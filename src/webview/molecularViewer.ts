@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { parseFile, parseLogFile, LogFrame } from '../parsers/index';
+import { parseFile, parseLogFile, LogFrame, OrcaFrame } from '../parsers/index';
 import { ensureBonds } from '../parsers/bondDetector';
 import { MolecularData } from '../types';
 
@@ -17,17 +17,19 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
 
         const ext = fileName.toLowerCase().split('.').pop() || '';
         let data: MolecularData;
-        let frames: LogFrame[] = [];
+        let frames: (LogFrame | OrcaFrame)[] = [];
 
         if (ext === 'log' || ext === 'out') {
-            const logResult = parseLogFile(textContent);
+            const logResult = parseLogFile(textContent, fileName);
             frames = logResult.frames;
             if (frames.length > 0) {
                 data = ensureBonds({
                     atoms: frames[0].atoms,
                     bonds: frames[0].bonds,
                     title: frames[0].title,
-                    hasExplicitBonds: frames[0].hasExplicitBonds
+                    hasExplicitBonds: frames[0].hasExplicitBonds,
+                    charge: frames[0].charge,
+                    multiplicity: frames[0].multiplicity
                 });
             } else {
                 data = { atoms: [], bonds: [], title: 'No structures found', hasExplicitBonds: false };
@@ -87,7 +89,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         });
     }
 
-    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: LogFrame[] = []): Promise<string> {
+    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = []): Promise<string> {
         const nonce = getNonce();
 
         const threeJsBytes = await vscode.workspace.fs.readFile(
@@ -135,7 +137,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             stepLabel: f.stepLabel
         }));
 
-        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null });
+        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity });
 
         return `<!DOCTYPE html>
 <html lang="en">
@@ -155,6 +157,7 @@ body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;b
 .tsep{width:1px;height:20px;background:var(--vscode-panel-border,#444);margin:0 4px}
 #status-bar{height:24px;flex-shrink:0;background:var(--vscode-statusBar-background,#007acc);color:var(--vscode-statusBar-foreground,#fff);display:flex;align-items:center;padding:0 10px;font-size:11px;z-index:20;gap:12px}
 #container{flex:1;position:relative;overflow:hidden;min-height:0}
+#mol-info{position:absolute;top:8px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.55);padding:6px 10px;border-radius:4px;z-index:25;pointer-events:none;line-height:1.6}
 canvas{display:block}
 #atom-tooltip{position:absolute;display:none;color:var(--vscode-editor-foreground,#ccc);font-size:12px;background:var(--vscode-editor-background,#1e1e1e);padding:4px 8px;border-radius:3px;border:1px solid var(--vscode-panel-border,#444);pointer-events:none;z-index:30}
 #modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:100;display:none;align-items:center;justify-content:center}
@@ -209,7 +212,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="modal-overlay"><div id="modal"></div></div>
@@ -220,6 +223,19 @@ ${threeJsContent}
 (function(){
 try{
 var MD=${jsonData};
+var AN={H:1,He:2,Li:3,Be:4,B:5,C:6,N:7,O:8,F:9,Ne:10,Na:11,Mg:12,Al:13,Si:14,P:15,S:16,Cl:17,Ar:18,K:19,Ca:20,Sc:21,Ti:22,V:23,Cr:24,Mn:25,Fe:26,Co:27,Ni:28,Cu:29,Zn:30,Ga:31,Ge:32,As:33,Se:34,Br:35,Kr:36,Rb:37,Sr:38,Y:39,Zr:40,Nb:41,Mo:42,Tc:43,Ru:44,Rh:45,Pd:46,Ag:47,Cd:48,In:49,Sn:50,Sb:51,Te:52,I:53,Xe:54,Cs:55,Ba:56,La:57,Ce:58,Pr:59,Nd:60,Pm:61,Sm:62,Eu:63,Gd:64,Tb:65,Dy:66,Ho:67,Er:68,Tm:69,Yb:70,Lu:71,Hf:72,Ta:73,W:74,Re:75,Os:76,Ir:77,Pt:78,Au:79,Hg:80,Tl:81,Pb:82,Bi:83,Po:84,At:85,Rn:86};
+function updateMolInfo(){
+    var infoEl=document.getElementById('mol-info');
+    if(!infoEl)return;
+    var nAtoms=MD.atoms.length;
+    var chrg=MD.charge!=null?MD.charge:'-';
+    var mult=MD.multiplicity!=null?MD.multiplicity:'-';
+    var nElectrons=0;
+    MD.atoms.forEach(function(a){nElectrons+=(AN[a.element]||0)});
+    if(typeof chrg==='number')nElectrons-=chrg;
+    infoEl.innerHTML='Atoms: '+nAtoms+'<br>Charge: '+chrg+'<br>Electrons: '+nElectrons+'<br>Multiplicity: '+mult;
+}
+updateMolInfo();
 var container=document.getElementById('container');
 var loadingEl=document.getElementById('loading');
 var errorEl=document.getElementById('error-msg');
@@ -939,7 +955,7 @@ class MolecularDocument implements vscode.CustomDocument {
     constructor(
         public readonly uri: vscode.Uri,
         public readonly data: MolecularData,
-        public readonly frames: LogFrame[] = []
+        public readonly frames: (LogFrame | OrcaFrame)[] = []
     ) {}
 
     dispose(): void {}

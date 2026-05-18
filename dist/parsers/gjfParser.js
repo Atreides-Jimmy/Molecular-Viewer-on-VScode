@@ -76,6 +76,8 @@ function parseGjf(content) {
     const bonds = [];
     let title = '';
     let hasExplicitBonds = false;
+    let charge;
+    let multiplicity;
     const link0Lines = [];
     let routeLine = '';
     const titleLines = [];
@@ -104,6 +106,13 @@ function parseGjf(content) {
     }
     if (i < lines.length) {
         chargeMultLine = lines[i];
+        const cmParts = lines[i].trim().split(/\s+/);
+        const chrg = parseInt(cmParts[0], 10);
+        const mult = parseInt(cmParts[1], 10);
+        if (!isNaN(chrg))
+            charge = chrg;
+        if (!isNaN(mult))
+            multiplicity = mult;
         i++;
     }
     let atomIndex = 0;
@@ -191,7 +200,7 @@ function parseGjf(content) {
         chargeMultLine,
         afterConnectContent
     };
-    return { atoms, bonds, title, hasExplicitBonds, gjfMeta };
+    return { atoms, bonds, title, hasExplicitBonds, gjfMeta, charge, multiplicity };
 }
 function parseConnectLine(line, totalAtoms, bonds) {
     const cparts = line.split(/\s+/);

@@ -27,4 +27,6 @@ export interface MolecularData {
     hasExplicitBonds: boolean;
     filePath?: string;
     gjfMeta?: GjfMeta;
+    charge?: number;
+    multiplicity?: number;
 }

@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.parseGaussianLog = void 0;
+exports.parseOrcaOut = exports.parseGaussianLog = void 0;
 exports.parseFile = parseFile;
 exports.parseLogFile = parseLogFile;
 const gjfParser_1 = require("./gjfParser");
@@ -8,6 +8,10 @@ const xyzParser_1 = require("./xyzParser");
 const mol2Parser_1 = require("./mol2Parser");
 const logParser_1 = require("./logParser");
 Object.defineProperty(exports, "parseGaussianLog", { enumerable: true, get: function () { return logParser_1.parseGaussianLog; } });
+const coordParser_1 = require("./coordParser");
+const orcaInpParser_1 = require("./orcaInpParser");
+const orcaOutParser_1 = require("./orcaOutParser");
+Object.defineProperty(exports, "parseOrcaOut", { enumerable: true, get: function () { return orcaOutParser_1.parseOrcaOut; } });
 function parseFile(content, fileName) {
     const ext = fileName.toLowerCase().split('.').pop() || '';
     switch (ext) {
@@ -24,11 +28,20 @@ function parseFile(content, fileName) {
         case 'log':
         case 'out':
             return parseLogAsSingleFrame(content);
+        case 'coord':
+            return (0, coordParser_1.parseCoord)(content);
+        case 'inp':
+            return (0, orcaInpParser_1.parseOrcainp)(content);
         default:
             return tryAutoParse(content);
     }
 }
-function parseLogFile(content) {
+function parseLogFile(content, fileName) {
+    const ext = (fileName || '').toLowerCase().split('.').pop() || '';
+    if (ext === 'out') {
+        const result = (0, orcaOutParser_1.parseOrcaOut)(content);
+        return { frames: result.frames, title: result.title };
+    }
     return (0, logParser_1.parseGaussianLog)(content);
 }
 function parseLogAsSingleFrame(content) {
@@ -45,6 +58,25 @@ function parseLogAsSingleFrame(content) {
 }
 function tryAutoParse(content) {
     const lines = content.split(/\r?\n/).filter(l => l.trim() !== '');
+    if (content.includes('$coord')) {
+        return (0, coordParser_1.parseCoord)(content);
+    }
+    if (content.match(/\*\s*xyz/i) || content.match(/\*\s*xyzfile/i)) {
+        return (0, orcaInpParser_1.parseOrcainp)(content);
+    }
+    if (content.includes('CARTESIAN COORDINATES (ANGSTROEM)')) {
+        const result = (0, orcaOutParser_1.parseOrcaOut)(content);
+        if (result.frames.length > 0) {
+            return {
+                atoms: result.frames[0].atoms,
+                bonds: result.frames[0].bonds,
+                title: result.frames[0].title,
+                hasExplicitBonds: result.frames[0].hasExplicitBonds,
+                charge: result.charge,
+                multiplicity: result.multiplicity
+            };
+        }
+    }
     if (lines.length > 0) {
         const firstLine = lines[0].trim();
         const possibleCount = parseInt(firstLine, 10);

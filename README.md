@@ -8,6 +8,7 @@ A VS Code / Trae extension for visualizing and editing molecular structures in 3
 - **Bond Order Support** — Visual distinction for single (1 line), aromatic (1 solid + 1 dashed), double (2 lines), and triple (3 lines) bonds
 - **Auto Bond Detection** — When files lack explicit connectivity, bonds are automatically detected using covalent radii + 0.45 Å tolerance; bond order estimated by distance ratio (triple ≤ 0.78, double ≤ 0.88, single > 0.88)
 - **GJF Connect Section** — Reads explicit bond information from coordinate section in GJF files, including bond orders (1.0, 1.5, 2.0, 3.0)
+- **Molecular Info Display** — Shows atom count, charge, electron count, and spin multiplicity in the top-left corner of the 3D view
 - **Interactive Mouse Control**:
   - Left drag → Rotate around molecule center
   - Scroll → Zoom in/out
@@ -42,7 +43,10 @@ A VS Code / Trae extension for visualizing and editing molecular structures in 3
 | Gaussian Input | `.gjf`, `.gjf03`, `.gjf09`, `.gjf16`, `.com` | Reads Link 0, route, title, charge/mult, coordinates, connect section; supports fixed atom notation (`C -1 x y z` or `C x y z -1`) |
 | XYZ | `.xyz` | Standard XYZ format with atom count header |
 | MOL2 | `.mol2` | Tripos MOL2 format; reads `@<TRIPOS>ATOM` and `@<TRIPOS>BOND` sections with bond order support (aromatic `ar` → 1.5) |
-| Gaussian LOG | `.log`, `.out` | Reads `Standard orientation:` / `Input orientation:` blocks; supports multi-frame optimization trajectory |
+| Gaussian LOG | `.log` | Reads `Standard orientation:` / `Input orientation:` blocks; supports multi-frame optimization trajectory |
+| ORCA Input | `.inp` | Reads `* xyz CHARGE MULT ... *` blocks and `%coords` blocks; supports xyz and xyzfile coordinate formats |
+| ORCA Output | `.out` | Reads `CARTESIAN COORDINATES (ANGSTROEM)` blocks; supports multi-frame optimization trajectory; extracts charge and multiplicity |
+| Turbomole Coord | `.coord` | Reads `$coord` section (Bohr → Å conversion), `$chrg` and `$spin`/`$mult` for charge and multiplicity |
 | MDL Mol | `.mol` | Basic support |
 | SDF | `.sdf` | Basic support |
 
@@ -86,7 +90,10 @@ Add to your `settings.json`:
     "*.xyz": "molecularViewer.editor",
     "*.com": "molecularViewer.editor",
     "*.mol2": "molecularViewer.editor",
-    "*.log": "molecularViewer.editor"
+    "*.log": "molecularViewer.editor",
+    "*.out": "molecularViewer.editor",
+    "*.coord": "molecularViewer.editor",
+    "*.inp": "molecularViewer.editor"
   }
 }
 ```
@@ -140,6 +147,9 @@ molecular-viewer/
 │   │   ├── xyzParser.ts       # XYZ format parser
 │   │   ├── mol2Parser.ts      # Tripos MOL2 format parser
 │   │   ├── logParser.ts       # Gaussian LOG parser (optimization trajectory)
+│   │   ├── coordParser.ts     # Turbomole .coord parser (Bohr → Å)
+│   │   ├── orcaInpParser.ts   # ORCA input .inp parser
+│   │   ├── orcaOutParser.ts   # ORCA output .out parser (optimization trajectory)
 │   │   └── bondDetector.ts    # Covalent radii bond detection + order estimation
 │   └── webview/
 │       └── molecularViewer.ts # Custom editor + Three.js webview + editing

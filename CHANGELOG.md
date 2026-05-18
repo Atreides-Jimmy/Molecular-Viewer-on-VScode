@@ -1,5 +1,20 @@
 # Change Log
 
+## [0.6.2] - 2026-04-15
+
+### Added
+
+- **Turbomole .coord file support** — New parser for Turbomole coordinate files (`.coord`); reads `$coord` section with automatic Bohr → Ångström conversion; reads `$chrg` for charge and `$spin`/`$mult` for spin multiplicity
+- **ORCA input file support** — New parser for ORCA input files (`.inp`); reads `* xyz CHARGE MULT ... *` coordinate blocks and `%coords` blocks; supports both inline xyz and xyzfile reference formats; extracts charge and multiplicity
+- **ORCA output file support** — New parser for ORCA output files (`.out`); reads `CARTESIAN COORDINATES (ANGSTROEM)` blocks; supports multi-frame optimization trajectory with frame navigation; extracts charge and multiplicity from `Total Charge` and `Multiplicity` lines; falls back to `CARTESIAN COORDINATES (A.U.)` with Bohr → Å conversion
+- **Molecular info display** — Shows atom count, charge, electron count, and spin multiplicity in the top-left corner of the 3D view; electron count calculated from atomic numbers minus charge; info updates automatically when atoms are added/deleted
+- **Charge and multiplicity extraction** — GJF, LOG, coord, ORCA input, and ORCA output parsers now extract and return charge and multiplicity information
+
+### Changed
+
+- **File extension handling** — `.out` files are now dispatched to ORCA output parser (previously treated as Gaussian LOG); `.log` files remain as Gaussian LOG; auto-detection also checks for ORCA-specific markers
+- **`parseLogFile` signature** — Now accepts optional `fileName` parameter to distinguish between Gaussian LOG and ORCA output formats
+
 ## [0.6.1] - 2026-04-15
 
 ### Fixed

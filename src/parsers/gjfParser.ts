@@ -81,6 +81,8 @@ export function parseGjf(content: string): MolecularData {
     const bonds: Bond[] = [];
     let title = '';
     let hasExplicitBonds = false;
+    let charge: number | undefined;
+    let multiplicity: number | undefined;
 
     const link0Lines: string[] = [];
     let routeLine = '';
@@ -113,6 +115,11 @@ export function parseGjf(content: string): MolecularData {
 
     if (i < lines.length) {
         chargeMultLine = lines[i];
+        const cmParts = lines[i].trim().split(/\s+/);
+        const chrg = parseInt(cmParts[0], 10);
+        const mult = parseInt(cmParts[1], 10);
+        if (!isNaN(chrg)) charge = chrg;
+        if (!isNaN(mult)) multiplicity = mult;
         i++;
     }
 
@@ -191,7 +198,7 @@ export function parseGjf(content: string): MolecularData {
         afterConnectContent
     };
 
-    return { atoms, bonds, title, hasExplicitBonds, gjfMeta };
+    return { atoms, bonds, title, hasExplicitBonds, gjfMeta, charge, multiplicity };
 }
 
 function parseConnectLine(line: string, totalAtoms: number, bonds: Bond[]): void {

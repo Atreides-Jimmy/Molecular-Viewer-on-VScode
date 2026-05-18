@@ -20,6 +20,8 @@ export interface LogFrame {
     title: string;
     hasExplicitBonds: boolean;
     stepLabel: string;
+    charge?: number;
+    multiplicity?: number;
 }
 
 function skipDashedLines(lines: string[], startIdx: number, count: number): number {
@@ -49,8 +51,12 @@ export function parseGaussianLog(content: string): { frames: LogFrame[], title: 
 
     const chargeMultMatch = content.match(/Charge\s*=\s*(-?\d+)\s+Multiplicity\s*=\s*(\d+)/);
     let chargeMultLine = '';
+    let logCharge: number | undefined;
+    let logMultiplicity: number | undefined;
     if (chargeMultMatch) {
         chargeMultLine = `Charge=${chargeMultMatch[1]} Mult=${chargeMultMatch[2]}`;
+        logCharge = parseInt(chargeMultMatch[1], 10);
+        logMultiplicity = parseInt(chargeMultMatch[2], 10);
     }
 
     let optStep = 0;
@@ -91,7 +97,9 @@ export function parseGaussianLog(content: string): { frames: LogFrame[], title: 
                     bonds: [],
                     title: label,
                     hasExplicitBonds: false,
-                    stepLabel: label
+                    stepLabel: label,
+                    charge: logCharge,
+                    multiplicity: logMultiplicity
                 });
                 if (isStandard) optStep++;
             }
@@ -129,7 +137,9 @@ export function parseGaussianLog(content: string): { frames: LogFrame[], title: 
                         bonds: [],
                         title: 'Coordinates',
                         hasExplicitBonds: false,
-                        stepLabel: 'Coordinates'
+                        stepLabel: 'Coordinates',
+                        charge: logCharge,
+                        multiplicity: logMultiplicity
                     });
                 }
                 break;

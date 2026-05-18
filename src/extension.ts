@@ -35,7 +35,7 @@ export function activate(context: vscode.ExtensionContext) {
                         canSelectMany: false,
                         openLabel: 'Select Molecular File',
                         filters: {
-                            'Molecular Files': ['gjf', 'xyz', 'mol', 'sdf', 'gjf03', 'gjf09', 'gjf16', 'com'],
+                            'Molecular Files': ['gjf', 'xyz', 'mol', 'sdf', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp'],
                             'All Files': ['*']
                         }
                     });

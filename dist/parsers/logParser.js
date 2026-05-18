@@ -39,8 +39,12 @@ function parseGaussianLog(content) {
     }
     const chargeMultMatch = content.match(/Charge\s*=\s*(-?\d+)\s+Multiplicity\s*=\s*(\d+)/);
     let chargeMultLine = '';
+    let logCharge;
+    let logMultiplicity;
     if (chargeMultMatch) {
         chargeMultLine = `Charge=${chargeMultMatch[1]} Mult=${chargeMultMatch[2]}`;
+        logCharge = parseInt(chargeMultMatch[1], 10);
+        logMultiplicity = parseInt(chargeMultMatch[2], 10);
     }
     let optStep = 0;
     for (let i = 0; i < lines.length; i++) {
@@ -75,7 +79,9 @@ function parseGaussianLog(content) {
                     bonds: [],
                     title: label,
                     hasExplicitBonds: false,
-                    stepLabel: label
+                    stepLabel: label,
+                    charge: logCharge,
+                    multiplicity: logMultiplicity
                 });
                 if (isStandard)
                     optStep++;
@@ -110,7 +116,9 @@ function parseGaussianLog(content) {
                         bonds: [],
                         title: 'Coordinates',
                         hasExplicitBonds: false,
-                        stepLabel: 'Coordinates'
+                        stepLabel: 'Coordinates',
+                        charge: logCharge,
+                        multiplicity: logMultiplicity
                     });
                 }
                 break;
