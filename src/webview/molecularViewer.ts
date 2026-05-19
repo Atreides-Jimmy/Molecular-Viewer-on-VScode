@@ -810,13 +810,82 @@ function doSave(){
     });
     gjf+='\\n';
     if(meta&&meta.afterConnectContent){gjf+=meta.afterConnectContent+'\\n'}
+
+    var chrg=MD.charge||0;
+    var mult=MD.multiplicity||1;
+    var AN2={H:1,He:2,Li:3,Be:4,B:5,C:6,N:7,O:8,F:9,Ne:10,Na:11,Mg:12,Al:13,Si:14,P:15,S:16,Cl:17,Ar:18,K:19,Ca:20,Sc:21,Ti:22,V:23,Cr:24,Mn:25,Fe:26,Co:27,Ni:28,Cu:29,Zn:30,Ga:31,Ge:32,As:33,Se:34,Br:35,Kr:36,Rb:37,Sr:38,Y:39,Zr:40,Nb:41,Mo:42,Tc:43,Ru:44,Rh:45,Pd:46,Ag:47,Cd:48,In:49,Sn:50,Sb:51,Te:52,I:53,Xe:54,Cs:55,Ba:56,La:57,Ce:58,Pr:59,Nd:60,Pm:61,Sm:62,Eu:63,Gd:64,Tb:65,Dy:66,Ho:67,Er:68,Tm:69,Yb:70,Lu:71,Hf:72,Ta:73,W:74,Re:75,Os:76,Ir:77,Pt:78,Au:79,Hg:80,Tl:81,Pb:82,Bi:83,Po:84,At:85,Rn:86};
+
+    var coord='$coord\\n';
+    var ANG_TO_BOHR=1.8897259886;
+    MD.atoms.forEach(function(a){coord+='  '+(a.x*ANG_TO_BOHR).toFixed(8)+'  '+(a.y*ANG_TO_BOHR).toFixed(8)+'  '+(a.z*ANG_TO_BOHR).toFixed(8)+' '+a.element.toLowerCase()+'\\n'});
+    coord+='$end\\n';
+    if(chrg!==0)coord+='$chrg '+chrg+'\\n';
+    if(mult!==1)coord+='$spin '+(mult-1)/2+'\\n';
+
+    var orcaInp='! B3LYP def2-SVP\\n\\n* xyz '+chrg+' '+mult+'\\n';
+    MD.atoms.forEach(function(a){orcaInp+=a.element+' '+a.x.toFixed(6)+' '+a.y.toFixed(6)+' '+a.z.toFixed(6)+'\\n'});
+    orcaInp+='*\\n';
+
+    var mol2='@<TRIPOS>MOLECULE\\n'+(MD.title||'Modified structure')+'\\n'+MD.atoms.length+' '+MD.bonds.length+' 0 0 0\\nSMALL\\nNO_CHARGES\\n\\n';
+    mol2+='@<TRIPOS>ATOM\\n';
+    MD.atoms.forEach(function(a,i){mol2+=(i+1)+' '+a.element+' '+a.x.toFixed(6)+' '+a.y.toFixed(6)+' '+a.z.toFixed(6)+' '+a.element+' 1 UNK 0.000\\n'});
+    mol2+='@<TRIPOS>BOND\\n';
+    var bondIdx=1;
+    MD.bonds.forEach(function(b){
+        var bt='1';
+        if(b.order>=2.5)bt='3';
+        else if(b.order>=1.75)bt='2';
+        else if(b.order>=1.25)bt='ar';
+        mol2+=bondIdx+' '+(b.atom1+1)+' '+(b.atom2+1)+' '+bt+'\\n';
+        bondIdx++;
+    });
+
+    var mol='\\n '+MD.atoms.length+'  '+MD.bonds.length+'  0  0  0  0  0  0  0  0999 V2000\\n';
+    MD.atoms.forEach(function(a){
+        var z=AN2[a.element]||0;
+        var sx=(a.x*10).toFixed(4);
+        var sy=(a.y*10).toFixed(4);
+        var sz=(a.z*10).toFixed(4);
+        while(sx.length<10)sx=' '+sx;
+        while(sy.length<10)sy=' '+sy;
+        while(sz.length<10)sz=' '+sz;
+        mol+=sx+sy+sz+' '+a.element+' 0  0  0  0  0  0  0  0  0  0  0  0\\n';
+    });
+    MD.bonds.forEach(function(b){
+        var bt=1;
+        if(b.order>=2.5)bt=3;
+        else if(b.order>=1.75)bt=2;
+        else if(b.order>=1.25)bt=4;
+        var a1=b.atom1+1,a2=b.atom2+1;
+        var s1=''+a1,s2=''+a2,s3=''+bt;
+        while(s1.length<3)s1=' '+s1;
+        while(s2.length<3)s2=' '+s2;
+        while(s3.length<3)s3=' '+s3;
+        mol+=s1+s2+s3+'  0  0  0  0\\n';
+    });
+    mol+='M  END\\n';
+
     showModal('<h3>Save File</h3>'+
-        '<label>Format:</label><select id="m-fmt"><option value="xyz">XYZ (.xyz)</option><option value="gjf">Gaussian Input (.gjf)</option></select>'+
+        '<label>Format:</label><select id="m-fmt">'+
+        '<option value="xyz">XYZ (.xyz)</option>'+
+        '<option value="gjf">Gaussian Input (.gjf)</option>'+
+        '<option value="coord">Turbomole Coord (.coord)</option>'+
+        '<option value="inp">ORCA Input (.inp)</option>'+
+        '<option value="mol2">MOL2 (.mol2)</option>'+
+        '<option value="mol">MDL Mol (.mol)</option>'+
+        '</select>'+
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok" id="m-ok">Save</button></div>',null);
     document.getElementById('m-ok').addEventListener('click',function(){
         var fmt=document.getElementById('m-fmt').value;
-        var content=fmt==='gjf'?gjf:xyz;
-        var ext=fmt==='gjf'?'.gjf':'.xyz';
+        var content,ext;
+        switch(fmt){
+            case 'gjf':content=gjf;ext='.gjf';break;
+            case 'coord':content=coord;ext='.coord';break;
+            case 'inp':content=orcaInp;ext='.inp';break;
+            case 'mol2':content=mol2;ext='.mol2';break;
+            case 'mol':content=mol;ext='.mol';break;
+            default:content=xyz;ext='.xyz';
+        }
         vscodeApi.postMessage({command:'saveFile',content:content,suggestedName:'molecule_modified'+ext,filePath:MD.filePath||''});
         hideModal();
     });

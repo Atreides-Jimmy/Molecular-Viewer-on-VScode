@@ -26,7 +26,7 @@ A VS Code / Trae extension for visualizing and editing molecular structures in 3
 - **Add Atom** — Click anchor atom, choose element (70+ elements), set bond length and bond order, direction auto-calculated from existing bonds
 - **Delete Atom** — Click atom and confirm; atoms and bonds are automatically re-indexed
 - **Select Atoms** — Input atom indices (1-based), ranges (e.g. `3-10`), or element symbols (e.g. `C H`) to highlight specific atoms in yellow
-- **Save As** — Export modified structure as XYZ or Gaussian GJF format (original file is never modified); GJF output preserves original Link 0, route, title, charge/mult, and post-connect content; connect section includes all atom lines
+- **Save As** — Export modified structure in 6 formats: XYZ, Gaussian GJF (preserving original file structure), Turbomole Coord (Å→Bohr conversion), ORCA Input, MOL2 (with bond orders), or MDL Mol; GJF output preserves original Link 0, route, title, charge/mult, and post-connect content; connect section includes all atom lines
 - **Continuous Editing** — After completing an edit, the viewer stays in the current editing mode for repeated adjustments
 - **Cancel/Undo** — Cancel button restores original coordinates before confirming edits
 

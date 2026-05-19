@@ -1,5 +1,14 @@
 # Change Log
 
+## [0.6.3] - 2026-04-15
+
+### Added
+
+- **Save as Turbomole .coord** — Export molecular structure in Turbomole coordinate format with automatic Å→Bohr conversion; writes `$coord`, `$end`, `$chrg`, and `$spin` sections
+- **Save as ORCA Input (.inp)** — Export in ORCA input format with `* xyz CHARGE MULT ... *` block; uses charge and multiplicity from the original file
+- **Save as MOL2 (.mol2)** — Export in Tripos MOL2 format with `@<TRIPOS>MOLECULE`, `@<TRIPOS>ATOM`, and `@<TRIPOS>BOND` sections; bond orders mapped correctly (1→1, 1.5→ar, 2→2, 3→3)
+- **Save as MDL Mol (.mol)** — Export in MDL Mol V2000 format with atom block (coordinates in Å×10) and bond block; aromatic bonds represented as type 4
+
 ## [0.6.2] - 2026-04-15
 
 ### Added
