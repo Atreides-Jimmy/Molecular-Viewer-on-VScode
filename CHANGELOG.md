@@ -1,5 +1,17 @@
 # Change Log
 
+## [0.7.1] - 2026-04-15
+
+### Changed
+
+- **Completely rewritten bond order detection algorithm** — Replaced simple covalent radii ratio-based estimation with a sophisticated multi-stage approach:
+  1. **Element-pair-specific bond length specifications** — BOND_SPECS table defines expected bond lengths and tolerances for 11 common atom pairs (C-C, C-N, C-O, N-N, N-O, O-O, C-S, C-F, C-H, N-H, O-H) with multiple bond orders per pair
+  2. **Pair-specific distance cutoffs** — BOND_CUTOFF dictionary provides maximum bond distances for 11 common atom pairs (e.g., CC: 1.9Å, CO: 1.7Å, CH: 1.3Å); other pairs use covalent radii sum + 0.5Å
+  3. **Best-match fallback** — For BOND_SPECS pairs where no spec matches within tolerance, the closest spec is chosen by distance
+  4. **Post-processing fixes** — C-O bonds forced to 1.0 or 2.0; Br bonds forced to single; N with 3 neighbors → all single; N with 2 neighbors → smart assignment (1.5+1.5, 2+1, or 1+2)
+  5. **Valence-based refinement** — Iterative algorithm (max 10 iterations) that reduces bond orders when atoms exceed their maximum valence (H:1, C:4, N:3, O:2, F:1, S:6, P:5, Cl:1, Br:1, I:1, B:3); prefers reducing the bond whose ideal length is closest to the actual distance
+  6. **Fallback ratio** — For atom pairs not in BOND_SPECS, uses covalent radii ratio (ratio < 0.85 → triple, < 0.90 → double, else single)
+
 ## [0.6.3] - 2026-04-15
 
 ### Added

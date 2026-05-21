@@ -6,7 +6,7 @@ A VS Code / Trae extension for visualizing and editing molecular structures in 3
 
 - **3D Ball-and-Stick Rendering** — Atoms rendered as spheres (scaled by covalent radius) with CPK coloring; bonds rendered as dual-colored cylinders
 - **Bond Order Support** — Visual distinction for single (1 line), aromatic (1 solid + 1 dashed), double (2 lines), and triple (3 lines) bonds
-- **Auto Bond Detection** — When files lack explicit connectivity, bonds are automatically detected using covalent radii + 0.45 Å tolerance; bond order estimated by distance ratio (triple ≤ 0.78, double ≤ 0.88, single > 0.88)
+- **Auto Bond Detection** — When files lack explicit connectivity, bonds are automatically detected using element-pair-specific bond length specifications (C-C, C-N, C-O, etc.) with tolerances; pair-specific distance cutoffs; valence-based bond order refinement (max valence constraints for H/C/N/O/F/S/P/Cl/Br/I/B); post-processing fixes for N and C-O bonds; fallback to covalent radii ratio for unspecified pairs
 - **GJF Connect Section** — Reads explicit bond information from coordinate section in GJF files, including bond orders (1.0, 1.5, 2.0, 3.0)
 - **Molecular Info Display** — Shows atom count, charge, electron count, and spin multiplicity in the top-left corner of the 3D view
 - **Interactive Mouse Control**:

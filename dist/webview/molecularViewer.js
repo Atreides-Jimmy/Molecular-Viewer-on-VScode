@@ -447,24 +447,49 @@ function switchFrame(idx){
     updateFrameInfo();
 }
 function detectBondsFromAtoms(atoms){
-    var CR={H:0.31,He:0.28,Li:1.28,Be:0.96,B:0.84,C:0.76,N:0.71,O:0.66,F:0.57,Na:1.66,Mg:1.41,Al:1.21,Si:1.11,P:1.07,S:1.05,Cl:1.02,K:2.03,Ca:1.76,Fe:1.32,Cu:1.32,Zn:1.22,Br:1.20,I:1.39};
-    var tol=0.45;
-    var bonds=[];
-    for(var i=0;i<atoms.length;i++){
-        for(var j=i+1;j<atoms.length;j++){
-            var dx=atoms[i].x-atoms[j].x,dy=atoms[i].y-atoms[j].y,dz=atoms[i].z-atoms[j].z;
-            var d=Math.sqrt(dx*dx+dy*dy+dz*dz);
-            var r1=CR[atoms[i].element]||1.5,r2=CR[atoms[j].element]||1.5;
-            var maxD=r1+r2+tol;
-            if(d<=maxD){
-                var ratio=d/(r1+r2);
-                var order=1;
-                if(ratio<=0.78)order=3;
-                else if(ratio<=0.88)order=2;
-                bonds.push({atom1:i,atom2:j,order:order});
-            }
-        }
+    var CR2={H:0.31,He:0.28,Li:1.28,Be:0.96,B:0.85,C:0.76,N:0.71,O:0.66,F:0.57,Ne:0.58,Na:1.66,Mg:1.41,Al:1.21,Si:1.11,P:1.07,S:1.05,Cl:1.02,Ar:1.06,K:2.03,Ca:1.76,Sc:1.70,Ti:1.60,V:1.53,Cr:1.39,Mn:1.39,Fe:1.32,Co:1.26,Ni:1.24,Cu:1.32,Zn:1.22,Ga:1.22,Ge:1.20,As:1.19,Se:1.20,Br:1.20,Kr:1.16,I:1.39};
+    var BS={'C+C':[{o:3,l:1.20,t:0.05},{o:1.5,l:1.39,t:0.05},{o:2,l:1.38,t:0.05},{o:1,l:1.51,t:0.10}],'C+N':[{o:2,l:1.26,t:0.05},{o:1.5,l:1.36,t:0.05},{o:1,l:1.43,t:0.10},{o:3,l:1.16,t:0.06}],'C+O':[{o:2,l:1.24,t:0.05},{o:1,l:1.39,t:0.05}],'N+N':[{o:1,l:1.41,t:0.10},{o:2,l:1.25,t:0.06},{o:3,l:1.10,t:0.06}],'N+O':[{o:2,l:1.20,t:0.06},{o:1.5,l:1.30,t:0.06},{o:1,l:1.40,t:0.15}],'O+O':[{o:2,l:1.21,t:0.06},{o:1,l:1.48,t:0.15}],'C+S':[{o:1.5,l:1.73,t:0.06},{o:2,l:1.60,t:0.10},{o:1,l:1.82,t:0.15}],'C+F':[{o:1,l:1.33,t:0.10}],'C+H':[{o:1,l:0.97,t:0.15}],'N+H':[{o:1,l:0.88,t:0.15}],'O+H':[{o:1,l:0.85,t:0.15}]};
+    var BC={HH:0,CH:1.3,HO:1.2,HN:1.3,CC:1.9,CO:1.7,CN:1.7,NN:1.7,NO:1.8,CF:1.6,CS:2.0};
+    var MV={H:1,C:4,N:3,O:2,F:1,S:6,P:5,Cl:1,Br:1,I:1,B:3};
+    function pk(e1,e2){e1=e1.toUpperCase();e2=e2.toUpperCase();return e1<e2?e1+e2:e2+e1}
+    function sk(e1,e2){e1=e1.charAt(0).toUpperCase()+e1.slice(1).toLowerCase();e2=e2.charAt(0).toUpperCase()+e2.slice(1).toLowerCase();return e1<e2?e1+'+'+e2:e2+'+'+e1}
+    function gbo(el1,el2,d){
+        var p=pk(el1,el2);var co=BC[p];
+        if(co!==undefined){if(d>co)return 0}else{var r1=CR2[el1.charAt(0).toUpperCase()+el1.slice(1).toLowerCase()]||1.5;var r2=CR2[el2.charAt(0).toUpperCase()+el2.slice(1).toLowerCase()]||1.5;if(d>(r1+r2)+0.5)return 0}
+        var s=sk(el1,el2);var sp=BS[s];
+        if(sp){for(var k=0;k<sp.length;k++){if(Math.abs(d-sp[k].l)<=sp[k].t)return sp[k].o}var bo=1,md=Infinity;for(var k=0;k<sp.length;k++){var df=Math.abs(d-sp[k].l);if(df<md){md=df;bo=sp[k].o}}return bo}
+        var r1=CR2[el1.charAt(0).toUpperCase()+el1.slice(1).toLowerCase()]||1.5;var r2=CR2[el2.charAt(0).toUpperCase()+el2.slice(1).toLowerCase()]||1.5;var rs=r1+r2;var ratio=rs?d/rs:1;
+        if(ratio<0.85)return 3;if(ratio<0.90)return 2;return 1;
     }
+    var n=atoms.length;var bm=new Map();
+    for(var i=0;i<n;i++){for(var j=i+1;j<n;j++){
+        var dx=atoms[i].x-atoms[j].x,dy=atoms[i].y-atoms[j].y,dz=atoms[i].z-atoms[j].z;
+        var d=Math.sqrt(dx*dx+dy*dy+dz*dz);var bo=gbo(atoms[i].element,atoms[j].element,d);
+        if(bo>0){if(!bm.has(i))bm.set(i,new Map());if(!bm.has(j))bm.set(j,new Map());bm.get(i).set(j,bo);bm.get(j).set(i,bo)}
+    }}
+    bm.forEach(function(nb,i){nb.forEach(function(o,j){if(i>j)return;var e1=atoms[i].element.toUpperCase(),e2=atoms[j].element.toUpperCase();var els=new Set([e1,e2]);
+        if(els.has('C')&&els.has('O')&&o!==1&&o!==2){var no=o<1.7?1:2;nb.set(j,no);bm.get(j).set(i,no)}
+        if(e1==='BR'||e2==='BR'){nb.set(j,1);bm.get(j).set(i,1)}
+    })});
+    bm.forEach(function(nb,i){var el=atoms[i].element.toUpperCase();if(el!=='N')return;var nl=Array.from(nb.entries());var nn=nl.length;
+        if(nn===3){for(var k=0;k<nl.length;k++){nb.set(nl[k][0],1);bm.get(nl[k][0]).set(i,1)}}
+        else if(nn===2){var n1=nl[0][0],bo1=nl[0][1],n2=nl[1][0],bo2=nl[1][1];var n1H=atoms[n1].element.toUpperCase()==='H',n2H=atoms[n2].element.toUpperCase()==='H';var f1,f2;
+            if(n1H){f1=1;f2=2}else if(n2H){f1=2;f2=1}else{var d1=Math.abs(bo1-1.5)+Math.abs(bo2-1.5),d2=Math.abs(bo1-2)+Math.abs(bo2-1),d3=Math.abs(bo1-1)+Math.abs(bo2-2);var best=Math.min(d1,d2,d3);if(best===d1){f1=1.5;f2=1.5}else if(best===d2){f1=2;f2=1}else{f1=1;f2=2}}
+            nb.set(n1,f1);bm.get(n1).set(i,f1);nb.set(n2,f2);bm.get(n2).set(i,f2)}
+    });
+    for(var iter=0;iter<10;iter++){var changed=false;var val=new Map();for(var i=0;i<n;i++)val.set(i,0);
+        bm.forEach(function(nb,i){nb.forEach(function(o){val.set(i,(val.get(i)||0)+o)})});
+        var viols=[];val.forEach(function(v,i){var el=atoms[i].element.charAt(0).toUpperCase()+atoms[i].element.slice(1).toLowerCase();var mv=MV[el]||100;if(v>mv+0.1)viols.push(i)});
+        if(viols.length===0)break;
+        for(var vi=0;vi<viols.length;vi++){var i=viols[vi];var nb=bm.get(i);if(!nb)continue;var cv=Array.from(nb.values()).reduce(function(s,v){return s+v},0);var el=atoms[i].element.charAt(0).toUpperCase()+atoms[i].element.slice(1).toLowerCase();var mv=MV[el]||100;if(cv<=mv+0.1)continue;
+            var bb=null,ml=Infinity;nb.forEach(function(o,j){if(o<=1)return;var no;if(o===3)no=2;else if(o===2)no=1.5;else if(o===1.5)no=1;else return;
+                var el2=atoms[j].element;var dd=Math.sqrt(Math.pow(atoms[i].x-atoms[j].x,2)+Math.pow(atoms[i].y-atoms[j].y,2)+Math.pow(atoms[i].z-atoms[j].z,2));var s=sk(atoms[i].element,el2);var sp=BS[s];if(!sp)return;
+                var ci=0,ni=0,md=Infinity;for(var k=0;k<sp.length;k++){if(sp[k].o===o&&Math.abs(dd-sp[k].l)<md){md=Math.abs(dd-sp[k].l);ci=sp[k].l}}md=Infinity;for(var k=0;k<sp.length;k++){if(sp[k].o===no&&Math.abs(dd-sp[k].l)<md){md=Math.abs(dd-sp[k].l);ni=sp[k].l}}if(!ci||!ni)return;
+                var loss=Math.abs(dd-ni)-Math.abs(dd-ci);if(loss<ml){ml=loss;bb=[j,no]}
+            });if(bb){nb.set(bb[0],bb[1]);bm.get(bb[0]).set(i,bb[1]);changed=true}
+        }if(!changed)break;
+    }
+    var bonds=[];var seen=new Set();bm.forEach(function(nb,i){nb.forEach(function(o,j){var key=Math.min(i,j)+'-'+Math.max(i,j);if(!seen.has(key)){seen.add(key);bonds.push({atom1:Math.min(i,j),atom2:Math.max(i,j),order:o})}})});
     return bonds;
 }
 document.getElementById('prev-frame').addEventListener('click',function(){if(currentFrame>0)switchFrame(currentFrame-1)});
