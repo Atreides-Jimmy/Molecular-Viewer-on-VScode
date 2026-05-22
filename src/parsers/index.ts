@@ -6,6 +6,8 @@ import { parseGaussianLog, LogFrame } from './logParser';
 import { parseCoord } from './coordParser';
 import { parseOrcainp } from './orcaInpParser';
 import { parseOrcaOut, OrcaFrame } from './orcaOutParser';
+import { parsePdb } from './pdbParser';
+import { parseMopac } from './mopacParser';
 
 export { parseGaussianLog, LogFrame };
 export { parseOrcaOut, OrcaFrame };
@@ -31,6 +33,13 @@ export function parseFile(content: string, fileName: string): MolecularData {
             return parseCoord(content);
         case 'inp':
             return parseOrcainp(content);
+        case 'pdb':
+        case 'ent':
+            return parsePdb(content);
+        case 'mop':
+        case 'mopac':
+        case 'dat':
+            return parseMopac(content);
         default:
             return tryAutoParse(content);
     }
@@ -67,6 +76,14 @@ function tryAutoParse(content: string): MolecularData {
 
     if (content.match(/\*\s*xyz/i) || content.match(/\*\s*xyzfile/i)) {
         return parseOrcainp(content);
+    }
+
+    if (content.match(/^(ATOM|HETATM)/m)) {
+        return parsePdb(content);
+    }
+
+    if (content.match(/CARTESIAN COORDINATES/i) && content.match(/MOPAC/i)) {
+        return parseMopac(content);
     }
 
     if (content.includes('CARTESIAN COORDINATES (ANGSTROEM)')) {

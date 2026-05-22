@@ -2,7 +2,7 @@
   "name": "molecular-viewer",
   "displayName": "Molecular Viewer",
   "description": "3D molecular structure viewer and editor for computational chemistry files (Gaussian .gjf/.log, ORCA .inp/.out, .xyz, .mol2, .coord, .mol, .sdf). Features ball-and-stick rendering, auto bond detection, interactive rotation/zoom, bond length/angle/dihedral editing, atom add/delete, optimization trajectory navigation, and save-as — like GaussView in your IDE.",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "publisher": "Atreides-Jimmy",
   "license": "MIT",
   "icon": "icon.png",
@@ -62,14 +62,14 @@
       "explorer/context": [
         {
           "command": "molecularViewer.openViewer",
-          "when": "resourceExtname == .gjf || resourceExtname == .xyz || resourceExtname == .mol || resourceExtname == .sdf || resourceExtname == .com || resourceExtname == .gjf03 || resourceExtname == .gjf09 || resourceExtname == .gjf16 || resourceExtname == .mol2 || resourceExtname == .log || resourceExtname == .out || resourceExtname == .coord || resourceExtname == .inp",
+          "when": "resourceExtname == .gjf || resourceExtname == .xyz || resourceExtname == .mol || resourceExtname == .sdf || resourceExtname == .com || resourceExtname == .gjf03 || resourceExtname == .gjf09 || resourceExtname == .gjf16 || resourceExtname == .mol2 || resourceExtname == .log || resourceExtname == .out || resourceExtname == .coord || resourceExtname == .inp || resourceExtname == .pdb || resourceExtname == .ent || resourceExtname == .mop || resourceExtname == .mopac || resourceExtname == .dat",
           "group": "navigation"
         }
       ],
       "editor/title/context": [
         {
           "command": "molecularViewer.openViewer",
-          "when": "resourceExtname == .gjf || resourceExtname == .xyz || resourceExtname == .mol || resourceExtname == .sdf || resourceExtname == .com || resourceExtname == .gjf03 || resourceExtname == .gjf09 || resourceExtname == .gjf16 || resourceExtname == .mol2 || resourceExtname == .log || resourceExtname == .out || resourceExtname == .coord || resourceExtname == .inp",
+          "when": "resourceExtname == .gjf || resourceExtname == .xyz || resourceExtname == .mol || resourceExtname == .sdf || resourceExtname == .com || resourceExtname == .gjf03 || resourceExtname == .gjf09 || resourceExtname == .gjf16 || resourceExtname == .mol2 || resourceExtname == .log || resourceExtname == .out || resourceExtname == .coord || resourceExtname == .inp || resourceExtname == .pdb || resourceExtname == .ent || resourceExtname == .mop || resourceExtname == .mopac || resourceExtname == .dat",
           "group": "navigation"
         }
       ]
@@ -117,6 +117,21 @@
           },
           {
             "filenamePattern": "*.inp"
+          },
+          {
+            "filenamePattern": "*.pdb"
+          },
+          {
+            "filenamePattern": "*.ent"
+          },
+          {
+            "filenamePattern": "*.mop"
+          },
+          {
+            "filenamePattern": "*.mopac"
+          },
+          {
+            "filenamePattern": "*.dat"
           }
         ]
       }

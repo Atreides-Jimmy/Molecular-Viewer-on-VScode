@@ -12,6 +12,8 @@ const coordParser_1 = require("./coordParser");
 const orcaInpParser_1 = require("./orcaInpParser");
 const orcaOutParser_1 = require("./orcaOutParser");
 Object.defineProperty(exports, "parseOrcaOut", { enumerable: true, get: function () { return orcaOutParser_1.parseOrcaOut; } });
+const pdbParser_1 = require("./pdbParser");
+const mopacParser_1 = require("./mopacParser");
 function parseFile(content, fileName) {
     const ext = fileName.toLowerCase().split('.').pop() || '';
     switch (ext) {
@@ -32,6 +34,13 @@ function parseFile(content, fileName) {
             return (0, coordParser_1.parseCoord)(content);
         case 'inp':
             return (0, orcaInpParser_1.parseOrcainp)(content);
+        case 'pdb':
+        case 'ent':
+            return (0, pdbParser_1.parsePdb)(content);
+        case 'mop':
+        case 'mopac':
+        case 'dat':
+            return (0, mopacParser_1.parseMopac)(content);
         default:
             return tryAutoParse(content);
     }
@@ -63,6 +72,12 @@ function tryAutoParse(content) {
     }
     if (content.match(/\*\s*xyz/i) || content.match(/\*\s*xyzfile/i)) {
         return (0, orcaInpParser_1.parseOrcainp)(content);
+    }
+    if (content.match(/^(ATOM|HETATM)/m)) {
+        return (0, pdbParser_1.parsePdb)(content);
+    }
+    if (content.match(/CARTESIAN COORDINATES/i) && content.match(/MOPAC/i)) {
+        return (0, mopacParser_1.parseMopac)(content);
     }
     if (content.includes('CARTESIAN COORDINATES (ANGSTROEM)')) {
         const result = (0, orcaOutParser_1.parseOrcaOut)(content);

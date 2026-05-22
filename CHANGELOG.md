@@ -1,5 +1,14 @@
 # Change Log
 
+## [0.7.2] - 2026-04-15
+
+### Added
+
+- **PDB file support** — New parser for Protein Data Bank files (`.pdb`, `.ent`); reads ATOM and HETATM records with fixed-column PDB format parsing; element identification from columns 77-78 (element field) or inferred from atom name with 2-letter element detection (e.g. FE→Fe, CL→Cl); CONECT records for explicit bond connectivity; handles duplicate atom serial numbers; title from TITLE records
+- **MOPAC file support** — New parser for MOPAC input/output files (`.mop`, `.mopac`, `.dat`); reads internal coordinate format (`ELEM x 1 y 1 z 1`); supports both element symbols and atomic numbers; auto-detects Å/Bohr units from coordinate flags (1/A=Å, 0/B=Bohr); extracts CHARGE and MS/MULT keywords from keyword line; falls back to CARTESIAN COORDINATES output blocks for MOPAC output files
+- **Save as PDB** — Export molecular structure in PDB format with ATOM records and CONECT records for bond connectivity
+- **Save as MOPAC Input** — Export in MOPAC input format with PM7 method, CHARGE and MS keywords, and internal coordinates in Å
+
 ## [0.7.1] - 2026-04-15
 
 ### Changed

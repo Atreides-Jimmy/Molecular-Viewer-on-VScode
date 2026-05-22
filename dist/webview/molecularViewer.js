@@ -903,6 +903,37 @@ function doSave(){
     });
     mol+='M  END\\n';
 
+    var pdb='';
+    MD.atoms.forEach(function(a,i){
+        var serial=(i+1).toString();while(serial.length<5)serial=' '+serial;
+        var name;
+        if(a.element.length===1){name=' '+a.element+'  '}
+        else{name=a.element+'  '}
+        var sx=a.x.toFixed(3);while(sx.length<8)sx=' '+sx;
+        var sy=a.y.toFixed(3);while(sy.length<8)sy=' '+sy;
+        var sz=a.z.toFixed(3);while(sz.length<8)sz=' '+sz;
+        var el=a.element.charAt(0).toUpperCase();
+        if(a.element.length>1)el+=a.element.charAt(1).toLowerCase();
+        while(el.length<2)el=' '+el;
+        pdb+='ATOM  '+serial+name+'UNK A   1    '+sx+sy+sz+'  1.00  0.00          '+el+'\\n';
+    });
+    MD.bonds.forEach(function(b){
+        var a1=(b.atom1+1).toString();while(a1.length<5)a1=' '+a1;
+        var a2=(b.atom2+1).toString();while(a2.length<5)a2=' '+a2;
+        pdb+='CONECT'+a1+a2+'\\n';
+    });
+    pdb+='END\\n';
+
+    var mopac=(MD.title||'Modified structure')+'\\n';
+    var chrgStr=chrg!==0?' CHARGE='+chrg:'';
+    var multStr=mult!==1?' MS='+mult:'';
+    mopac+='PM7'+chrgStr+multStr+'\\n\\n';
+    MD.atoms.forEach(function(a){
+        var sx=a.x.toFixed(5);var sy=a.y.toFixed(5);var sz=a.z.toFixed(5);
+        mopac+=a.element+' '+sx+' 1 '+sy+' 1 '+sz+' 1\\n';
+    });
+    mopac+='\\n';
+
     showModal('<h3>Save File</h3>'+
         '<label>Format:</label><select id="m-fmt">'+
         '<option value="xyz">XYZ (.xyz)</option>'+
@@ -911,6 +942,8 @@ function doSave(){
         '<option value="inp">ORCA Input (.inp)</option>'+
         '<option value="mol2">MOL2 (.mol2)</option>'+
         '<option value="mol">MDL Mol (.mol)</option>'+
+        '<option value="pdb">PDB (.pdb)</option>'+
+        '<option value="mop">MOPAC Input (.mop)</option>'+
         '</select>'+
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok" id="m-ok">Save</button></div>',null);
     document.getElementById('m-ok').addEventListener('click',function(){
@@ -922,6 +955,8 @@ function doSave(){
             case 'inp':content=orcaInp;ext='.inp';break;
             case 'mol2':content=mol2;ext='.mol2';break;
             case 'mol':content=mol;ext='.mol';break;
+            case 'pdb':content=pdb;ext='.pdb';break;
+            case 'mop':content=mopac;ext='.mop';break;
             default:content=xyz;ext='.xyz';
         }
         vscodeApi.postMessage({command:'saveFile',content:content,suggestedName:'molecule_modified'+ext,filePath:MD.filePath||''});

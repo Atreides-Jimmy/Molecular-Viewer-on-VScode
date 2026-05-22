@@ -26,7 +26,7 @@ A VS Code / Trae extension for visualizing and editing molecular structures in 3
 - **Add Atom** — Click anchor atom, choose element (70+ elements), set bond length and bond order, direction auto-calculated from existing bonds
 - **Delete Atom** — Click atom and confirm; atoms and bonds are automatically re-indexed
 - **Select Atoms** — Input atom indices (1-based), ranges (e.g. `3-10`), or element symbols (e.g. `C H`) to highlight specific atoms in yellow
-- **Save As** — Export modified structure in 6 formats: XYZ, Gaussian GJF (preserving original file structure), Turbomole Coord (Å→Bohr conversion), ORCA Input, MOL2 (with bond orders), or MDL Mol; GJF output preserves original Link 0, route, title, charge/mult, and post-connect content; connect section includes all atom lines
+- **Save As** — Export modified structure in 8 formats: XYZ, Gaussian GJF (preserving original file structure), Turbomole Coord (Å→Bohr conversion), ORCA Input, MOL2 (with bond orders), MDL Mol, PDB (with CONECT records), or MOPAC Input; GJF output preserves original Link 0, route, title, charge/mult, and post-connect content; connect section includes all atom lines
 - **Continuous Editing** — After completing an edit, the viewer stays in the current editing mode for repeated adjustments
 - **Cancel/Undo** — Cancel button restores original coordinates before confirming edits
 
@@ -47,6 +47,8 @@ A VS Code / Trae extension for visualizing and editing molecular structures in 3
 | ORCA Input | `.inp` | Reads `* xyz CHARGE MULT ... *` blocks and `%coords` blocks; supports xyz and xyzfile coordinate formats |
 | ORCA Output | `.out` | Reads `CARTESIAN COORDINATES (ANGSTROEM)` blocks; supports multi-frame optimization trajectory; extracts charge and multiplicity |
 | Turbomole Coord | `.coord` | Reads `$coord` section (Bohr → Å conversion), `$chrg` and `$spin`/`$mult` for charge and multiplicity |
+| PDB | `.pdb`, `.ent` | Reads ATOM/HETATM records with fixed-column parsing; element from columns 77-78 or atom name; CONECT records for explicit bonds; handles duplicate serials |
+| MOPAC | `.mop`, `.mopac`, `.dat` | Reads MOPAC input format with `ELEM x 1 y 1 z 1` internal coordinates; supports atomic numbers or element symbols; auto-detects Å/Bohr units; extracts CHARGE and MS keywords; falls back to `CARTESIAN COORDINATES` output blocks |
 | MDL Mol | `.mol` | Basic support |
 | SDF | `.sdf` | Basic support |
 
@@ -93,7 +95,10 @@ Add to your `settings.json`:
     "*.log": "molecularViewer.editor",
     "*.out": "molecularViewer.editor",
     "*.coord": "molecularViewer.editor",
-    "*.inp": "molecularViewer.editor"
+    "*.inp": "molecularViewer.editor",
+    "*.pdb": "molecularViewer.editor",
+    "*.ent": "molecularViewer.editor",
+    "*.mop": "molecularViewer.editor"
   }
 }
 ```
@@ -150,6 +155,8 @@ molecular-viewer/
 │   │   ├── coordParser.ts     # Turbomole .coord parser (Bohr → Å)
 │   │   ├── orcaInpParser.ts   # ORCA input .inp parser
 │   │   ├── orcaOutParser.ts   # ORCA output .out parser (optimization trajectory)
+│   │   ├── pdbParser.ts       # PDB format parser (ATOM/HETATM/CONECT)
+│   │   ├── mopacParser.ts     # MOPAC input/output parser
 │   │   └── bondDetector.ts    # Covalent radii bond detection + order estimation
 │   └── webview/
 │       └── molecularViewer.ts # Custom editor + Three.js webview + editing
