@@ -5,6 +5,7 @@
   "version": "0.7.1",
   "publisher": "Atreides-Jimmy",
   "license": "MIT",
+  "icon": "icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/Atreides-Jimmy/Molecular-Viewer-on-VScode.git"
@@ -38,7 +39,7 @@
   },
   "categories": [
     "Visualization",
-    "Science"
+    "Education"
   ],
   "galleryBanner": {
     "color": "#1e1e1e",
