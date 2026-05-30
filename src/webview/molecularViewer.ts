@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
-import { parseFile, parseLogFile, LogFrame, OrcaFrame } from '../parsers/index';
+import * as path from 'path';
+import { parseFile, parseLogFile, LogFrame, OrcaFrame, parseTcl } from '../parsers/index';
 import { ensureBonds } from '../parsers/bondDetector';
-import { MolecularData } from '../types';
+import { MolecularData, AtomGroup } from '../types';
 
 export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvider<MolecularDocument> {
     constructor(private readonly context: vscode.ExtensionContext) {}
@@ -18,8 +19,56 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         const ext = fileName.toLowerCase().split('.').pop() || '';
         let data: MolecularData;
         let frames: (LogFrame | OrcaFrame)[] = [];
+        let atomGroups: AtomGroup[] | undefined;
 
-        if (ext === 'log' || ext === 'out') {
+        if (ext === 'tcl') {
+            const tclResult = parseTcl(textContent);
+            let sourceUri: vscode.Uri | undefined;
+            if (tclResult.sourceFile) {
+                if (path.isAbsolute(tclResult.sourceFile)) {
+                    sourceUri = vscode.Uri.file(tclResult.sourceFile);
+                } else {
+                    const tclDir = path.dirname(uri.fsPath);
+                    const resolvedPath = path.resolve(tclDir, tclResult.sourceFile);
+                    sourceUri = vscode.Uri.file(resolvedPath);
+                }
+            }
+            if (sourceUri) {
+                try {
+                    const sourceContent = await vscode.workspace.fs.readFile(sourceUri);
+                    const sourceText = new TextDecoder().decode(sourceContent);
+                    const sourceFileName = sourceUri.path.split('/').pop() || 'unknown.xyz';
+                    const sourceExt = sourceFileName.toLowerCase().split('.').pop() || '';
+
+                    if (sourceExt === 'log' || sourceExt === 'out') {
+                        const logResult = parseLogFile(sourceText, sourceFileName);
+                        frames = logResult.frames;
+                        if (frames.length > 0) {
+                            data = ensureBonds({
+                                atoms: frames[0].atoms,
+                                bonds: frames[0].bonds,
+                                title: frames[0].title,
+                                hasExplicitBonds: frames[0].hasExplicitBonds,
+                                charge: frames[0].charge,
+                                multiplicity: frames[0].multiplicity
+                            });
+                        } else {
+                            data = { atoms: [], bonds: [], title: 'No structures found', hasExplicitBonds: false };
+                        }
+                    } else {
+                        data = parseFile(sourceText, sourceFileName);
+                        data = ensureBonds(data);
+                    }
+                    data.filePath = sourceUri.fsPath;
+                } catch {
+                    data = { atoms: [], bonds: [], title: 'Failed to load source file: ' + tclResult.sourceFile, hasExplicitBonds: false };
+                }
+            } else {
+                data = { atoms: [], bonds: [], title: 'No source file specified in TCL', hasExplicitBonds: false };
+            }
+            atomGroups = tclResult.groups.length > 0 ? tclResult.groups : undefined;
+            data.atomGroups = atomGroups;
+        } else if (ext === 'log' || ext === 'out') {
             const logResult = parseLogFile(textContent, fileName);
             frames = logResult.frames;
             if (frames.length > 0) {
@@ -39,7 +88,9 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             data = ensureBonds(data);
         }
 
-        data.filePath = uri.fsPath;
+        if (ext !== 'tcl') {
+            data.filePath = uri.fsPath;
+        }
 
         return new MolecularDocument(uri, data, frames);
     }
@@ -122,10 +173,27 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             Sg: '#E00045', Bh: '#E6002E', Hs: '#EB0026'
         };
 
-        const atomData = data.atoms.map(a => ({
-            element: a.element, x: a.x, y: a.y, z: a.z,
-            color: atomColors[a.element] || '#FF1493'
-        }));
+        const atomData = data.atoms.map(a => {
+            let color = atomColors[a.element] || '#FF1493';
+            return {
+                element: a.element, x: a.x, y: a.y, z: a.z,
+                color: color
+            };
+        });
+
+        if (data.atomGroups && data.atomGroups.length > 0) {
+            const atomColorOverride: { [key: number]: string } = {};
+            for (const group of data.atomGroups) {
+                for (const idx of group.indices) {
+                    atomColorOverride[idx] = group.color;
+                }
+            }
+            for (let i = 0; i < atomData.length; i++) {
+                if (atomColorOverride[i]) {
+                    atomData[i].color = atomColorOverride[i];
+                }
+            }
+        }
 
         const bondData = data.bonds.map(b => ({
             atom1: b.atom1, atom2: b.atom2, order: b.order
@@ -137,7 +205,11 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             stepLabel: f.stepLabel
         }));
 
-        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity });
+        const atomGroupsData = data.atomGroups ? data.atomGroups.map(g => ({
+            colorId: g.colorId, color: g.color, indices: g.indices
+        })) : [];
+
+        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData });
 
         return `<!DOCTYPE html>
 <html lang="en">

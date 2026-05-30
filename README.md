@@ -49,6 +49,7 @@ A VS Code / Trae extension for visualizing and editing molecular structures in 3
 | Turbomole Coord | `.coord` | Reads `$coord` section (Bohr → Å conversion), `$chrg` and `$spin`/`$mult` for charge and multiplicity |
 | PDB | `.pdb`, `.ent` | Reads ATOM/HETATM records with fixed-column parsing; element from columns 77-78 or atom name; CONECT records for explicit bonds; handles duplicate serials |
 | MOPAC | `.mop`, `.mopac`, `.dat` | Reads MOPAC input format with `ELEM x 1 y 1 z 1` internal coordinates; supports atomic numbers or element symbols; auto-detects Å/Bohr units; extracts CHARGE and MS keywords; falls back to `CARTESIAN COORDINATES` output blocks |
+| VMD TCL | `.tcl` | VMD visualization script; reads `mol new <file>` to load the referenced molecular file; parses `mol color ColorID N` + `mol selection "index ..."` to assign per-group atom colors using VMD's 33-color palette; supports relative and absolute file paths |
 | MDL Mol | `.mol` | Basic support |
 | SDF | `.sdf` | Basic support |
 
@@ -98,7 +99,8 @@ Add to your `settings.json`:
     "*.inp": "molecularViewer.editor",
     "*.pdb": "molecularViewer.editor",
     "*.ent": "molecularViewer.editor",
-    "*.mop": "molecularViewer.editor"
+    "*.mop": "molecularViewer.editor",
+    "*.tcl": "molecularViewer.editor"
   }
 }
 ```
@@ -157,6 +159,7 @@ molecular-viewer/
 │   │   ├── orcaOutParser.ts   # ORCA output .out parser (optimization trajectory)
 │   │   ├── pdbParser.ts       # PDB format parser (ATOM/HETATM/CONECT)
 │   │   ├── mopacParser.ts     # MOPAC input/output parser
+│   │   ├── tclParser.ts       # VMD TCL script parser (color groups)
 │   │   └── bondDetector.ts    # Covalent radii bond detection + order estimation
 │   └── webview/
 │       └── molecularViewer.ts # Custom editor + Three.js webview + editing
@@ -194,7 +197,6 @@ npm run package
 - [ ] CIF crystal structure support
 - [ ] Multiple display styles (wireframe, space-filling, licorice)
 - [ ] Vibration animation from frequency calculations
-- [ ] ORCA output parser
 - [ ] Export as PNG/SVG
 - [ ] Undo/redo history for edits
 

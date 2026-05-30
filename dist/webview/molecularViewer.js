@@ -35,6 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MolecularViewerProvider = void 0;
 const vscode = __importStar(require("vscode"));
+const path = __importStar(require("path"));
 const index_1 = require("../parsers/index");
 const bondDetector_1 = require("../parsers/bondDetector");
 class MolecularViewerProvider {
@@ -48,7 +49,60 @@ class MolecularViewerProvider {
         const ext = fileName.toLowerCase().split('.').pop() || '';
         let data;
         let frames = [];
-        if (ext === 'log' || ext === 'out') {
+        let atomGroups;
+        if (ext === 'tcl') {
+            const tclResult = (0, index_1.parseTcl)(textContent);
+            let sourceUri;
+            if (tclResult.sourceFile) {
+                if (path.isAbsolute(tclResult.sourceFile)) {
+                    sourceUri = vscode.Uri.file(tclResult.sourceFile);
+                }
+                else {
+                    const tclDir = path.dirname(uri.fsPath);
+                    const resolvedPath = path.resolve(tclDir, tclResult.sourceFile);
+                    sourceUri = vscode.Uri.file(resolvedPath);
+                }
+            }
+            if (sourceUri) {
+                try {
+                    const sourceContent = await vscode.workspace.fs.readFile(sourceUri);
+                    const sourceText = new TextDecoder().decode(sourceContent);
+                    const sourceFileName = sourceUri.path.split('/').pop() || 'unknown.xyz';
+                    const sourceExt = sourceFileName.toLowerCase().split('.').pop() || '';
+                    if (sourceExt === 'log' || sourceExt === 'out') {
+                        const logResult = (0, index_1.parseLogFile)(sourceText, sourceFileName);
+                        frames = logResult.frames;
+                        if (frames.length > 0) {
+                            data = (0, bondDetector_1.ensureBonds)({
+                                atoms: frames[0].atoms,
+                                bonds: frames[0].bonds,
+                                title: frames[0].title,
+                                hasExplicitBonds: frames[0].hasExplicitBonds,
+                                charge: frames[0].charge,
+                                multiplicity: frames[0].multiplicity
+                            });
+                        }
+                        else {
+                            data = { atoms: [], bonds: [], title: 'No structures found', hasExplicitBonds: false };
+                        }
+                    }
+                    else {
+                        data = (0, index_1.parseFile)(sourceText, sourceFileName);
+                        data = (0, bondDetector_1.ensureBonds)(data);
+                    }
+                    data.filePath = sourceUri.fsPath;
+                }
+                catch {
+                    data = { atoms: [], bonds: [], title: 'Failed to load source file: ' + tclResult.sourceFile, hasExplicitBonds: false };
+                }
+            }
+            else {
+                data = { atoms: [], bonds: [], title: 'No source file specified in TCL', hasExplicitBonds: false };
+            }
+            atomGroups = tclResult.groups.length > 0 ? tclResult.groups : undefined;
+            data.atomGroups = atomGroups;
+        }
+        else if (ext === 'log' || ext === 'out') {
             const logResult = (0, index_1.parseLogFile)(textContent, fileName);
             frames = logResult.frames;
             if (frames.length > 0) {
@@ -69,7 +123,9 @@ class MolecularViewerProvider {
             data = (0, index_1.parseFile)(textContent, fileName);
             data = (0, bondDetector_1.ensureBonds)(data);
         }
-        data.filePath = uri.fsPath;
+        if (ext !== 'tcl') {
+            data.filePath = uri.fsPath;
+        }
         return new MolecularDocument(uri, data, frames);
     }
     async resolveCustomEditor(document, webviewPanel, _token) {
@@ -139,10 +195,26 @@ class MolecularViewerProvider {
             Md: '#B30DA6', No: '#BD0D87', Lr: '#C70066', Rf: '#CC0059', Db: '#D9004F',
             Sg: '#E00045', Bh: '#E6002E', Hs: '#EB0026'
         };
-        const atomData = data.atoms.map(a => ({
-            element: a.element, x: a.x, y: a.y, z: a.z,
-            color: atomColors[a.element] || '#FF1493'
-        }));
+        const atomData = data.atoms.map(a => {
+            let color = atomColors[a.element] || '#FF1493';
+            return {
+                element: a.element, x: a.x, y: a.y, z: a.z,
+                color: color
+            };
+        });
+        if (data.atomGroups && data.atomGroups.length > 0) {
+            const atomColorOverride = {};
+            for (const group of data.atomGroups) {
+                for (const idx of group.indices) {
+                    atomColorOverride[idx] = group.color;
+                }
+            }
+            for (let i = 0; i < atomData.length; i++) {
+                if (atomColorOverride[i]) {
+                    atomData[i].color = atomColorOverride[i];
+                }
+            }
+        }
         const bondData = data.bonds.map(b => ({
             atom1: b.atom1, atom2: b.atom2, order: b.order
         }));
@@ -151,7 +223,10 @@ class MolecularViewerProvider {
             bonds: f.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order })),
             stepLabel: f.stepLabel
         }));
-        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity });
+        const atomGroupsData = data.atomGroups ? data.atomGroups.map(g => ({
+            colorId: g.colorId, color: g.color, indices: g.indices
+        })) : [];
+        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData });
         return `<!DOCTYPE html>
 <html lang="en">
 <head>

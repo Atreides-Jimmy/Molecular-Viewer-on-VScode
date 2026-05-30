@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.parseOrcaOut = exports.parseGaussianLog = void 0;
+exports.parseTcl = exports.parseOrcaOut = exports.parseGaussianLog = void 0;
 exports.parseFile = parseFile;
 exports.parseLogFile = parseLogFile;
 const gjfParser_1 = require("./gjfParser");
@@ -14,6 +14,8 @@ const orcaOutParser_1 = require("./orcaOutParser");
 Object.defineProperty(exports, "parseOrcaOut", { enumerable: true, get: function () { return orcaOutParser_1.parseOrcaOut; } });
 const pdbParser_1 = require("./pdbParser");
 const mopacParser_1 = require("./mopacParser");
+const tclParser_1 = require("./tclParser");
+Object.defineProperty(exports, "parseTcl", { enumerable: true, get: function () { return tclParser_1.parseTcl; } });
 function parseFile(content, fileName) {
     const ext = fileName.toLowerCase().split('.').pop() || '';
     switch (ext) {

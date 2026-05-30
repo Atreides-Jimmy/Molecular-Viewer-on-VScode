@@ -20,6 +20,12 @@ export interface GjfMeta {
     afterConnectContent: string;
 }
 
+export interface AtomGroup {
+    colorId: number;
+    color: string;
+    indices: number[];
+}
+
 export interface MolecularData {
     atoms: Atom[];
     bonds: Bond[];
@@ -29,4 +35,5 @@ export interface MolecularData {
     gjfMeta?: GjfMeta;
     charge?: number;
     multiplicity?: number;
+    atomGroups?: AtomGroup[];
 }

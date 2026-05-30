@@ -1,4 +1,4 @@
-import { MolecularData } from '../types';
+import { MolecularData, AtomGroup } from '../types';
 import { parseGjf } from './gjfParser';
 import { parseXyz } from './xyzParser';
 import { parseMol2 } from './mol2Parser';
@@ -8,9 +8,11 @@ import { parseOrcainp } from './orcaInpParser';
 import { parseOrcaOut, OrcaFrame } from './orcaOutParser';
 import { parsePdb } from './pdbParser';
 import { parseMopac } from './mopacParser';
+import { parseTcl, TclParseResult } from './tclParser';
 
 export { parseGaussianLog, LogFrame };
 export { parseOrcaOut, OrcaFrame };
+export { parseTcl, TclParseResult };
 
 export function parseFile(content: string, fileName: string): MolecularData {
     const ext = fileName.toLowerCase().split('.').pop() || '';

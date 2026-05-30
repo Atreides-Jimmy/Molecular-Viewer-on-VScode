@@ -1,5 +1,18 @@
 # Change Log
 
+## [0.8.1] - 2026-05-22
+
+### Added
+
+- **VMD TCL script support** — New parser for VMD TCL visualization scripts (`.tcl`); reads `mol new <filename>` to locate the referenced molecular structure file (supports relative and absolute paths); parses `mol color ColorID N` + `mol selection "index ..."` pairs to extract atom color group assignments; maps VMD ColorID (0-32) to hex colors (blue, red, gray, orange, yellow, tan, silver, green, white, pink, cyan, purple, etc.); atoms in each group are rendered with their assigned VMD color instead of the default CPK element color
+- **TCL file integration** — Opening a `.tcl` file automatically resolves and loads the referenced molecular file, applies the color groups, and displays the structure with per-group coloring; supports all molecular file formats as source (PDB, XYZ, GJF, etc.); works with both relative and absolute file paths; if the source file cannot be found, shows an informative error message
+- **AtomGroup data type** — New `AtomGroup` interface in types.ts with `colorId`, `color`, and `indices` fields; `MolecularData` now has an optional `atomGroups` field for color group information
+
+### Changed
+
+- **Package name** — Changed from `molecular-viewer` to `Molecular-Viewer` (capitalized) to allow re-publishing after accidental deletion of the original extension
+- **.gitignore** — Added `test/` folder to git ignore list
+
 ## [0.7.2] - 2026-04-15
 
 ### Added
