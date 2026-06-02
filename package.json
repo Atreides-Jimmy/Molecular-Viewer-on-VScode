@@ -2,7 +2,7 @@
   "name": "Molecular-Viewer",
   "displayName": "Molecular Viewer",
   "description": "3D molecular structure viewer and editor for computational chemistry files (Gaussian .gjf/.log, ORCA .inp/.out, .xyz, .mol2, .coord, .mol, .sdf, VMD .tcl). Features ball-and-stick rendering, auto bond detection, interactive rotation/zoom, bond length/angle/dihedral editing, atom add/delete, optimization trajectory navigation, VMD TCL script color groups, and save-as — like GaussView in your IDE.",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "publisher": "Atreides-Jimmy",
   "license": "MIT",
   "icon": "icon.png",

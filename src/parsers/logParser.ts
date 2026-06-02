@@ -76,6 +76,7 @@ export function parseGaussianLog(content: string): { frames: LogFrame[], title: 
                 const parts = coordLine.split(/\s+/);
                 if (parts.length >= 6) {
                     const atomicNum = parseInt(parts[1], 10);
+                    if (isNaN(atomicNum)) { i++; continue; }
                     const element = ATOMIC_NUMBER_MAP[atomicNum] || 'X';
                     const x = parseFloat(parts[3]);
                     const y = parseFloat(parts[4]);

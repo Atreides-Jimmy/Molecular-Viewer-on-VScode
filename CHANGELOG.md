@@ -1,5 +1,11 @@
 # Change Log
 
+## [0.8.2] - 2026-05-22
+
+### Fixed
+
+- **Gaussian LOG external program coordinate filtering** — When Gaussian calls external programs during optimization (e.g., ONIOM), the LOG file may contain coordinate blocks where atomic numbers are written as element symbols (e.g., `C` instead of `6`) instead of numeric atomic numbers. Previously, these lines were parsed with `parseInt` returning `NaN`, causing atoms to be misidentified as element `X`. Now, lines with non-numeric atomic numbers in `Standard orientation:` and `Input orientation:` blocks are skipped, ensuring only valid Gaussian-native coordinate entries are read
+
 ## [0.8.1] - 2026-05-22
 
 ### Added
