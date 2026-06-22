@@ -36,6 +36,15 @@ A VS Code / Trae extension for visualizing and editing molecular structures in 3
 - **Jump to Frame** — Direct input field to jump to a specific frame number
 - **Auto Play** — Automatically cycle through all frames with 500ms interval
 
+### Structure Diff
+
+- **Diff Button** — Compare the current structure against another molecular file (any supported format, no need for matching formats)
+- **Frame Selection** — If the comparison file is an optimization LOG/OUT, a QuickPick lets you choose which frame to compare
+- **Skeleton Check** — Graph isomorphism via BFS-based atom matching (element + degree + neighbor signature); if skeletons differ, shows atom/bond counts and a clear message
+- **Side-by-Side View** — Left viewport shows the original molecule, right shows the comparison; both rotate synchronously
+- **Conformation Diff** — When skeletons match, highlights bond length (Δ > 0.05 Å), bond angle (Δ > 2°), and dihedral (Δ > 5°) differences in orange on both sides
+- **Diff Info Panel** — Floating panel listing all differences sorted by magnitude, with atom labels and values from both structures
+
 ### Supported File Formats
 
 | Format | Extension | Notes |

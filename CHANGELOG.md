@@ -1,5 +1,16 @@
 # Change Log
 
+## [0.9.0] - 2026-05-22
+
+### Added
+
+- **Molecular structure diff** — New "Diff" toolbar button that compares the currently open structure against another molecular file (any supported format, no need for matching formats); if the second file is an optimization LOG/OUT, a QuickPick lets you select which frame to compare
+- **Skeleton comparison** — Uses graph isomorphism via BFS-based atom matching (element + degree + neighbor-element signature) to determine if two molecules share the same connectivity skeleton; if skeletons differ, shows a clear "skeletons differ" message with atom/bond counts
+- **Conformation diff** — When skeletons match, computes bond length differences (threshold 0.05 Å), bond angle differences (threshold 2°), and dihedral angle differences (threshold 5°); displays a sorted diff panel listing all differences with values from both structures
+- **Side-by-side rendering** — In diff mode, the 3D view splits into left (original) and right (comparison) viewports using Three.js scissor/viewport; both molecules rotate synchronously; differing atoms and bonds are highlighted in orange on both sides
+- **Diff info panel** — Floating panel showing all differences grouped by type (bonds, angles, dihedrals), sorted by magnitude, with atom labels and values from both structures; closable via × button
+- **Diff exit** — Clicking the Diff button again exits diff mode and restores the single-molecule view
+
 ## [0.8.2] - 2026-05-22
 
 ### Fixed
