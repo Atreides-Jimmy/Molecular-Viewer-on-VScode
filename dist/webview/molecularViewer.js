@@ -672,6 +672,9 @@ var diffAtomMeshes=[];
 var diffBondMeshes=[];
 var diffCX=0,diffCY=0,diffCZ=0;
 var diffRotQuat=new THREE.Quaternion();
+var diffThresholdPct=2;
+var diffDetBonds1=null;
+var diffDetBonds2=null;
 var diffPanX=0,diffPanY=0;
 var diffCamDist=10;
 var diffTransformSide='left';
@@ -839,9 +842,9 @@ function dihedral3d(a,b,c,d){
     return sign<0?-ang:ang;
 }
 
-function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping){
+function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct){
     var diffs={bonds:[],angles:[],dihedrals:[]};
-    var bondThresh=0.02,angleThresh=1.0,dihedralThresh=2.5;
+    var tp=threshPct||2;
 
     var bondSet2={};
     bonds2.forEach(function(b){bondSet2[Math.min(b.atom1,b.atom2)+'-'+Math.max(b.atom1,b.atom2)]=b.order});
@@ -853,8 +856,10 @@ function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping){
             var d1=dist3d(atoms1[b.atom1],atoms1[b.atom2]);
             var d2=dist3d(atoms2[mapping[b.atom1]],atoms2[mapping[b.atom2]]);
             var dd=Math.abs(d1-d2);
-            if(dd>bondThresh){
-                diffs.bonds.push({i1:b.atom1,i2:b.atom2,d1:d1,d2:d2,diff:dd});
+            var avg=(d1+d2)/2;
+            var pct=avg>0.01?dd/avg*100:0;
+            if(pct>tp){
+                diffs.bonds.push({i1:b.atom1,i2:b.atom2,d1:d1,d2:d2,diff:dd,pct:pct});
             }
         }
     });
@@ -872,8 +877,10 @@ function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping){
                 var a1=angle3d(atoms1[i1],atoms1[j],atoms1[i3]);
                 var a2=angle3d(atoms2[mapping[i1]],atoms2[mapping[j]],atoms2[mapping[i3]]);
                 var da=Math.abs(a1-a2);
-                if(da>angleThresh){
-                    diffs.angles.push({i1:i1,i2:j,i3:i3,a1:a1,a2:a2,diff:da});
+                var avgA=(a1+a2)/2;
+                var pctA=avgA>1.0?da/avgA*100:da*100;
+                if(pctA>tp){
+                    diffs.angles.push({i1:i1,i2:j,i3:i3,a1:a1,a2:a2,diff:da,pct:pctA});
                 }
             }
         }
@@ -897,8 +904,10 @@ function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping){
                     var d2=dihedral3d(atoms2[mapping[s0]],atoms2[mapping[start]],atoms2[mapping[mid]],atoms2[mapping[end]]);
                     var dd=Math.abs(d1-d2);
                     if(dd>180)dd=360-dd;
-                    if(dd>dihedralThresh){
-                        diffs.dihedrals.push({i1:s0,i2:start,i3:mid,i4:end,d1:d1,d2:d2,diff:dd});
+                    var avgD=(Math.abs(d1)+Math.abs(d2))/2;
+                    var pctD=avgD>1.0?dd/avgD*100:dd*10;
+                    if(pctD>tp){
+                        diffs.dihedrals.push({i1:s0,i2:start,i3:mid,i4:end,d1:d1,d2:d2,diff:dd,pct:pctD});
                     }
                 });
             });
@@ -913,6 +922,8 @@ function startDiff(msg){
 
     var detBonds1=detectBondsFromAtoms(MD.atoms);
     var detBonds2=detectBondsFromAtoms(diffData.atoms);
+    diffDetBonds1=detBonds1;
+    diffDetBonds2=detBonds2;
 
     var mapping=findAtomMapping(MD.atoms,detBonds1,diffData.atoms,detBonds2);
 
@@ -935,42 +946,16 @@ function startDiff(msg){
         return;
     }
 
-    var diffs=computeConformationDiffs(MD.atoms,detBonds1,diffData.atoms,detBonds2,mapping);
+    var diffs=computeConformationDiffs(MD.atoms,detBonds1,diffData.atoms,detBonds2,mapping,diffThresholdPct);
     var totalDiff=diffs.bonds.length+diffs.angles.length+diffs.dihedrals.length;
 
-    var html='<span class="diff-close">×</span>';
-    html+='<h4>Diff Results</h4>';
-    if(totalDiff===0){
-        html+='<div class="diff-row" style="color:#4ec9b0">Structures are identical (same conformation within thresholds).</div>';
-    }else{
-        html+='<div class="diff-row">Mapping: '+MD.atoms.length+' atoms matched. '+totalDiff+' differences found.</div>';
-        if(diffs.bonds.length>0){
-            html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Bond Length Differences ('+diffs.bonds.length+')</b></div>';
-            diffs.bonds.sort(function(a,b){return b.diff-a.diff});
-            diffs.bonds.forEach(function(d){
-                html+='<div class="diff-row">  '+MD.atoms[d.i1].element+(d.i1+1)+'-'+MD.atoms[d.i2].element+(d.i2+1)+
-                    ': '+d.d1.toFixed(3)+' vs '+d.d2.toFixed(3)+' Å (Δ='+d.diff.toFixed(3)+')</div>';
-            });
-        }
-        if(diffs.angles.length>0){
-            html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Bond Angle Differences ('+diffs.angles.length+')</b></div>';
-            diffs.angles.sort(function(a,b){return b.diff-a.diff});
-            diffs.angles.forEach(function(d){
-                html+='<div class="diff-row">  '+MD.atoms[d.i1].element+(d.i1+1)+'-'+MD.atoms[d.i2].element+(d.i2+1)+'-'+MD.atoms[d.i3].element+(d.i3+1)+
-                    ': '+d.a1.toFixed(1)+'° vs '+d.a2.toFixed(1)+'° (Δ='+d.diff.toFixed(1)+'°)</div>';
-            });
-        }
-        if(diffs.dihedrals.length>0){
-            html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Dihedral Differences ('+diffs.dihedrals.length+')</b></div>';
-            diffs.dihedrals.sort(function(a,b){return b.diff-a.diff});
-            diffs.dihedrals.forEach(function(d){
-                html+='<div class="diff-row">  '+MD.atoms[d.i1].element+(d.i1+1)+'-'+MD.atoms[d.i2].element+(d.i2+1)+'-'+MD.atoms[d.i3].element+(d.i3+1)+'-'+MD.atoms[d.i4].element+(d.i4+1)+
-                    ': '+d.d1.toFixed(1)+'° vs '+d.d2.toFixed(1)+'° (Δ='+d.diff.toFixed(1)+'°)</div>';
-            });
-        }
-    }
+    diffMapping=mapping;
+    diffReverseMapping=new Array(diffData.atoms.length).fill(-1);
+    for(var mi=0;mi<mapping.length;mi++){diffReverseMapping[mapping[mi]]=mi}
 
+    var html=buildDiffResultsHTML(diffs,totalDiff);
     showDiffPanel(html,true);
+    wireDiffSlider();
     diffMode=true;
     diffLabelLeft.textContent='Original: '+(MD.title||'molecule');
     diffLabelLeft.classList.add('show');
@@ -978,11 +963,127 @@ function startDiff(msg){
     diffLabelRight.classList.add('show');
     modeInfoEl.textContent='Diff Mode ('+totalDiff+' differences)';
 
-    diffMapping=mapping;
-    diffReverseMapping=new Array(diffData.atoms.length).fill(-1);
-    for(var mi=0;mi<mapping.length;mi++){diffReverseMapping[mapping[mi]]=mi}
-
     enterDiffRender(diffs,mapping);
+}
+
+function buildDiffResultsHTML(diffs,totalDiff){
+    var html='<span class="diff-close">×</span>';
+    html+='<h4>Diff Results</h4>';
+    html+='<div class="diff-row" style="margin-bottom:4px">';
+    html+='<label style="font-size:11px">Threshold: <b><span id="thresh-val">'+diffThresholdPct.toFixed(1)+'</span>%</b></label>';
+    html+='<input type="range" id="thresh-slider" min="0" max="20" step="0.5" value="'+diffThresholdPct+'" style="width:100%;accent-color:var(--vscode-textLink-foreground,#3794ff)">';
+    html+='<div style="font-size:10px;color:var(--vscode-descriptionForeground,#999)">Relative difference: Δ/avg × 100%</div>';
+    html+='</div>';
+    html+='<div id="diff-results-list">';
+    html+=buildDiffListHTML(diffs,totalDiff);
+    html+='</div>';
+    return html;
+}
+
+function buildDiffListHTML(diffs,totalDiff){
+    var html='';
+    if(totalDiff===0){
+        html+='<div class="diff-row" style="color:#4ec9b0">Structures are identical (same conformation within thresholds).</div>';
+    }else{
+        html+='<div class="diff-row">Mapping: '+MD.atoms.length+' atoms matched. '+totalDiff+' differences found.</div>';
+        if(diffs.bonds.length>0){
+            html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Bond Length Differences ('+diffs.bonds.length+')</b></div>';
+            diffs.bonds.sort(function(a,b){return b.pct-a.pct});
+            diffs.bonds.forEach(function(d){
+                html+='<div class="diff-row">  '+MD.atoms[d.i1].element+(d.i1+1)+'-'+MD.atoms[d.i2].element+(d.i2+1)+
+                    ': '+d.d1.toFixed(3)+' vs '+d.d2.toFixed(3)+' Å (Δ='+d.diff.toFixed(3)+', '+d.pct.toFixed(2)+'%)</div>';
+            });
+        }
+        if(diffs.angles.length>0){
+            html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Bond Angle Differences ('+diffs.angles.length+')</b></div>';
+            diffs.angles.sort(function(a,b){return b.pct-a.pct});
+            diffs.angles.forEach(function(d){
+                html+='<div class="diff-row">  '+MD.atoms[d.i1].element+(d.i1+1)+'-'+MD.atoms[d.i2].element+(d.i2+1)+'-'+MD.atoms[d.i3].element+(d.i3+1)+
+                    ': '+d.a1.toFixed(1)+'° vs '+d.a2.toFixed(1)+'° (Δ='+d.diff.toFixed(1)+'°, '+d.pct.toFixed(2)+'%)</div>';
+            });
+        }
+        if(diffs.dihedrals.length>0){
+            html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Dihedral Differences ('+diffs.dihedrals.length+')</b></div>';
+            diffs.dihedrals.sort(function(a,b){return b.pct-a.pct});
+            diffs.dihedrals.forEach(function(d){
+                html+='<div class="diff-row">  '+MD.atoms[d.i1].element+(d.i1+1)+'-'+MD.atoms[d.i2].element+(d.i2+1)+'-'+MD.atoms[d.i3].element+(d.i3+1)+'-'+MD.atoms[d.i4].element+(d.i4+1)+
+                    ': '+d.d1.toFixed(1)+'° vs '+d.d2.toFixed(1)+'° (Δ='+d.diff.toFixed(1)+'°, '+d.pct.toFixed(2)+'%)</div>';
+            });
+        }
+    }
+    return html;
+}
+
+function wireDiffSlider(){
+    var slider=diffPanelEl.querySelector('#thresh-slider');
+    if(slider){
+        slider.addEventListener('input',function(){
+            diffThresholdPct=parseFloat(slider.value);
+            var valEl=diffPanelEl.querySelector('#thresh-val');
+            if(valEl)valEl.textContent=diffThresholdPct.toFixed(1);
+            recomputeDiff();
+        });
+    }
+}
+
+function recomputeDiff(){
+    if(!diffMapping||!diffDetBonds1||!diffDetBonds2)return;
+    var diffs=computeConformationDiffs(MD.atoms,diffDetBonds1,diffData.atoms,diffDetBonds2,diffMapping,diffThresholdPct);
+    var totalDiff=diffs.bonds.length+diffs.angles.length+diffs.dihedrals.length;
+    var listEl=diffPanelEl.querySelector('#diff-results-list');
+    if(listEl){
+        listEl.innerHTML=buildDiffListHTML(diffs,totalDiff);
+    }
+    var fullHTML=buildDiffResultsHTML(diffs,totalDiff);
+    diffPanelHTML=fullHTML;
+    diffResultsHTML=fullHTML;
+    modeInfoEl.textContent='Diff Mode ('+totalDiff+' differences)';
+    updateDiffHighlights(diffs);
+}
+
+function updateDiffHighlights(diffs){
+    var highlightAtoms={};
+    var highlightBonds={};
+    diffs.bonds.forEach(function(d){
+        highlightAtoms[d.i1]=true;highlightAtoms[d.i2]=true;
+        highlightBonds[Math.min(d.i1,d.i2)+'-'+Math.max(d.i1,d.i2)]=true;
+    });
+    diffs.angles.forEach(function(d){
+        highlightAtoms[d.i1]=true;highlightAtoms[d.i2]=true;highlightAtoms[d.i3]=true;
+    });
+    diffs.dihedrals.forEach(function(d){
+        highlightAtoms[d.i1]=true;highlightAtoms[d.i2]=true;highlightAtoms[d.i3]=true;highlightAtoms[d.i4]=true;
+    });
+
+    atomMeshes.forEach(function(m,i){
+        m.userData.diffHi=highlightAtoms[i]?true:false;
+    });
+
+    diffAtomMeshes.forEach(function(m,i){
+        var origI=diffReverseMapping?diffReverseMapping[i]:-1;
+        var isHi=origI>=0&&highlightAtoms[origI];
+        m.userData.diffHi=isHi?true:false;
+        if(m.userData.origColor){
+            m.material.color.copy(m.userData.origColor);
+        }
+    });
+
+    diffBondMeshes.forEach(function(mesh){
+        if(mesh.userData&&mesh.userData.bondKey){
+            var isHi=highlightBonds[mesh.userData.bondKey];
+            if(isHi){
+                mesh.material.color.set(0xff6600);
+                mesh.material.emissive=new THREE.Color(0xff6600);
+                mesh.material.emissiveIntensity=0.3;
+            }else{
+                mesh.material.color.copy(mesh.userData.origColor);
+                mesh.material.emissive=new THREE.Color(0x000000);
+                mesh.material.emissiveIntensity=0;
+            }
+        }
+    });
+
+    highlightSelected();
 }
 
 function showDiffPanel(html,isResults){
@@ -998,6 +1099,7 @@ function showDiffPanel(html,isResults){
             diffReopenEl.classList.add('show');
         });
     }
+    wireDiffSlider();
 }
 
 diffReopenEl.addEventListener('click',function(){
@@ -1012,6 +1114,7 @@ diffReopenEl.addEventListener('click',function(){
             diffReopenEl.classList.add('show');
         });
     }
+    wireDiffSlider();
 });
 
 function enterDiffRender(diffs,mapping){
@@ -1041,12 +1144,13 @@ function enterDiffRender(diffs,mapping){
         var r=getR(a.element);
         var g=new THREE.SphereGeometry(r,32,24);
         var isHi=highlightAtoms[mapping?mapping.indexOf(i):-1];
-        var col=isHi?new THREE.Color(0xff6600):new THREE.Color(a.color);
+        var origColor=new THREE.Color(a.color);
+        var col=isHi?new THREE.Color(0xff6600):origColor;
         var m=new THREE.MeshPhongMaterial({color:col,shininess:80,specular:0x444444});
         if(isHi){m.emissive=new THREE.Color(0xff6600);m.emissiveIntensity=0.4}
         var mesh=new THREE.Mesh(g,m);
         mesh.position.set(a.x-diffCX,a.y-diffCY,a.z-diffCZ);
-        mesh.userData={element:a.element,index:i,diffHi:isHi?true:false};
+        mesh.userData={element:a.element,index:i,diffHi:isHi?true:false,origColor:origColor};
         diffMolGroup.add(mesh);
         diffAtomMeshes.push(mesh);
     });
@@ -1062,11 +1166,18 @@ function enterDiffRender(diffs,mapping){
         var br=0.12;
         var origI1=mapping?mapping.indexOf(b.atom1):-1;
         var origI2=mapping?mapping.indexOf(b.atom2):-1;
-        var isHi=highlightBonds[Math.min(origI1,origI2)+'-'+Math.max(origI1,origI2)];
-        var c1=isHi?new THREE.Color(0xff6600):new THREE.Color(a1.color);
-        var c2=isHi?new THREE.Color(0xff6600):new THREE.Color(a2.color);
+        var bondKey=Math.min(origI1,origI2)+'-'+Math.max(origI1,origI2);
+        var isHi=highlightBonds[bondKey];
+        var c1Orig=new THREE.Color(a1.color);
+        var c2Orig=new THREE.Color(a2.color);
+        var c1=isHi?new THREE.Color(0xff6600):c1Orig;
+        var c2=isHi?new THREE.Color(0xff6600):c2Orig;
         hBondDiff(s,mp,d,l/2,br,c1);
         hBondDiff(mp,e,d,l/2,br,c2);
+        if(diffBondMeshes.length>=2){
+            diffBondMeshes[diffBondMeshes.length-2].userData={origColor:c1Orig,bondKey:bondKey};
+            diffBondMeshes[diffBondMeshes.length-1].userData={origColor:c2Orig,bondKey:bondKey};
+        }
     });
 
     if(diffs&&mapping){
@@ -1120,6 +1231,7 @@ function exitDiff(){
     diffAtomMeshes=[];diffBondMeshes=[];
     diffSelectedAtoms=[];
     diffMapping=null;diffReverseMapping=null;
+    diffDetBonds1=null;diffDetBonds2=null;
     diffActiveSide='left';
     diffTransformSide='left';
     diffRotQuat.identity();
