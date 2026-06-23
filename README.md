@@ -36,6 +36,17 @@ A VS Code / Trae extension for visualizing and editing molecular structures in 3
 - **Jump to Frame** — Direct input field to jump to a specific frame number
 - **Auto Play** — Automatically cycle through all frames with 500ms interval
 
+### Structure Diff
+
+- **Diff Button** — Compare the current structure against another molecular file (any supported format, no need for matching formats)
+- **Frame Selection** — If the comparison file is an optimization LOG/OUT, a QuickPick lets you choose which frame to compare
+- **Skeleton Check** — Graph isomorphism via recursive backtracking atom matching (element + degree + neighbor signature with most-constrained-variable heuristic); uses the plugin's own bond detection algorithm (not the file's original bond orders) to ensure consistent skeleton comparison even when files specify different bond orders for the same connectivity
+- **Side-by-Side View** — Left viewport shows the original molecule, right shows the comparison; each side has **independent** rotation, pan, and zoom controls
+- **Correct Aspect Ratio** — Each viewport uses its own camera aspect ratio matching the half-width, preventing horizontal distortion
+- **Conformation Diff** — When skeletons match, highlights bond length (Δ > 0.02 Å), bond angle (Δ > 1°), and dihedral (Δ > 2.5°) differences in orange on both sides; full list of all differences displayed
+- **Diff Info Panel** — Floating panel listing all differences sorted by magnitude, with atom labels and values from both structures; can be closed and reopened via "Show Results" button; diff results are always accessible and not overwritten by measurement info
+- **Auto-Mirror Selection** — When selecting atoms for bond length/angle/dihedral measurement on one side, the corresponding atoms are automatically selected on the other side via the atom mapping, and both values plus the Δ difference are displayed simultaneously
+
 ### Supported File Formats
 
 | Format | Extension | Notes |
@@ -43,7 +54,7 @@ A VS Code / Trae extension for visualizing and editing molecular structures in 3
 | Gaussian Input | `.gjf`, `.gjf03`, `.gjf09`, `.gjf16`, `.com` | Reads Link 0, route, title, charge/mult, coordinates, connect section; supports fixed atom notation (`C -1 x y z` or `C x y z -1`) |
 | XYZ | `.xyz` | Standard XYZ format with atom count header |
 | MOL2 | `.mol2` | Tripos MOL2 format; reads `@<TRIPOS>ATOM` and `@<TRIPOS>BOND` sections with bond order support (aromatic `ar` → 1.5) |
-| Gaussian LOG | `.log` | Reads `Standard orientation:` / `Input orientation:` blocks; supports multi-frame optimization trajectory |
+| Gaussian LOG | `.log` | Reads `Standard orientation:` / `Input orientation:` blocks; skips lines where atomic numbers are written as element symbols (e.g. from ONIOM external program calls); supports multi-frame optimization trajectory |
 | ORCA Input | `.inp` | Reads `* xyz CHARGE MULT ... *` blocks and `%coords` blocks; supports xyz and xyzfile coordinate formats |
 | ORCA Output | `.out` | Reads `CARTESIAN COORDINATES (ANGSTROEM)` blocks; supports multi-frame optimization trajectory; extracts charge and multiplicity |
 | Turbomole Coord | `.coord` | Reads `$coord` section (Bohr → Å conversion), `$chrg` and `$spin`/`$mult` for charge and multiplicity |

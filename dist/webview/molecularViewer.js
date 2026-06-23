@@ -158,6 +158,150 @@ class MolecularViewerProvider {
                         vscode.window.showErrorMessage('Save failed: ' + (e.message || e));
                     }
                     break;
+                case 'diffFile':
+                    try {
+                        const result = await vscode.window.showOpenDialog({
+                            canSelectMany: false,
+                            openLabel: 'Select File to Compare',
+                            filters: {
+                                'Molecular Files': ['gjf', 'xyz', 'mol', 'sdf', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl'],
+                                'All Files': ['*']
+                            }
+                        });
+                        if (!result || result.length === 0) {
+                            webviewPanel.webview.postMessage({ command: 'diffResult', cancelled: true });
+                            break;
+                        }
+                        const diffUri = result[0];
+                        const diffContent = await vscode.workspace.fs.readFile(diffUri);
+                        const diffText = new TextDecoder().decode(diffContent);
+                        const diffFileName = diffUri.path.split('/').pop() || 'unknown.xyz';
+                        const diffExt = diffFileName.toLowerCase().split('.').pop() || '';
+                        let diffData;
+                        let diffFrames = [];
+                        if (diffExt === 'tcl') {
+                            const tclResult = (0, index_1.parseTcl)(diffText);
+                            let sourceUri;
+                            if (tclResult.sourceFile) {
+                                if (path.isAbsolute(tclResult.sourceFile)) {
+                                    sourceUri = vscode.Uri.file(tclResult.sourceFile);
+                                }
+                                else {
+                                    const tclDir = path.dirname(diffUri.fsPath);
+                                    sourceUri = vscode.Uri.file(path.resolve(tclDir, tclResult.sourceFile));
+                                }
+                            }
+                            if (sourceUri) {
+                                const srcContent = await vscode.workspace.fs.readFile(sourceUri);
+                                const srcText = new TextDecoder().decode(srcContent);
+                                const srcFileName = sourceUri.path.split('/').pop() || 'unknown.xyz';
+                                const srcExt = srcFileName.toLowerCase().split('.').pop() || '';
+                                if (srcExt === 'log' || srcExt === 'out') {
+                                    const logResult = (0, index_1.parseLogFile)(srcText, srcFileName);
+                                    diffFrames = logResult.frames;
+                                    if (diffFrames.length > 0) {
+                                        diffData = (0, bondDetector_1.ensureBonds)({
+                                            atoms: diffFrames[0].atoms, bonds: diffFrames[0].bonds,
+                                            title: diffFrames[0].title, hasExplicitBonds: diffFrames[0].hasExplicitBonds,
+                                            charge: diffFrames[0].charge, multiplicity: diffFrames[0].multiplicity
+                                        });
+                                    }
+                                    else {
+                                        diffData = { atoms: [], bonds: [], title: 'No structures', hasExplicitBonds: false };
+                                    }
+                                }
+                                else {
+                                    diffData = (0, bondDetector_1.ensureBonds)((0, index_1.parseFile)(srcText, srcFileName));
+                                }
+                                diffData.filePath = sourceUri.fsPath;
+                            }
+                            else {
+                                diffData = { atoms: [], bonds: [], title: 'No source', hasExplicitBonds: false };
+                            }
+                            diffData.atomGroups = tclResult.groups.length > 0 ? tclResult.groups : undefined;
+                        }
+                        else if (diffExt === 'log' || diffExt === 'out') {
+                            const logResult = (0, index_1.parseLogFile)(diffText, diffFileName);
+                            diffFrames = logResult.frames;
+                            if (diffFrames.length > 0) {
+                                diffData = (0, bondDetector_1.ensureBonds)({
+                                    atoms: diffFrames[0].atoms, bonds: diffFrames[0].bonds,
+                                    title: diffFrames[0].title, hasExplicitBonds: diffFrames[0].hasExplicitBonds,
+                                    charge: diffFrames[0].charge, multiplicity: diffFrames[0].multiplicity
+                                });
+                            }
+                            else {
+                                diffData = { atoms: [], bonds: [], title: 'No structures', hasExplicitBonds: false };
+                            }
+                        }
+                        else {
+                            diffData = (0, bondDetector_1.ensureBonds)((0, index_1.parseFile)(diffText, diffFileName));
+                            diffData.filePath = diffUri.fsPath;
+                        }
+                        let selectedFrameIdx = 0;
+                        if (diffFrames.length > 1) {
+                            const items = diffFrames.map((f, i) => ({
+                                label: `Frame ${i + 1}: ${f.stepLabel || ''}`,
+                                description: `${f.atoms.length} atoms`,
+                                index: i
+                            }));
+                            const picked = await vscode.window.showQuickPick(items, {
+                                placeHolder: `Select frame to compare (${diffFrames.length} frames found)`,
+                                canPickMany: false
+                            });
+                            if (!picked) {
+                                webviewPanel.webview.postMessage({ command: 'diffResult', cancelled: true });
+                                break;
+                            }
+                            selectedFrameIdx = picked.index;
+                            const sf = diffFrames[selectedFrameIdx];
+                            diffData = (0, bondDetector_1.ensureBonds)({
+                                atoms: sf.atoms, bonds: sf.bonds, title: sf.title,
+                                hasExplicitBonds: sf.hasExplicitBonds, charge: sf.charge, multiplicity: sf.multiplicity
+                            });
+                        }
+                        const diffAtomColors = {
+                            H: '#FFFFFF', C: '#909090', N: '#3050F8', O: '#FF0D0D', F: '#90E050',
+                            S: '#FFFF30', Cl: '#1FF01F', Br: '#A62929', I: '#940094', P: '#FF8000',
+                            Na: '#AB5CF2', Mg: '#8AFF00', K: '#8F40D4', Ca: '#3DFF00', Fe: '#E06633',
+                            Cu: '#C88033', Zn: '#7D80B0', Ag: '#C0C0C0', Au: '#FFD123', Si: '#F0C8A0',
+                            B: '#FFB5B5', Li: '#CC80FF', Be: '#C2FF00', Al: '#BFA6A6'
+                        };
+                        const diffAtoms = diffData.atoms.map(a => ({
+                            element: a.element, x: a.x, y: a.y, z: a.z,
+                            color: diffAtomColors[a.element] || '#FF1493'
+                        }));
+                        if (diffData.atomGroups && diffData.atomGroups.length > 0) {
+                            const override = {};
+                            for (const g of diffData.atomGroups)
+                                for (const idx of g.indices)
+                                    override[idx] = g.color;
+                            for (let i = 0; i < diffAtoms.length; i++)
+                                if (override[i])
+                                    diffAtoms[i].color = override[i];
+                        }
+                        const diffBonds = diffData.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order }));
+                        const diffFramesData = diffFrames.map(f => ({
+                            atoms: f.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: diffAtomColors[a.element] || '#FF1493' })),
+                            bonds: f.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order })),
+                            stepLabel: f.stepLabel
+                        }));
+                        webviewPanel.webview.postMessage({
+                            command: 'diffResult',
+                            cancelled: false,
+                            fileName: diffFileName,
+                            atoms: diffAtoms,
+                            bonds: diffBonds,
+                            frames: diffFramesData,
+                            selectedFrame: selectedFrameIdx,
+                            title: diffData.title
+                        });
+                    }
+                    catch (e) {
+                        vscode.window.showErrorMessage('Diff failed: ' + (e.message || e));
+                        webviewPanel.webview.postMessage({ command: 'diffResult', cancelled: true });
+                    }
+                    break;
                 case 'info':
                     vscode.window.showInformationMessage(message.text);
                     break;
@@ -274,6 +418,19 @@ canvas{display:block}
 #frame-num{width:40px;padding:2px 4px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:11px;text-align:center}
 #frame-info{color:var(--vscode-statusBar-foreground,#fff);font-size:11px;padding:0 4px;white-space:nowrap}
 #auto-play.playing{background:var(--vscode-button-background,#0e639c);border-color:var(--vscode-button-background,#0e639c)}
+#diff-panel{display:none;position:absolute;bottom:40px;right:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.65);padding:8px 12px;border-radius:4px;z-index:25;max-width:40%;max-height:60%;overflow-y:auto;pointer-events:auto;line-height:1.5}
+#diff-panel.show{display:block}
+#diff-panel h4{font-size:12px;margin-bottom:4px;color:var(--vscode-textLink-foreground,#3794ff)}
+#diff-panel .diff-row{margin:2px 0}
+#diff-panel .diff-close{position:absolute;top:4px;right:8px;cursor:pointer;color:var(--vscode-descriptionForeground,#999);font-size:14px}
+#diff-panel .diff-close:hover{color:var(--vscode-errorForeground,#f66)}
+#diff-reopen{display:none;position:absolute;bottom:40px;right:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
+#diff-reopen.show{display:block}
+#diff-reopen:hover{background:var(--vscode-button-background,#0e639c)}
+#diff-label,#diff-label-right{display:none;position:absolute;top:8px;color:var(--vscode-editor-foreground,#ccc);font-size:13px;font-weight:bold;background:rgba(0,0,0,0.55);padding:4px 10px;border-radius:4px;z-index:25;pointer-events:none}
+#diff-label.show,#diff-label-right.show{display:block}
+#diff-label{left:8px}
+#diff-label-right{right:8px}
 </style>
 </head>
 <body>
@@ -288,6 +445,7 @@ canvas{display:block}
 <div class="tsep"></div>
 <button class="tbtn" data-mode="selectAtoms">Select Atoms</button>
 <div class="tsep"></div>
+<button class="tbtn" id="diff-btn">Diff</button>
 <button class="tbtn" id="save-btn">Save As</button>
 <button class="tbtn" id="reset-btn">Reset View</button>
 <div class="tsep" id="frame-sep"></div>
@@ -300,7 +458,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="modal-overlay"><div id="modal"></div></div>
@@ -473,7 +631,7 @@ var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAng
 
 function setMode(m){
     if(currentMode===m)return;
-    currentMode=m;selectedAtoms=[];originalCoords=null;hideModal();highlightSelected();
+    currentMode=m;selectedAtoms=[];diffSelectedAtoms=[];originalCoords=null;hideModal();highlightSelected();
     modeInfoEl.textContent=MODE_INFO[m]||m;
     selInfoEl.textContent='';
     document.querySelectorAll('.tbtn[data-mode]').forEach(function(b){b.classList.toggle('active',b.dataset.mode===m)});
@@ -481,13 +639,531 @@ function setMode(m){
 }
 
 function resetSelection(){
-    selectedAtoms=[];originalCoords=null;highlightSelected();
+    selectedAtoms=[];diffSelectedAtoms=[];originalCoords=null;highlightSelected();
     selInfoEl.textContent='';
 }
 
 document.querySelectorAll('.tbtn[data-mode]').forEach(function(b){b.addEventListener('click',function(){setMode(this.dataset.mode)})});
-document.getElementById('reset-btn').addEventListener('click',function(){rotQuat.identity();panX=0;panY=0;camDist=initCam;camera.position.set(0,0,camDist);updateTransform()});
+document.getElementById('reset-btn').addEventListener('click',function(){
+    rotQuat.identity();panX=0;panY=0;
+    if(diffMode){
+        camDist=camDiffInit();diffCamDist=camDist;
+        diffRotQuat.identity();diffPanX=0;diffPanY=0;
+    }else{
+        camDist=initCam;camera.position.set(0,0,camDist);
+    }
+    updateTransform();
+});
 document.getElementById('save-btn').addEventListener('click',doSave);
+document.getElementById('diff-btn').addEventListener('click',function(){
+    if(diffMode){
+        exitDiff();
+    }else{
+        modeInfoEl.textContent='Diff: selecting file...';
+        vscodeApi.postMessage({command:'diffFile'});
+    }
+});
+
+var diffMode=false;
+var diffData=null;
+var diffPivot=null;
+var diffMolGroup=null;
+var diffAtomMeshes=[];
+var diffBondMeshes=[];
+var diffCX=0,diffCY=0,diffCZ=0;
+var diffRotQuat=new THREE.Quaternion();
+var diffPanX=0,diffPanY=0;
+var diffCamDist=10;
+var diffTransformSide='left';
+var diffActiveSide='left';
+var diffSelectedAtoms=[];
+var diffMapping=null;
+var diffReverseMapping=null;
+var diffPanelEl=document.getElementById('diff-panel');
+var diffReopenEl=document.getElementById('diff-reopen');
+var diffPanelHTML='';
+var diffResultsHTML='';
+var diffLabelLeft=document.getElementById('diff-label');
+var diffLabelRight=document.getElementById('diff-label-right');
+
+window.addEventListener('message',function(event){
+    var msg=event.data;
+    if(msg.command==='diffResult'){
+        if(msg.cancelled){
+            modeInfoEl.textContent='View Mode';
+            return;
+        }
+        startDiff(msg);
+    }
+});
+
+function buildAdjacency(atoms,bonds){
+    var adj=[];
+    for(var i=0;i<atoms.length;i++)adj[i]=[];
+    bonds.forEach(function(b){
+        if(adj[b.atom1])adj[b.atom1].push({to:b.atom2,order:b.order});
+        if(adj[b.atom2])adj[b.atom2].push({to:b.atom1,order:b.order});
+    });
+    return adj;
+}
+
+function atomSignature(i,atoms,adj){
+    var el=atoms[i].element;
+    var deg=adj[i].length;
+    var nbEls=adj[i].map(function(e){return atoms[e.to].element}).sort().join(',');
+    return el+'|'+deg+'|'+nbEls;
+}
+
+function findAtomMapping(atoms1,bonds1,atoms2,bonds2){
+    var n1=atoms1.length,n2=atoms2.length;
+    if(n1!==n2)return null;
+
+    var adj1=buildAdjacency(atoms1,bonds1);
+    var adj2=buildAdjacency(atoms2,bonds2);
+
+    var elCount1={},elCount2={};
+    atoms1.forEach(function(a){elCount1[a.element]=(elCount1[a.element]||0)+1});
+    atoms2.forEach(function(a){elCount2[a.element]=(elCount2[a.element]||0)+1});
+    var els1=Object.keys(elCount1).sort(),els2=Object.keys(elCount2).sort();
+    if(els1.length!==els2.length)return null;
+    for(var k=0;k<els1.length;k++){
+        if(els1[k]!==els2[k]||elCount1[els1[k]]!==elCount2[els2[k]])return null;
+    }
+
+    var deg1={},deg2={};
+    for(var i=0;i<n1;i++){var d=adj1[i].length;deg1[d]=(deg1[d]||0)+1}
+    for(var i=0;i<n2;i++){var d=adj2[i].length;deg2[d]=(deg2[d]||0)+1}
+    var dk1=Object.keys(deg1).sort(),dk2=Object.keys(deg2).sort();
+    if(dk1.length!==dk2.length)return null;
+    for(var k=0;k<dk1.length;k++){if(dk1[k]!==dk2[k]||deg1[dk1[k]]!==deg2[dk2[k]])return null}
+
+    // Precompute signatures and candidate lists
+    var sig1=[],sig2=[];
+    for(var i=0;i<n1;i++)sig1[i]=atomSignature(i,atoms1,adj1);
+    for(var j=0;j<n2;j++)sig2[j]=atomSignature(j,atoms2,adj2);
+    var candidates=[];
+    for(var i=0;i<n1;i++){
+        candidates[i]=[];
+        for(var j=0;j<n2;j++){
+            if(sig1[i]===sig2[j])candidates[i].push(j);
+        }
+        if(candidates[i].length===0)return null;
+    }
+
+    var map=new Array(n1).fill(-1);
+    var rmap=new Array(n2).fill(-1);
+
+    function consistent(a1,a2){
+        if(atoms1[a1].element!==atoms2[a2].element)return false;
+        var nb2set={};
+        adj2[a2].forEach(function(e){nb2set[e.to]=e.order});
+        for(var k=0;k<adj1[a1].length;k++){
+            var nb1=adj1[a1][k].to;
+            if(map[nb1]!==-1){
+                if(nb2set[map[nb1]]===undefined)return false;
+                if(Math.abs(adj1[a1][k].order-nb2set[map[nb1]])>0.3)return false;
+            }
+        }
+        var nb1set={};
+        adj1[a1].forEach(function(e){nb1set[e.to]=e.order});
+        for(var k=0;k<adj2[a2].length;k++){
+            var nb2=adj2[a2][k].to;
+            if(rmap[nb2]!==-1){
+                if(nb1set[rmap[nb2]]===undefined)return false;
+                if(Math.abs(adj2[a2][k].order-nb1set[rmap[nb2]])>0.3)return false;
+            }
+        }
+        return true;
+    }
+
+    function nextUnassigned(){
+        var best=-1,bestKey=null;
+        for(var i=0;i<n1;i++){
+            if(map[i]!==-1)continue;
+            var mappedNbrs=0;
+            for(var k=0;k<adj1[i].length;k++){
+                if(map[adj1[i][k].to]!==-1)mappedNbrs++;
+            }
+            var avail=0;
+            for(var c=0;c<candidates[i].length;c++){
+                if(rmap[candidates[i][c]]===-1)avail++;
+            }
+            var key=(mappedNbrs>0?1000000:0)-avail*1000+mappedNbrs;
+            if(bestKey===null||key>bestKey){bestKey=key;best=i}
+        }
+        return best;
+    }
+
+    var iterCount=0;
+    var maxIter=500000;
+
+    function backtrack(depth){
+        if(iterCount++>maxIter)return false;
+        if(depth===n1)return true;
+        var a1=nextUnassigned();
+        if(a1===-1)return false;
+        for(var c=0;c<candidates[a1].length;c++){
+            var a2=candidates[a1][c];
+            if(rmap[a2]!==-1)continue;
+            if(!consistent(a1,a2))continue;
+            map[a1]=a2;rmap[a2]=a1;
+            if(backtrack(depth+1))return true;
+            map[a1]=-1;rmap[a2]=-1;
+        }
+        return false;
+    }
+
+    if(backtrack(0))return map;
+    return null;
+}
+
+function dist3d(a,b){var dx=a.x-b.x,dy=a.y-b.y,dz=a.z-b.z;return Math.sqrt(dx*dx+dy*dy+dz*dz)}
+function angle3d(a,b,c){
+    var v1={x:a.x-b.x,y:a.y-b.y,z:a.z-b.z},v2={x:c.x-b.x,y:c.y-b.y,z:c.z-b.z};
+    var d1=Math.sqrt(v1.x*v1.x+v1.y*v1.y+v1.z*v1.z),d2=Math.sqrt(v2.x*v2.x+v2.y*v2.y+v2.z*v2.z);
+    if(d1<1e-10||d2<1e-10)return 0;
+    var dot=(v1.x*v2.x+v1.y*v2.y+v1.z*v2.z)/(d1*d2);
+    return Math.acos(Math.max(-1,Math.min(1,dot)))*180/Math.PI;
+}
+function dihedral3d(a,b,c,d){
+    var v1={x:b.x-a.x,y:b.y-a.y,z:b.z-a.z};
+    var v2={x:c.x-b.x,y:c.y-b.y,z:c.z-b.z};
+    var v3={x:d.x-c.x,y:d.y-c.y,z:d.z-c.z};
+    var n1={x:v1.y*v2.z-v1.z*v2.y,y:v1.z*v2.x-v1.x*v2.z,z:v1.x*v2.y-v1.y*v2.x};
+    var n2={x:v2.y*v3.z-v2.z*v3.y,y:v2.z*v3.x-v2.x*v3.z,z:v2.x*v3.y-v2.y*v3.x};
+    var d1=Math.sqrt(n1.x*n1.x+n1.y*n1.y+n1.z*n1.z),d2=Math.sqrt(n2.x*n2.x+n2.y*n2.y+n2.z*n2.z);
+    if(d1<1e-10||d2<1e-10)return 0;
+    var dot=(n1.x*n2.x+n1.y*n2.y+n1.z*n2.z)/(d1*d2);
+    var sign=v1.x*n2.x+v1.y*n2.y+v1.z*n2.z;
+    var ang=Math.acos(Math.max(-1,Math.min(1,dot)))*180/Math.PI;
+    return sign<0?-ang:ang;
+}
+
+function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping){
+    var diffs={bonds:[],angles:[],dihedrals:[]};
+    var bondThresh=0.02,angleThresh=1.0,dihedralThresh=2.5;
+
+    var bondSet2={};
+    bonds2.forEach(function(b){bondSet2[Math.min(b.atom1,b.atom2)+'-'+Math.max(b.atom1,b.atom2)]=b.order});
+    bonds1.forEach(function(b){
+        var a1m=Math.min(mapping[b.atom1],mapping[b.atom2]);
+        var a2m=Math.max(mapping[b.atom1],mapping[b.atom2]);
+        var key=a1m+'-'+a2m;
+        if(bondSet2[key]!==undefined){
+            var d1=dist3d(atoms1[b.atom1],atoms1[b.atom2]);
+            var d2=dist3d(atoms2[mapping[b.atom1]],atoms2[mapping[b.atom2]]);
+            var dd=Math.abs(d1-d2);
+            if(dd>bondThresh){
+                diffs.bonds.push({i1:b.atom1,i2:b.atom2,d1:d1,d2:d2,diff:dd});
+            }
+        }
+    });
+
+    var adj1=buildAdjacency(atoms1,bonds1);
+    var angleSeen={};
+    for(var j=0;j<atoms1.length;j++){
+        var nbs=adj1[j].map(function(e){return e.to});
+        for(var k=0;k<nbs.length;k++){
+            for(var m=k+1;m<nbs.length;m++){
+                var i1=nbs[k],i3=nbs[m];
+                var key=Math.min(i1,j)+'-'+j+'-'+Math.max(i3,j);
+                if(angleSeen[key])continue;
+                angleSeen[key]=true;
+                var a1=angle3d(atoms1[i1],atoms1[j],atoms1[i3]);
+                var a2=angle3d(atoms2[mapping[i1]],atoms2[mapping[j]],atoms2[mapping[i3]]);
+                var da=Math.abs(a1-a2);
+                if(da>angleThresh){
+                    diffs.angles.push({i1:i1,i2:j,i3:i3,a1:a1,a2:a2,diff:da});
+                }
+            }
+        }
+    }
+
+    var dihedralSeen={};
+    bonds1.forEach(function(b){
+        var a1=b.atom1,a2=b.atom2;
+        [[a1,a2],[a2,a1]].forEach(function(pair){
+            var start=pair[0],mid=pair[1];
+            adj1[mid].forEach(function(e2){
+                var end=e2.to;
+                if(end===start)return;
+                adj1[start].forEach(function(e1){
+                    var s0=e1.to;
+                    if(s0===mid)return;
+                    var key=[s0,start,mid,end].sort().join('-');
+                    if(dihedralSeen[key])return;
+                    dihedralSeen[key]=true;
+                    var d1=dihedral3d(atoms1[s0],atoms1[start],atoms1[mid],atoms1[end]);
+                    var d2=dihedral3d(atoms2[mapping[s0]],atoms2[mapping[start]],atoms2[mapping[mid]],atoms2[mapping[end]]);
+                    var dd=Math.abs(d1-d2);
+                    if(dd>180)dd=360-dd;
+                    if(dd>dihedralThresh){
+                        diffs.dihedrals.push({i1:s0,i2:start,i3:mid,i4:end,d1:d1,d2:d2,diff:dd});
+                    }
+                });
+            });
+        });
+    });
+
+    return diffs;
+}
+
+function startDiff(msg){
+    diffData={atoms:msg.atoms,bonds:msg.bonds,title:msg.title||msg.fileName,fileName:msg.fileName};
+
+    var detBonds1=detectBondsFromAtoms(MD.atoms);
+    var detBonds2=detectBondsFromAtoms(diffData.atoms);
+
+    var mapping=findAtomMapping(MD.atoms,detBonds1,diffData.atoms,detBonds2);
+
+    if(!mapping){
+        diffMapping=null;diffReverseMapping=null;
+        showDiffPanel('<span class="diff-close">×</span>'+
+            '<h4>Skeletons Differ</h4>'+
+            '<div class="diff-row">Molecular skeletons are different — cannot compare.</div>'+
+            '<div class="diff-row">Left: '+MD.atoms.length+' atoms, '+detBonds1.length+' bonds (detected)</div>'+
+            '<div class="diff-row">Right: '+diffData.atoms.length+' atoms, '+detBonds2.length+' bonds (detected)</div>'+
+            '<div class="diff-row" style="margin-top:6px;color:var(--vscode-descriptionForeground,#999)">Click Diff again to exit.</div>',true);
+        diffPanelEl.classList.add('show');
+        diffMode=true;
+        diffLabelLeft.textContent='Original: '+(MD.title||'molecule');
+        diffLabelLeft.classList.add('show');
+        diffLabelRight.textContent='Diff: '+diffData.fileName+' (skeleton differs)';
+        diffLabelRight.classList.add('show');
+        modeInfoEl.textContent='Diff Mode (skeletons differ)';
+        enterDiffRender();
+        return;
+    }
+
+    var diffs=computeConformationDiffs(MD.atoms,detBonds1,diffData.atoms,detBonds2,mapping);
+    var totalDiff=diffs.bonds.length+diffs.angles.length+diffs.dihedrals.length;
+
+    var html='<span class="diff-close">×</span>';
+    html+='<h4>Diff Results</h4>';
+    if(totalDiff===0){
+        html+='<div class="diff-row" style="color:#4ec9b0">Structures are identical (same conformation within thresholds).</div>';
+    }else{
+        html+='<div class="diff-row">Mapping: '+MD.atoms.length+' atoms matched. '+totalDiff+' differences found.</div>';
+        if(diffs.bonds.length>0){
+            html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Bond Length Differences ('+diffs.bonds.length+')</b></div>';
+            diffs.bonds.sort(function(a,b){return b.diff-a.diff});
+            diffs.bonds.forEach(function(d){
+                html+='<div class="diff-row">  '+MD.atoms[d.i1].element+(d.i1+1)+'-'+MD.atoms[d.i2].element+(d.i2+1)+
+                    ': '+d.d1.toFixed(3)+' vs '+d.d2.toFixed(3)+' Å (Δ='+d.diff.toFixed(3)+')</div>';
+            });
+        }
+        if(diffs.angles.length>0){
+            html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Bond Angle Differences ('+diffs.angles.length+')</b></div>';
+            diffs.angles.sort(function(a,b){return b.diff-a.diff});
+            diffs.angles.forEach(function(d){
+                html+='<div class="diff-row">  '+MD.atoms[d.i1].element+(d.i1+1)+'-'+MD.atoms[d.i2].element+(d.i2+1)+'-'+MD.atoms[d.i3].element+(d.i3+1)+
+                    ': '+d.a1.toFixed(1)+'° vs '+d.a2.toFixed(1)+'° (Δ='+d.diff.toFixed(1)+'°)</div>';
+            });
+        }
+        if(diffs.dihedrals.length>0){
+            html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Dihedral Differences ('+diffs.dihedrals.length+')</b></div>';
+            diffs.dihedrals.sort(function(a,b){return b.diff-a.diff});
+            diffs.dihedrals.forEach(function(d){
+                html+='<div class="diff-row">  '+MD.atoms[d.i1].element+(d.i1+1)+'-'+MD.atoms[d.i2].element+(d.i2+1)+'-'+MD.atoms[d.i3].element+(d.i3+1)+'-'+MD.atoms[d.i4].element+(d.i4+1)+
+                    ': '+d.d1.toFixed(1)+'° vs '+d.d2.toFixed(1)+'° (Δ='+d.diff.toFixed(1)+'°)</div>';
+            });
+        }
+    }
+
+    showDiffPanel(html,true);
+    diffMode=true;
+    diffLabelLeft.textContent='Original: '+(MD.title||'molecule');
+    diffLabelLeft.classList.add('show');
+    diffLabelRight.textContent='Diff: '+diffData.fileName;
+    diffLabelRight.classList.add('show');
+    modeInfoEl.textContent='Diff Mode ('+totalDiff+' differences)';
+
+    diffMapping=mapping;
+    diffReverseMapping=new Array(diffData.atoms.length).fill(-1);
+    for(var mi=0;mi<mapping.length;mi++){diffReverseMapping[mapping[mi]]=mi}
+
+    enterDiffRender(diffs,mapping);
+}
+
+function showDiffPanel(html,isResults){
+    diffPanelHTML=html;
+    if(isResults)diffResultsHTML=html;
+    diffPanelEl.innerHTML=html;
+    diffPanelEl.classList.add('show');
+    diffReopenEl.classList.remove('show');
+    var closeBtn=diffPanelEl.querySelector('.diff-close');
+    if(closeBtn){
+        closeBtn.addEventListener('click',function(){
+            diffPanelEl.classList.remove('show');
+            diffReopenEl.classList.add('show');
+        });
+    }
+}
+
+diffReopenEl.addEventListener('click',function(){
+    var html=diffResultsHTML||diffPanelHTML;
+    diffPanelEl.innerHTML=html;
+    diffPanelEl.classList.add('show');
+    diffReopenEl.classList.remove('show');
+    var closeBtn=diffPanelEl.querySelector('.diff-close');
+    if(closeBtn){
+        closeBtn.addEventListener('click',function(){
+            diffPanelEl.classList.remove('show');
+            diffReopenEl.classList.add('show');
+        });
+    }
+});
+
+function enterDiffRender(diffs,mapping){
+    diffPivot=new THREE.Group();scene.add(diffPivot);
+    diffMolGroup=new THREE.Group();diffPivot.add(diffMolGroup);
+
+    diffCX=0;diffCY=0;diffCZ=0;
+    diffData.atoms.forEach(function(a){diffCX+=a.x;diffCY+=a.y;diffCZ+=a.z});
+    if(diffData.atoms.length>0){diffCX/=diffData.atoms.length;diffCY/=diffData.atoms.length;diffCZ/=diffData.atoms.length}
+
+    var highlightAtoms={};
+    var highlightBonds={};
+    if(diffs&&mapping){
+        diffs.bonds.forEach(function(d){
+            highlightAtoms[d.i1]=true;highlightAtoms[d.i2]=true;
+            highlightBonds[Math.min(d.i1,d.i2)+'-'+Math.max(d.i1,d.i2)]=true;
+        });
+        diffs.angles.forEach(function(d){
+            highlightAtoms[d.i1]=true;highlightAtoms[d.i2]=true;highlightAtoms[d.i3]=true;
+        });
+        diffs.dihedrals.forEach(function(d){
+            highlightAtoms[d.i1]=true;highlightAtoms[d.i2]=true;highlightAtoms[d.i3]=true;highlightAtoms[d.i4]=true;
+        });
+    }
+
+    diffData.atoms.forEach(function(a,i){
+        var r=getR(a.element);
+        var g=new THREE.SphereGeometry(r,32,24);
+        var isHi=highlightAtoms[mapping?mapping.indexOf(i):-1];
+        var col=isHi?new THREE.Color(0xff6600):new THREE.Color(a.color);
+        var m=new THREE.MeshPhongMaterial({color:col,shininess:80,specular:0x444444});
+        if(isHi){m.emissive=new THREE.Color(0xff6600);m.emissiveIntensity=0.4}
+        var mesh=new THREE.Mesh(g,m);
+        mesh.position.set(a.x-diffCX,a.y-diffCY,a.z-diffCZ);
+        mesh.userData={element:a.element,index:i,diffHi:isHi?true:false};
+        diffMolGroup.add(mesh);
+        diffAtomMeshes.push(mesh);
+    });
+
+    diffData.bonds.forEach(function(b){
+        var a1=diffData.atoms[b.atom1],a2=diffData.atoms[b.atom2];
+        if(!a1||!a2)return;
+        var s=new THREE.Vector3(a1.x-diffCX,a1.y-diffCY,a1.z-diffCZ);
+        var e=new THREE.Vector3(a2.x-diffCX,a2.y-diffCY,a2.z-diffCZ);
+        var d=new THREE.Vector3().subVectors(e,s);
+        var l=d.length();
+        var mp=new THREE.Vector3().addVectors(s,e).multiplyScalar(0.5);
+        var br=0.12;
+        var origI1=mapping?mapping.indexOf(b.atom1):-1;
+        var origI2=mapping?mapping.indexOf(b.atom2):-1;
+        var isHi=highlightBonds[Math.min(origI1,origI2)+'-'+Math.max(origI1,origI2)];
+        var c1=isHi?new THREE.Color(0xff6600):new THREE.Color(a1.color);
+        var c2=isHi?new THREE.Color(0xff6600):new THREE.Color(a2.color);
+        hBondDiff(s,mp,d,l/2,br,c1);
+        hBondDiff(mp,e,d,l/2,br,c2);
+    });
+
+    if(diffs&&mapping){
+        var leftHi={};
+        diffs.bonds.forEach(function(d){leftHi[d.i1]=true;leftHi[d.i2]=true});
+        diffs.angles.forEach(function(d){leftHi[d.i1]=true;leftHi[d.i2]=true;leftHi[d.i3]=true});
+        diffs.dihedrals.forEach(function(d){leftHi[d.i1]=true;leftHi[d.i2]=true;leftHi[d.i3]=true;leftHi[d.i4]=true});
+        atomMeshes.forEach(function(m,i){
+            m.userData.diffHi=leftHi[i]?true:false;
+            if(leftHi[i]){
+                m.material.emissive=new THREE.Color(0xff6600);
+                m.material.emissiveIntensity=0.4;
+            }
+        });
+        var leftBondHi={};
+        diffs.bonds.forEach(function(d){leftBondHi[Math.min(d.i1,d.i2)+'-'+Math.max(d.i1,d.i2)]=true});
+        bondMeshes.forEach(function(mesh){
+            mesh.material.emissive=new THREE.Color(0x000000);
+        });
+    }
+
+    var allAtoms=MD.atoms.concat(diffData.atoms);
+    var maxD2=0;
+    MD.atoms.forEach(function(a){var dx=a.x-CX,dy=a.y-CY,dz=a.z-CZ,dd=Math.sqrt(dx*dx+dy*dy+dz*dz);if(dd>maxD2)maxD2=dd});
+    diffData.atoms.forEach(function(a){var dx=a.x-diffCX,dy=a.y-diffCY,dz=a.z-diffCZ,dd=Math.sqrt(dx*dx+dy*dy+dz*dz);if(dd>maxD2)maxD2=dd});
+    var newCam=maxD2*2.5+5;
+    camDist=newCam;diffCamDist=newCam;
+    camera.position.set(0,0,camDist);
+    panX=0;panY=0;
+    diffPanX=0;diffPanY=0;
+    diffRotQuat.copy(rotQuat);
+    diffTransformSide='left';
+    updateTransform();
+}
+
+function hBondDiff(s,e,d,hl,r,c){
+    var g=new THREE.CylinderGeometry(r,r,hl,8,1);
+    var m=new THREE.MeshPhongMaterial({color:c,shininess:40,specular:0x222222});
+    var mesh=new THREE.Mesh(g,m);
+    var mid=new THREE.Vector3().addVectors(s,e).multiplyScalar(0.5);
+    mesh.position.copy(mid);
+    var axis=new THREE.Vector3(0,1,0);
+    mesh.quaternion.copy(new THREE.Quaternion().setFromUnitVectors(axis,d.clone().normalize()));
+    diffMolGroup.add(mesh);
+    diffBondMeshes.push(mesh);
+}
+
+function exitDiff(){
+    diffMode=false;
+    if(diffPivot){scene.remove(diffPivot);diffPivot=null;diffMolGroup=null}
+    diffAtomMeshes=[];diffBondMeshes=[];
+    diffSelectedAtoms=[];
+    diffMapping=null;diffReverseMapping=null;
+    diffActiveSide='left';
+    diffTransformSide='left';
+    diffRotQuat.identity();
+    diffPanX=0;diffPanY=0;diffCamDist=10;
+    diffPanelEl.classList.remove('show');
+    diffPanelEl.innerHTML='';
+    diffReopenEl.classList.remove('show');
+    diffPanelHTML='';
+    diffResultsHTML='';
+    diffLabelLeft.classList.remove('show');
+    diffLabelRight.classList.remove('show');
+    modeInfoEl.textContent='View Mode';
+    atomMeshes.forEach(function(m){
+        m.userData.diffHi=false;
+        m.material.emissive=new THREE.Color(0x000000);
+        m.material.emissiveIntensity=0;
+    });
+    highlightSelected();
+    pivotGroup.visible=true;
+    var w=container.clientWidth||window.innerWidth;
+    var h=container.clientHeight||(window.innerHeight-60);
+    if(w<1)w=window.innerWidth;
+    if(h<1)h=window.innerHeight-60;
+    renderer.setScissorTest(false);
+    renderer.setViewport(0,0,w,h);
+    renderer.setScissor(0,0,w,h);
+    renderer.autoClear=true;
+    camera.aspect=w/h;
+    camera.updateProjectionMatrix();
+    var maxD=0;
+    MD.atoms.forEach(function(a){var dx=a.x-CX,dy=a.y-CY,dz=a.z-CZ,dd=Math.sqrt(dx*dx+dy*dy+dz*dz);if(dd>maxD)maxD=dd});
+    camDist=maxD*2.5+5;
+    camera.position.set(0,0,camDist);
+    updateTransform();
+}
+
+function camDiffInit(){
+    var maxD=0;
+    MD.atoms.forEach(function(a){var dx=a.x-CX,dy=a.y-CY,dz=a.z-CZ,dd=Math.sqrt(dx*dx+dy*dy+dz*dz);if(dd>maxD)maxD=dd});
+    if(diffData){
+        diffData.atoms.forEach(function(a){var dx=a.x-diffCX,dy=a.y-diffCY,dz=a.z-diffCZ,dd=Math.sqrt(dx*dx+dy*dy+dz*dz);if(dd>maxD)maxD=dd});
+    }
+    return maxD*2.5+5;
+}
 
 var currentFrame=0;
 var totalFrames=MD.frames?MD.frames.length:0;
@@ -587,11 +1263,52 @@ function highlightSelected(){
     atomMeshes.forEach(function(m,i){
         var sel=selectedAtoms.indexOf(i)>=0;
         if(sel){m.material.emissive=new THREE.Color(0xffff00);m.material.emissiveIntensity=0.6}
+        else if(m.userData.diffHi){m.material.emissive=new THREE.Color(0xff6600);m.material.emissiveIntensity=0.4}
         else{m.material.emissive=new THREE.Color(0x000000);m.material.emissiveIntensity=0}
     });
+    if(diffMode){
+        diffAtomMeshes.forEach(function(m,i){
+            var sel=diffSelectedAtoms.indexOf(i)>=0;
+            if(sel){m.material.emissive=new THREE.Color(0xffff00);m.material.emissiveIntensity=0.6}
+            else if(m.userData.diffHi){m.material.emissive=new THREE.Color(0xff6600);m.material.emissiveIntensity=0.4}
+            else{m.material.emissive=new THREE.Color(0x000000);m.material.emissiveIntensity=0}
+        });
+    }
 }
 
 function selectAtom(idx){
+    if(diffMode&&diffActiveSide==='right'){
+        var need=diffSelectedAtoms.length>=requiredCount();
+        if(need){diffSelectedAtoms=[idx]}else if(diffSelectedAtoms.indexOf(idx)>=0){return}else{diffSelectedAtoms.push(idx)}
+        if(diffMapping){
+            var needL=selectedAtoms.length>=requiredCount();
+            if(needL){selectedAtoms=[]}
+            diffSelectedAtoms.forEach(function(i){
+                var li=diffReverseMapping[i];
+                if(li>=0&&selectedAtoms.indexOf(li)<0)selectedAtoms.push(li);
+            });
+        }
+        highlightSelected();
+        updateDiffSelInfo();
+        checkSelectionComplete();
+        return;
+    }
+    if(diffMode){
+        var needL=selectedAtoms.length>=requiredCount();
+        if(needL){selectedAtoms=[idx]}else if(selectedAtoms.indexOf(idx)>=0){return}else{selectedAtoms.push(idx)}
+        if(diffMapping){
+            var needR=diffSelectedAtoms.length>=requiredCount();
+            if(needR){diffSelectedAtoms=[]}
+            selectedAtoms.forEach(function(i){
+                var ri=diffMapping[i];
+                if(ri>=0&&diffSelectedAtoms.indexOf(ri)<0)diffSelectedAtoms.push(ri);
+            });
+        }
+        highlightSelected();
+        updateDiffSelInfo();
+        checkSelectionComplete();
+        return;
+    }
     if(selectedAtoms.indexOf(idx)>=0)return;
     selectedAtoms.push(idx);
     highlightSelected();
@@ -600,7 +1317,33 @@ function selectAtom(idx){
     checkSelectionComplete();
 }
 
+function updateDiffSelInfo(){
+    var lNames=selectedAtoms.map(function(i){return MD.atoms[i].element+(i+1)}).join(', ');
+    var rNames=diffSelectedAtoms.map(function(i){return diffData.atoms[i].element+(i+1)}).join(', ');
+    selInfoEl.textContent='[Left] '+(lNames||'-')+'   |   [Right] '+(rNames||'-');
+}
+
+function requiredCount(){
+    if(currentMode==='bondLength')return 2;
+    if(currentMode==='bondAngle')return 3;
+    if(currentMode==='dihedral')return 4;
+    if(currentMode==='addAtom'||currentMode==='deleteAtom')return 1;
+    return 999;
+}
+
 function checkSelectionComplete(){
+    if(diffMode){
+        if(currentMode==='bondLength'){
+            if(selectedAtoms.length===2||diffSelectedAtoms.length===2)showDiffMeasurement('bondLength');
+        }else if(currentMode==='bondAngle'){
+            if(selectedAtoms.length===3||diffSelectedAtoms.length===3)showDiffMeasurement('bondAngle');
+        }else if(currentMode==='dihedral'){
+            if(selectedAtoms.length===4||diffSelectedAtoms.length===4)showDiffMeasurement('dihedral');
+        }else if(currentMode==='selectAtoms'){
+            updateDiffSelInfo();
+        }
+        return;
+    }
     if(currentMode==='bondLength'&&selectedAtoms.length===2)showBondLengthModal();
     else if(currentMode==='bondAngle'&&selectedAtoms.length===3)showBondAngleModal();
     else if(currentMode==='dihedral'&&selectedAtoms.length===4)showDihedralModal();
@@ -610,6 +1353,52 @@ function checkSelectionComplete(){
         var names=selectedAtoms.map(function(i){return MD.atoms[i].element+(i+1)}).join(', ');
         selInfoEl.textContent='Selected: '+names;
     }
+}
+
+function fmtMeasurement(kind,sel,atomsArr){
+    if(!sel||sel.length===0)return null;
+    if(kind==='bondLength'&&sel.length===2){
+        var a1=atomsArr[sel[0]],a2=atomsArr[sel[1]];
+        var d=dist(a1,a2);
+        return {label:a1.element+(sel[0]+1)+' - '+a2.element+(sel[1]+1),value:d.toFixed(4)+' A',num:d};
+    }
+    if(kind==='bondAngle'&&sel.length===3){
+        var a1=atomsArr[sel[0]],a2=atomsArr[sel[1]],a3=atomsArr[sel[2]];
+        var ang=angle(a1,a2,a3);
+        return {label:a1.element+(sel[0]+1)+' - '+a2.element+(sel[1]+1)+' - '+a3.element+(sel[2]+1),value:ang.toFixed(2)+' deg',num:ang};
+    }
+    if(kind==='dihedral'&&sel.length===4){
+        var a1=atomsArr[sel[0]],a2=atomsArr[sel[1]],a3=atomsArr[sel[2]],a4=atomsArr[sel[3]];
+        var dih=dihedral(a1,a2,a3,a4);
+        return {label:a1.element+(sel[0]+1)+' - '+a2.element+(sel[1]+1)+' - '+a3.element+(sel[2]+1)+' - '+a4.element+(sel[3]+1),value:dih.toFixed(2)+' deg',num:dih};
+    }
+    return null;
+}
+
+function showDiffMeasurement(kind){
+    var kindLabel=kind==='bondLength'?'Bond Length':kind==='bondAngle'?'Bond Angle':'Dihedral Angle';
+    var left=fmtMeasurement(kind,selectedAtoms,MD.atoms);
+    var right=fmtMeasurement(kind,diffSelectedAtoms,diffData.atoms);
+    var html='<span class="diff-close">×</span><h4>'+kindLabel+' (Diff Mode)</h4>';
+    html+='<div class="diff-row" style="color:#4ec9b0"><b>Left: '+(MD.title||'original')+'</b></div>';
+    if(left){
+        html+='<div class="diff-row">  '+left.label+': '+left.value+'</div>';
+    }else{
+        html+='<div class="diff-row" style="color:var(--vscode-descriptionForeground,#999)">  Select '+(kind==='bondLength'?2:kind==='bondAngle'?3:4)+' atoms on left...</div>';
+    }
+    html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Right: '+diffData.fileName+'</b></div>';
+    if(right){
+        html+='<div class="diff-row">  '+right.label+': '+right.value+'</div>';
+    }else{
+        html+='<div class="diff-row" style="color:var(--vscode-descriptionForeground,#999)">  Select '+(kind==='bondLength'?2:kind==='bondAngle'?3:4)+' atoms on right...</div>';
+    }
+    if(left&&right){
+        var diff=Math.abs(left.num-right.num);
+        if(kind==='dihedral'&&diff>180)diff=360-diff;
+        html+='<div class="diff-row" style="margin-top:6px;color:#ff6600"><b>Δ = '+diff.toFixed(4)+(kind==='bondLength'?' A':' deg')+'</b></div>';
+    }
+    html+='<div class="diff-row" style="margin-top:6px;color:var(--vscode-descriptionForeground,#999)">Selecting atoms on one side auto-selects the corresponding atoms on the other.</div>';
+    showDiffPanel(html);
 }
 
 function dist(a,b){var dx=a.x-b.x,dy=a.y-b.y,dz=a.z-b.z;return Math.sqrt(dx*dx+dy*dy+dz*dz)}
@@ -1087,8 +1876,17 @@ function showSelectAtomsModal(){
 }
 
 function updateTransform(){
-    moleculeGroup.quaternion.copy(rotQuat);
-    pivotGroup.position.set(panX,panY,0);
+    if(diffMode){
+        moleculeGroup.quaternion.copy(rotQuat);
+        pivotGroup.position.set(panX,panY,0);
+        if(diffMolGroup){
+            diffMolGroup.quaternion.copy(diffRotQuat);
+            diffPivot.position.set(diffPanX,diffPanY,0);
+        }
+    }else{
+        moleculeGroup.quaternion.copy(rotQuat);
+        pivotGroup.position.set(panX,panY,0);
+    }
 }
 
 var canvas=renderer.domElement;
@@ -1097,6 +1895,36 @@ var mouse=new THREE.Vector2();
 
 function getClickedAtom(e){
     var rect=canvas.getBoundingClientRect();
+    if(diffMode){
+        var w=rect.width;
+        var h=rect.height;
+        var halfW=Math.floor(w/2);
+        var localX=e.clientX-rect.left;
+        if(localX<halfW){
+            diffActiveSide='left';
+            mouse.x=(localX/halfW)*2-1;
+            mouse.y=-((e.clientY-rect.top)/h)*2+1;
+            camera.aspect=halfW/h;
+            camera.updateProjectionMatrix();
+            camera.position.set(0,0,camDist);
+            camera.updateMatrixWorld();
+            raycaster.setFromCamera(mouse,camera);
+            var hitsL=raycaster.intersectObjects(atomMeshes);
+            if(hitsL.length>0)return hitsL[0].object.userData.index;
+        }else{
+            diffActiveSide='right';
+            mouse.x=((localX-halfW)/(w-halfW))*2-1;
+            mouse.y=-((e.clientY-rect.top)/h)*2+1;
+            camera.aspect=(w-halfW)/h;
+            camera.updateProjectionMatrix();
+            camera.position.set(0,0,diffCamDist);
+            camera.updateMatrixWorld();
+            raycaster.setFromCamera(mouse,camera);
+            var hitsR=raycaster.intersectObjects(diffAtomMeshes);
+            if(hitsR.length>0)return hitsR[0].object.userData.index;
+        }
+        return-1;
+    }
     mouse.x=((e.clientX-rect.left)/rect.width)*2-1;
     mouse.y=-((e.clientY-rect.top)/rect.height)*2+1;
     raycaster.setFromCamera(mouse,camera);
@@ -1112,21 +1940,77 @@ canvas.addEventListener('mousedown',function(e){
     }
     if(e.button===0)isRot=true;
     else if(e.button===1||e.button===2)isPan=true;
+    if(diffMode){
+        var rect=canvas.getBoundingClientRect();
+        var halfW=Math.floor(rect.width/2);
+        diffTransformSide=(e.clientX-rect.left)<halfW?'left':'right';
+    }
     prevM={x:e.clientX,y:e.clientY};
     e.preventDefault();
 });
 
 canvas.addEventListener('mousemove',function(e){
     var dm={x:e.clientX-prevM.x,y:e.clientY-prevM.y};
-    if(isRot){
-        var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),dm.x*0.008);
-        var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),dm.y*0.008);
-        rotQuat.premultiply(qx);rotQuat.premultiply(qy);rotQuat.normalize();
-        updateTransform()
+    if(diffMode){
+        var side=diffTransformSide;
+        var rq=side==='right'?diffRotQuat:rotQuat;
+        if(isRot){
+            var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),dm.x*0.008);
+            var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),dm.y*0.008);
+            rq.premultiply(qx);rq.premultiply(qy);rq.normalize();
+            updateTransform()
+        }
+        if(isPan){
+            if(side==='right'){diffPanX+=dm.x*0.01*(diffCamDist/20);diffPanY-=dm.y*0.01*(diffCamDist/20)}
+            else{panX+=dm.x*0.01*(camDist/20);panY-=dm.y*0.01*(camDist/20)}
+            updateTransform()
+        }
+    }else{
+        if(isRot){
+            var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),dm.x*0.008);
+            var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),dm.y*0.008);
+            rotQuat.premultiply(qx);rotQuat.premultiply(qy);rotQuat.normalize();
+            updateTransform()
+        }
+        if(isPan){panX+=dm.x*0.01*(camDist/20);panY-=dm.y*0.01*(camDist/20);updateTransform()}
     }
-    if(isPan){panX+=dm.x*0.01*(camDist/20);panY-=dm.y*0.01*(camDist/20);updateTransform()}
     prevM={x:e.clientX,y:e.clientY};
     var rect=canvas.getBoundingClientRect();
+    if(diffMode){
+        var w=rect.width;
+        var h=rect.height;
+        var halfW=Math.floor(w/2);
+        var localX=e.clientX-rect.left;
+        var hitsD;
+        if(localX<halfW){
+            mouse.x=(localX/halfW)*2-1;
+            mouse.y=-((e.clientY-rect.top)/h)*2+1;
+            camera.aspect=halfW/h;
+            camera.updateProjectionMatrix();
+            camera.position.set(0,0,camDist);
+            camera.updateMatrixWorld();
+            raycaster.setFromCamera(mouse,camera);
+            hitsD=raycaster.intersectObjects(atomMeshes);
+        }else{
+            mouse.x=((localX-halfW)/(w-halfW))*2-1;
+            mouse.y=-((e.clientY-rect.top)/h)*2+1;
+            camera.aspect=(w-halfW)/h;
+            camera.updateProjectionMatrix();
+            camera.position.set(0,0,diffCamDist);
+            camera.updateMatrixWorld();
+            raycaster.setFromCamera(mouse,camera);
+            hitsD=raycaster.intersectObjects(diffAtomMeshes);
+        }
+        if(hitsD&&hitsD.length>0){
+            var o=hitsD[0].object,i=o.userData.index;
+            var a=diffMode&&o.userData.diffHi!==undefined&&localX>=halfW?diffData.atoms[i]:MD.atoms[i];
+            tooltipEl.textContent=a.element+(i+1)+' ('+a.x.toFixed(4)+', '+a.y.toFixed(4)+', '+a.z.toFixed(4)+')';
+            tooltipEl.style.display='block';
+            tooltipEl.style.left=(e.clientX-container.getBoundingClientRect().left+15)+'px';
+            tooltipEl.style.top=(e.clientY-container.getBoundingClientRect().top-10)+'px';
+        }else{tooltipEl.style.display='none'}
+        return;
+    }
     mouse.x=((e.clientX-rect.left)/rect.width)*2-1;
     mouse.y=-((e.clientY-rect.top)/rect.height)*2+1;
     raycaster.setFromCamera(mouse,camera);
@@ -1141,24 +2025,103 @@ canvas.addEventListener('mousemove',function(e){
 
 canvas.addEventListener('mouseup',function(){isRot=false;isPan=false});
 canvas.addEventListener('mouseleave',function(){isRot=false;isPan=false;tooltipEl.style.display='none'});
-canvas.addEventListener('wheel',function(e){e.preventDefault();camDist*=e.deltaY>0?1.1:0.9;camDist=Math.max(1,Math.min(500,camDist));camera.position.z=camDist},{passive:false});
+canvas.addEventListener('wheel',function(e){e.preventDefault();
+    if(diffMode){
+        var rect=canvas.getBoundingClientRect();
+        var halfW=Math.floor(rect.width/2);
+        var side=(e.clientX-rect.left)<halfW?'left':'right';
+        if(side==='right'){
+            diffCamDist*=e.deltaY>0?1.1:0.9;
+            diffCamDist=Math.max(1,Math.min(500,diffCamDist));
+        }else{
+            camDist*=e.deltaY>0?1.1:0.9;
+            camDist=Math.max(1,Math.min(500,camDist));
+        }
+    }else{
+        camDist*=e.deltaY>0?1.1:0.9;
+        camDist=Math.max(1,Math.min(500,camDist));
+        camera.position.z=camDist;
+    }
+},{passive:false});
 canvas.addEventListener('contextmenu',function(e){e.preventDefault()});
 
 var touchSD=0;
 canvas.addEventListener('touchstart',function(e){e.preventDefault();
-    if(e.touches.length===1){isRot=true;prevM={x:e.touches[0].clientX,y:e.touches[0].clientY}}
+    if(e.touches.length===1){
+        isRot=true;prevM={x:e.touches[0].clientX,y:e.touches[0].clientY};
+        if(diffMode){var rect=canvas.getBoundingClientRect();var halfW=Math.floor(rect.width/2);diffTransformSide=(e.touches[0].clientX-rect.left)<halfW?'left':'right'}
+    }
     else if(e.touches.length===2){isRot=false;var dx=e.touches[0].clientX-e.touches[1].clientX,dy=e.touches[0].clientY-e.touches[1].clientY;touchSD=Math.sqrt(dx*dx+dy*dy)}
 },{passive:false});
 canvas.addEventListener('touchmove',function(e){e.preventDefault();
-    if(e.touches.length===1&&isRot){var dm={x:e.touches[0].clientX-prevM.x,y:e.touches[0].clientY-prevM.y};var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),dm.x*0.008);var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),dm.y*0.008);rotQuat.premultiply(qx);rotQuat.premultiply(qy);rotQuat.normalize();updateTransform();prevM={x:e.touches[0].clientX,y:e.touches[0].clientY}}
+    if(e.touches.length===1&&isRot){
+        var dm={x:e.touches[0].clientX-prevM.x,y:e.touches[0].clientY-prevM.y};
+        var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),dm.x*0.008);
+        var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),dm.y*0.008);
+        if(diffMode){
+            var rq=diffTransformSide==='right'?diffRotQuat:rotQuat;
+            rq.premultiply(qx);rq.premultiply(qy);rq.normalize();
+        }else{
+            rotQuat.premultiply(qx);rotQuat.premultiply(qy);rotQuat.normalize();
+        }
+        updateTransform();
+        prevM={x:e.touches[0].clientX,y:e.touches[0].clientY}
+    }
     else if(e.touches.length===2){var dx=e.touches[0].clientX-e.touches[1].clientX,dy=e.touches[0].clientY-e.touches[1].clientY,d=Math.sqrt(dx*dx+dy*dy);
-        if(touchSD>0){camDist*=touchSD/d;camDist=Math.max(1,Math.min(500,camDist));camera.position.z=camDist}touchSD=d}
+        if(touchSD>0){
+            if(diffMode){
+                var sc=touchSD/d;
+                if(diffTransformSide==='right'){diffCamDist*=sc;diffCamDist=Math.max(1,Math.min(500,diffCamDist))}
+                else{camDist*=sc;camDist=Math.max(1,Math.min(500,camDist))}
+            }else{
+                camDist*=touchSD/d;camDist=Math.max(1,Math.min(500,camDist));camera.position.z=camDist;
+            }
+        }
+        touchSD=d}
 },{passive:false});
 canvas.addEventListener('touchend',function(e){isRot=false;if(e.touches.length<2)touchSD=0});
 
 window.addEventListener('resize',function(){var rw=container.clientWidth||window.innerWidth;var rh=container.clientHeight||(window.innerHeight-60);if(rw<1)rw=window.innerWidth;if(rh<1)rh=window.innerHeight-60;camera.aspect=rw/rh;camera.updateProjectionMatrix();renderer.setSize(rw,rh)});
 
-function animate(){requestAnimationFrame(animate);renderer.render(scene,camera)}
+function animate(){
+    requestAnimationFrame(animate);
+    var w=container.clientWidth||window.innerWidth;
+    var h=container.clientHeight||(window.innerHeight-60);
+    if(w<1)w=window.innerWidth;
+    if(h<1)h=window.innerHeight-60;
+    if(diffMode){
+        var halfW=Math.floor(w/2);
+        renderer.autoClear=false;
+        renderer.setScissorTest(true);
+        renderer.setViewport(0,0,halfW,h);
+        renderer.setScissor(0,0,halfW,h);
+        camera.aspect=halfW/h;
+        camera.updateProjectionMatrix();
+        camera.position.set(0,0,camDist);
+        renderer.clear();
+        if(diffPivot)diffPivot.visible=false;
+        pivotGroup.visible=true;
+        renderer.render(scene,camera);
+        renderer.setViewport(halfW,0,w-halfW,h);
+        renderer.setScissor(halfW,0,w-halfW,h);
+        camera.aspect=(w-halfW)/h;
+        camera.updateProjectionMatrix();
+        camera.position.set(0,0,diffCamDist);
+        renderer.clear();
+        if(diffPivot)diffPivot.visible=true;
+        pivotGroup.visible=false;
+        renderer.render(scene,camera);
+        renderer.setScissorTest(false);
+        renderer.autoClear=true;
+        pivotGroup.visible=true;
+        if(diffPivot)diffPivot.visible=true;
+    }else{
+        camera.aspect=w/h;
+        camera.updateProjectionMatrix();
+        camera.position.set(0,0,camDist);
+        renderer.render(scene,camera);
+    }
+}
 animate();
 }catch(e){var el=document.getElementById('error-msg');var ll=document.getElementById('loading');if(ll)ll.style.display='none';if(el){el.style.display='block';el.textContent='Error: '+e.message}}
 })();
