@@ -759,21 +759,19 @@ function findAtomMapping(atoms1,bonds1,atoms2,bonds2){
     function consistent(a1,a2){
         if(atoms1[a1].element!==atoms2[a2].element)return false;
         var nb2set={};
-        adj2[a2].forEach(function(e){nb2set[e.to]=e.order});
+        adj2[a2].forEach(function(e){nb2set[e.to]=true});
         for(var k=0;k<adj1[a1].length;k++){
             var nb1=adj1[a1][k].to;
             if(map[nb1]!==-1){
                 if(nb2set[map[nb1]]===undefined)return false;
-                if(Math.abs(adj1[a1][k].order-nb2set[map[nb1]])>0.3)return false;
             }
         }
         var nb1set={};
-        adj1[a1].forEach(function(e){nb1set[e.to]=e.order});
+        adj1[a1].forEach(function(e){nb1set[e.to]=true});
         for(var k=0;k<adj2[a2].length;k++){
             var nb2=adj2[a2][k].to;
             if(rmap[nb2]!==-1){
                 if(nb1set[rmap[nb2]]===undefined)return false;
-                if(Math.abs(adj2[a2][k].order-nb1set[rmap[nb2]])>0.3)return false;
             }
         }
         return true;
