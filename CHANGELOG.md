@@ -1,5 +1,24 @@
 # Change Log
 
+## [0.9.1] - 2026-06-23/28
+
+### Added
+
+- **Adjustable diff threshold slider** — A percentage slider (0–20%, step 0.5%, default 2%) in the diff results panel lets you interactively adjust the sensitivity for what counts as a "difference" in bond lengths, bond angles, and dihedral angles; the diff list updates in real time as you drag the slider
+
+### Fixed
+
+- **Select Atoms space-separated parsing** — Space-separated atom input (e.g. `1 2 3`) only selected the first atom because regex escape sequences (`\s`, `\d`) inside the webview template literal were stripped during evaluation, causing the split regex to match the letter `s` instead of whitespace. Range matching (e.g. `3-10`) was also broken. Fixed by double-escaping backslashes (`\\s`, `\\d`) so the browser receives the correct regexes
+
+### Changed
+
+- **GJF save format** — Atom coordinates in saved GJF files now use 8 decimal places (zero-padded) with GaussView-style alignment (element left-justified to 2 chars, each coordinate right-justified to 17 chars), replacing the previous 6-decimal fixed-separator format that produced misaligned columns
+- **Skeleton matching ignores bond order** — The diff skeleton isomorphism check now considers only connectivity (whether atoms are bonded), not bond order. Previously, if corresponding atoms in the two molecules had different bond orders (e.g. single vs. double), the skeleton would be incorrectly considered different. Now all bonds are treated as single bonds for skeleton matching purposes; bond order differences do not prevent conformation diff comparison
+
+### Improved
+
+- **Select Atoms accumulation** — Clicking the Select Atoms toolbar button while already in select mode now reopens the input dialog (previously required switching to another mode first). Selections accumulate across multiple dialog sessions within the same mode — atoms stay highlighted until switching to another mode (View, Add, etc.). Previously each dialog session replaced the previous selection
+
 ## [0.9.0] - 2026-05-22
 
 ### Added

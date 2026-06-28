@@ -25,8 +25,8 @@ A VS Code / Trae extension for visualizing and editing molecular structures in 3
 - **Bond Order Editing** — Change bond order (none / single / aromatic 1.5 / double / triple) in the Bond Length modal; selecting "None (0)" removes the bond; changes reflected immediately in 3D display
 - **Add Atom** — Click anchor atom, choose element (70+ elements), set bond length and bond order, direction auto-calculated from existing bonds
 - **Delete Atom** — Click atom and confirm; atoms and bonds are automatically re-indexed
-- **Select Atoms** — Input atom indices (1-based), ranges (e.g. `3-10`), or element symbols (e.g. `C H`) to highlight specific atoms in yellow
-- **Save As** — Export modified structure in 8 formats: XYZ, Gaussian GJF (preserving original file structure), Turbomole Coord (Å→Bohr conversion), ORCA Input, MOL2 (with bond orders), MDL Mol, PDB (with CONECT records), or MOPAC Input; GJF output preserves original Link 0, route, title, charge/mult, and post-connect content; connect section includes all atom lines
+- **Select Atoms** — Input atom indices (1-based), ranges (e.g. `3-10`), or element symbols (e.g. `C H`) to highlight specific atoms in yellow; selections accumulate across multiple dialog sessions within the same mode, and the dialog can be reopened by clicking the Select Atoms button again without switching modes; all highlights clear when switching to another mode
+- **Save As** — Export modified structure in 8 formats: XYZ, Gaussian GJF (preserving original file structure), Turbomole Coord (Å→Bohr conversion), ORCA Input, MOL2 (with bond orders), MDL Mol, PDB (with CONECT records), or MOPAC Input; GJF output preserves original Link 0, route, title, charge/mult, and post-connect content; GJF atom coordinates use GaussView-style 8-decimal aligned format; connect section includes all atom lines
 - **Continuous Editing** — After completing an edit, the viewer stays in the current editing mode for repeated adjustments
 - **Cancel/Undo** — Cancel button restores original coordinates before confirming edits
 
@@ -40,7 +40,7 @@ A VS Code / Trae extension for visualizing and editing molecular structures in 3
 
 - **Diff Button** — Compare the current structure against another molecular file (any supported format, no need for matching formats)
 - **Frame Selection** — If the comparison file is an optimization LOG/OUT, a QuickPick lets you choose which frame to compare
-- **Skeleton Check** — Graph isomorphism via recursive backtracking atom matching (element + degree + neighbor signature with most-constrained-variable heuristic); uses the plugin's own bond detection algorithm (not the file's original bond orders) to ensure consistent skeleton comparison even when files specify different bond orders for the same connectivity
+- **Skeleton Check** — Graph isomorphism via recursive backtracking atom matching (element + degree + neighbor signature with most-constrained-variable heuristic); uses the plugin's own bond detection algorithm (not the file's original bond orders) to ensure consistent skeleton comparison even when files specify different bond orders for the same connectivity; matching considers **connectivity only** (bonded or not), not bond order — a single bond in one molecule and a double bond in the other at the same position does not prevent skeleton matching
 - **Side-by-Side View** — Left viewport shows the original molecule, right shows the comparison; each side has **independent** rotation, pan, and zoom controls
 - **Correct Aspect Ratio** — Each viewport uses its own camera aspect ratio matching the half-width, preventing horizontal distortion
 - **Conformation Diff** — When skeletons match, highlights bond length, bond angle, and dihedral differences in orange on both sides; full list of all differences displayed (no truncation); each difference shows the percentage change relative to the average value

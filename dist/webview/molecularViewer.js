@@ -630,7 +630,10 @@ camDist=initCam;
 var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',selectAtoms:'Select Atoms - Input indices or element symbols'};
 
 function setMode(m){
-    if(currentMode===m)return;
+    if(currentMode===m){
+        if(m==='selectAtoms')showSelectAtomsModal();
+        return;
+    }
     currentMode=m;selectedAtoms=[];diffSelectedAtoms=[];originalCoords=null;hideModal();highlightSelected();
     modeInfoEl.textContent=MODE_INFO[m]||m;
     selInfoEl.textContent='';
@@ -1956,11 +1959,10 @@ function showSelectAtomsModal(){
     document.getElementById('m-ok').addEventListener('click',function(){
         var input=inputEl.value.trim();
         if(!input){hideModal();return}
-        selectedAtoms=[];
-        var tokens=input.split(/[\s,;]+/);
+        var tokens=input.split(/[\\s,;]+/);
         tokens.forEach(function(tok){
             if(!tok)return;
-            var rangeMatch=tok.match(/^(\d+)-(\d+)$/);
+            var rangeMatch=tok.match(/^(\\d+)-(\\d+)$/);
             if(rangeMatch){
                 var start=parseInt(rangeMatch[1],10);
                 var end=parseInt(rangeMatch[2],10);
