@@ -1790,7 +1790,13 @@ function doSave(){
     }else{
         gjf='%chk=molecule.chk\\n%mem=4GB\\n%nproc=4\\n# B3LYP/6-31G(d)\\n\\n'+(MD.title||'Modified structure')+'\\n\\n0 1\\n';
     }
-    MD.atoms.forEach(function(a){gjf+=' '+a.element+'   '+a.x.toFixed(6)+'   '+a.y.toFixed(6)+'   '+a.z.toFixed(6)+'\\n'});
+    MD.atoms.forEach(function(a){
+        var el=a.element; while(el.length<2) el+=' ';
+        var sx=a.x.toFixed(8); while(sx.length<17) sx=' '+sx;
+        var sy=a.y.toFixed(8); while(sy.length<17) sy=' '+sy;
+        var sz=a.z.toFixed(8); while(sz.length<17) sz=' '+sz;
+        gjf+=' '+el+' '+sx+' '+sy+' '+sz+'\\n';
+    });
     gjf+='\\n';
     MD.atoms.forEach(function(a,i){
         var parts=[i+1];
