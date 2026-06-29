@@ -525,6 +525,16 @@ function rebuildScene(){
     MD.bonds.forEach(function(b){createBond(b)});
     highlightSelected();
 }
+function updateScenePositions(){
+    CX=0;CY=0;CZ=0;
+    MD.atoms.forEach(function(a){CX+=a.x;CY+=a.y;CZ+=a.z});
+    if(MD.atoms.length>0){CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length}
+    atomMeshes.forEach(function(m,i){var a=MD.atoms[i];if(a)m.position.set(a.x-CX,a.y-CY,a.z-CZ)});
+    for(var i=bondMeshes.length-1;i>=0;i--){moleculeGroup.remove(bondMeshes[i])}
+    bondMeshes.length=0;
+    MD.bonds.forEach(function(b){createBond(b)});
+    highlightSelected();
+}
 
 function getPerp(dir){
     var up=Math.abs(dir.y)<0.99?new THREE.Vector3(0,1,0):new THREE.Vector3(1,0,0);
@@ -1564,7 +1574,7 @@ function applyBondLength(targetLen,fixFirst){
             a.x=a2.x+vx*scale;a.y=a2.y+vy*scale;a.z=a2.z+vz*scale;
         });
     }
-    rebuildScene();
+    updateScenePositions();
 }
 
 function applyBondAngle(targetDeg,fixFirstTwo){
@@ -1594,7 +1604,7 @@ function applyBondAngle(targetDeg,fixFirstTwo){
             MD.atoms[idx].x=r.x;MD.atoms[idx].y=r.y;MD.atoms[idx].z=r.z;
         });
     }
-    rebuildScene();
+    updateScenePositions();
 }
 
 function applyDihedral(targetDeg,fixFirstThree){
@@ -1621,7 +1631,7 @@ function applyDihedral(targetDeg,fixFirstThree){
             MD.atoms[idx].x=r.x;MD.atoms[idx].y=r.y;MD.atoms[idx].z=r.z;
         });
     }
-    rebuildScene();
+    updateScenePositions();
 }
 
 function showModal(html,cb){modalEl.innerHTML=html;modalOverlay.classList.add('show');modalCallback=cb}
@@ -1692,7 +1702,7 @@ function showDihedralModal(){
         '<div class="current-val">Current: '+cur.toFixed(2)+' deg</div>'+
         '<label>Fix side:</label><select id="m-fix"><option value="1">Fix '+n1+'-'+n2+'-'+n3+' (move '+n4+')</option><option value="2">Fix '+n2+'-'+n3+'-'+n4+' (move '+n1+')</option></select>'+
         '<label>Target dihedral (deg):</label><input type="number" id="m-val" value="'+cur.toFixed(2)+'" step="1" min="-180" max="180">'+
-        '<input type="range" id="m-slider" value="'+cur.toFixed(2)+'" min="-180" max="180" step="1">'+
+        '<input type="range" id="m-slider" value="'+cur.toFixed(2)+'" min="-180" max="180" step="0.5">'+
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok" id="m-ok">OK</button></div>',null);
     var valEl=document.getElementById('m-val'),sliderEl=document.getElementById('m-slider'),fixEl=document.getElementById('m-fix');
     sliderEl.addEventListener('input',function(){valEl.value=this.value;applyDihedral(parseFloat(this.value),fixEl.value==='1')});
