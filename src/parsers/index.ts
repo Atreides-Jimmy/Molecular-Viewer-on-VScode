@@ -9,10 +9,18 @@ import { parseOrcaOut, OrcaFrame } from './orcaOutParser';
 import { parsePdb } from './pdbParser';
 import { parseMopac } from './mopacParser';
 import { parseTcl, TclParseResult } from './tclParser';
+import { parseCif } from './cifParser';
+import { parseVasp } from './vaspParser';
+import { parseCube } from './cubeParser';
+import { parseVesta } from './vestaParser';
 
 export { parseGaussianLog, LogFrame };
 export { parseOrcaOut, OrcaFrame };
 export { parseTcl, TclParseResult };
+export { parseCif };
+export { parseVasp };
+export { parseCube };
+export { parseVesta };
 
 export function parseFile(content: string, fileName: string): MolecularData {
     const ext = fileName.toLowerCase().split('.').pop() || '';
@@ -42,8 +50,18 @@ export function parseFile(content: string, fileName: string): MolecularData {
         case 'mopac':
         case 'dat':
             return parseMopac(content);
+        case 'cif':
+            return parseCif(content);
+        case 'vasp':
+        case 'poscar':
+        case 'contcar':
+            return parseVasp(content);
+        case 'cube':
+            return parseCube(content);
+        case 'vesta':
+            return parseVesta(content);
         default:
-            return tryAutoParse(content);
+            return tryAutoParse(content, fileName);
     }
 }
 
@@ -69,7 +87,7 @@ function parseLogAsSingleFrame(content: string): MolecularData {
     return { atoms: [], bonds: [], title: 'Empty', hasExplicitBonds: false };
 }
 
-function tryAutoParse(content: string): MolecularData {
+function tryAutoParse(content: string, fileName: string = ''): MolecularData {
     const lines = content.split(/\r?\n/).filter(l => l.trim() !== '');
 
     if (content.includes('$coord')) {
@@ -86,6 +104,22 @@ function tryAutoParse(content: string): MolecularData {
 
     if (content.match(/CARTESIAN COORDINATES/i) && content.match(/MOPAC/i)) {
         return parseMopac(content);
+    }
+
+    if (content.match(/^data_/m) && content.includes('_cell_length_a')) {
+        return parseCif(content);
+    }
+
+    if (fileName.match(/\.vasp$/i) || fileName.match(/poscar/i) || fileName.match(/contcar/i)) {
+        return parseVasp(content);
+    }
+
+    if (fileName.match(/\.cube$/i)) {
+        return parseCube(content);
+    }
+
+    if (fileName.match(/\.vesta$/i) || content.includes('#VESTA_FORMAT_VERSION')) {
+        return parseVesta(content);
     }
 
     if (content.includes('CARTESIAN COORDINATES (ANGSTROEM)')) {

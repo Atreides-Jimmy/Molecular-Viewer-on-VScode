@@ -4,12 +4,33 @@ export interface Atom {
     y: number;
     z: number;
     index: number;
+    occupancy?: number;
+    baseIdx?: number;
+    cellI?: number;
+    cellJ?: number;
+    cellK?: number;
 }
 
 export interface Bond {
     atom1: number;
     atom2: number;
     order: number;
+    crossCell?: boolean;
+    shift?: [number, number, number];
+}
+
+export interface CrystalData {
+    a: number;
+    b: number;
+    c: number;
+    alpha: number;
+    beta: number;
+    gamma: number;
+    latticeVectors: number[][];
+    spaceGroup?: string;
+    symmetryOps: string[];
+    baseAtoms: Atom[];
+    baseBonds: Bond[];
 }
 
 export interface GjfMeta {
@@ -36,4 +57,5 @@ export interface MolecularData {
     charge?: number;
     multiplicity?: number;
     atomGroups?: AtomGroup[];
+    crystal?: CrystalData;
 }

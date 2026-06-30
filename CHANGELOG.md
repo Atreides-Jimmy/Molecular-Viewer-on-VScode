@@ -1,5 +1,43 @@
 # Change Log
 
+## [0.9.3] - 2026-06-30
+
+### Added
+
+- **VESTA format support** — New parser for VESTA structure files (`.vesta`); reads CELLP (cell parameters), STRUC (fractional coordinates + occupancy), and GROUP (space group) sections; converts fractional coordinates to Cartesian via lattice vectors; supports fractional occupancy for disordered sites; wraps negative fractional coordinates to [0, 1) range
+- **Minimum Image Convention (MIC) bond detection** — Crystal bond detection now uses the minimum image convention: for each pair of base atoms, the fractional coordinate difference is wrapped to [-0.5, 0.5] before computing the Cartesian distance, ensuring bonds are always detected at their shortest periodic distance. Each base bond stores a `shift` vector (lattice translation to the nearest image cell)
+
+### Fixed
+
+- **Cross-boundary bond rendering** — Bonds crossing periodic cell boundaries (e.g. atom at x=0.05 bonded to atom at x=0.95 across the a=1 boundary) were previously rendered as long bonds spanning the entire view. Now they are rendered as short bonds extending outside the view boundary via virtual atom positions, with both forward and reverse split bonds drawn at each edge of the supercell. The `createBond()` function applies the lattice translation vector to compute the virtual position; `rebuildCrystal()` performs a bidirectional propagation pass (forward + reverse) to ensure split bonds appear on all edges of the supercell
+- **Cube file bond detection** — Cube files with positive NATOMS (Bohr units) were incorrectly treated as Angstrom, causing atom coordinates to be ~1.89× too large and all interatomic distances to exceed bond length thresholds. Fixed by using the Cube convention: NATOMS > 0 means Bohr, NATOMS < 0 means Angstrom; the voxel-based heuristic is now only used as a secondary check when voxel data is valid
+- **VASP/Cube/POSCAR right-click menu missing** — The explorer/context and editor/title/context menus did not include `.vasp`, `.cube`, or bare `POSCAR`/`CONTCAR` filenames in their `when` clauses. Added these extensions and a case-insensitive regex match for bare POSCAR/CONTCAR filenames
+- **Crystal bond detection on initial load** — When opening crystal files (CIF/VASP/Cube/VESTA), bonds were not detected on initial load because `rebuildCrystal()` was not called before `rebuildScene()`. Additionally, the extension's `ensureBonds()` (which uses plain distance without MIC) was previously applied to crystal structures and its results copied to `baseBonds`, overriding the webview's MIC detection. Fixed by: (1) skipping `ensureBonds()` for crystal files in the extension, and (2) calling `rebuildCrystal()` before `rebuildScene()` on initial load when crystal data is present
+
+### Changed
+
+- **File association** — `package.json` customEditors selector and explorer/editor context menus now register `.vesta` extension; context menus also match bare `POSCAR`/`CONTCAR` filenames (case-insensitive) via regex
+- **Crystal bond detection architecture** — Crystal bonds are now detected exclusively in the webview using MIC via `detectCrystalBaseBonds()`, not in the extension via `ensureBonds()`; this ensures periodic boundary conditions are correctly handled for all crystal formats (CIF, VASP, Cube, VESTA)
+
+## [0.9.2] - 2026-06-30
+
+### Added
+
+- **CIF crystal structure support** — New parser for Crystallographic Information Files (`.cif`); reads cell lengths/angles, space group symmetry operators, and atom site fractional/Cartesian coordinates; applies symmetry operations to generate the complete unit cell; supports fractional occupancy with partial coloration rendering; outputs fractional coordinates in minimal CIF format on save
+- **VASP POSCAR/CONTCAR support** — New parser for VASP structure files (`.vasp`, `POSCAR`, `CONTCAR`); handles scale factor, lattice vectors, element types/counts, selective dynamics flag, and both Direct (fractional) and Cartesian coordinate systems; converts fractional coordinates to Cartesian via lattice vectors; outputs Direct (fractional) coordinates on save
+- **Gaussian Cube support** — New parser for Gaussian Cube volumetric files (`.cube`); reads voxel vectors and atomic positions; auto-detects Bohr/Angstrom units; robustly handles corrupted voxel vectors (e.g. `1.#INF00`) by inferring an orthogonal lattice from atomic coordinate ranges with padding; supports atom-only cube files without volumetric data
+- **Crystal structure viewer** — Comprehensive crystal visualization system: initial unit cell display with cell wireframe; rotating axes indicator (bottom-left corner) that synchronizes with the main view; supercell boundary controls with 6 input boxes (a/b/c min/max) supporting fractional values (step 0.1) for partial cell selection; periodic boundary modification propagation via `propagateToAllCells()` so atom edits apply to all periodic images; "Remove Disorder" button to clean up disordered sites (occupancy < 0.5 removed, > 0.5 set to 1, = 0.5 kept)
+- **Save as VASP/Cube** — Export modified crystal structures in VASP POSCAR format (Direct fractional coordinates grouped by element) or Gaussian Cube format (with minimal 2×2×2 volumetric grid); both available only when crystal data is present
+
+### Fixed
+
+- **Crystal deformation bug when adjusting a/b/c boundaries** — Adjusting supercell a/b/c boundary values caused the crystal structure to appear stretched/distorted. Root cause: the 3×3 inverse matrix used for Cartesian→fractional coordinate conversion contained 3 incorrect elements in the adjugate matrix formula (affects `rebuildCrystal()`, CIF save in `doSave()`, and `cartToFrac()` in cifParser.ts). The incorrect elements were `inv[0][1]` (used `lv[0][0]` instead of `lv[0][1]`), `inv[0][2]` (completely wrong formula), and `inv[1][2]` (completely wrong formula). Fixed by applying the correct adjugate (cofactor transpose) formula in all three locations. The bug was previously unnoticed because CIF parsing uses the forward fractional→Cartesian transform, and diagonal lattices happen to produce correct results despite the matrix errors
+
+### Changed
+
+- **Save dialog filters** — Save As dialog now includes VASP POSCAR and Gaussian Cube format filters alongside all existing formats; diff file picker now accepts VASP and Cube files
+- **File association** — `package.json` customEditors selector and explorer context menu now register `.vasp`, `POSCAR`/`CONTCAR` (case-insensitive), and `.cube` extensions
+
 ## [0.9.1] - 2026-06-23/28
 
 ### Added

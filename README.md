@@ -26,7 +26,7 @@ A VS Code / Trae extension for visualizing and editing molecular structures in 3
 - **Add Atom** — Click anchor atom, choose element (70+ elements), set bond length and bond order, direction auto-calculated from existing bonds
 - **Delete Atom** — Click atom and confirm; atoms and bonds are automatically re-indexed
 - **Select Atoms** — Input atom indices (1-based), ranges (e.g. `3-10`), or element symbols (e.g. `C H`) to highlight specific atoms in yellow; selections accumulate across multiple dialog sessions within the same mode, and the dialog can be reopened by clicking the Select Atoms button again without switching modes; all highlights clear when switching to another mode
-- **Save As** — Export modified structure in 8 formats: XYZ, Gaussian GJF (preserving original file structure), Turbomole Coord (Å→Bohr conversion), ORCA Input, MOL2 (with bond orders), MDL Mol, PDB (with CONECT records), or MOPAC Input; GJF output preserves original Link 0, route, title, charge/mult, and post-connect content; GJF atom coordinates use GaussView-style 8-decimal aligned format; connect section includes all atom lines
+- **Save As** — Export modified structure in 11 formats: XYZ, Gaussian GJF (preserving original file structure), CIF (fractional coordinates), VASP POSCAR (Direct fractional coordinates), Gaussian Cube (with volumetric grid), Turbomole Coord (Å→Bohr conversion), ORCA Input, MOL2 (with bond orders), MDL Mol, PDB (with CONECT records), or MOPAC Input; GJF output preserves original Link 0, route, title, charge/mult, and post-connect content; GJF atom coordinates use GaussView-style 8-decimal aligned format; connect section includes all atom lines; CIF/VASP/Cube formats available only when crystal data is present
 - **Continuous Editing** — After completing an edit, the viewer stays in the current editing mode for repeated adjustments
 - **Cancel/Undo** — Cancel button restores original coordinates before confirming edits
 
@@ -48,6 +48,17 @@ A VS Code / Trae extension for visualizing and editing molecular structures in 3
 - **Diff Info Panel** — Floating panel listing all differences sorted by magnitude, with atom labels and values from both structures; can be closed and reopened via "Show Results" button; diff results are always accessible and not overwritten by measurement info
 - **Auto-Mirror Selection** — When selecting atoms for bond length/angle/dihedral measurement on one side, the corresponding atoms are automatically selected on the other side via the atom mapping, and both values plus the Δ difference are displayed simultaneously
 
+### Crystal Structure Viewing
+
+- **Unit Cell Display** — When opening CIF, VASP, Cube, or VESTA files, the crystal unit cell is rendered with a wireframe outline showing the lattice boundaries
+- **Supercell Boundary Controls** — 6 input boxes (a/b/c min/max) let you define a custom region of the crystal to display; supports fractional values (step 0.1) for partial cell selection; the view is a cutout of the crystal, not a deformation of the lattice
+- **Periodic Modification Propagation** — Atom edits (bond length, angle, dihedral, add/delete) are automatically propagated to all periodic images within the supercell boundaries, keeping the crystal consistent
+- **Minimum Image Convention Bonds** — Crystal bonds are detected using the minimum image convention (MIC): interatomic distances are computed at their shortest periodic distance, and bonds crossing cell boundaries are rendered as short split bonds extending outside the view (not as long bonds spanning across the view)
+- **Rotating Axes Indicator** — A small axes gizmo in the bottom-left corner rotates synchronously with the main 3D view, providing spatial orientation reference
+- **Fractional Occupancy Rendering** — Atoms with partial occupancy (disordered crystal sites) are rendered with partial coloration proportional to their occupancy value
+- **Remove Disorder** — One-click button to clean up disordered sites: occupancy < 0.5 removed, > 0.5 set to 1, = 0.5 kept
+- **Crystal Save** — Export modified crystal structures as CIF (fractional coordinates, minimal format), VASP POSCAR (Direct fractional coordinates grouped by element), or Gaussian Cube (with minimal volumetric grid)
+
 ### Supported File Formats
 
 | Format | Extension | Notes |
@@ -62,6 +73,10 @@ A VS Code / Trae extension for visualizing and editing molecular structures in 3
 | PDB | `.pdb`, `.ent` | Reads ATOM/HETATM records with fixed-column parsing; element from columns 77-78 or atom name; CONECT records for explicit bonds; handles duplicate serials |
 | MOPAC | `.mop`, `.mopac`, `.dat` | Reads MOPAC input format with `ELEM x 1 y 1 z 1` internal coordinates; supports atomic numbers or element symbols; auto-detects Å/Bohr units; extracts CHARGE and MS keywords; falls back to `CARTESIAN COORDINATES` output blocks |
 | VMD TCL | `.tcl` | VMD visualization script; reads `mol new <file>` to load the referenced molecular file; parses `mol color ColorID N` + `mol selection "index ..."` to assign per-group atom colors using VMD's 33-color palette; supports relative and absolute file paths |
+| CIF | `.cif` | Crystallographic Information File; reads cell lengths/angles, space group symmetry operators, and fractional/Cartesian atom sites; applies symmetry operations to build the full unit cell; supports fractional occupancy with partial coloration |
+| VASP POSCAR | `.vasp`, `POSCAR`, `CONTCAR` | VASP structure file; handles scale factor, lattice vectors, element types/counts, selective dynamics, and both Direct (fractional) and Cartesian coordinates |
+| Gaussian Cube | `.cube` | Gaussian volumetric file; reads voxel vectors and atomic positions; auto-detects Bohr/Angstrom units; robustly handles corrupted voxel vectors by inferring an orthogonal lattice from atomic coordinate ranges |
+| VESTA | `.vesta` | VESTA structure file; reads CELLP (cell parameters), STRUC (fractional coordinates + occupancy), and GROUP (space group) sections; supports fractional occupancy for disordered sites |
 | MDL Mol | `.mol` | Basic support |
 | SDF | `.sdf` | Basic support |
 
@@ -112,7 +127,10 @@ Add to your `settings.json`:
     "*.pdb": "molecularViewer.editor",
     "*.ent": "molecularViewer.editor",
     "*.mop": "molecularViewer.editor",
-    "*.tcl": "molecularViewer.editor"
+    "*.tcl": "molecularViewer.editor",
+    "*.cif": "molecularViewer.editor",
+    "*.vasp": "molecularViewer.editor",
+    "*.cube": "molecularViewer.editor"
   }
 }
 ```
@@ -172,6 +190,9 @@ molecular-viewer/
 │   │   ├── pdbParser.ts       # PDB format parser (ATOM/HETATM/CONECT)
 │   │   ├── mopacParser.ts     # MOPAC input/output parser
 │   │   ├── tclParser.ts       # VMD TCL script parser (color groups)
+│   │   ├── cifParser.ts       # CIF crystal structure parser (symmetry, occupancy)
+│   │   ├── vaspParser.ts      # VASP POSCAR/CONTCAR parser (scale, Direct/Cartesian)
+│   │   ├── cubeParser.ts      # Gaussian Cube parser (voxel vectors, robust lattice)
 │   │   └── bondDetector.ts    # Covalent radii bond detection + order estimation
 │   └── webview/
 │       └── molecularViewer.ts # Custom editor + Three.js webview + editing
@@ -206,7 +227,6 @@ npm run package
 ## Roadmap
 
 - [ ] MOL/SDF full parser with explicit bond info
-- [ ] CIF crystal structure support
 - [ ] Multiple display styles (wireframe, space-filling, licorice)
 - [ ] Vibration animation from frequency calculations
 - [ ] Export as PNG/SVG

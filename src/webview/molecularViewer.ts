@@ -57,7 +57,12 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         }
                     } else {
                         data = parseFile(sourceText, sourceFileName);
-                        data = ensureBonds(data);
+                        if (data.crystal) {
+                            data.bonds = [];
+                            data.crystal.baseBonds = [];
+                        } else {
+                            data = ensureBonds(data);
+                        }
                     }
                     data.filePath = sourceUri.fsPath;
                 } catch {
@@ -85,7 +90,12 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             }
         } else {
             data = parseFile(textContent, fileName);
-            data = ensureBonds(data);
+            if (data.crystal) {
+                data.bonds = [];
+                data.crystal.baseBonds = [];
+            } else {
+                data = ensureBonds(data);
+            }
         }
 
         if (ext !== 'tcl') {
@@ -119,6 +129,15 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             filters: {
                                 'XYZ Files': ['xyz'],
                                 'Gaussian Input': ['gjf'],
+                                'CIF Files': ['cif'],
+                                'VASP POSCAR': ['vasp', 'poscar', 'contcar'],
+                                'Gaussian Cube': ['cube'],
+                                'Turbomole Coord': ['coord'],
+                                'ORCA Input': ['inp'],
+                                'MOL2': ['mol2'],
+                                'MDL Mol': ['mol'],
+                                'PDB': ['pdb'],
+                                'MOPAC': ['mop'],
                                 'All Files': ['*']
                             }
                         });
@@ -136,7 +155,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             canSelectMany: false,
                             openLabel: 'Select File to Compare',
                             filters: {
-                                'Molecular Files': ['gjf', 'xyz', 'mol', 'sdf', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl'],
+                                'Molecular Files': ['gjf', 'xyz', 'mol', 'sdf', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta'],
                                 'All Files': ['*']
                             }
                         });
@@ -182,7 +201,13 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                         diffData = { atoms: [], bonds: [], title: 'No structures', hasExplicitBonds: false };
                                     }
                                 } else {
-                                    diffData = ensureBonds(parseFile(srcText, srcFileName));
+                                    diffData = parseFile(srcText, srcFileName);
+                                    if (diffData.crystal) {
+                                        diffData.bonds = [];
+                                        diffData.crystal.baseBonds = [];
+                                    } else {
+                                        diffData = ensureBonds(diffData);
+                                    }
                                 }
                                 diffData.filePath = sourceUri.fsPath;
                             } else {
@@ -202,7 +227,13 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                 diffData = { atoms: [], bonds: [], title: 'No structures', hasExplicitBonds: false };
                             }
                         } else {
-                            diffData = ensureBonds(parseFile(diffText, diffFileName));
+                            diffData = parseFile(diffText, diffFileName);
+                            if (diffData.crystal) {
+                                diffData.bonds = [];
+                                diffData.crystal.baseBonds = [];
+                            } else {
+                                diffData = ensureBonds(diffData);
+                            }
                             diffData.filePath = diffUri.fsPath;
                         }
 
@@ -314,7 +345,10 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             let color = atomColors[a.element] || '#FF1493';
             return {
                 element: a.element, x: a.x, y: a.y, z: a.z,
-                color: color
+                color: color,
+                occupancy: a.occupancy,
+                baseIdx: a.baseIdx,
+                cellI: a.cellI, cellJ: a.cellJ, cellK: a.cellK
             };
         });
 
@@ -346,7 +380,22 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             colorId: g.colorId, color: g.color, indices: g.indices
         })) : [];
 
-        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData });
+        const crystalData = data.crystal ? {
+            a: data.crystal.a, b: data.crystal.b, c: data.crystal.c,
+            alpha: data.crystal.alpha, beta: data.crystal.beta, gamma: data.crystal.gamma,
+            latticeVectors: data.crystal.latticeVectors,
+            spaceGroup: data.crystal.spaceGroup || '',
+            symmetryOps: data.crystal.symmetryOps,
+            baseAtoms: data.crystal.baseAtoms.map(a => ({
+                element: a.element, x: a.x, y: a.y, z: a.z,
+                index: a.index, occupancy: a.occupancy, baseIdx: a.baseIdx
+            })),
+            baseBonds: data.crystal.baseBonds.map(b => ({
+                atom1: b.atom1, atom2: b.atom2, order: b.order
+            }))
+        } : null;
+
+        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData });
 
         return `<!DOCTYPE html>
 <html lang="en">
@@ -367,6 +416,15 @@ body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;b
 #status-bar{height:24px;flex-shrink:0;background:var(--vscode-statusBar-background,#007acc);color:var(--vscode-statusBar-foreground,#fff);display:flex;align-items:center;padding:0 10px;font-size:11px;z-index:20;gap:12px}
 #container{flex:1;position:relative;overflow:hidden;min-height:0}
 #mol-info{position:absolute;top:8px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.55);padding:6px 10px;border-radius:4px;z-index:25;pointer-events:none;line-height:1.6}
+#axes-indicator{position:absolute;bottom:12px;left:12px;width:90px;height:90px;z-index:25;pointer-events:none}
+#axes-indicator svg{width:100%;height:100%}
+#crystal-panel{position:absolute;top:8px;right:8px;background:rgba(0,0,0,0.6);border:1px solid var(--vscode-panel-border,#444);border-radius:4px;padding:8px 10px;font-size:11px;color:var(--vscode-editor-foreground,#ccc);z-index:25;display:none;min-width:180px}
+#crystal-panel h4{margin:0 0 6px 0;font-size:11px;font-weight:600}
+#crystal-panel .bnd-row{display:flex;align-items:center;gap:4px;margin:3px 0}
+#crystal-panel .bnd-row label{width:42px;text-align:right}
+#crystal-panel .bnd-row input{width:48px;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;padding:1px 3px;font-size:11px;text-align:center}
+#crystal-panel .bnd-btn{margin-top:6px;width:100%;background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff);border:none;border-radius:3px;padding:4px 6px;font-size:11px;cursor:pointer}
+#crystal-panel .bnd-btn:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
 canvas{display:block}
 #atom-tooltip{position:absolute;display:none;color:var(--vscode-editor-foreground,#ccc);font-size:12px;background:var(--vscode-editor-background,#1e1e1e);padding:4px 8px;border-radius:3px;border:1px solid var(--vscode-panel-border,#444);pointer-events:none;z-index:30}
 #modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:100;display:none;align-items:center;justify-content:center}
@@ -435,7 +493,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="modal-overlay"><div id="modal"></div></div>
@@ -447,6 +505,23 @@ ${threeJsContent}
 try{
 var MD=${jsonData};
 var AN={H:1,He:2,Li:3,Be:4,B:5,C:6,N:7,O:8,F:9,Ne:10,Na:11,Mg:12,Al:13,Si:14,P:15,S:16,Cl:17,Ar:18,K:19,Ca:20,Sc:21,Ti:22,V:23,Cr:24,Mn:25,Fe:26,Co:27,Ni:28,Cu:29,Zn:30,Ga:31,Ge:32,As:33,Se:34,Br:35,Kr:36,Rb:37,Sr:38,Y:39,Zr:40,Nb:41,Mo:42,Tc:43,Ru:44,Rh:45,Pd:46,Ag:47,Cd:48,In:49,Sn:50,Sb:51,Te:52,I:53,Xe:54,Cs:55,Ba:56,La:57,Ce:58,Pr:59,Nd:60,Pm:61,Sm:62,Eu:63,Gd:64,Tb:65,Dy:66,Ho:67,Er:68,Tm:69,Yb:70,Lu:71,Hf:72,Ta:73,W:74,Re:75,Os:76,Ir:77,Pt:78,Au:79,Hg:80,Tl:81,Pb:82,Bi:83,Po:84,At:85,Rn:86};
+var CRY=MD.crystal||null;
+var boundary={aMin:0,aMax:1,bMin:0,bMax:1,cMin:0,cMax:1};
+var occTextureCache={};
+var CRY_INV=null;
+function computeCrystalInv(){
+    if(!CRY){CRY_INV=null;return}
+    var lv=CRY.latticeVectors;
+    var det=lv[0][0]*(lv[1][1]*lv[2][2]-lv[1][2]*lv[2][1])-lv[0][1]*(lv[1][0]*lv[2][2]-lv[1][2]*lv[2][0])+lv[0][2]*(lv[1][0]*lv[2][1]-lv[1][1]*lv[2][0]);
+    if(Math.abs(det)<1e-12){CRY_INV=null;return}
+    var invDet=1/det;
+    CRY_INV=[
+        [(lv[1][1]*lv[2][2]-lv[1][2]*lv[2][1])*invDet,(lv[0][2]*lv[2][1]-lv[0][1]*lv[2][2])*invDet,(lv[0][1]*lv[1][2]-lv[0][2]*lv[1][1])*invDet],
+        [(lv[1][2]*lv[2][0]-lv[1][0]*lv[2][2])*invDet,(lv[0][0]*lv[2][2]-lv[0][2]*lv[2][0])*invDet,(lv[0][2]*lv[1][0]-lv[0][0]*lv[1][2])*invDet],
+        [(lv[1][0]*lv[2][1]-lv[1][1]*lv[2][0])*invDet,(lv[0][1]*lv[2][0]-lv[0][0]*lv[2][1])*invDet,(lv[0][0]*lv[1][1]-lv[0][1]*lv[1][0])*invDet]
+    ];
+}
+computeCrystalInv();
 function updateMolInfo(){
     var infoEl=document.getElementById('mol-info');
     if(!infoEl)return;
@@ -456,7 +531,15 @@ function updateMolInfo(){
     var nElectrons=0;
     MD.atoms.forEach(function(a){nElectrons+=(AN[a.element]||0)});
     if(typeof chrg==='number')nElectrons-=chrg;
-    infoEl.innerHTML='Atoms: '+nAtoms+'<br>Charge: '+chrg+'<br>Electrons: '+nElectrons+'<br>Multiplicity: '+mult;
+    var html='Atoms: '+nAtoms+'<br>Charge: '+chrg+'<br>Electrons: '+nElectrons+'<br>Multiplicity: '+mult;
+    if(CRY){
+        var sa=boundary.aMax-boundary.aMin,sb=boundary.bMax-boundary.bMin,sc=boundary.cMax-boundary.cMin;
+        html+='<br>Cell: '+CRY.a.toFixed(3)+' × '+CRY.b.toFixed(3)+' × '+CRY.c.toFixed(3);
+        html+='<br>Angles: '+CRY.alpha.toFixed(1)+'°, '+CRY.beta.toFixed(1)+'°, '+CRY.gamma.toFixed(1)+'°';
+        if(CRY.spaceGroup)html+='<br>SG: '+CRY.spaceGroup;
+        html+='<br>Supercell: '+sa.toFixed(2)+'×'+sb.toFixed(2)+'×'+sc.toFixed(2);
+    }
+    infoEl.innerHTML=html;
 }
 updateMolInfo();
 var container=document.getElementById('container');
@@ -501,6 +584,273 @@ CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length;
 var CR={H:0.31,He:0.28,Li:1.28,Be:0.96,B:0.84,C:0.76,N:0.71,O:0.66,F:0.57,Na:1.66,Mg:1.41,Al:1.21,Si:1.11,P:1.07,S:1.05,Cl:1.02,K:2.03,Ca:1.76,Fe:1.32,Cu:1.32,Zn:1.22,Br:1.20,I:1.39};
 function getR(el){return(CR[el]||1.50)*0.5}
 
+function getOccupancyTexture(color,occupancy){
+    var key=color+'_'+occupancy.toFixed(3);
+    if(occTextureCache[key])return occTextureCache[key];
+    var canvas=document.createElement('canvas');
+    canvas.width=4;canvas.height=256;
+    var ctx=canvas.getContext('2d');
+    var boundY=Math.round((1-occupancy)*255);
+    ctx.fillStyle='#FFFFFF';
+    ctx.fillRect(0,0,4,boundY);
+    ctx.fillStyle=color;
+    ctx.fillRect(0,boundY,4,256-boundY);
+    var tex=new THREE.CanvasTexture(canvas);
+    tex.needsUpdate=true;
+    occTextureCache[key]=tex;
+    return tex;
+}
+
+function detectCrystalBaseBonds(){
+    if(!CRY||!CRY_INV)return;
+    var baseAtoms=CRY.baseAtoms;
+    var lv=CRY.latticeVectors;
+    var inv=CRY_INV;
+    var n=baseAtoms.length;
+    var CR2={H:0.31,He:0.28,Li:1.28,Be:0.96,B:0.85,C:0.76,N:0.71,O:0.66,F:0.57,Ne:0.58,Na:1.66,Mg:1.41,Al:1.21,Si:1.11,P:1.07,S:1.05,Cl:1.02,Ar:1.06,K:2.03,Ca:1.76,Sc:1.70,Ti:1.60,V:1.53,Cr:1.39,Mn:1.39,Fe:1.32,Co:1.26,Ni:1.24,Cu:1.32,Zn:1.22,Ga:1.22,Ge:1.20,As:1.19,Se:1.20,Br:1.20,Kr:1.16,I:1.39};
+    var BS={'C+C':[{o:3,l:1.20,t:0.05},{o:1.5,l:1.39,t:0.05},{o:2,l:1.38,t:0.05},{o:1,l:1.51,t:0.10}],'C+N':[{o:2,l:1.26,t:0.05},{o:1.5,l:1.36,t:0.05},{o:1,l:1.43,t:0.10},{o:3,l:1.16,t:0.06}],'C+O':[{o:2,l:1.24,t:0.05},{o:1,l:1.39,t:0.05}],'N+N':[{o:1,l:1.41,t:0.10},{o:2,l:1.25,t:0.06},{o:3,l:1.10,t:0.06}],'N+O':[{o:2,l:1.20,t:0.06},{o:1.5,l:1.30,t:0.06},{o:1,l:1.40,t:0.15}],'O+O':[{o:2,l:1.21,t:0.06},{o:1,l:1.48,t:0.15}],'C+S':[{o:1.5,l:1.73,t:0.06},{o:2,l:1.60,t:0.10},{o:1,l:1.82,t:0.15}],'C+F':[{o:1,l:1.33,t:0.10}],'C+H':[{o:1,l:0.97,t:0.15}],'N+H':[{o:1,l:0.88,t:0.15}],'O+H':[{o:1,l:0.85,t:0.15}]};
+    var BC={HH:0,CH:1.3,HO:1.2,HN:1.3,CC:1.9,CO:1.7,CN:1.7,NN:1.7,NO:1.8,CF:1.6,CS:2.0};
+    function pk(e1,e2){e1=e1.toUpperCase();e2=e2.toUpperCase();return e1<e2?e1+e2:e2+e1}
+    function sk(e1,e2){e1=e1.charAt(0).toUpperCase()+e1.slice(1).toLowerCase();e2=e2.charAt(0).toUpperCase()+e2.slice(1).toLowerCase();return e1<e2?e1+'+'+e2:e2+'+'+e1}
+    function gbo(el1,el2,d){
+        var p=pk(el1,el2);var co=BC[p];
+        if(co!==undefined){if(d>co)return 0}else{var r1=CR2[el1.charAt(0).toUpperCase()+el1.slice(1).toLowerCase()]||1.5;var r2=CR2[el2.charAt(0).toUpperCase()+el2.slice(1).toLowerCase()]||1.5;if(d>(r1+r2)+0.5)return 0}
+        var s=sk(el1,el2);var sp=BS[s];
+        if(sp){for(var k=0;k<sp.length;k++){if(Math.abs(d-sp[k].l)<=sp[k].t)return sp[k].o}var bo=1,md=Infinity;for(var k=0;k<sp.length;k++){var df=Math.abs(d-sp[k].l);if(df<md){md=df;bo=sp[k].o}}return bo}
+        var r1=CR2[el1.charAt(0).toUpperCase()+el1.slice(1).toLowerCase()]||1.5;var r2=CR2[el2.charAt(0).toUpperCase()+el2.slice(1).toLowerCase()]||1.5;var rs=r1+r2;var ratio=rs?d/rs:1;
+        if(ratio<0.85)return 3;if(ratio<0.90)return 2;return 1;
+    }
+    function cartToFrac(a){
+        return[inv[0][0]*a.x+inv[0][1]*a.y+inv[0][2]*a.z,
+               inv[1][0]*a.x+inv[1][1]*a.y+inv[1][2]*a.z,
+               inv[2][0]*a.x+inv[2][1]*a.y+inv[2][2]*a.z];
+    }
+    var bonds=[];
+    for(var i=0;i<n;i++){
+        var f1=cartToFrac(baseAtoms[i]);
+        for(var j=i+1;j<n;j++){
+            var f2=cartToFrac(baseAtoms[j]);
+            var fdx=f2[0]-f1[0],fdy=f2[1]-f1[1],fdz=f2[2]-f1[2];
+            var sx=Math.round(fdx),sy=Math.round(fdy),sz=Math.round(fdz);
+            var wfx=fdx-sx,wfy=fdy-sy,wfz=fdz-sz;
+            var dx=wfx*lv[0][0]+wfy*lv[1][0]+wfz*lv[2][0];
+            var dy=wfx*lv[0][1]+wfy*lv[1][1]+wfz*lv[2][1];
+            var dz=wfx*lv[0][2]+wfy*lv[1][2]+wfz*lv[2][2];
+            var dist=Math.sqrt(dx*dx+dy*dy+dz*dz);
+            var bo=gbo(baseAtoms[i].element,baseAtoms[j].element,dist);
+            if(bo>0){
+                bonds.push({atom1:i,atom2:j,order:bo,shift:[-sx,-sy,-sz]});
+            }
+        }
+    }
+    CRY.baseBonds=bonds;
+}
+
+function rebuildCrystal(){
+    if(!CRY)return;
+    var lv=CRY.latticeVectors;
+    var aMin=boundary.aMin,aMax=boundary.aMax;
+    var bMin=boundary.bMin,bMax=boundary.bMax;
+    var cMin=boundary.cMin,cMax=boundary.cMax;
+    var baseAtoms=CRY.baseAtoms;
+    var baseBonds=CRY.baseBonds;
+
+    if(!CRY_INV){MD.atoms=[];MD.bonds=[];updateMolInfo();return}
+    var inv=CRY_INV;
+
+    if(baseBonds.length===0||!baseBonds[0].shift){
+        detectCrystalBaseBonds();
+        baseBonds=CRY.baseBonds;
+    }
+
+    var iMin=Math.floor(aMin),iMax=Math.ceil(aMax);
+    var jMin=Math.floor(bMin),jMax=Math.ceil(bMax);
+    var kMin=Math.floor(cMin),kMax=Math.ceil(cMax);
+    var EPS=1e-9;
+
+    var atoms=[];
+    var bonds=[];
+    var idx=0;
+    var cellMap={};
+
+    baseAtoms.forEach(function(ba,bi){
+        var fx=inv[0][0]*ba.x+inv[0][1]*ba.y+inv[0][2]*ba.z;
+        var fy=inv[1][0]*ba.x+inv[1][1]*ba.y+inv[1][2]*ba.z;
+        var fz=inv[2][0]*ba.x+inv[2][1]*ba.y+inv[2][2]*ba.z;
+        fx-=Math.floor(fx);fy-=Math.floor(fy);fz-=Math.floor(fz);
+        for(var ci=iMin;ci<=iMax;ci++){
+            for(var cj=jMin;cj<=jMax;cj++){
+                for(var ck=kMin;ck<=kMax;ck++){
+                    var ax=fx+ci,ay=fy+cj,az=fz+ck;
+                    if(ax<aMin-EPS||ax>aMax+EPS)continue;
+                    if(ay<bMin-EPS||ay>bMax+EPS)continue;
+                    if(az<cMin-EPS||az>cMax+EPS)continue;
+                    var ox=ax*lv[0][0]+ay*lv[1][0]+az*lv[2][0];
+                    var oy=ax*lv[0][1]+ay*lv[1][1]+az*lv[2][1];
+                    var oz=ax*lv[0][2]+ay*lv[1][2]+az*lv[2][2];
+                    var color=ba.color||((MD.atomColors&&MD.atomColors[ba.element])||'#FF1493');
+                    atoms.push({
+                        element:ba.element,
+                        x:ox,y:oy,z:oz,
+                        index:idx,
+                        occupancy:ba.occupancy,
+                        color:color,
+                        baseIdx:ba.baseIdx!=null?ba.baseIdx:bi,
+                        cellI:ci,cellJ:cj,cellK:ck
+                    });
+                    cellMap[bi+'_'+ci+'_'+cj+'_'+ck]=idx;
+                    idx++;
+                }
+            }
+        }
+    });
+
+    var seenPairs={};
+    var seenSplits={};
+    baseBonds.forEach(function(bb){
+        var b1=bb.atom1,b2=bb.atom2;
+        var s=bb.shift||[0,0,0];
+        var hasShift=s[0]||s[1]||s[2];
+        for(var ci1=iMin;ci1<=iMax;ci1++){
+            for(var cj1=jMin;cj1<=jMax;cj1++){
+                for(var ck1=kMin;ck1<=kMax;ck1++){
+                    var idx1=cellMap[b1+'_'+ci1+'_'+cj1+'_'+ck1];
+                    if(idx1==null)continue;
+                    var ci2=ci1+s[0],cj2=cj1+s[1],ck2=ck1+s[2];
+                    var idx2=cellMap[b2+'_'+ci2+'_'+cj2+'_'+ck2];
+                    if(idx2!=null){
+                        var key=idx1<idx2?idx1+'_'+idx2:idx2+'_'+idx1;
+                        if(!seenPairs[key]){
+                            seenPairs[key]=true;
+                            bonds.push({atom1:idx1,atom2:idx2,order:bb.order});
+                        }
+                    }else{
+                        var idx2s=cellMap[b2+'_'+ci1+'_'+cj1+'_'+ck1];
+                        if(idx2s!=null){
+                            var skey='F_'+idx1+'_'+idx2s+'_'+s[0]+'_'+s[1]+'_'+s[2];
+                            if(!seenSplits[skey]){
+                                seenSplits[skey]=true;
+                                bonds.push({atom1:idx1,atom2:idx2s,order:bb.order,shift:s});
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if(hasShift){
+            var rs=[-s[0],-s[1],-s[2]];
+            for(var ci2=iMin;ci2<=iMax;ci2++){
+                for(var cj2=jMin;cj2<=jMax;cj2++){
+                    for(var ck2=kMin;ck2<=kMax;ck2++){
+                        var idx2r=cellMap[b2+'_'+ci2+'_'+cj2+'_'+ck2];
+                        if(idx2r==null)continue;
+                        var ri1=ci2+rs[0],rj1=cj2+rs[1],rk1=ck2+rs[2];
+                        var ridx1=cellMap[b1+'_'+ri1+'_'+rj1+'_'+rk1];
+                        if(ridx1==null){
+                            var idx1r=cellMap[b1+'_'+ci2+'_'+cj2+'_'+ck2];
+                            if(idx1r!=null){
+                                var skey='R_'+idx2r+'_'+idx1r+'_'+rs[0]+'_'+rs[1]+'_'+rs[2];
+                                if(!seenSplits[skey]){
+                                    seenSplits[skey]=true;
+                                    bonds.push({atom1:idx2r,atom2:idx1r,order:bb.order,shift:rs});
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    MD.atoms=atoms;
+    MD.bonds=bonds;
+    updateMolInfo();
+}
+
+function removeDisorder(){
+    if(!CRY)return;
+    var newBaseAtoms=[];
+    var oldToNew={};
+    CRY.baseAtoms.forEach(function(ba,i){
+        var occ=ba.occupancy!=null?ba.occupancy:1;
+        if(occ<0.5)return;
+        var newIdx=newBaseAtoms.length;
+        oldToNew[i]=newIdx;
+        var newOcc=occ>0.5?1:occ;
+        var color=ba.color||((MD.atomColors&&MD.atomColors[ba.element])||'#FF1493');
+        newBaseAtoms.push({
+            element:ba.element,x:ba.x,y:ba.y,z:ba.z,
+            index:newIdx,occupancy:newOcc,baseIdx:newIdx,color:color
+        });
+    });
+    CRY.baseBonds=CRY.baseBonds.filter(function(b){
+        return oldToNew[b.atom1]!=null&&oldToNew[b.atom2]!=null;
+    }).map(function(b){
+        return{atom1:oldToNew[b.atom1],atom2:oldToNew[b.atom2],order:b.order,shift:b.shift};
+    });
+    CRY.baseAtoms=newBaseAtoms;
+    rebuildCrystal();
+    rebuildScene();
+}
+
+var cellWireframe=null;
+function buildCellWireframe(){
+    if(cellWireframe){moleculeGroup.remove(cellWireframe);cellWireframe=null}
+    if(!CRY)return;
+    var lv=CRY.latticeVectors;
+    var aMin=boundary.aMin,aMax=boundary.aMax;
+    var bMin=boundary.bMin,bMax=boundary.bMax;
+    var cMin=boundary.cMin,cMax=boundary.cMax;
+    var corners=[];
+    for(var i=0;i<2;i++)for(var j=0;j<2;j++)for(var k=0;k<2;k++){
+        var ai=i?aMax:aMin,aj=j?bMax:bMin,ak=k?cMax:cMin;
+        var x=ai*lv[0][0]+aj*lv[1][0]+ak*lv[2][0];
+        var y=ai*lv[0][1]+aj*lv[1][1]+ak*lv[2][1];
+        var z=ai*lv[0][2]+aj*lv[1][2]+ak*lv[2][2];
+        corners.push(new THREE.Vector3(x-CX,y-CY,z-CZ));
+    }
+    var edges=[[0,4],[1,5],[2,6],[3,7],[0,2],[1,3],[4,6],[5,7],[0,1],[2,3],[4,5],[6,7]];
+    var positions=[];
+    edges.forEach(function(e){
+        positions.push(corners[e[0]].x,corners[e[0]].y,corners[e[0]].z);
+        positions.push(corners[e[1]].x,corners[e[1]].y,corners[e[1]].z);
+    });
+    var geo=new THREE.BufferGeometry();
+    geo.setAttribute('position',new THREE.Float32BufferAttribute(positions,3));
+    var mat=new THREE.LineBasicMaterial({color:0x88aaff});
+    cellWireframe=new THREE.LineSegments(geo,mat);
+    moleculeGroup.add(cellWireframe);
+}
+
+function updateAxesIndicator(){
+    if(!CRY)return;
+    var el=document.getElementById('axes-indicator');
+    if(!el)return;
+    var lv=CRY.latticeVectors;
+    var vectors=[
+        {dir:new THREE.Vector3(lv[0][0],lv[0][1],lv[0][2]).normalize(),color:'#FF4444',label:'a'},
+        {dir:new THREE.Vector3(lv[1][0],lv[1][1],lv[1][2]).normalize(),color:'#44FF44',label:'b'},
+        {dir:new THREE.Vector3(lv[2][0],lv[2][1],lv[2][2]).normalize(),color:'#4488FF',label:'c'}
+    ];
+    vectors.forEach(function(v){v.dir.applyQuaternion(rotQuat)});
+    vectors.sort(function(a,b){return a.dir.z-b.dir.z});
+    var cx=45,cy=45,scale=30;
+    var svg='<svg viewBox="0 0 90 90">';
+    vectors.forEach(function(v){
+        var x2=cx+v.dir.x*scale;
+        var y2=cy-v.dir.y*scale;
+        var depth=(v.dir.z+1)/2;
+        var opacity=0.4+depth*0.6;
+        var width=1.5+depth*1.5;
+        svg+='<line x1="'+cx+'" y1="'+cy+'" x2="'+x2.toFixed(1)+'" y2="'+y2.toFixed(1)+'" stroke="'+v.color+'" stroke-width="'+width.toFixed(1)+'" stroke-linecap="round" opacity="'+opacity.toFixed(2)+'"/>';
+        svg+='<circle cx="'+x2.toFixed(1)+'" cy="'+y2.toFixed(1)+'" r="3" fill="'+v.color+'" opacity="'+opacity.toFixed(2)+'"/>';
+        svg+='<text x="'+(x2+4).toFixed(1)+'" y="'+(y2+4).toFixed(1)+'" fill="'+v.color+'" font-size="10" font-weight="bold" opacity="'+opacity.toFixed(2)+'">'+v.label+'</text>';
+    });
+    svg+='<circle cx="'+cx+'" cy="'+cy+'" r="2" fill="#888"/>';
+    svg+='</svg>';
+    el.innerHTML=svg;
+}
+
 var atomMeshes=[];
 var bondMeshes=[];
 
@@ -508,6 +858,7 @@ function rebuildScene(){
     while(moleculeGroup.children.length>0)moleculeGroup.remove(moleculeGroup.children[0]);
     atomMeshes.length=0;
     bondMeshes.length=0;
+    cellWireframe=null;
     CX=0;CY=0;CZ=0;
     MD.atoms.forEach(function(a){CX+=a.x;CY+=a.y;CZ+=a.z});
     if(MD.atoms.length>0){CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length}
@@ -515,7 +866,14 @@ function rebuildScene(){
         a.index=i;
         var r=getR(a.element);
         var g=new THREE.SphereGeometry(r,32,24);
-        var m=new THREE.MeshPhongMaterial({color:new THREE.Color(a.color),shininess:80,specular:0x444444});
+        var occ=a.occupancy!=null?a.occupancy:1;
+        var m;
+        if(occ<0.999){
+            var tex=getOccupancyTexture(a.color,occ);
+            m=new THREE.MeshPhongMaterial({color:0xffffff,map:tex,shininess:80,specular:0x444444});
+        }else{
+            m=new THREE.MeshPhongMaterial({color:new THREE.Color(a.color),shininess:80,specular:0x444444});
+        }
         var mesh=new THREE.Mesh(g,m);
         mesh.position.set(a.x-CX,a.y-CY,a.z-CZ);
         mesh.userData={element:a.element,index:i};
@@ -523,6 +881,7 @@ function rebuildScene(){
         atomMeshes.push(mesh);
     });
     MD.bonds.forEach(function(b){createBond(b)});
+    if(CRY)buildCellWireframe();
     highlightSelected();
 }
 function updateScenePositions(){
@@ -533,6 +892,7 @@ function updateScenePositions(){
     for(var i=bondMeshes.length-1;i>=0;i--){moleculeGroup.remove(bondMeshes[i])}
     bondMeshes.length=0;
     MD.bonds.forEach(function(b){createBond(b)});
+    if(CRY)buildCellWireframe();
     highlightSelected();
 }
 
@@ -544,8 +904,15 @@ function getPerp(dir){
 function createBond(b){
     var a1=MD.atoms[b.atom1],a2=MD.atoms[b.atom2];
     if(!a1||!a2)return;
+    var a2x=a2.x,a2y=a2.y,a2z=a2.z;
+    if(b.shift&&CRY){
+        var lv=CRY.latticeVectors;
+        a2x+=b.shift[0]*lv[0][0]+b.shift[1]*lv[1][0]+b.shift[2]*lv[2][0];
+        a2y+=b.shift[0]*lv[0][1]+b.shift[1]*lv[1][1]+b.shift[2]*lv[2][1];
+        a2z+=b.shift[0]*lv[0][2]+b.shift[1]*lv[1][2]+b.shift[2]*lv[2][2];
+    }
     var s=new THREE.Vector3(a1.x-CX,a1.y-CY,a1.z-CZ);
-    var e=new THREE.Vector3(a2.x-CX,a2.y-CY,a2.z-CZ);
+    var e=new THREE.Vector3(a2x-CX,a2y-CY,a2z-CZ);
     var d=new THREE.Vector3().subVectors(e,s);
     var l=d.length();
     var mp=new THREE.Vector3().addVectors(s,e).multiplyScalar(0.5);
@@ -606,7 +973,59 @@ var selectedAtoms=[];
 var originalCoords=null;
 var modalCallback=null;
 
+if(CRY){rebuildCrystal();}
 rebuildScene();
+
+if(CRY){
+    var crystalPanel=document.getElementById('crystal-panel');
+    if(crystalPanel)crystalPanel.style.display='block';
+    var axesEl=document.getElementById('axes-indicator');
+    if(axesEl)axesEl.style.display='block';
+    updateAxesIndicator();
+    ['bnd-a-min','bnd-a-max','bnd-b-min','bnd-b-max','bnd-c-min','bnd-c-max'].forEach(function(id){
+        var inp=document.getElementById(id);
+        if(inp){
+            inp.addEventListener('change',function(){
+                var v=parseFloat(inp.value);
+                if(isNaN(v))v=0;
+                v=Math.max(-5,Math.min(5,v));
+                inp.value=v;
+                if(id==='bnd-a-min')boundary.aMin=v;
+                else if(id==='bnd-a-max')boundary.aMax=v;
+                else if(id==='bnd-b-min')boundary.bMin=v;
+                else if(id==='bnd-b-max')boundary.bMax=v;
+                else if(id==='bnd-c-min')boundary.cMin=v;
+                else if(id==='bnd-c-max')boundary.cMax=v;
+                if(boundary.aMax<boundary.aMin)boundary.aMax=boundary.aMin;
+                if(boundary.bMax<boundary.bMin)boundary.bMax=boundary.bMin;
+                if(boundary.cMax<boundary.cMin)boundary.cMax=boundary.cMin;
+                rebuildCrystal();
+                rebuildScene();
+            });
+        }
+    });
+    var rmDisorderBtn=document.getElementById('bnd-remove-disorder');
+    if(rmDisorderBtn){
+        rmDisorderBtn.addEventListener('click',function(){
+            if(!CRY)return;
+            var removedCount=0;
+            CRY.baseAtoms.forEach(function(ba){
+                var occ=ba.occupancy!=null?ba.occupancy:1;
+                if(occ<0.5)removedCount++;
+            });
+            if(removedCount===0){
+                showModal('<h3>No Disorder</h3><div class="current-val">No atoms with occupancy &lt; 0.5 found.</div><div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">OK</button></div>',null);
+                document.getElementById('m-cancel').addEventListener('click',hideModal);
+                return;
+            }
+            showModal('<h3>Remove Disorder</h3>'+
+                '<div class="current-val">Remove '+removedCount+' atom(s) with occupancy &lt; 0.5?<br>Atoms with occupancy &gt; 0.5 will be set to 1.0.<br>Atoms with occupancy = 0.5 will be kept unchanged.</div>'+
+                '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok mbtn-danger" id="m-ok">Remove</button></div>',null);
+            document.getElementById('m-ok').addEventListener('click',function(){hideModal();removeDisorder()});
+            document.getElementById('m-cancel').addEventListener('click',hideModal);
+        });
+    }
+}
 
 var maxD=0;
 MD.atoms.forEach(function(a){var dx=a.x-CX,dy=a.y-CY,dz=a.z-CZ,dd=Math.sqrt(dx*dx+dy*dy+dz*dz);if(dd>maxD)maxD=dd});
@@ -1545,6 +1964,34 @@ function rotAroundAxis(px,py,pz,ox,oy,oz,dx,dy,dz,angle){
 function saveOriginal(){originalCoords=MD.atoms.map(function(a){return{x:a.x,y:a.y,z:a.z}})}
 function restoreOriginal(){if(!originalCoords)return;originalCoords.forEach(function(c,i){MD.atoms[i].x=c.x;MD.atoms[i].y=c.y;MD.atoms[i].z=c.z})}
 
+function propagateToAllCells(){
+    if(!CRY||!originalCoords)return;
+    var modified=[];
+    MD.atoms.forEach(function(a,i){
+        var oc=originalCoords[i];
+        if(oc&&(Math.abs(a.x-oc.x)>1e-12||Math.abs(a.y-oc.y)>1e-12||Math.abs(a.z-oc.z)>1e-12)){
+            modified.push(i);
+        }
+    });
+    var modifiedSet=new Set(modified);
+    modified.forEach(function(idx){
+        var a=MD.atoms[idx];
+        if(a.baseIdx==null)return;
+        var oc=originalCoords[idx];
+        var dx=a.x-oc.x,dy=a.y-oc.y,dz=a.z-oc.z;
+        MD.atoms.forEach(function(other,i){
+            if(modifiedSet.has(i))return;
+            if(other.baseIdx===a.baseIdx){
+                var oc2=originalCoords[i];
+                other.x=oc2.x+dx;
+                other.y=oc2.y+dy;
+                other.z=oc2.z+dz;
+                modifiedSet.add(i);
+            }
+        });
+    });
+}
+
 function applyBondLength(targetLen,fixFirst){
     var i1=selectedAtoms[0],i2=selectedAtoms[1];
     var a1=MD.atoms[i1],a2=MD.atoms[i2];
@@ -1574,6 +2021,7 @@ function applyBondLength(targetLen,fixFirst){
             a.x=a2.x+vx*scale;a.y=a2.y+vy*scale;a.z=a2.z+vz*scale;
         });
     }
+    if(CRY)propagateToAllCells();
     updateScenePositions();
 }
 
@@ -1604,6 +2052,7 @@ function applyBondAngle(targetDeg,fixFirstTwo){
             MD.atoms[idx].x=r.x;MD.atoms[idx].y=r.y;MD.atoms[idx].z=r.z;
         });
     }
+    if(CRY)propagateToAllCells();
     updateScenePositions();
 }
 
@@ -1631,6 +2080,7 @@ function applyDihedral(targetDeg,fixFirstThree){
             MD.atoms[idx].x=r.x;MD.atoms[idx].y=r.y;MD.atoms[idx].z=r.z;
         });
     }
+    if(CRY)propagateToAllCells();
     updateScenePositions();
 }
 
@@ -1751,21 +2201,41 @@ function showAddAtomModal(){
         var bl=parseFloat(document.getElementById('m-val').value)||1.5;
         var bondOrder=parseFloat(document.getElementById('m-bond-order').value)||1;
         var dir={x:0,y:0,z:1};
-        var bonded=[];
-        MD.bonds.forEach(function(b){
-            if(b.atom1===anchorIdx)bonded.push(b.atom2);
-            if(b.atom2===anchorIdx)bonded.push(b.atom1);
-        });
-        if(bonded.length>0){
-            var avg={x:0,y:0,z:0};
-            bonded.forEach(function(bi){avg.x+=MD.atoms[bi].x-anchor.x;avg.y+=MD.atoms[bi].y-anchor.y;avg.z+=MD.atoms[bi].z-anchor.z});
-            var al=Math.sqrt(avg.x*avg.x+avg.y*avg.y+avg.z*avg.z);
-            if(al>1e-10){dir={x:-avg.x/al,y:-avg.y/al,z:-avg.z/al}}
+        if(CRY){
+            var baseAnchorIdx=anchor.baseIdx!=null?anchor.baseIdx:anchorIdx;
+            var baseAnchor=CRY.baseAtoms[baseAnchorIdx];
+            var bondedBase=[];
+            CRY.baseBonds.forEach(function(b){
+                if(b.atom1===baseAnchorIdx)bondedBase.push(b.atom2);
+                if(b.atom2===baseAnchorIdx)bondedBase.push(b.atom1);
+            });
+            if(bondedBase.length>0){
+                var avg={x:0,y:0,z:0};
+                bondedBase.forEach(function(bi){avg.x+=CRY.baseAtoms[bi].x-baseAnchor.x;avg.y+=CRY.baseAtoms[bi].y-baseAnchor.y;avg.z+=CRY.baseAtoms[bi].z-baseAnchor.z});
+                var al=Math.sqrt(avg.x*avg.x+avg.y*avg.y+avg.z*avg.z);
+                if(al>1e-10){dir={x:-avg.x/al,y:-avg.y/al,z:-avg.z/al}}
+            }
+            var newBaseIdx=CRY.baseAtoms.length;
+            CRY.baseAtoms.push({element:el,x:baseAnchor.x+dir.x*bl,y:baseAnchor.y+dir.y*bl,z:baseAnchor.z+dir.z*bl,index:newBaseIdx,baseIdx:newBaseIdx,occupancy:1});
+            CRY.baseBonds.push({atom1:baseAnchorIdx,atom2:newBaseIdx,order:bondOrder});
+            rebuildCrystal();rebuildScene();hideModal();originalCoords=null;resetSelection();
+        }else{
+            var bonded=[];
+            MD.bonds.forEach(function(b){
+                if(b.atom1===anchorIdx)bonded.push(b.atom2);
+                if(b.atom2===anchorIdx)bonded.push(b.atom1);
+            });
+            if(bonded.length>0){
+                var avg={x:0,y:0,z:0};
+                bonded.forEach(function(bi){avg.x+=MD.atoms[bi].x-anchor.x;avg.y+=MD.atoms[bi].y-anchor.y;avg.z+=MD.atoms[bi].z-anchor.z});
+                var al=Math.sqrt(avg.x*avg.x+avg.y*avg.y+avg.z*avg.z);
+                if(al>1e-10){dir={x:-avg.x/al,y:-avg.y/al,z:-avg.z/al}}
+            }
+            var newIdx=MD.atoms.length;
+            MD.atoms.push({element:el,x:anchor.x+dir.x*bl,y:anchor.y+dir.y*bl,z:anchor.z+dir.z*bl,color:MD.atomColors[el]||'#FF1493',index:newIdx});
+            MD.bonds.push({atom1:anchorIdx,atom2:newIdx,order:bondOrder});
+            rebuildScene();hideModal();originalCoords=null;resetSelection();
         }
-        var newIdx=MD.atoms.length;
-        MD.atoms.push({element:el,x:anchor.x+dir.x*bl,y:anchor.y+dir.y*bl,z:anchor.z+dir.z*bl,color:MD.atomColors[el]||'#FF1493',index:newIdx});
-        MD.bonds.push({atom1:anchorIdx,atom2:newIdx,order:bondOrder});
-        rebuildScene();hideModal();originalCoords=null;resetSelection();
     });
     document.getElementById('m-cancel').addEventListener('click',function(){hideModal();originalCoords=null;resetSelection()});
 }
@@ -1778,12 +2248,22 @@ function showDeleteAtomModal(){
         '<div class="current-val">Delete '+name+'?</div>'+
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok mbtn-danger" id="m-ok">Delete</button></div>',null);
     document.getElementById('m-ok').addEventListener('click',function(){
-        MD.atoms.splice(idx,1);
-        MD.atoms.forEach(function(a,i){a.index=i});
-        MD.bonds=MD.bonds.filter(function(b){return b.atom1!==idx&&b.atom2!==idx}).map(function(b){
-            return{atom1:b.atom1>idx?b.atom1-1:b.atom1,atom2:b.atom2>idx?b.atom2-1:b.atom2,order:b.order};
-        });
-        rebuildScene();hideModal();resetSelection();
+        if(CRY){
+            var baseIdx=a.baseIdx!=null?a.baseIdx:idx;
+            CRY.baseAtoms.splice(baseIdx,1);
+            CRY.baseAtoms.forEach(function(ba,i){ba.index=i;ba.baseIdx=i});
+            CRY.baseBonds=CRY.baseBonds.filter(function(b){return b.atom1!==baseIdx&&b.atom2!==baseIdx}).map(function(b){
+                return{atom1:b.atom1>baseIdx?b.atom1-1:b.atom1,atom2:b.atom2>baseIdx?b.atom2-1:b.atom2,order:b.order,shift:b.shift};
+            });
+            rebuildCrystal();rebuildScene();hideModal();resetSelection();
+        }else{
+            MD.atoms.splice(idx,1);
+            MD.atoms.forEach(function(a,i){a.index=i});
+            MD.bonds=MD.bonds.filter(function(b){return b.atom1!==idx&&b.atom2!==idx}).map(function(b){
+                return{atom1:b.atom1>idx?b.atom1-1:b.atom1,atom2:b.atom2>idx?b.atom2-1:b.atom2,order:b.order};
+            });
+            rebuildScene();hideModal();resetSelection();
+        }
     });
     document.getElementById('m-cancel').addEventListener('click',function(){hideModal();resetSelection()});
 }
@@ -1904,10 +2384,97 @@ function doSave(){
     });
     mopac+='\\n';
 
+    var cifContent='';
+    if(CRY){
+        var lv=CRY.latticeVectors;
+        var det=lv[0][0]*(lv[1][1]*lv[2][2]-lv[1][2]*lv[2][1])-lv[0][1]*(lv[1][0]*lv[2][2]-lv[1][2]*lv[2][0])+lv[0][2]*(lv[1][0]*lv[2][1]-lv[1][1]*lv[2][0]);
+        var invDet=1/det;
+        var inv=[
+            [(lv[1][1]*lv[2][2]-lv[1][2]*lv[2][1])*invDet,(lv[0][2]*lv[2][1]-lv[0][1]*lv[2][2])*invDet,(lv[0][1]*lv[1][2]-lv[0][2]*lv[1][1])*invDet],
+            [(lv[1][2]*lv[2][0]-lv[1][0]*lv[2][2])*invDet,(lv[0][0]*lv[2][2]-lv[0][2]*lv[2][0])*invDet,(lv[0][2]*lv[1][0]-lv[0][0]*lv[1][2])*invDet],
+            [(lv[1][0]*lv[2][1]-lv[1][1]*lv[2][0])*invDet,(lv[0][1]*lv[2][0]-lv[0][0]*lv[2][1])*invDet,(lv[0][0]*lv[1][1]-lv[0][1]*lv[1][0])*invDet]
+        ];
+        cifContent='data_modified\\n';
+        cifContent+='_cell_length_a '+CRY.a.toFixed(6)+'\\n';
+        cifContent+='_cell_length_b '+CRY.b.toFixed(6)+'\\n';
+        cifContent+='_cell_length_c '+CRY.c.toFixed(6)+'\\n';
+        cifContent+='_cell_angle_alpha '+CRY.alpha.toFixed(6)+'\\n';
+        cifContent+='_cell_angle_beta '+CRY.beta.toFixed(6)+'\\n';
+        cifContent+='_cell_angle_gamma '+CRY.gamma.toFixed(6)+'\\n';
+        if(CRY.spaceGroup)cifContent+='_symmetry_space_group_name_H-M \\''+CRY.spaceGroup+'\\'\\n';
+        cifContent+='loop_\\n_symmetry_equiv_pos_as_xyz\\n';
+        CRY.symmetryOps.forEach(function(op){cifContent+='\\''+op+'\\'\\n'});
+        cifContent+='loop_\\n_atom_site_label\\n_atom_site_type_symbol\\n_atom_site_fract_x\\n_atom_site_fract_y\\n_atom_site_fract_z\\n_atom_site_occupancy\\n';
+        CRY.baseAtoms.forEach(function(ba,i){
+            var fx=inv[0][0]*ba.x+inv[0][1]*ba.y+inv[0][2]*ba.z;
+            var fy=inv[1][0]*ba.x+inv[1][1]*ba.y+inv[1][2]*ba.z;
+            var fz=inv[2][0]*ba.x+inv[2][1]*ba.y+inv[2][2]*ba.z;
+            var label=ba.element+(i+1);
+            var occ=(ba.occupancy!=null?ba.occupancy:1).toFixed(3);
+            cifContent+=label+' '+ba.element+' '+fx.toFixed(6)+' '+fy.toFixed(6)+' '+fz.toFixed(6)+' '+occ+'\\n';
+        });
+    }
+
+    var vaspContent='';
+    if(CRY){
+        var lv=CRY.latticeVectors;
+        var vDet=lv[0][0]*(lv[1][1]*lv[2][2]-lv[1][2]*lv[2][1])-lv[0][1]*(lv[1][0]*lv[2][2]-lv[1][2]*lv[2][0])+lv[0][2]*(lv[1][0]*lv[2][1]-lv[1][1]*lv[2][0]);
+        var vInvDet=1/vDet;
+        var vInv=[
+            [(lv[1][1]*lv[2][2]-lv[1][2]*lv[2][1])*vInvDet,(lv[0][2]*lv[2][1]-lv[0][1]*lv[2][2])*vInvDet,(lv[0][1]*lv[1][2]-lv[0][2]*lv[1][1])*vInvDet],
+            [(lv[1][2]*lv[2][0]-lv[1][0]*lv[2][2])*vInvDet,(lv[0][0]*lv[2][2]-lv[0][2]*lv[2][0])*vInvDet,(lv[0][2]*lv[1][0]-lv[0][0]*lv[1][2])*vInvDet],
+            [(lv[1][0]*lv[2][1]-lv[1][1]*lv[2][0])*vInvDet,(lv[0][1]*lv[2][0]-lv[0][0]*lv[2][1])*vInvDet,(lv[0][0]*lv[1][1]-lv[0][1]*lv[1][0])*vInvDet]
+        ];
+        var elemOrder=[];
+        var elemCounts={};
+        MD.atoms.forEach(function(a){
+            if(elemCounts[a.element]===undefined){elemOrder.push(a.element);elemCounts[a.element]=0}
+            elemCounts[a.element]++;
+        });
+        vaspContent=(MD.title||'Modified structure')+'\\n';
+        vaspContent+='1.0\\n';
+        for(var ii=0;ii<3;ii++){
+            vaspContent+='  '+lv[ii][0].toFixed(8)+'  '+lv[ii][1].toFixed(8)+'  '+lv[ii][2].toFixed(8)+'\\n';
+        }
+        vaspContent+=elemOrder.join('  ')+'\\n';
+        vaspContent+=elemOrder.map(function(e){return elemCounts[e]}).join('  ')+'\\n';
+        vaspContent+='Direct\\n';
+        MD.atoms.forEach(function(a){
+            var fx=vInv[0][0]*a.x+vInv[0][1]*a.y+vInv[0][2]*a.z;
+            var fy=vInv[1][0]*a.x+vInv[1][1]*a.y+vInv[1][2]*a.z;
+            var fz=vInv[2][0]*a.x+vInv[2][1]*a.y+vInv[2][2]*a.z;
+            vaspContent+='  '+fx.toFixed(8)+'  '+fy.toFixed(8)+'  '+fz.toFixed(8)+'\\n';
+        });
+    }
+
+    var cubeContent='';
+    if(CRY){
+        var clv=CRY.latticeVectors;
+        var nGrid=2;
+        cubeContent='Molecular Viewer export\\n';
+        cubeContent+='Generated from '+(MD.title||'structure')+'\\n';
+        cubeContent+='-'+MD.atoms.length+'  0.000000  0.000000  0.000000\\n';
+        cubeContent+=nGrid+'  '+(clv[0][0]/nGrid).toFixed(8)+'  '+(clv[0][1]/nGrid).toFixed(8)+'  '+(clv[0][2]/nGrid).toFixed(8)+'\\n';
+        cubeContent+=nGrid+'  '+(clv[1][0]/nGrid).toFixed(8)+'  '+(clv[1][1]/nGrid).toFixed(8)+'  '+(clv[1][2]/nGrid).toFixed(8)+'\\n';
+        cubeContent+=nGrid+'  '+(clv[2][0]/nGrid).toFixed(8)+'  '+(clv[2][1]/nGrid).toFixed(8)+'  '+(clv[2][2]/nGrid).toFixed(8)+'\\n';
+        MD.atoms.forEach(function(a){
+            var z=AN2[a.element]||0;
+            cubeContent+=z+'  0.000000  '+a.x.toFixed(8)+'  '+a.y.toFixed(8)+'  '+a.z.toFixed(8)+'\\n';
+        });
+        var nVals=nGrid*nGrid*nGrid;
+        for(var vi=0;vi<nVals;vi++){
+            cubeContent+='0.0000e+00';
+            if((vi+1)%6===0||vi===nVals-1){cubeContent+='\\n'}else{cubeContent+='  '}
+        }
+    }
+
     showModal('<h3>Save File</h3>'+
         '<label>Format:</label><select id="m-fmt">'+
         '<option value="xyz">XYZ (.xyz)</option>'+
         '<option value="gjf">Gaussian Input (.gjf)</option>'+
+        (CRY?'<option value="cif">CIF (.cif)</option>':'')+
+        (CRY?'<option value="vasp">VASP POSCAR (.vasp)</option>':'')+
+        (CRY?'<option value="cube">Gaussian Cube (.cube)</option>':'')+
         '<option value="coord">Turbomole Coord (.coord)</option>'+
         '<option value="inp">ORCA Input (.inp)</option>'+
         '<option value="mol2">MOL2 (.mol2)</option>'+
@@ -1921,6 +2488,9 @@ function doSave(){
         var content,ext;
         switch(fmt){
             case 'gjf':content=gjf;ext='.gjf';break;
+            case 'cif':content=cifContent;ext='.cif';break;
+            case 'vasp':content=vaspContent;ext='.vasp';break;
+            case 'cube':content=cubeContent;ext='.cube';break;
             case 'coord':content=coord;ext='.coord';break;
             case 'inp':content=orcaInp;ext='.inp';break;
             case 'mol2':content=mol2;ext='.mol2';break;
@@ -1992,6 +2562,7 @@ function updateTransform(){
         moleculeGroup.quaternion.copy(rotQuat);
         pivotGroup.position.set(panX,panY,0);
     }
+    if(CRY)updateAxesIndicator();
 }
 
 var canvas=renderer.domElement;

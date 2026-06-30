@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.parseTcl = exports.parseOrcaOut = exports.parseGaussianLog = void 0;
+exports.parseVesta = exports.parseCube = exports.parseVasp = exports.parseCif = exports.parseTcl = exports.parseOrcaOut = exports.parseGaussianLog = void 0;
 exports.parseFile = parseFile;
 exports.parseLogFile = parseLogFile;
 const gjfParser_1 = require("./gjfParser");
@@ -16,6 +16,14 @@ const pdbParser_1 = require("./pdbParser");
 const mopacParser_1 = require("./mopacParser");
 const tclParser_1 = require("./tclParser");
 Object.defineProperty(exports, "parseTcl", { enumerable: true, get: function () { return tclParser_1.parseTcl; } });
+const cifParser_1 = require("./cifParser");
+Object.defineProperty(exports, "parseCif", { enumerable: true, get: function () { return cifParser_1.parseCif; } });
+const vaspParser_1 = require("./vaspParser");
+Object.defineProperty(exports, "parseVasp", { enumerable: true, get: function () { return vaspParser_1.parseVasp; } });
+const cubeParser_1 = require("./cubeParser");
+Object.defineProperty(exports, "parseCube", { enumerable: true, get: function () { return cubeParser_1.parseCube; } });
+const vestaParser_1 = require("./vestaParser");
+Object.defineProperty(exports, "parseVesta", { enumerable: true, get: function () { return vestaParser_1.parseVesta; } });
 function parseFile(content, fileName) {
     const ext = fileName.toLowerCase().split('.').pop() || '';
     switch (ext) {
@@ -43,8 +51,18 @@ function parseFile(content, fileName) {
         case 'mopac':
         case 'dat':
             return (0, mopacParser_1.parseMopac)(content);
+        case 'cif':
+            return (0, cifParser_1.parseCif)(content);
+        case 'vasp':
+        case 'poscar':
+        case 'contcar':
+            return (0, vaspParser_1.parseVasp)(content);
+        case 'cube':
+            return (0, cubeParser_1.parseCube)(content);
+        case 'vesta':
+            return (0, vestaParser_1.parseVesta)(content);
         default:
-            return tryAutoParse(content);
+            return tryAutoParse(content, fileName);
     }
 }
 function parseLogFile(content, fileName) {
@@ -67,7 +85,7 @@ function parseLogAsSingleFrame(content) {
     }
     return { atoms: [], bonds: [], title: 'Empty', hasExplicitBonds: false };
 }
-function tryAutoParse(content) {
+function tryAutoParse(content, fileName = '') {
     const lines = content.split(/\r?\n/).filter(l => l.trim() !== '');
     if (content.includes('$coord')) {
         return (0, coordParser_1.parseCoord)(content);
@@ -80,6 +98,18 @@ function tryAutoParse(content) {
     }
     if (content.match(/CARTESIAN COORDINATES/i) && content.match(/MOPAC/i)) {
         return (0, mopacParser_1.parseMopac)(content);
+    }
+    if (content.match(/^data_/m) && content.includes('_cell_length_a')) {
+        return (0, cifParser_1.parseCif)(content);
+    }
+    if (fileName.match(/\.vasp$/i) || fileName.match(/poscar/i) || fileName.match(/contcar/i)) {
+        return (0, vaspParser_1.parseVasp)(content);
+    }
+    if (fileName.match(/\.cube$/i)) {
+        return (0, cubeParser_1.parseCube)(content);
+    }
+    if (fileName.match(/\.vesta$/i) || content.includes('#VESTA_FORMAT_VERSION')) {
+        return (0, vestaParser_1.parseVesta)(content);
     }
     if (content.includes('CARTESIAN COORDINATES (ANGSTROEM)')) {
         const result = (0, orcaOutParser_1.parseOrcaOut)(content);
