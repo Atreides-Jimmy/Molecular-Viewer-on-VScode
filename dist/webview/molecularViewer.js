@@ -161,6 +161,7 @@ class MolecularViewerProvider {
                                 'CIF Files': ['cif'],
                                 'VASP POSCAR': ['vasp', 'poscar', 'contcar'],
                                 'Gaussian Cube': ['cube'],
+                                'VESTA': ['vesta'],
                                 'Turbomole Coord': ['coord'],
                                 'ORCA Input': ['inp'],
                                 'MOL2': ['mol2'],
@@ -440,7 +441,7 @@ body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;b
 .tbtn.active{background:var(--vscode-button-background,#0e639c);border-color:var(--vscode-button-background,#0e639c)}
 .tsep{width:1px;height:20px;background:var(--vscode-panel-border,#444);margin:0 4px}
 #status-bar{height:24px;flex-shrink:0;background:var(--vscode-statusBar-background,#007acc);color:var(--vscode-statusBar-foreground,#fff);display:flex;align-items:center;padding:0 10px;font-size:11px;z-index:20;gap:12px}
-#container{flex:1;position:relative;overflow:hidden;min-height:0}
+#container{flex:1;position:relative;overflow:hidden;min-height:0;outline:none}
 #mol-info{position:absolute;top:8px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.55);padding:6px 10px;border-radius:4px;z-index:25;pointer-events:none;line-height:1.6}
 #axes-indicator{position:absolute;bottom:12px;left:12px;width:90px;height:90px;z-index:25;pointer-events:none}
 #axes-indicator svg{width:100%;height:100%}
@@ -451,8 +452,14 @@ body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;b
 #crystal-panel .bnd-row input{width:48px;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;padding:1px 3px;font-size:11px;text-align:center}
 #crystal-panel .bnd-btn{margin-top:6px;width:100%;background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff);border:none;border-radius:3px;padding:4px 6px;font-size:11px;cursor:pointer}
 #crystal-panel .bnd-btn:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
+#select-panel{display:none;position:absolute;bottom:40px;left:8px;z-index:50;background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:4px;padding:8px;width:280px;box-shadow:0 2px 8px rgba(0,0,0,0.3)}
+#select-panel .sp-title{font-size:12px;font-weight:bold;margin-bottom:4px}
+#select-panel input[type=text]{width:100%;padding:6px 8px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:12px;box-sizing:border-box}
+#select-panel .sp-btns{display:flex;gap:4px;margin-top:4px}
+#select-panel .sp-btns button{flex:1}
 canvas{display:block}
 #atom-tooltip{position:absolute;display:none;color:var(--vscode-editor-foreground,#ccc);font-size:12px;background:var(--vscode-editor-background,#1e1e1e);padding:4px 8px;border-radius:3px;border:1px solid var(--vscode-panel-border,#444);pointer-events:none;z-index:30}
+#box-select-rect{position:fixed;display:none;border:1px dashed #ffeb3b;background:rgba(255,235,59,0.12);pointer-events:none;z-index:40}
 #modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:100;display:none;align-items:center;justify-content:center}
 #modal-overlay.show{display:flex}
 #modal{background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-panel-border,#444);border-radius:6px;padding:16px 20px;min-width:320px;max-width:420px;box-shadow:0 8px 30px rgba(0,0,0,0.5)}
@@ -503,10 +510,13 @@ canvas{display:block}
 <div class="tsep"></div>
 <button class="tbtn" data-mode="addAtom">Add Atom</button>
 <button class="tbtn" data-mode="deleteAtom">Delete Atom</button>
+<button class="tbtn" data-mode="replaceAtom">Replace Atom</button>
 <div class="tsep"></div>
 <button class="tbtn" data-mode="selectAtoms">Select Atoms</button>
+<button class="tbtn" data-mode="boxSelect">Box Select</button>
 <div class="tsep"></div>
 <button class="tbtn" id="diff-btn">Diff</button>
+<button class="tbtn" id="undo-btn" disabled>Undo</button>
 <button class="tbtn" id="save-btn">Save As</button>
 <button class="tbtn" id="reset-btn">Reset View</button>
 <div class="tsep" id="frame-sep"></div>
@@ -519,9 +529,10 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
+<div id="box-select-rect"></div>
 <div id="modal-overlay"><div id="modal"></div></div>
 <script nonce="${nonce}">
 ${threeJsContent}
@@ -542,12 +553,30 @@ function computeCrystalInv(){
     if(Math.abs(det)<1e-12){CRY_INV=null;return}
     var invDet=1/det;
     CRY_INV=[
-        [(lv[1][1]*lv[2][2]-lv[1][2]*lv[2][1])*invDet,(lv[0][2]*lv[2][1]-lv[0][1]*lv[2][2])*invDet,(lv[0][1]*lv[1][2]-lv[0][2]*lv[1][1])*invDet],
-        [(lv[1][2]*lv[2][0]-lv[1][0]*lv[2][2])*invDet,(lv[0][0]*lv[2][2]-lv[0][2]*lv[2][0])*invDet,(lv[0][2]*lv[1][0]-lv[0][0]*lv[1][2])*invDet],
-        [(lv[1][0]*lv[2][1]-lv[1][1]*lv[2][0])*invDet,(lv[0][1]*lv[2][0]-lv[0][0]*lv[2][1])*invDet,(lv[0][0]*lv[1][1]-lv[0][1]*lv[1][0])*invDet]
+        [(lv[1][1]*lv[2][2]-lv[1][2]*lv[2][1])*invDet,(lv[1][2]*lv[2][0]-lv[1][0]*lv[2][2])*invDet,(lv[1][0]*lv[2][1]-lv[1][1]*lv[2][0])*invDet],
+        [(lv[0][2]*lv[2][1]-lv[0][1]*lv[2][2])*invDet,(lv[0][0]*lv[2][2]-lv[0][2]*lv[2][0])*invDet,(lv[0][1]*lv[2][0]-lv[0][0]*lv[2][1])*invDet],
+        [(lv[0][1]*lv[1][2]-lv[0][2]*lv[1][1])*invDet,(lv[0][2]*lv[1][0]-lv[0][0]*lv[1][2])*invDet,(lv[0][0]*lv[1][1]-lv[0][1]*lv[1][0])*invDet]
     ];
 }
 computeCrystalInv();
+function formulaFromAtoms(arr){
+    var counts={};
+    arr.forEach(function(a){counts[a.element]=(counts[a.element]||0)+1});
+    var keys=Object.keys(counts);
+    var hasC=counts.C!==undefined;
+    keys.sort(function(a,b){
+        if(hasC){
+            if(a==='C'&&b!=='C')return-1;
+            if(b==='C'&&a!=='C')return 1;
+            if(a==='H'&&b!=='H')return-1;
+            if(b==='H'&&a!=='H')return 1;
+        }
+        return a<b?-1:1;
+    });
+    var s='';
+    keys.forEach(function(k){s+=k+(counts[k]>1?counts[k]:'')});
+    return s;
+}
 function updateMolInfo(){
     var infoEl=document.getElementById('mol-info');
     if(!infoEl)return;
@@ -557,9 +586,10 @@ function updateMolInfo(){
     var nElectrons=0;
     MD.atoms.forEach(function(a){nElectrons+=(AN[a.element]||0)});
     if(typeof chrg==='number')nElectrons-=chrg;
-    var html='Atoms: '+nAtoms+'<br>Charge: '+chrg+'<br>Electrons: '+nElectrons+'<br>Multiplicity: '+mult;
+    var html='Formula: '+formulaFromAtoms(MD.atoms)+'<br>Atoms: '+nAtoms+'<br>Charge: '+chrg+'<br>Electrons: '+nElectrons+'<br>Multiplicity: '+mult;
     if(CRY){
         var sa=boundary.aMax-boundary.aMin,sb=boundary.bMax-boundary.bMin,sc=boundary.cMax-boundary.cMin;
+        html+='<br>Unit Cell: '+formulaFromAtoms(CRY.baseAtoms);
         html+='<br>Cell: '+CRY.a.toFixed(3)+' × '+CRY.b.toFixed(3)+' × '+CRY.c.toFixed(3);
         html+='<br>Angles: '+CRY.alpha.toFixed(1)+'°, '+CRY.beta.toFixed(1)+'°, '+CRY.gamma.toFixed(1)+'°';
         if(CRY.spaceGroup)html+='<br>SG: '+CRY.spaceGroup;
@@ -572,6 +602,7 @@ var container=document.getElementById('container');
 var loadingEl=document.getElementById('loading');
 var errorEl=document.getElementById('error-msg');
 var tooltipEl=document.getElementById('atom-tooltip');
+var boxRectEl=document.getElementById('box-select-rect');
 var modeInfoEl=document.getElementById('mode-info');
 var selInfoEl=document.getElementById('selection-info');
 var modalOverlay=document.getElementById('modal-overlay');
@@ -654,8 +685,10 @@ function detectCrystalBaseBonds(){
     var bonds=[];
     for(var i=0;i<n;i++){
         var f1=cartToFrac(baseAtoms[i]);
+        f1[0]-=Math.floor(f1[0]);f1[1]-=Math.floor(f1[1]);f1[2]-=Math.floor(f1[2]);
         for(var j=i+1;j<n;j++){
             var f2=cartToFrac(baseAtoms[j]);
+            f2[0]-=Math.floor(f2[0]);f2[1]-=Math.floor(f2[1]);f2[2]-=Math.floor(f2[2]);
             var fdx=f2[0]-f1[0],fdy=f2[1]-f1[1],fdz=f2[2]-f1[2];
             var sx=Math.round(fdx),sy=Math.round(fdy),sz=Math.round(fdz);
             var wfx=fdx-sx,wfy=fdy-sy,wfz=fdz-sz;
@@ -689,6 +722,28 @@ function rebuildCrystal(){
         baseBonds=CRY.baseBonds;
     }
 
+    var adj={};var groupOf={};var groups=[];
+    baseBonds.forEach(function(bb){
+        if(!adj[bb.atom1])adj[bb.atom1]=[];
+        if(!adj[bb.atom2])adj[bb.atom2]=[];
+        adj[bb.atom1].push({nb:bb.atom2,shift:bb.shift});
+        adj[bb.atom2].push({nb:bb.atom1,shift:bb.shift});
+    });
+    baseAtoms.forEach(function(ba,bi){
+        if(groupOf[bi]!==undefined)return;
+        if(!adj[bi]){groupOf[bi]=-1;return}
+        var gid=groups.length;var queue=[bi];groupOf[bi]=gid;
+        var hasShift=false;
+        while(queue.length){
+            var cur=queue.shift();
+            (adj[cur]||[]).forEach(function(e){
+                if(e.shift&&(e.shift[0]||e.shift[1]||e.shift[2]))hasShift=true;
+                if(groupOf[e.nb]===undefined){groupOf[e.nb]=gid;queue.push(e.nb)}
+            });
+        }
+        groups.push({hasShift:hasShift});
+    });
+
     var iMin=Math.floor(aMin),iMax=Math.ceil(aMax);
     var jMin=Math.floor(bMin),jMax=Math.ceil(bMax);
     var kMin=Math.floor(cMin),kMax=Math.ceil(cMax);
@@ -711,6 +766,46 @@ function rebuildCrystal(){
                     if(ax<aMin-EPS||ax>aMax+EPS)continue;
                     if(ay<bMin-EPS||ay>bMax+EPS)continue;
                     if(az<cMin-EPS||az>cMax+EPS)continue;
+                    var ox=ax*lv[0][0]+ay*lv[1][0]+az*lv[2][0];
+                    var oy=ax*lv[0][1]+ay*lv[1][1]+az*lv[2][1];
+                    var oz=ax*lv[0][2]+ay*lv[1][2]+az*lv[2][2];
+                    var color=ba.color||((MD.atomColors&&MD.atomColors[ba.element])||'#FF1493');
+                    atoms.push({
+                        element:ba.element,
+                        x:ox,y:oy,z:oz,
+                        index:idx,
+                        occupancy:ba.occupancy,
+                        color:color,
+                        baseIdx:ba.baseIdx!=null?ba.baseIdx:bi,
+                        cellI:ci,cellJ:cj,cellK:ck
+                    });
+                    cellMap[bi+'_'+ci+'_'+cj+'_'+ck]=idx;
+                    idx++;
+                }
+            }
+        }
+    });
+
+    var activeGroups={};
+    atoms.forEach(function(a){
+        var g=groupOf[a.baseIdx];
+        if(g!==undefined&&g>=0&&!groups[g].hasShift){
+            activeGroups[g+'_'+a.cellI+'_'+a.cellJ+'_'+a.cellK]=true;
+        }
+    });
+    baseAtoms.forEach(function(ba,bi){
+        var g=groupOf[bi];
+        if(g===undefined||g<0||groups[g].hasShift)return;
+        var fx=inv[0][0]*ba.x+inv[0][1]*ba.y+inv[0][2]*ba.z;
+        var fy=inv[1][0]*ba.x+inv[1][1]*ba.y+inv[1][2]*ba.z;
+        var fz=inv[2][0]*ba.x+inv[2][1]*ba.y+inv[2][2]*ba.z;
+        fx-=Math.floor(fx);fy-=Math.floor(fy);fz-=Math.floor(fz);
+        for(var ci=iMin;ci<=iMax;ci++){
+            for(var cj=jMin;cj<=jMax;cj++){
+                for(var ck=kMin;ck<=kMax;ck++){
+                    if(!activeGroups[g+'_'+ci+'_'+cj+'_'+ck])continue;
+                    if(cellMap[bi+'_'+ci+'_'+cj+'_'+ck]!==undefined)continue;
+                    var ax=fx+ci,ay=fy+cj,az=fz+ck;
                     var ox=ax*lv[0][0]+ay*lv[1][0]+az*lv[2][0];
                     var oy=ax*lv[0][1]+ay*lv[1][1]+az*lv[2][1];
                     var oz=ax*lv[0][2]+ay*lv[1][2]+az*lv[2][2];
@@ -791,10 +886,12 @@ function rebuildCrystal(){
     MD.atoms=atoms;
     MD.bonds=bonds;
     updateMolInfo();
+    needsRender=true;
 }
 
 function removeDisorder(){
     if(!CRY)return;
+    pushUndo();
     var newBaseAtoms=[];
     var oldToNew={};
     CRY.baseAtoms.forEach(function(ba,i){
@@ -879,19 +976,35 @@ function updateAxesIndicator(){
 
 var atomMeshes=[];
 var bondMeshes=[];
+var needsRender=true;
 
+function disposeMesh(ch){
+    if(ch.geometry)ch.geometry.dispose();
+    if(ch.material){
+        if(ch.material.map)ch.material.map.dispose();
+        ch.material.dispose();
+    }
+}
+function sphereSegs(n){
+    if(n==null)n=MD.atoms.length;
+    if(n<=200)return [32,24];
+    if(n<=1000)return [20,16];
+    return [12,10];
+}
 function rebuildScene(){
-    while(moleculeGroup.children.length>0)moleculeGroup.remove(moleculeGroup.children[0]);
+    var oldChildren=moleculeGroup.children.slice();
+    oldChildren.forEach(function(ch){disposeMesh(ch);moleculeGroup.remove(ch)});
     atomMeshes.length=0;
     bondMeshes.length=0;
     cellWireframe=null;
     CX=0;CY=0;CZ=0;
     MD.atoms.forEach(function(a){CX+=a.x;CY+=a.y;CZ+=a.z});
     if(MD.atoms.length>0){CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length}
+    var segs=sphereSegs();
     MD.atoms.forEach(function(a,i){
         a.index=i;
         var r=getR(a.element);
-        var g=new THREE.SphereGeometry(r,32,24);
+        var g=new THREE.SphereGeometry(r,segs[0],segs[1]);
         var occ=a.occupancy!=null?a.occupancy:1;
         var m;
         if(occ<0.999){
@@ -909,17 +1022,21 @@ function rebuildScene(){
     MD.bonds.forEach(function(b){createBond(b)});
     if(CRY)buildCellWireframe();
     highlightSelected();
+    needsRender=true;
 }
-function updateScenePositions(){
-    CX=0;CY=0;CZ=0;
-    MD.atoms.forEach(function(a){CX+=a.x;CY+=a.y;CZ+=a.z});
-    if(MD.atoms.length>0){CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length}
+function updateScenePositions(keepCenter){
+    if(!keepCenter){
+        CX=0;CY=0;CZ=0;
+        MD.atoms.forEach(function(a){CX+=a.x;CY+=a.y;CZ+=a.z});
+        if(MD.atoms.length>0){CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length}
+    }
     atomMeshes.forEach(function(m,i){var a=MD.atoms[i];if(a)m.position.set(a.x-CX,a.y-CY,a.z-CZ)});
-    for(var i=bondMeshes.length-1;i>=0;i--){moleculeGroup.remove(bondMeshes[i])}
+    for(var i=bondMeshes.length-1;i>=0;i--){disposeMesh(bondMeshes[i]);moleculeGroup.remove(bondMeshes[i])}
     bondMeshes.length=0;
     MD.bonds.forEach(function(b){createBond(b)});
     if(CRY)buildCellWireframe();
     highlightSelected();
+    needsRender=true;
 }
 
 function getPerp(dir){
@@ -993,6 +1110,8 @@ function hBond(s,e,d,hl,r,c){
 }
 
 var isRot=false,isPan=false,prevM={x:0,y:0},panX=0,panY=0,camDist=10;
+var keyState={ArrowUp:false,ArrowDown:false,ArrowLeft:false,ArrowRight:false};
+var keyRotSpeed=0.03;
 var rotQuat=new THREE.Quaternion();
 var currentMode='view';
 var selectedAtoms=[];
@@ -1001,6 +1120,11 @@ var modalCallback=null;
 
 if(CRY){rebuildCrystal();}
 rebuildScene();
+
+var spInit=document.getElementById('select-panel');
+if(spInit)spInit.style.display='none';
+container.tabIndex=0;
+container.focus();
 
 if(CRY){
     var crystalPanel=document.getElementById('crystal-panel');
@@ -1059,18 +1183,31 @@ var initCam=maxD*2.5+5;
 camera.position.set(0,0,initCam);camera.lookAt(0,0,0);
 camDist=initCam;
 
-var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',selectAtoms:'Select Atoms - Input indices or element symbols'};
+var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',replaceAtom:'Replace Atom - Click atom(s) to select, click button again to confirm',selectAtoms:'Select Atoms - Input indices or element symbols',boxSelect:'Box Select - Drag a rectangle to select atoms'};
 
 function setMode(m){
     if(currentMode===m){
-        if(m==='selectAtoms')showSelectAtomsModal();
+        if(m==='selectAtoms'){
+            var sp=document.getElementById('select-panel');
+            if(sp)sp.style.display=(sp.style.display==='none'?'block':'none');
+        }
+        if(m==='replaceAtom'){
+            if(selectedAtoms.length>0){showReplaceAtomModal();return}
+        }
         return;
     }
-    currentMode=m;selectedAtoms=[];diffSelectedAtoms=[];originalCoords=null;hideModal();highlightSelected();
+    var oldMode=currentMode;
+    currentMode=m;
+    var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect')&&(m==='selectAtoms'||m==='boxSelect'));
+    if(!preserveSel){
+        selectedAtoms=[];diffSelectedAtoms=[];originalCoords=null;
+    }
+    hideModal();highlightSelected();
     modeInfoEl.textContent=MODE_INFO[m]||m;
-    selInfoEl.textContent='';
+    if(!preserveSel)selInfoEl.textContent='';
     document.querySelectorAll('.tbtn[data-mode]').forEach(function(b){b.classList.toggle('active',b.dataset.mode===m)});
-    if(m==='selectAtoms')showSelectAtomsModal();
+    var sp2=document.getElementById('select-panel');
+    if(sp2)sp2.style.display=(m==='selectAtoms')?'block':'none';
 }
 
 function resetSelection(){
@@ -1078,7 +1215,37 @@ function resetSelection(){
     selInfoEl.textContent='';
 }
 
-document.querySelectorAll('.tbtn[data-mode]').forEach(function(b){b.addEventListener('click',function(){setMode(this.dataset.mode)})});
+document.querySelectorAll('.tbtn[data-mode]').forEach(function(b){b.addEventListener('click',function(){
+    var mode=this.dataset.mode;
+    if(mode==='deleteAtom'&&selectedAtoms.length>0&&(currentMode==='selectAtoms'||currentMode==='boxSelect')){
+        showBatchDeleteModal();
+    }else{
+        setMode(mode);
+    }
+})});
+(function(){
+    var inp=document.getElementById('sel-panel-input');
+    var okBtn=document.getElementById('sel-panel-ok');
+    var clrBtn=document.getElementById('sel-panel-clear');
+    if(!inp||!okBtn||!clrBtn)return;
+    function doSelect(){
+        var input=inp.value.trim();
+        if(!input)return;
+        var indices=parseSelectInput(input);
+        indices.forEach(function(idx){
+            if(selectedAtoms.indexOf(idx)<0)selectedAtoms.push(idx);
+        });
+        highlightSelected();
+        var names=selectedAtoms.map(function(i){return MD.atoms[i].element+(i+1)}).join(', ');
+        selInfoEl.textContent='Selected: '+names+' ('+selectedAtoms.length+' atoms)';
+        inp.value='';
+    }
+    okBtn.addEventListener('click',doSelect);
+    inp.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();doSelect()}});
+    clrBtn.addEventListener('click',function(){
+        selectedAtoms=[];highlightSelected();selInfoEl.textContent='';
+    });
+})();
 document.getElementById('reset-btn').addEventListener('click',function(){
     rotQuat.identity();panX=0;panY=0;
     if(diffMode){
@@ -1089,6 +1256,23 @@ document.getElementById('reset-btn').addEventListener('click',function(){
     }
     updateTransform();
 });
+var undoStack=[];var MAX_UNDO=50;
+function pushUndo(){
+    var snap={atoms:JSON.parse(JSON.stringify(MD.atoms)),bonds:JSON.parse(JSON.stringify(MD.bonds))};
+    if(CRY){snap.baseAtoms=JSON.parse(JSON.stringify(CRY.baseAtoms));snap.baseBonds=JSON.parse(JSON.stringify(CRY.baseBonds))}
+    undoStack.push(snap);
+    if(undoStack.length>MAX_UNDO)undoStack.shift();
+    updateUndoBtn();
+}
+function updateUndoBtn(){var b=document.getElementById('undo-btn');if(b)b.disabled=undoStack.length===0}
+function doUndo(){
+    if(undoStack.length===0)return;
+    var snap=undoStack.pop();
+    MD.atoms=snap.atoms;MD.bonds=snap.bonds;
+    if(CRY&&snap.baseAtoms){CRY.baseAtoms=snap.baseAtoms;CRY.baseBonds=snap.baseBonds}
+    if(CRY){rebuildCrystal()}rebuildScene();updateMolInfo();updateUndoBtn();
+}
+document.getElementById('undo-btn').addEventListener('click',doUndo);
 document.getElementById('save-btn').addEventListener('click',doSave);
 document.getElementById('diff-btn').addEventListener('click',function(){
     if(diffMode){
@@ -1573,9 +1757,10 @@ function enterDiffRender(diffs,mapping){
         });
     }
 
+    var dSegs=sphereSegs(diffData.atoms.length);
     diffData.atoms.forEach(function(a,i){
         var r=getR(a.element);
-        var g=new THREE.SphereGeometry(r,32,24);
+        var g=new THREE.SphereGeometry(r,dSegs[0],dSegs[1]);
         var isHi=highlightAtoms[mapping?mapping.indexOf(i):-1];
         var origColor=new THREE.Color(a.color);
         var col=isHi?new THREE.Color(0xff6600):origColor;
@@ -1819,6 +2004,7 @@ function highlightSelected(){
             else{m.material.emissive=new THREE.Color(0x000000);m.material.emissiveIntensity=0}
         });
     }
+    needsRender=true;
 }
 
 function selectAtom(idx){
@@ -1853,6 +2039,17 @@ function selectAtom(idx){
         updateDiffSelInfo();
         checkSelectionComplete();
         return;
+    }
+    if(currentMode==='selectAtoms'||currentMode==='replaceAtom'){
+        var pos=selectedAtoms.indexOf(idx);
+        if(pos>=0){
+            selectedAtoms.splice(pos,1);
+            highlightSelected();
+            var dn=selectedAtoms.map(function(i){return MD.atoms[i].element+(i+1)}).join(', ');
+            selInfoEl.textContent=selectedAtoms.length?('Selected: '+dn):'';
+            checkSelectionComplete();
+            return;
+        }
     }
     if(selectedAtoms.indexOf(idx)>=0)return;
     selectedAtoms.push(idx);
@@ -1897,6 +2094,10 @@ function checkSelectionComplete(){
     else if(currentMode==='selectAtoms'){
         var names=selectedAtoms.map(function(i){return MD.atoms[i].element+(i+1)}).join(', ');
         selInfoEl.textContent='Selected: '+names;
+    }
+    else if(currentMode==='replaceAtom'){
+        var rnames=selectedAtoms.map(function(i){return MD.atoms[i].element+(i+1)}).join(', ');
+        selInfoEl.textContent='Selected to replace: '+rnames+' (click Replace Atom button to confirm)';
     }
 }
 
@@ -1987,73 +2188,47 @@ function rotAroundAxis(px,py,pz,ox,oy,oz,dx,dy,dz,angle){
     return{x:rx+ox,y:ry+oy,z:rz+oz};
 }
 
-function saveOriginal(){originalCoords=MD.atoms.map(function(a){return{x:a.x,y:a.y,z:a.z}})}
+function saveOriginal(){originalCoords=MD.atoms.map(function(a){return{x:a.x,y:a.y,z:a.z}});pushUndo()}
 function restoreOriginal(){if(!originalCoords)return;originalCoords.forEach(function(c,i){MD.atoms[i].x=c.x;MD.atoms[i].y=c.y;MD.atoms[i].z=c.z})}
 
-function propagateToAllCells(){
-    if(!CRY||!originalCoords)return;
-    var modified=[];
-    MD.atoms.forEach(function(a,i){
-        var oc=originalCoords[i];
-        if(oc&&(Math.abs(a.x-oc.x)>1e-12||Math.abs(a.y-oc.y)>1e-12||Math.abs(a.z-oc.z)>1e-12)){
-            modified.push(i);
-        }
-    });
-    var modifiedSet=new Set(modified);
-    modified.forEach(function(idx){
-        var a=MD.atoms[idx];
-        if(a.baseIdx==null)return;
-        var oc=originalCoords[idx];
-        var dx=a.x-oc.x,dy=a.y-oc.y,dz=a.z-oc.z;
-        MD.atoms.forEach(function(other,i){
-            if(modifiedSet.has(i))return;
-            if(other.baseIdx===a.baseIdx){
-                var oc2=originalCoords[i];
-                other.x=oc2.x+dx;
-                other.y=oc2.y+dy;
-                other.z=oc2.z+dz;
-                modifiedSet.add(i);
-            }
-        });
-    });
-}
-
-function applyBondLength(targetLen,fixFirst){
+function applyBondLength(targetLen,fixFirst,moveMode){
     var i1=selectedAtoms[0],i2=selectedAtoms[1];
-    var a1=MD.atoms[i1],a2=MD.atoms[i2];
-    var dx=a2.x-a1.x,dy=a2.y-a1.y,dz=a2.z-a1.z;
+    var o1=originalCoords[i1],o2=originalCoords[i2];
+    var dx=o2.x-o1.x,dy=o2.y-o1.y,dz=o2.z-o1.z;
     var curLen=Math.sqrt(dx*dx+dy*dy+dz*dz);
     if(curLen<1e-10)return;
-    var nx=dx/curLen,ny=dy/curLen,nz=dz/curLen;
     if(fixFirst){
-        var fixedSet=new Set([i1]);var movable=getMovable(fixedSet,i2);
-        movable.forEach(function(idx){var a=MD.atoms[idx];
-            var ox=originalCoords[idx].x,oy=originalCoords[idx].y,oz=originalCoords[idx].z;
-            var vx=ox-a1.x,vy=oy-a1.y,vz=oz-a1.z;
-            var proj=vx*nx+vy*ny+vz*nz;
-            var scale=targetLen/curLen;
-            a.x=a1.x+vx*scale;a.y=a1.y+vy*scale;a.z=a1.z+vz*scale;
+        var newI2x=o1.x+dx*targetLen/curLen;
+        var newI2y=o1.y+dy*targetLen/curLen;
+        var newI2z=o1.z+dz*targetLen/curLen;
+        var tx=newI2x-o2.x,ty=newI2y-o2.y,tz=newI2z-o2.z;
+        var fixedSet=new Set([i1]);
+        var movable=(moveMode==='atom')?[i2]:getMovable(fixedSet,i2);
+        movable.forEach(function(idx){
+            var oc=originalCoords[idx];
+            MD.atoms[idx].x=oc.x+tx;
+            MD.atoms[idx].y=oc.y+ty;
+            MD.atoms[idx].z=oc.z+tz;
         });
     }else{
-        var fixedSet=new Set([i2]);var movable=getMovable(fixedSet,i1);
-        movable.forEach(function(idx){var a=MD.atoms[idx];
-            var ox=originalCoords[idx].x,oy=originalCoords[idx].y,oz=originalCoords[idx].z;
-            var vx=ox-a2.x,vy=oy-a2.y,vz=oz-a2.z;
-            var nx2=a1.x-a2.x,ny2=a1.y-a2.y,nz2=a1.z-a2.z;
-            var curLen2=Math.sqrt(nx2*nx2+ny2*ny2+nz2*nz2);
-            if(curLen2<1e-10)return;
-            nx2/=curLen2;ny2/=curLen2;nz2/=curLen2;
-            var scale=targetLen/curLen2;
-            a.x=a2.x+vx*scale;a.y=a2.y+vy*scale;a.z=a2.z+vz*scale;
+        var newI1x=o2.x-dx*targetLen/curLen;
+        var newI1y=o2.y-dy*targetLen/curLen;
+        var newI1z=o2.z-dz*targetLen/curLen;
+        var tx=newI1x-o1.x,ty=newI1y-o1.y,tz=newI1z-o1.z;
+        var fixedSet=new Set([i2]);
+        var movable=(moveMode==='atom')?[i1]:getMovable(fixedSet,i1);
+        movable.forEach(function(idx){
+            var oc=originalCoords[idx];
+            MD.atoms[idx].x=oc.x+tx;
+            MD.atoms[idx].y=oc.y+ty;
+            MD.atoms[idx].z=oc.z+tz;
         });
     }
-    if(CRY)propagateToAllCells();
-    updateScenePositions();
+    updateScenePositions(true);
 }
 
-function applyBondAngle(targetDeg,fixFirstTwo){
+function applyBondAngle(targetDeg,fixFirstTwo,moveMode){
     var i1=selectedAtoms[0],i2=selectedAtoms[1],i3=selectedAtoms[2];
-    var a1=MD.atoms[i1],a2=MD.atoms[i2],a3=MD.atoms[i3];
     var curDeg=angle(originalCoords[i1],originalCoords[i2],originalCoords[i3]);
     var delta=(targetDeg-curDeg)*Math.PI/180;
     if(Math.abs(delta)<1e-10)return;
@@ -2064,25 +2239,26 @@ function applyBondAngle(targetDeg,fixFirstTwo){
     cx/=cl;cy/=cl;cz/=cl;
     var ox=originalCoords[i2].x,oy=originalCoords[i2].y,oz=originalCoords[i2].z;
     if(fixFirstTwo){
-        var fixedSet=new Set([i1,i2]);var movable=getMovable(fixedSet,i3);
+        var fixedSet=new Set([i1,i2]);
+        var movable=(moveMode==='atom')?[i3]:getMovable(fixedSet,i3);
         movable.forEach(function(idx){
             var oc=originalCoords[idx];
             var r=rotAroundAxis(oc.x,oc.y,oc.z,ox,oy,oz,cx,cy,cz,delta);
             MD.atoms[idx].x=r.x;MD.atoms[idx].y=r.y;MD.atoms[idx].z=r.z;
         });
     }else{
-        var fixedSet=new Set([i2,i3]);var movable=getMovable(fixedSet,i1);
+        var fixedSet=new Set([i2,i3]);
+        var movable=(moveMode==='atom')?[i1]:getMovable(fixedSet,i1);
         movable.forEach(function(idx){
             var oc=originalCoords[idx];
             var r=rotAroundAxis(oc.x,oc.y,oc.z,ox,oy,oz,cx,cy,cz,-delta);
             MD.atoms[idx].x=r.x;MD.atoms[idx].y=r.y;MD.atoms[idx].z=r.z;
         });
     }
-    if(CRY)propagateToAllCells();
-    updateScenePositions();
+    updateScenePositions(true);
 }
 
-function applyDihedral(targetDeg,fixFirstThree){
+function applyDihedral(targetDeg,fixFirstThree,moveMode){
     var i1=selectedAtoms[0],i2=selectedAtoms[1],i3=selectedAtoms[2],i4=selectedAtoms[3];
     var curDeg=dihedral(originalCoords[i1],originalCoords[i2],originalCoords[i3],originalCoords[i4]);
     var delta=(targetDeg-curDeg)*Math.PI/180;
@@ -2092,22 +2268,23 @@ function applyDihedral(targetDeg,fixFirstThree){
     ax/=al;ay/=al;az/=al;
     var ox=originalCoords[i2].x,oy=originalCoords[i2].y,oz=originalCoords[i2].z;
     if(fixFirstThree){
-        var fixedSet=new Set([i1,i2,i3]);var movable=getMovable(fixedSet,i4);
+        var fixedSet=new Set([i1,i2,i3]);
+        var movable=(moveMode==='atom')?[i4]:getMovable(fixedSet,i4);
         movable.forEach(function(idx){
             var oc=originalCoords[idx];
             var r=rotAroundAxis(oc.x,oc.y,oc.z,ox,oy,oz,ax,ay,az,delta);
             MD.atoms[idx].x=r.x;MD.atoms[idx].y=r.y;MD.atoms[idx].z=r.z;
         });
     }else{
-        var fixedSet=new Set([i2,i3,i4]);var movable=getMovable(fixedSet,i1);
+        var fixedSet=new Set([i2,i3,i4]);
+        var movable=(moveMode==='atom')?[i1]:getMovable(fixedSet,i1);
         movable.forEach(function(idx){
             var oc=originalCoords[idx];
             var r=rotAroundAxis(oc.x,oc.y,oc.z,ox,oy,oz,ax,ay,az,-delta);
             MD.atoms[idx].x=r.x;MD.atoms[idx].y=r.y;MD.atoms[idx].z=r.z;
         });
     }
-    if(CRY)propagateToAllCells();
-    updateScenePositions();
+    updateScenePositions(true);
 }
 
 function showModal(html,cb){modalEl.innerHTML=html;modalOverlay.classList.add('show');modalCallback=cb}
@@ -2123,14 +2300,16 @@ function showBondLengthModal(){
     showModal('<h3>Adjust Bond Length</h3>'+
         '<div class="current-val">Current: '+cur.toFixed(4)+' A, Bond order: '+curOrder+'</div>'+
         '<label>Fix atom:</label><select id="m-fix"><option value="1">Fix '+n1+' (move '+n2+')</option><option value="2">Fix '+n2+' (move '+n1+')</option></select>'+
+        '<label>Move:</label><select id="m-move"><option value="group">Translate Group (atom + connected)</option><option value="atom">Translate Atom (only)</option></select>'+
         '<label>Bond order:</label><select id="m-order"><option value="0"'+(curOrder===0?' selected':'')+'>None (0) - Remove bond</option><option value="1"'+(curOrder===1?' selected':'')+'>Single (1.0)</option><option value="1.5"'+(curOrder===1.5?' selected':'')+'>Aromatic (1.5)</option><option value="2"'+(curOrder===2?' selected':'')+'>Double (2.0)</option><option value="3"'+(curOrder===3?' selected':'')+'>Triple (3.0)</option></select>'+
         '<label>Target length (A):</label><input type="number" id="m-val" value="'+cur.toFixed(4)+'" step="0.01" min="0.3" max="6">'+
         '<input type="range" id="m-slider" value="'+cur.toFixed(4)+'" min="0.3" max="6" step="0.01">'+
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok" id="m-ok">OK</button></div>',null);
-    var valEl=document.getElementById('m-val'),sliderEl=document.getElementById('m-slider'),fixEl=document.getElementById('m-fix'),orderEl=document.getElementById('m-order');
-    sliderEl.addEventListener('input',function(){valEl.value=this.value;applyBondLength(parseFloat(this.value),fixEl.value==='1')});
-    valEl.addEventListener('input',function(){sliderEl.value=this.value;applyBondLength(parseFloat(this.value),fixEl.value==='1')});
-    fixEl.addEventListener('change',function(){applyBondLength(parseFloat(valEl.value),this.value==='1')});
+    var valEl=document.getElementById('m-val'),sliderEl=document.getElementById('m-slider'),fixEl=document.getElementById('m-fix'),orderEl=document.getElementById('m-order'),moveEl=document.getElementById('m-move');
+    sliderEl.addEventListener('input',function(){valEl.value=this.value;applyBondLength(parseFloat(this.value),fixEl.value==='1',moveEl.value)});
+    valEl.addEventListener('input',function(){sliderEl.value=this.value;applyBondLength(parseFloat(this.value),fixEl.value==='1',moveEl.value)});
+    fixEl.addEventListener('change',function(){applyBondLength(parseFloat(valEl.value),this.value==='1',moveEl.value)});
+    moveEl.addEventListener('change',function(){applyBondLength(parseFloat(valEl.value),fixEl.value==='1',this.value)});
     orderEl.addEventListener('change',function(){
         var newOrder=parseFloat(this.value);
         if(newOrder===0){
@@ -2158,13 +2337,15 @@ function showBondAngleModal(){
     showModal('<h3>Adjust Bond Angle</h3>'+
         '<div class="current-val">Current: '+cur.toFixed(2)+' deg</div>'+
         '<label>Fix side:</label><select id="m-fix"><option value="1">Fix '+n1+'-'+n2+' (move '+n3+')</option><option value="2">Fix '+n2+'-'+n3+' (move '+n1+')</option></select>'+
+        '<label>Move:</label><select id="m-move"><option value="group">Translate Group (atom + connected)</option><option value="atom">Translate Atom (only)</option></select>'+
         '<label>Target angle (deg):</label><input type="number" id="m-val" value="'+cur.toFixed(2)+'" step="0.5" min="5" max="175">'+
         '<input type="range" id="m-slider" value="'+cur.toFixed(2)+'" min="5" max="175" step="0.5">'+
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok" id="m-ok">OK</button></div>',null);
-    var valEl=document.getElementById('m-val'),sliderEl=document.getElementById('m-slider'),fixEl=document.getElementById('m-fix');
-    sliderEl.addEventListener('input',function(){valEl.value=this.value;applyBondAngle(parseFloat(this.value),fixEl.value==='1')});
-    valEl.addEventListener('input',function(){sliderEl.value=this.value;applyBondAngle(parseFloat(this.value),fixEl.value==='1')});
-    fixEl.addEventListener('change',function(){applyBondAngle(parseFloat(valEl.value),this.value==='1')});
+    var valEl=document.getElementById('m-val'),sliderEl=document.getElementById('m-slider'),fixEl=document.getElementById('m-fix'),moveEl=document.getElementById('m-move');
+    sliderEl.addEventListener('input',function(){valEl.value=this.value;applyBondAngle(parseFloat(this.value),fixEl.value==='1',moveEl.value)});
+    valEl.addEventListener('input',function(){sliderEl.value=this.value;applyBondAngle(parseFloat(this.value),fixEl.value==='1',moveEl.value)});
+    fixEl.addEventListener('change',function(){applyBondAngle(parseFloat(valEl.value),this.value==='1',moveEl.value)});
+    moveEl.addEventListener('change',function(){applyBondAngle(parseFloat(valEl.value),fixEl.value==='1',this.value)});
     document.getElementById('m-ok').addEventListener('click',function(){hideModal();originalCoords=null;resetSelection()});
     document.getElementById('m-cancel').addEventListener('click',function(){restoreOriginal();rebuildScene();hideModal();originalCoords=null;resetSelection()});
 }
@@ -2177,17 +2358,45 @@ function showDihedralModal(){
     showModal('<h3>Adjust Dihedral Angle</h3>'+
         '<div class="current-val">Current: '+cur.toFixed(2)+' deg</div>'+
         '<label>Fix side:</label><select id="m-fix"><option value="1">Fix '+n1+'-'+n2+'-'+n3+' (move '+n4+')</option><option value="2">Fix '+n2+'-'+n3+'-'+n4+' (move '+n1+')</option></select>'+
+        '<label>Move:</label><select id="m-move"><option value="group">Translate Group (atom + connected)</option><option value="atom">Translate Atom (only)</option></select>'+
         '<label>Target dihedral (deg):</label><input type="number" id="m-val" value="'+cur.toFixed(2)+'" step="1" min="-180" max="180">'+
         '<input type="range" id="m-slider" value="'+cur.toFixed(2)+'" min="-180" max="180" step="0.5">'+
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok" id="m-ok">OK</button></div>',null);
-    var valEl=document.getElementById('m-val'),sliderEl=document.getElementById('m-slider'),fixEl=document.getElementById('m-fix');
-    sliderEl.addEventListener('input',function(){valEl.value=this.value;applyDihedral(parseFloat(this.value),fixEl.value==='1')});
-    valEl.addEventListener('input',function(){sliderEl.value=this.value;applyDihedral(parseFloat(this.value),fixEl.value==='1')});
-    fixEl.addEventListener('change',function(){applyDihedral(parseFloat(valEl.value),this.value==='1')});
+    var valEl=document.getElementById('m-val'),sliderEl=document.getElementById('m-slider'),fixEl=document.getElementById('m-fix'),moveEl=document.getElementById('m-move');
+    sliderEl.addEventListener('input',function(){valEl.value=this.value;applyDihedral(parseFloat(this.value),fixEl.value==='1',moveEl.value)});
+    valEl.addEventListener('input',function(){sliderEl.value=this.value;applyDihedral(parseFloat(this.value),fixEl.value==='1',moveEl.value)});
+    fixEl.addEventListener('change',function(){applyDihedral(parseFloat(valEl.value),this.value==='1',moveEl.value)});
+    moveEl.addEventListener('change',function(){applyDihedral(parseFloat(valEl.value),fixEl.value==='1',this.value)});
     document.getElementById('m-ok').addEventListener('click',function(){hideModal();originalCoords=null;resetSelection()});
     document.getElementById('m-cancel').addEventListener('click',function(){restoreOriginal();rebuildScene();hideModal();originalCoords=null;resetSelection()});
 }
 
+var UNIT_CANDIDATES=(function(){
+    var arr=[];var N=50;var phi=Math.PI*(3-Math.sqrt(5));
+    for(var i=0;i<N;i++){
+        var y=1-(i/(N-1))*2;
+        var r=Math.sqrt(1-y*y);
+        var th=phi*i;
+        arr.push({x:Math.cos(th)*r,y:y,z:Math.sin(th)*r});
+    }
+    return arr;
+})();
+function pickFreeDirection(neighbors){
+    if(!neighbors||neighbors.length===0)return {x:0,y:0,z:1};
+    var best=UNIT_CANDIDATES[0];var bestMin=-1;
+    for(var ci=0;ci<UNIT_CANDIDATES.length;ci++){
+        var c=UNIT_CANDIDATES[ci];
+        var minAng=Infinity;
+        for(var ni=0;ni<neighbors.length;ni++){
+            var nv=neighbors[ni];
+            var dot=c.x*nv.x+c.y*nv.y+c.z*nv.z;
+            var ang=Math.acos(Math.max(-1,Math.min(1,dot)));
+            if(ang<minAng)minAng=ang;
+        }
+        if(minAng>bestMin){bestMin=minAng;best=c;}
+    }
+    return best;
+}
 function showAddAtomModal(){
     var anchorIdx=selectedAtoms[0];
     var anchor=MD.atoms[anchorIdx];
@@ -2223,6 +2432,7 @@ function showAddAtomModal(){
         document.getElementById('m-val').value=defaults[this.value]||1.5;
     });
     document.getElementById('m-ok').addEventListener('click',function(){
+        pushUndo();
         var el=document.getElementById('m-elem').value;
         var bl=parseFloat(document.getElementById('m-val').value)||1.5;
         var bondOrder=parseFloat(document.getElementById('m-bond-order').value)||1;
@@ -2236,10 +2446,14 @@ function showAddAtomModal(){
                 if(b.atom2===baseAnchorIdx)bondedBase.push(b.atom1);
             });
             if(bondedBase.length>0){
-                var avg={x:0,y:0,z:0};
-                bondedBase.forEach(function(bi){avg.x+=CRY.baseAtoms[bi].x-baseAnchor.x;avg.y+=CRY.baseAtoms[bi].y-baseAnchor.y;avg.z+=CRY.baseAtoms[bi].z-baseAnchor.z});
-                var al=Math.sqrt(avg.x*avg.x+avg.y*avg.y+avg.z*avg.z);
-                if(al>1e-10){dir={x:-avg.x/al,y:-avg.y/al,z:-avg.z/al}}
+                var nbrs=bondedBase.map(function(bi){
+                    var ba=CRY.baseAtoms[bi];
+                    var dx=ba.x-baseAnchor.x,dy=ba.y-baseAnchor.y,dz=ba.z-baseAnchor.z;
+                    var dl=Math.sqrt(dx*dx+dy*dy+dz*dz);
+                    if(dl<1e-10)return{x:0,y:0,z:1};
+                    return{x:dx/dl,y:dy/dl,z:dz/dl};
+                });
+                dir=pickFreeDirection(nbrs);
             }
             var newBaseIdx=CRY.baseAtoms.length;
             CRY.baseAtoms.push({element:el,x:baseAnchor.x+dir.x*bl,y:baseAnchor.y+dir.y*bl,z:baseAnchor.z+dir.z*bl,index:newBaseIdx,baseIdx:newBaseIdx,occupancy:1});
@@ -2252,10 +2466,14 @@ function showAddAtomModal(){
                 if(b.atom2===anchorIdx)bonded.push(b.atom1);
             });
             if(bonded.length>0){
-                var avg={x:0,y:0,z:0};
-                bonded.forEach(function(bi){avg.x+=MD.atoms[bi].x-anchor.x;avg.y+=MD.atoms[bi].y-anchor.y;avg.z+=MD.atoms[bi].z-anchor.z});
-                var al=Math.sqrt(avg.x*avg.x+avg.y*avg.y+avg.z*avg.z);
-                if(al>1e-10){dir={x:-avg.x/al,y:-avg.y/al,z:-avg.z/al}}
+                var nbrs=bonded.map(function(bi){
+                    var ba=MD.atoms[bi];
+                    var dx=ba.x-anchor.x,dy=ba.y-anchor.y,dz=ba.z-anchor.z;
+                    var dl=Math.sqrt(dx*dx+dy*dy+dz*dz);
+                    if(dl<1e-10)return{x:0,y:0,z:1};
+                    return{x:dx/dl,y:dy/dl,z:dz/dl};
+                });
+                dir=pickFreeDirection(nbrs);
             }
             var newIdx=MD.atoms.length;
             MD.atoms.push({element:el,x:anchor.x+dir.x*bl,y:anchor.y+dir.y*bl,z:anchor.z+dir.z*bl,color:MD.atomColors[el]||'#FF1493',index:newIdx});
@@ -2266,7 +2484,49 @@ function showAddAtomModal(){
     document.getElementById('m-cancel').addEventListener('click',function(){hideModal();originalCoords=null;resetSelection()});
 }
 
+function showReplaceAtomModal(){
+    if(selectedAtoms.length===0)return;
+    saveOriginal();
+    var names=selectedAtoms.map(function(i){return MD.atoms[i].element+(i+1)}).join(', ');
+    showModal('<h3>Replace Atom</h3>'+
+        '<div class="current-val">Replace '+selectedAtoms.length+' atom(s): '+names+'</div>'+
+        '<label>New element:</label><select id="m-elem">'+
+        '<option>H</option><option>He</option>'+
+        '<option>Li</option><option>Be</option><option>B</option><option>C</option><option>N</option><option>O</option><option>F</option><option>Ne</option>'+
+        '<option>Na</option><option>Mg</option><option>Al</option><option>Si</option><option>P</option><option>S</option><option>Cl</option><option>Ar</option>'+
+        '<option>K</option><option>Ca</option><option>Sc</option><option>Ti</option><option>V</option><option>Cr</option><option>Mn</option><option>Fe</option>'+
+        '<option>Co</option><option>Ni</option><option>Cu</option><option>Zn</option><option>Ga</option><option>Ge</option><option>As</option><option>Se</option>'+
+        '<option>Br</option><option>Kr</option><option>Rb</option><option>Sr</option><option>Y</option><option>Zr</option><option>Nb</option><option>Mo</option>'+
+        '<option>Ru</option><option>Rh</option><option>Pd</option><option>Ag</option><option>Cd</option><option>In</option><option>Sn</option><option>Sb</option>'+
+        '<option>Te</option><option>I</option><option>Xe</option><option>Cs</option><option>Ba</option><option>La</option><option>Ce</option><option>Pr</option>'+
+        '<option>Nd</option><option>Sm</option><option>Eu</option><option>Gd</option><option>Tb</option><option>Dy</option><option>Ho</option><option>Er</option>'+
+        '<option>Tm</option><option>Yb</option><option>Lu</option><option>Hf</option><option>Ta</option><option>W</option><option>Re</option><option>Os</option>'+
+        '<option>Ir</option><option>Pt</option><option>Au</option><option>Hg</option><option>Tl</option><option>Pb</option><option>Bi</option>'+
+        '</select>'+
+        '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok" id="m-ok">Replace</button></div>',null);
+    document.getElementById('m-ok').addEventListener('click',function(){
+        pushUndo();
+        var el=document.getElementById('m-elem').value;
+        selectedAtoms.forEach(function(idx){
+            var a=MD.atoms[idx];
+            a.element=el;
+            a.color=MD.atomColors[el]||'#FF1493';
+            if(CRY){
+                var bi=a.baseIdx!=null?a.baseIdx:idx;
+                if(CRY.baseAtoms[bi]){
+                    CRY.baseAtoms[bi].element=el;
+                    CRY.baseAtoms[bi].color=a.color;
+                }
+            }
+        });
+        if(CRY){rebuildCrystal();}
+        rebuildScene();hideModal();originalCoords=null;resetSelection();
+    });
+    document.getElementById('m-cancel').addEventListener('click',function(){hideModal();originalCoords=null;resetSelection()});
+}
+
 function showDeleteAtomModal(){
+    pushUndo();
     var idx=selectedAtoms[0];
     var a=MD.atoms[idx];
     var name=a.element+(idx+1);
@@ -2294,7 +2554,69 @@ function showDeleteAtomModal(){
     document.getElementById('m-cancel').addEventListener('click',function(){hideModal();resetSelection()});
 }
 
+function showBatchDeleteModal(){
+    if(selectedAtoms.length===0)return;
+    pushUndo();
+    var names=selectedAtoms.map(function(i){return MD.atoms[i].element+(i+1)}).join(', ');
+    showModal('<h3>Delete Atoms</h3>'+
+        '<div class="current-val">Delete '+selectedAtoms.length+' atoms: '+names+'?</div>'+
+        '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok mbtn-danger" id="m-ok">Delete</button></div>',null);
+    document.getElementById('m-ok').addEventListener('click',function(){batchDeleteSelected()});
+    document.getElementById('m-cancel').addEventListener('click',function(){hideModal();resetSelection()});
+}
+
+function batchDeleteSelected(){
+    var delSet={};
+    selectedAtoms.forEach(function(idx){delSet[idx]=true});
+    var sortedAsc=selectedAtoms.slice().sort(function(a,b){return a-b});
+    if(CRY){
+        var baseToDelete={};
+        selectedAtoms.forEach(function(idx){
+            var a=MD.atoms[idx];
+            var bi=a.baseIdx!=null?a.baseIdx:idx;
+            baseToDelete[bi]=true;
+        });
+        var newBaseAtoms=[];
+        var oldToNew={};
+        CRY.baseAtoms.forEach(function(ba,i){
+            if(baseToDelete[i])return;
+            var newIdx=newBaseAtoms.length;
+            oldToNew[i]=newIdx;
+            var color=ba.color||((MD.atomColors&&MD.atomColors[ba.element])||'#FF1493');
+            newBaseAtoms.push({element:ba.element,x:ba.x,y:ba.y,z:ba.z,
+                index:newIdx,occupancy:ba.occupancy!=null?ba.occupancy:1,baseIdx:newIdx,color:color});
+        });
+        CRY.baseBonds=CRY.baseBonds.filter(function(b){
+            return !baseToDelete[b.atom1]&&!baseToDelete[b.atom2];
+        }).map(function(b){
+            return{atom1:oldToNew[b.atom1],atom2:oldToNew[b.atom2],order:b.order,shift:b.shift};
+        });
+        CRY.baseAtoms=newBaseAtoms;
+        rebuildCrystal();rebuildScene();hideModal();resetSelection();
+    }else{
+        for(var k=sortedAsc.length-1;k>=0;k--){
+            MD.atoms.splice(sortedAsc[k],1);
+        }
+        MD.atoms.forEach(function(a,i){a.index=i});
+        MD.bonds=MD.bonds.filter(function(b){
+            return !delSet[b.atom1]&&!delSet[b.atom2];
+        }).map(function(b){
+            var newA=b.atom1,newB=b.atom2;
+            sortedAsc.forEach(function(d){
+                if(d<b.atom1)newA--;
+                if(d<b.atom2)newB--;
+            });
+            return{atom1:newA,atom2:newB,order:b.order};
+        });
+        rebuildScene();hideModal();resetSelection();
+    }
+}
+
 function doSave(){
+    if(!MD.atoms||MD.atoms.length===0){alert('No atoms to save');return}
+    for(var ci=0;ci<MD.atoms.length;ci++){var ca=MD.atoms[ci];if(isNaN(ca.x)||isNaN(ca.y)||isNaN(ca.z)){alert('Atom '+(ci+1)+' has invalid coordinates (NaN). Cannot save.');return}}
+    if(CRY&&!CRY_INV){alert('Crystal lattice is degenerate (zero determinant). Cannot save crystal formats.');return}
+    try{
     var xyz=MD.atoms.length+'\\n'+(MD.title||'Modified structure')+'\\n';
     MD.atoms.forEach(function(a){xyz+=a.element+'  '+a.x.toFixed(6)+'  '+a.y.toFixed(6)+'  '+a.z.toFixed(6)+'\\n'});
     var gjf='';
@@ -2323,7 +2645,19 @@ function doSave(){
         gjf+=parts.join(' ')+'\\n';
     });
     gjf+='\\n';
-    if(meta&&meta.afterConnectContent){gjf+=meta.afterConnectContent+'\\n'}
+    if(meta&&meta.afterConnectContent){
+        var accLines=meta.afterConnectContent.split('\\n').filter(function(ln){
+            var t=ln.trim();
+            if(t===''||t.startsWith('--'))return true;
+            var p=t.split(/\\s+/);
+            var firstNum=parseInt(p[0],10);
+            if(!isNaN(firstNum)&&firstNum>=1&&firstNum<=MD.atoms.length&&p.every(function(pp){return !isNaN(parseFloat(pp))})){
+                return false;
+            }
+            return true;
+        });
+        if(accLines.length>0)gjf+=accLines.join('\\n')+'\\n';
+    }
 
     var chrg=MD.charge||0;
     var mult=MD.multiplicity||1;
@@ -2412,14 +2746,7 @@ function doSave(){
 
     var cifContent='';
     if(CRY){
-        var lv=CRY.latticeVectors;
-        var det=lv[0][0]*(lv[1][1]*lv[2][2]-lv[1][2]*lv[2][1])-lv[0][1]*(lv[1][0]*lv[2][2]-lv[1][2]*lv[2][0])+lv[0][2]*(lv[1][0]*lv[2][1]-lv[1][1]*lv[2][0]);
-        var invDet=1/det;
-        var inv=[
-            [(lv[1][1]*lv[2][2]-lv[1][2]*lv[2][1])*invDet,(lv[0][2]*lv[2][1]-lv[0][1]*lv[2][2])*invDet,(lv[0][1]*lv[1][2]-lv[0][2]*lv[1][1])*invDet],
-            [(lv[1][2]*lv[2][0]-lv[1][0]*lv[2][2])*invDet,(lv[0][0]*lv[2][2]-lv[0][2]*lv[2][0])*invDet,(lv[0][2]*lv[1][0]-lv[0][0]*lv[1][2])*invDet],
-            [(lv[1][0]*lv[2][1]-lv[1][1]*lv[2][0])*invDet,(lv[0][1]*lv[2][0]-lv[0][0]*lv[2][1])*invDet,(lv[0][0]*lv[1][1]-lv[0][1]*lv[1][0])*invDet]
-        ];
+        var inv=CRY_INV;
         cifContent='data_modified\\n';
         cifContent+='_cell_length_a '+CRY.a.toFixed(6)+'\\n';
         cifContent+='_cell_length_b '+CRY.b.toFixed(6)+'\\n';
@@ -2444,13 +2771,7 @@ function doSave(){
     var vaspContent='';
     if(CRY){
         var lv=CRY.latticeVectors;
-        var vDet=lv[0][0]*(lv[1][1]*lv[2][2]-lv[1][2]*lv[2][1])-lv[0][1]*(lv[1][0]*lv[2][2]-lv[1][2]*lv[2][0])+lv[0][2]*(lv[1][0]*lv[2][1]-lv[1][1]*lv[2][0]);
-        var vInvDet=1/vDet;
-        var vInv=[
-            [(lv[1][1]*lv[2][2]-lv[1][2]*lv[2][1])*vInvDet,(lv[0][2]*lv[2][1]-lv[0][1]*lv[2][2])*vInvDet,(lv[0][1]*lv[1][2]-lv[0][2]*lv[1][1])*vInvDet],
-            [(lv[1][2]*lv[2][0]-lv[1][0]*lv[2][2])*vInvDet,(lv[0][0]*lv[2][2]-lv[0][2]*lv[2][0])*vInvDet,(lv[0][2]*lv[1][0]-lv[0][0]*lv[1][2])*vInvDet],
-            [(lv[1][0]*lv[2][1]-lv[1][1]*lv[2][0])*vInvDet,(lv[0][1]*lv[2][0]-lv[0][0]*lv[2][1])*vInvDet,(lv[0][0]*lv[1][1]-lv[0][1]*lv[1][0])*vInvDet]
-        ];
+        var vInv=CRY_INV;
         var elemOrder=[];
         var elemCounts={};
         MD.atoms.forEach(function(a){
@@ -2494,6 +2815,30 @@ function doSave(){
         }
     }
 
+    var vestaContent='';
+    if(CRY){
+        var vInv=CRY_INV;
+        vestaContent='#VESTA_FORMAT_VERSION 3.5.4\\n\\n\\nCRYSTAL\\n\\nTITLE\\n'+(MD.title||'Modified structure')+'\\n\\nGROUP\\n    1   1 P 1\\n\\nSYMOP\\n 0.000000  0.000000  0.000000  1  0  0   0  1  0   0  0  1   1\\n-1.0 -1.0 -1.0  1 0 0  0 0 0  0 0 0\\n\\nTRANM 0\\n 0.000000  0.000000  0.000000  1  0  0   0  1  0   0  0  1\\n\\nLTRANSL\\n -1\\n 0.000000  0.000000  0.000000  0.000000  0.000000  0.000000\\n\\nLORIENT\\n -1   0   0   0   0\\n 1.000000  0.000000  0.000000  1.000000  0.000000  0.000000\\n 0.000000  0.000000  1.000000  0.000000  0.000000  1.000000\\n\\nLMATRIX\\n 1.000000  0.000000  0.000000  0.000000\\n 0.000000  1.000000  0.000000  0.000000\\n 0.000000  0.000000  1.000000  0.000000\\n 0.000000  0.000000  0.000000  1.000000\\n 0.000000  0.000000  0.000000\\n\\nCELLP\\n';
+        vestaContent+=' '+CRY.a.toFixed(6)+'  '+CRY.b.toFixed(6)+'  '+CRY.c.toFixed(6)+'  '+CRY.alpha.toFixed(6)+'  '+CRY.beta.toFixed(6)+'  '+CRY.gamma.toFixed(6)+'\\n';
+        vestaContent+=' 0.000000  0.000000  0.000000  0.000000  0.000000  0.000000\\n\\nSTRUC\\n';
+        CRY.baseAtoms.forEach(function(ba,i){
+            var fx=vInv[0][0]*ba.x+vInv[0][1]*ba.y+vInv[0][2]*ba.z;
+            var fy=vInv[1][0]*ba.x+vInv[1][1]*ba.y+vInv[1][2]*ba.z;
+            var fz=vInv[2][0]*ba.x+vInv[2][1]*ba.y+vInv[2][2]*ba.z;
+            var label=ba.element+(i+1);
+            var occ=(ba.occupancy!=null?ba.occupancy:1).toFixed(4);
+            var idxStr=''+(i+1);while(idxStr.length<3)idxStr=' '+idxStr;
+            var elStr=ba.element;while(elStr.length<3)elStr=elStr+' ';
+            var labelStr=label;while(labelStr.length<4)labelStr=labelStr+' ';
+            vestaContent+=idxStr+' '+elStr+' '+labelStr+' '+occ+'   '+fx.toFixed(6)+'   '+fy.toFixed(6)+'   '+fz.toFixed(6)+'    2i       1\\n';
+            vestaContent+='                            0.000000   0.000000   0.000000  0.00\\n';
+        });
+    }
+    }catch(err){
+        alert('Failed to generate save content: '+(err&&err.message?err.message:String(err)));
+        return;
+    }
+
     showModal('<h3>Save File</h3>'+
         '<label>Format:</label><select id="m-fmt">'+
         '<option value="xyz">XYZ (.xyz)</option>'+
@@ -2501,6 +2846,7 @@ function doSave(){
         (CRY?'<option value="cif">CIF (.cif)</option>':'')+
         (CRY?'<option value="vasp">VASP POSCAR (.vasp)</option>':'')+
         (CRY?'<option value="cube">Gaussian Cube (.cube)</option>':'')+
+        (CRY?'<option value="vesta">VESTA (.vesta)</option>':'')+
         '<option value="coord">Turbomole Coord (.coord)</option>'+
         '<option value="inp">ORCA Input (.inp)</option>'+
         '<option value="mol2">MOL2 (.mol2)</option>'+
@@ -2517,6 +2863,7 @@ function doSave(){
             case 'cif':content=cifContent;ext='.cif';break;
             case 'vasp':content=vaspContent;ext='.vasp';break;
             case 'cube':content=cubeContent;ext='.cube';break;
+            case 'vesta':content=vestaContent;ext='.vesta';break;
             case 'coord':content=coord;ext='.coord';break;
             case 'inp':content=orcaInp;ext='.inp';break;
             case 'mol2':content=mol2;ext='.mol2';break;
@@ -2531,49 +2878,35 @@ function doSave(){
     document.getElementById('m-cancel').addEventListener('click',function(){hideModal()});
 }
 
-function showSelectAtomsModal(){
-    showModal('<h3>Select Atoms</h3>'+
-        '<div class="current-val">Enter indices (1-based), ranges (e.g. 3-10), or element symbols. Separate with spaces or commas.</div>'+
-        '<input type="text" id="m-sel-input" placeholder="e.g. 1 3-5 C H 8" style="width:100%;padding:6px 8px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:12px">'+
-        '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Close</button><button class="mbtn mbtn-ok" id="m-ok">Select</button></div>',null);
-    var inputEl=document.getElementById('m-sel-input');
-    inputEl.focus();
-    inputEl.addEventListener('keydown',function(e){if(e.key==='Enter'){document.getElementById('m-ok').click()}});
-    document.getElementById('m-ok').addEventListener('click',function(){
-        var input=inputEl.value.trim();
-        if(!input){hideModal();return}
-        var tokens=input.split(/[\\s,;]+/);
-        tokens.forEach(function(tok){
-            if(!tok)return;
-            var rangeMatch=tok.match(/^(\\d+)-(\\d+)$/);
-            if(rangeMatch){
-                var start=parseInt(rangeMatch[1],10);
-                var end=parseInt(rangeMatch[2],10);
-                if(!isNaN(start)&&!isNaN(end)){
-                    for(var k=start;k<=end;k++){
-                        var idx=k-1;
-                        if(idx>=0&&idx<MD.atoms.length&&selectedAtoms.indexOf(idx)<0)selectedAtoms.push(idx);
-                    }
+function parseSelectInput(input){
+    var result=[];
+    var tokens=input.split(/[\\s,;]+/);
+    tokens.forEach(function(tok){
+        if(!tok)return;
+        var rangeMatch=tok.match(/^(\\d+)-(\\d+)$/);
+        if(rangeMatch){
+            var start=parseInt(rangeMatch[1],10);
+            var end=parseInt(rangeMatch[2],10);
+            if(!isNaN(start)&&!isNaN(end)){
+                for(var k=start;k<=end;k++){
+                    var idx=k-1;
+                    if(idx>=0&&idx<MD.atoms.length&&result.indexOf(idx)<0)result.push(idx);
                 }
-                return;
             }
-            var num=parseInt(tok,10);
-            if(!isNaN(num)&&num>0){
-                var idx2=num-1;
-                if(idx2<MD.atoms.length&&selectedAtoms.indexOf(idx2)<0)selectedAtoms.push(idx2);
-                return;
-            }
-            var el=tok.charAt(0).toUpperCase()+tok.slice(1).toLowerCase();
-            MD.atoms.forEach(function(a,i){
-                if(a.element===el&&selectedAtoms.indexOf(i)<0)selectedAtoms.push(i);
-            });
+            return;
+        }
+        var num=parseInt(tok,10);
+        if(!isNaN(num)&&num>0){
+            var idx2=num-1;
+            if(idx2<MD.atoms.length&&result.indexOf(idx2)<0)result.push(idx2);
+            return;
+        }
+        var el=tok.charAt(0).toUpperCase()+tok.slice(1).toLowerCase();
+        MD.atoms.forEach(function(a,i){
+            if(a.element===el&&result.indexOf(i)<0)result.push(i);
         });
-        highlightSelected();
-        var names=selectedAtoms.map(function(i){return MD.atoms[i].element+(i+1)}).join(', ');
-        selInfoEl.textContent='Selected: '+names+' ('+selectedAtoms.length+' atoms)';
-        hideModal();
     });
-    document.getElementById('m-cancel').addEventListener('click',function(){hideModal()});
+    return result;
 }
 
 function updateTransform(){
@@ -2588,12 +2921,13 @@ function updateTransform(){
         moleculeGroup.quaternion.copy(rotQuat);
         pivotGroup.position.set(panX,panY,0);
     }
-    if(CRY)updateAxesIndicator();
+    needsRender=true;
 }
 
 var canvas=renderer.domElement;
 var raycaster=new THREE.Raycaster();
 var mouse=new THREE.Vector2();
+var isBoxSelecting=false;var boxStart=null;
 
 function getClickedAtom(e){
     var rect=canvas.getBoundingClientRect();
@@ -2636,6 +2970,15 @@ function getClickedAtom(e){
 }
 
 canvas.addEventListener('mousedown',function(e){
+    if(currentMode==='boxSelect'&&e.button===0){
+        boxStart={x:e.clientX,y:e.clientY};
+        isBoxSelecting=true;
+        boxRectEl.style.display='block';
+        boxRectEl.style.left=boxStart.x+'px';
+        boxRectEl.style.top=boxStart.y+'px';
+        boxRectEl.style.width='0px';boxRectEl.style.height='0px';
+        e.preventDefault();return;
+    }
     if(currentMode!=='view'&&e.button===0){
         var idx=getClickedAtom(e);
         if(idx>=0){selectAtom(idx);e.preventDefault();return}
@@ -2652,6 +2995,13 @@ canvas.addEventListener('mousedown',function(e){
 });
 
 canvas.addEventListener('mousemove',function(e){
+    if(isBoxSelecting){
+        var bx=Math.min(boxStart.x,e.clientX),by=Math.min(boxStart.y,e.clientY);
+        var bw=Math.abs(e.clientX-boxStart.x),bh=Math.abs(e.clientY-boxStart.y);
+        boxRectEl.style.left=bx+'px';boxRectEl.style.top=by+'px';
+        boxRectEl.style.width=bw+'px';boxRectEl.style.height=bh+'px';
+        return;
+    }
     var dm={x:e.clientX-prevM.x,y:e.clientY-prevM.y};
     if(diffMode){
         var side=diffTransformSide;
@@ -2725,8 +3075,25 @@ canvas.addEventListener('mousemove',function(e){
     }else{tooltipEl.style.display='none'}
 });
 
-canvas.addEventListener('mouseup',function(){isRot=false;isPan=false});
-canvas.addEventListener('mouseleave',function(){isRot=false;isPan=false;tooltipEl.style.display='none'});
+canvas.addEventListener('mouseup',function(e){
+    if(isBoxSelecting){
+        isBoxSelecting=false;boxRectEl.style.display='none';
+        var rect=canvas.getBoundingClientRect();
+        var bx=Math.min(boxStart.x,e.clientX),by=Math.min(boxStart.y,e.clientY);
+        var bw=Math.abs(e.clientX-boxStart.x),bh=Math.abs(e.clientY-boxStart.y);
+        if(bw<3&&bh<3){boxStart=null;return;}
+        var v=new THREE.Vector3();
+        atomMeshes.forEach(function(m){
+            m.getWorldPosition(v);v.project(camera);
+            var sx=(v.x*0.5+0.5)*rect.width+rect.left;
+            var sy=(-v.y*0.5+0.5)*rect.height+rect.top;
+            if(sx>=bx&&sx<=bx+bw&&sy>=by&&sy<=by+bh){selectAtom(m.userData.index);}
+        });
+        boxStart=null;needsRender=true;return;
+    }
+    isRot=false;isPan=false;
+});
+canvas.addEventListener('mouseleave',function(){isRot=false;isPan=false;tooltipEl.style.display='none';if(isBoxSelecting){isBoxSelecting=false;boxRectEl.style.display='none';boxStart=null}});
 canvas.addEventListener('wheel',function(e){e.preventDefault();
     if(diffMode){
         var rect=canvas.getBoundingClientRect();
@@ -2744,6 +3111,7 @@ canvas.addEventListener('wheel',function(e){e.preventDefault();
         camDist=Math.max(1,Math.min(500,camDist));
         camera.position.z=camDist;
     }
+    needsRender=true;
 },{passive:false});
 canvas.addEventListener('contextmenu',function(e){e.preventDefault()});
 
@@ -2780,13 +3148,50 @@ canvas.addEventListener('touchmove',function(e){e.preventDefault();
             }
         }
         touchSD=d}
+    needsRender=true;
 },{passive:false});
 canvas.addEventListener('touchend',function(e){isRot=false;if(e.touches.length<2)touchSD=0});
 
-window.addEventListener('resize',function(){var rw=container.clientWidth||window.innerWidth;var rh=container.clientHeight||(window.innerHeight-60);if(rw<1)rw=window.innerWidth;if(rh<1)rh=window.innerHeight-60;camera.aspect=rw/rh;camera.updateProjectionMatrix();renderer.setSize(rw,rh)});
+document.addEventListener('keydown',function(e){
+    if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'||e.target.tagName==='SELECT')return;
+    if(e.key in keyState){keyState[e.key]=true;e.preventDefault()}
+    if(e.key==='Delete'&&!diffMode){
+        e.preventDefault();
+        if(selectedAtoms.length>0){showBatchDeleteModal()}
+        else{setMode('deleteAtom')}
+    }
+});
+document.addEventListener('keyup',function(e){
+    if(e.key in keyState){keyState[e.key]=false;e.preventDefault()}
+});
+
+window.addEventListener('resize',function(){var rw=container.clientWidth||window.innerWidth;var rh=container.clientHeight||(window.innerHeight-60);if(rw<1)rw=window.innerWidth;if(rh<1)rh=window.innerHeight-60;camera.aspect=rw/rh;camera.updateProjectionMatrix();renderer.setSize(rw,rh);needsRender=true});
 
 function animate(){
     requestAnimationFrame(animate);
+    var keyActive=false;
+    if(keyState.ArrowLeft||keyState.ArrowRight||keyState.ArrowUp||keyState.ArrowDown){
+        keyActive=true;
+        if(!diffMode){
+            if(keyState.ArrowLeft){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),-keyRotSpeed);rotQuat.premultiply(qx)}
+            if(keyState.ArrowRight){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),keyRotSpeed);rotQuat.premultiply(qx)}
+            if(keyState.ArrowUp){var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),-keyRotSpeed);rotQuat.premultiply(qy)}
+            if(keyState.ArrowDown){var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),keyRotSpeed);rotQuat.premultiply(qy)}
+            rotQuat.normalize();
+            updateTransform();
+        }else{
+            var rq=(diffTransformSide==='right')?diffRotQuat:rotQuat;
+            if(keyState.ArrowLeft){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),-keyRotSpeed);rq.premultiply(qx)}
+            if(keyState.ArrowRight){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),keyRotSpeed);rq.premultiply(qx)}
+            if(keyState.ArrowUp){var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),-keyRotSpeed);rq.premultiply(qy)}
+            if(keyState.ArrowDown){var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),keyRotSpeed);rq.premultiply(qy)}
+            rq.normalize();
+            updateTransform();
+        }
+    }
+    if(!needsRender&&!keyActive)return;
+    needsRender=false;
+    if(CRY)updateAxesIndicator();
     var w=container.clientWidth||window.innerWidth;
     var h=container.clientHeight||(window.innerHeight-60);
     if(w<1)w=window.innerWidth;

@@ -39,6 +39,11 @@ interface VestaAtom {
     frac: [number, number, number];
 }
 
+interface VestaSymOp {
+    R: number[][];
+    t: number[];
+}
+
 const SECTION_KEYWORDS = /^(GROUP|SYMOP|TRANM|LTRANSL|LORIENT|LMATRIX|CELLP|STRUC|THERI|ATOMM|BONDM|POLYM|SURFM|FORMM|SECCL|TEXCL|LIGHT|MAPM|VECTM|SBOND|SANG|BDSPL|BDTYP|CMBOND|ORBIT|NETCHG|AATOMM|SATOMM)\b/;
 
 export function parseVesta(content: string): MolecularData {
@@ -48,6 +53,7 @@ export function parseVesta(content: string): MolecularData {
     let spaceGroup: string | undefined;
     let cellParams: { a: number; b: number; c: number; alpha: number; beta: number; gamma: number } | null = null;
     const vestaAtoms: VestaAtom[] = [];
+    const vestaSymOps: VestaSymOp[] = [];
 
     let i = 0;
     while (i < lines.length) {
@@ -126,6 +132,16 @@ export function parseVesta(content: string): MolecularData {
             while (i < lines.length) {
                 const parts = lines[i].trim().split(/\s+/).map(Number);
                 if (parts.length >= 3 && parts[0] === -1 && parts[1] === -1 && parts[2] === -1) break;
+                if (parts.length >= 13 && parts.every(v => isFinite(v) && !isNaN(v))) {
+                    vestaSymOps.push({
+                        t: [parts[0], parts[1], parts[2]],
+                        R: [
+                            [parts[3], parts[4], parts[5]],
+                            [parts[6], parts[7], parts[8]],
+                            [parts[9], parts[10], parts[11]]
+                        ]
+                    });
+                }
                 i++;
             }
             i++;
@@ -146,17 +162,36 @@ export function parseVesta(content: string): MolecularData {
 
     const lattice = cellToLatticeVectors(cellParams.a, cellParams.b, cellParams.c, cellParams.alpha, cellParams.beta, cellParams.gamma);
 
-    const cartAtoms: Atom[] = vestaAtoms.map((va, idx) => {
-        const wf = [wrapFrac(va.frac[0]), wrapFrac(va.frac[1]), wrapFrac(va.frac[2])];
-        const [cx, cy, cz] = fracToCart(wf, lattice);
-        return {
-            element: va.element,
-            x: cx, y: cy, z: cz,
-            index: idx,
-            occupancy: va.occupancy,
-            baseIdx: idx
-        };
-    });
+    if (vestaSymOps.length === 0) {
+        vestaSymOps.push({ R: [[1, 0, 0], [0, 1, 0], [0, 0, 1]], t: [0, 0, 0] });
+    }
+
+    const cartAtoms: Atom[] = [];
+    let atomIndex = 0;
+    for (const va of vestaAtoms) {
+        for (const op of vestaSymOps) {
+            const fx = op.R[0][0] * va.frac[0] + op.R[0][1] * va.frac[1] + op.R[0][2] * va.frac[2] + op.t[0];
+            const fy = op.R[1][0] * va.frac[0] + op.R[1][1] * va.frac[1] + op.R[1][2] * va.frac[2] + op.t[1];
+            const fz = op.R[2][0] * va.frac[0] + op.R[2][1] * va.frac[1] + op.R[2][2] * va.frac[2] + op.t[2];
+            const wf = [wrapFrac(fx), wrapFrac(fy), wrapFrac(fz)];
+            const [cx, cy, cz] = fracToCart(wf, lattice);
+
+            let duplicate = false;
+            for (const existing of cartAtoms) {
+                const dx = existing.x - cx, dy = existing.y - cy, dz = existing.z - cz;
+                if (dx * dx + dy * dy + dz * dz < 0.25) { duplicate = true; break; }
+            }
+            if (duplicate) continue;
+            cartAtoms.push({
+                element: va.element,
+                x: cx, y: cy, z: cz,
+                index: atomIndex,
+                occupancy: va.occupancy,
+                baseIdx: atomIndex
+            });
+            atomIndex++;
+        }
+    }
 
     const crystal: CrystalData = {
         ...cellParams,

@@ -148,7 +148,6 @@ export function parseGjf(content: string): MolecularData {
         connectStartLine = i;
         let allNumeric = true;
         let lineCount = 0;
-        let maxAtomNum = 0;
 
         for (let li = i; li < lines.length; li++) {
             const tl = lines[li].trim();
@@ -157,25 +156,29 @@ export function parseGjf(content: string): MolecularData {
             const tp = tl.split(/\s+/);
             const firstNum = parseInt(tp[0], 10);
             if (isNaN(firstNum)) { allNumeric = false; break; }
-            if (firstNum > maxAtomNum) maxAtomNum = firstNum;
             for (let ti = 1; ti < tp.length; ti++) {
                 if (isNaN(parseFloat(tp[ti]))) { allNumeric = false; break; }
             }
             if (!allNumeric) break;
         }
 
-        if (allNumeric && lineCount > 0 && maxAtomNum <= atoms.length) {
-            hasExplicitBonds = true;
+        if (allNumeric && lineCount > 0) {
             let connectEndLine = i;
+            let validBonds = 0;
             for (let li = i; li < lines.length; li++) {
                 const tl = lines[li].trim();
                 if (tl === '' || tl.startsWith('--')) { connectEndLine = li; break; }
                 const cparts = tl.split(/\s+/);
                 const atom1Num = parseInt(cparts[0], 10);
-                if (atom1Num > atoms.length) { connectEndLine = li; break; }
+                if (atom1Num < 1 || atom1Num > atoms.length) {
+                    connectEndLine = li + 1;
+                    continue;
+                }
                 parseConnectLine(tl, atoms.length, bonds);
+                validBonds++;
                 connectEndLine = li + 1;
             }
+            if (validBonds > 0) hasExplicitBonds = true;
             let afterIdx = connectEndLine;
             while (afterIdx < lines.length && lines[afterIdx].trim() === '') {
                 afterIdx++;
@@ -186,8 +189,6 @@ export function parseGjf(content: string): MolecularData {
         } else {
             afterConnectContent = lines.slice(i).join('\n');
         }
-    } else if (i < lines.length) {
-        afterConnectContent = lines.slice(i).join('\n');
     }
 
     const gjfMeta: GjfMeta = {
@@ -219,7 +220,8 @@ function parseConnectLine(line: string, totalAtoms: number, bonds: Bond[]): void
                 (b.atom1 === atom2 && b.atom2 === atom1)
             );
             if (!exists) {
-                bonds.push({ atom1, atom2, order: bondOrder });
+                const lo = Math.min(atom1, atom2), hi = Math.max(atom1, atom2);
+                bonds.push({ atom1: lo, atom2: hi, order: bondOrder });
             }
         }
         j += 2;
@@ -233,7 +235,8 @@ function parseConnectLine(line: string, totalAtoms: number, bonds: Bond[]): void
                 (b.atom1 === atom2 && b.atom2 === atom1)
             );
             if (!exists) {
-                bonds.push({ atom1, atom2, order: 1 });
+                const lo2 = Math.min(atom1, atom2), hi2 = Math.max(atom1, atom2);
+                bonds.push({ atom1: lo2, atom2: hi2, order: 1 });
             }
         }
     }

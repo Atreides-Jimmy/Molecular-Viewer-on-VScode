@@ -444,17 +444,17 @@ function cartToFrac(cart: number[], lattice: number[][]): number[] {
     const inv = [
         [
             (bVec[1] * cVec[2] - bVec[2] * cVec[1]) * invDet,
-            (aVec[2] * cVec[1] - aVec[1] * cVec[2]) * invDet,
-            (aVec[1] * bVec[2] - aVec[2] * bVec[1]) * invDet
-        ],
-        [
             (bVec[2] * cVec[0] - bVec[0] * cVec[2]) * invDet,
-            (aVec[0] * cVec[2] - aVec[2] * cVec[0]) * invDet,
-            (aVec[2] * bVec[0] - aVec[0] * bVec[2]) * invDet
+            (bVec[0] * cVec[1] - bVec[1] * cVec[0]) * invDet
         ],
         [
-            (bVec[0] * cVec[1] - bVec[1] * cVec[0]) * invDet,
-            (aVec[1] * cVec[0] - aVec[0] * cVec[1]) * invDet,
+            (aVec[2] * cVec[1] - aVec[1] * cVec[2]) * invDet,
+            (aVec[0] * cVec[2] - aVec[2] * cVec[0]) * invDet,
+            (aVec[1] * cVec[0] - aVec[0] * cVec[1]) * invDet
+        ],
+        [
+            (aVec[1] * bVec[2] - aVec[2] * bVec[1]) * invDet,
+            (aVec[2] * bVec[0] - aVec[0] * bVec[2]) * invDet,
             (aVec[0] * bVec[1] - aVec[1] * bVec[0]) * invDet
         ]
     ];
