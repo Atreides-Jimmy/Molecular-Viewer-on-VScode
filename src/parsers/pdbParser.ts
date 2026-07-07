@@ -9,7 +9,8 @@ const ATOMIC_NUMBER_MAP: { [key: string]: number } = {
     SB: 51, TE: 52, I: 53, XE: 54, CS: 55, BA: 56, LA: 57, CE: 58, PR: 59, ND: 60,
     PM: 61, SM: 62, EU: 63, GD: 64, TB: 65, DY: 66, HO: 67, ER: 68, TM: 69, YB: 70,
     LU: 71, HF: 72, TA: 73, W: 74, RE: 75, OS: 76, IR: 77, PT: 78, AU: 79, HG: 80,
-    TL: 81, PB: 82, BI: 83, PO: 84, AT: 85, RN: 86
+    TL: 81, PB: 82, BI: 83, PO: 84, AT: 85, RN: 86, FR: 87, RA: 88, AC: 89, TH: 90,
+    PA: 91, U: 92, NP: 93, PU: 94, AM: 95, CM: 96, BK: 97, CF: 98
 };
 
 function pdbElement(atomName: string, altElement?: string): string {
@@ -96,7 +97,7 @@ export function parsePdb(content: string): MolecularData {
         } else if (recType === 'CONECT') {
             hasExplicitBonds = true;
             const fields: number[] = [];
-            for (let pos = 6; pos < Math.min(line.length, 31); pos += 5) {
+            for (let pos = 6; pos < Math.min(line.length, 46); pos += 5) {
                 const val = parseInt(line.substring(pos, pos + 5).trim(), 10);
                 if (!isNaN(val)) fields.push(val);
             }

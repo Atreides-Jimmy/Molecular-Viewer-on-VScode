@@ -60,7 +60,7 @@ function activate(context) {
                     canSelectMany: false,
                     openLabel: 'Select Molecular File',
                     filters: {
-                        'Molecular Files': ['gjf', 'xyz', 'mol', 'sdf', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta'],
+                        'Molecular Files': ['gjf', 'xyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta'],
                         'All Files': ['*']
                     }
                 });

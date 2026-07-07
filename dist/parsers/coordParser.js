@@ -41,12 +41,26 @@ function parseCoord(content) {
             }
         }
         if (line.toLowerCase().startsWith('$chrg')) {
-            const chrgVal = parseInt(line.split(/\s+/)[1], 10);
+            let chrgVal;
+            const eqMatch = line.match(/=\s*(-?\d+)/);
+            if (eqMatch) {
+                chrgVal = parseInt(eqMatch[1], 10);
+            }
+            else {
+                chrgVal = parseInt(line.split(/\s+/)[1], 10);
+            }
             if (!isNaN(chrgVal))
                 charge = chrgVal;
         }
         if (line.toLowerCase().startsWith('$spin') || line.toLowerCase().startsWith('$mult')) {
-            const spinVal = parseInt(line.split(/\s+/)[1], 10);
+            let spinVal;
+            const eqMatch = line.match(/=\s*(-?\d+)/);
+            if (eqMatch) {
+                spinVal = parseInt(eqMatch[1], 10);
+            }
+            else {
+                spinVal = parseInt(line.split(/\s+/)[1], 10);
+            }
             if (!isNaN(spinVal))
                 multiplicity = spinVal;
         }

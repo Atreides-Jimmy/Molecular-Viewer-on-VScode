@@ -118,7 +118,19 @@ export function parseVesta(content: string): MolecularData {
                             occupancy: isFinite(occupancy) ? occupancy : 1,
                             frac: [fx, fy, fz]
                         });
-                        i += 2;
+                        i++;
+                        // VESTA STRUC may have a second detail line per atom; skip it
+                        // only if the next line is NOT a valid atom line or section/blank
+                        if (i < lines.length) {
+                            const nextLine = lines[i].trim();
+                            if (nextLine === '' || SECTION_KEYWORDS.test(nextLine)) continue;
+                            const nextParts = nextLine.split(/\s+/);
+                            const nextElem = nextParts.length >= 2 ? nextParts[1] : '';
+                            const nextFx = nextParts.length >= 5 ? parseFloat(nextParts[4]) : NaN;
+                            if (!(nextParts.length >= 7 && /^[A-Za-z][A-Za-z]?$/.test(nextElem) && isFinite(nextFx))) {
+                                i++;
+                            }
+                        }
                         continue;
                     }
                 }

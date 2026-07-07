@@ -67,17 +67,29 @@ function parseOrcaOut(content) {
                     if (tl === '' || tl.startsWith('-'))
                         break;
                     const parts = tl.split(/\s+/);
-                    if (parts.length >= 7) {
-                        const elem = parts[1];
-                        const x = parseFloat(parts[5]) * 0.529177249;
-                        const y = parseFloat(parts[6]) * 0.529177249;
-                        const z = parseFloat(parts[7]) * 0.529177249;
-                        if (!isNaN(x) && !isNaN(y) && !isNaN(z) && /^[A-Za-z]{1,2}$/.test(elem)) {
-                            atoms.push({
-                                element: elem.charAt(0).toUpperCase() + elem.slice(1).toLowerCase(),
-                                x, y, z, index: atoms.length
-                            });
+                    // ORCA A.U. format: "index elem nuclear_charge x y z" (6 cols)
+                    // but some variants have extra columns. Find the element symbol
+                    // (first non-numeric token) and take the last 3 numbers as coords.
+                    let elem = '';
+                    const nums = [];
+                    for (const p of parts) {
+                        if (/^[A-Za-z]{1,2}$/.test(p) && !elem) {
+                            elem = p;
                         }
+                        else {
+                            const n = parseFloat(p);
+                            if (!isNaN(n))
+                                nums.push(n);
+                        }
+                    }
+                    if (elem && nums.length >= 3) {
+                        const x = nums[nums.length - 3] * 0.529177249;
+                        const y = nums[nums.length - 2] * 0.529177249;
+                        const z = nums[nums.length - 1] * 0.529177249;
+                        atoms.push({
+                            element: elem.charAt(0).toUpperCase() + elem.slice(1).toLowerCase(),
+                            x, y, z, index: atoms.length
+                        });
                     }
                     j++;
                 }

@@ -56,7 +56,7 @@ export function parseVasp(content: string): MolecularData {
 
     const isElementTypeLine = line6Tokens.length > 0 &&
         line6Tokens.every(t => /^[A-Za-z][a-z]?$/.test(t)) &&
-        !/^[DCSdc]/i.test(line6);
+        !(line6Tokens.length === 1 && /^-?\d/.test(line6));
 
     if (isElementTypeLine) {
         elementTypes = line6Tokens.map(t => t.charAt(0).toUpperCase() + t.slice(1).toLowerCase());

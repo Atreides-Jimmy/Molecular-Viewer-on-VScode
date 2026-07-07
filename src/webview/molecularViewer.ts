@@ -21,6 +21,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         let frames: (LogFrame | OrcaFrame)[] = [];
         let atomGroups: AtomGroup[] | undefined;
 
+        try {
         if (ext === 'tcl') {
             const tclResult = parseTcl(textContent);
             let sourceUri: vscode.Uri | undefined;
@@ -97,6 +98,11 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                 data = ensureBonds(data);
             }
         }
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            data = { atoms: [], bonds: [], title: 'Parse error: ' + msg, hasExplicitBonds: false };
+            frames = [];
+        }
 
         if (ext !== 'tcl') {
             data.filePath = uri.fsPath;
@@ -156,7 +162,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             canSelectMany: false,
                             openLabel: 'Select File to Compare',
                             filters: {
-                                'Molecular Files': ['gjf', 'xyz', 'mol', 'sdf', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta'],
+                                'Molecular Files': ['gjf', 'xyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta'],
                                 'All Files': ['*']
                             }
                         });
@@ -414,7 +420,8 @@ body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;b
 .tbtn:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e)}
 .tbtn.active{background:var(--vscode-button-background,#0e639c);border-color:var(--vscode-button-background,#0e639c)}
 .tsep{width:1px;height:20px;background:var(--vscode-panel-border,#444);margin:0 4px}
-#status-bar{height:24px;flex-shrink:0;background:var(--vscode-statusBar-background,#007acc);color:var(--vscode-statusBar-foreground,#fff);display:flex;align-items:center;padding:0 10px;font-size:11px;z-index:20;gap:12px}
+#status-bar{height:24px;flex-shrink:0;background:var(--vscode-statusBar-background,#007acc);color:var(--vscode-statusBar-foreground,#fff);display:flex;align-items:center;padding:0 10px;font-size:11px;z-index:20;gap:12px;overflow:hidden}
+#selection-info{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
 #container{flex:1;position:relative;overflow:hidden;min-height:0;outline:none}
 #mol-info{position:absolute;top:8px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.55);padding:6px 10px;border-radius:4px;z-index:25;pointer-events:none;line-height:1.6}
 #axes-indicator{position:absolute;bottom:12px;left:12px;width:90px;height:90px;z-index:25;pointer-events:none}
@@ -469,10 +476,10 @@ canvas{display:block}
 #diff-reopen{display:none;position:absolute;bottom:40px;right:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
 #diff-reopen.show{display:block}
 #diff-reopen:hover{background:var(--vscode-button-background,#0e639c)}
-#diff-label,#diff-label-right{display:none;position:absolute;top:8px;color:var(--vscode-editor-foreground,#ccc);font-size:13px;font-weight:bold;background:rgba(0,0,0,0.55);padding:4px 10px;border-radius:4px;z-index:25;pointer-events:none}
+#diff-label,#diff-label-right{display:none;position:absolute;top:8px;color:var(--vscode-editor-foreground,#ccc);font-size:13px;font-weight:bold;background:rgba(0,0,0,0.55);padding:4px 10px;border-radius:4px;z-index:25;pointer-events:none;max-width:40%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #diff-label.show,#diff-label-right.show{display:block}
-#diff-label{left:8px}
-#diff-label-right{right:8px}
+#diff-label{left:25%;transform:translateX(-50%)}
+#diff-label-right{left:75%;transform:translateX(-50%)}
 </style>
 </head>
 <body>
@@ -638,7 +645,7 @@ function detectCrystalBaseBonds(){
     var lv=CRY.latticeVectors;
     var inv=CRY_INV;
     var n=baseAtoms.length;
-    var CR2={H:0.31,He:0.28,Li:1.28,Be:0.96,B:0.85,C:0.76,N:0.71,O:0.66,F:0.57,Ne:0.58,Na:1.66,Mg:1.41,Al:1.21,Si:1.11,P:1.07,S:1.05,Cl:1.02,Ar:1.06,K:2.03,Ca:1.76,Sc:1.70,Ti:1.60,V:1.53,Cr:1.39,Mn:1.39,Fe:1.32,Co:1.26,Ni:1.24,Cu:1.32,Zn:1.22,Ga:1.22,Ge:1.20,As:1.19,Se:1.20,Br:1.20,Kr:1.16,I:1.39};
+    var CR2={H:0.31,He:0.28,Li:1.28,Be:0.96,B:0.85,C:0.76,N:0.71,O:0.66,F:0.57,Ne:0.58,Na:1.66,Mg:1.41,Al:1.21,Si:1.11,P:1.07,S:1.05,Cl:1.02,Ar:1.06,K:2.03,Ca:1.76,Sc:1.70,Ti:1.60,V:1.53,Cr:1.39,Mn:1.39,Fe:1.32,Co:1.26,Ni:1.24,Cu:1.32,Zn:1.22,Ga:1.22,Ge:1.20,As:1.19,Se:1.20,Br:1.20,Kr:1.16,Rb:2.20,Sr:1.95,Y:1.90,Zr:1.75,Nb:1.64,Mo:1.54,Tc:1.47,Ru:1.46,Rh:1.42,Pd:1.39,Ag:1.45,Cd:1.44,In:1.42,Sn:1.39,Sb:1.39,Te:1.38,Xe:1.40,Cs:2.44,Ba:2.15,La:2.07,Ce:2.04,Pr:2.03,Nd:2.01,Pm:1.99,Sm:1.98,Eu:1.98,Gd:1.96,Tb:1.94,Dy:1.92,Ho:1.92,Er:1.89,Tm:1.90,Yb:1.87,Lu:1.87,Hf:1.75,Ta:1.70,W:1.62,Re:1.51,Os:1.44,Ir:1.41,Pt:1.36,Au:1.36,Hg:1.32,Tl:1.45,Pb:1.46,Bi:1.48,Po:1.40,At:1.50,Rn:1.50,I:1.39};
     var BS={'C+C':[{o:3,l:1.20,t:0.05},{o:1.5,l:1.39,t:0.05},{o:2,l:1.38,t:0.05},{o:1,l:1.51,t:0.10}],'C+N':[{o:2,l:1.26,t:0.05},{o:1.5,l:1.36,t:0.05},{o:1,l:1.43,t:0.10},{o:3,l:1.16,t:0.06}],'C+O':[{o:2,l:1.24,t:0.05},{o:1,l:1.39,t:0.05}],'N+N':[{o:1,l:1.41,t:0.10},{o:2,l:1.25,t:0.06},{o:3,l:1.10,t:0.06}],'N+O':[{o:2,l:1.20,t:0.06},{o:1.5,l:1.30,t:0.06},{o:1,l:1.40,t:0.15}],'O+O':[{o:2,l:1.21,t:0.06},{o:1,l:1.48,t:0.15}],'C+S':[{o:1.5,l:1.73,t:0.06},{o:2,l:1.60,t:0.10},{o:1,l:1.82,t:0.15}],'C+F':[{o:1,l:1.33,t:0.10}],'C+H':[{o:1,l:0.97,t:0.15}],'N+H':[{o:1,l:0.88,t:0.15}],'O+H':[{o:1,l:0.85,t:0.15}]};
     var BC={HH:0,CH:1.3,HO:1.2,HN:1.3,CC:1.9,CO:1.7,CN:1.7,NN:1.7,NO:1.8,CF:1.6,CS:2.0};
     function pk(e1,e2){e1=e1.toUpperCase();e2=e2.toUpperCase();return e1<e2?e1+e2:e2+e1}
@@ -997,6 +1004,7 @@ function rebuildScene(){
     if(CRY)buildCellWireframe();
     highlightSelected();
     needsRender=true;
+    if(diffMode)refreshDiff();
 }
 function updateScenePositions(keepCenter){
     if(!keepCenter){
@@ -1106,6 +1114,7 @@ if(CRY){
     var axesEl=document.getElementById('axes-indicator');
     if(axesEl)axesEl.style.display='block';
     updateAxesIndicator();
+    layoutPanels();
     ['bnd-a-min','bnd-a-max','bnd-b-min','bnd-b-max','bnd-c-min','bnd-c-max'].forEach(function(id){
         var inp=document.getElementById(id);
         if(inp){
@@ -1168,11 +1177,12 @@ function setMode(m){
         if(m==='replaceAtom'){
             if(selectedAtoms.length>0){showReplaceAtomModal();return}
         }
+        layoutPanels();
         return;
     }
     var oldMode=currentMode;
     currentMode=m;
-    var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect')&&(m==='selectAtoms'||m==='boxSelect'));
+    var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect'||oldMode==='replaceAtom')&&(m==='selectAtoms'||m==='boxSelect'||m==='replaceAtom'));
     if(!preserveSel){
         selectedAtoms=[];diffSelectedAtoms=[];originalCoords=null;
     }
@@ -1182,6 +1192,7 @@ function setMode(m){
     document.querySelectorAll('.tbtn[data-mode]').forEach(function(b){b.classList.toggle('active',b.dataset.mode===m)});
     var sp2=document.getElementById('select-panel');
     if(sp2)sp2.style.display=(m==='selectAtoms')?'block':'none';
+    layoutPanels();
 }
 
 function resetSelection(){
@@ -1210,14 +1221,14 @@ document.querySelectorAll('.tbtn[data-mode]').forEach(function(b){b.addEventList
             if(selectedAtoms.indexOf(idx)<0)selectedAtoms.push(idx);
         });
         highlightSelected();
-        var names=selectedAtoms.map(function(i){return MD.atoms[i].element+(i+1)}).join(', ');
+        var names=formatAtomList(selectedAtoms);
         selInfoEl.textContent='Selected: '+names+' ('+selectedAtoms.length+' atoms)';
         inp.value='';
     }
     okBtn.addEventListener('click',doSelect);
     inp.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();doSelect()}});
     clrBtn.addEventListener('click',function(){
-        selectedAtoms=[];highlightSelected();selInfoEl.textContent='';
+        selectedAtoms=[];diffSelectedAtoms=[];highlightSelected();selInfoEl.textContent='';
     });
 })();
 document.getElementById('reset-btn').addEventListener('click',function(){
@@ -1245,6 +1256,7 @@ function doUndo(){
     MD.atoms=snap.atoms;MD.bonds=snap.bonds;
     if(CRY&&snap.baseAtoms){CRY.baseAtoms=snap.baseAtoms;CRY.baseBonds=snap.baseBonds}
     if(CRY){rebuildCrystal()}rebuildScene();updateMolInfo();updateUndoBtn();
+    if(diffMode)resetSelection();
 }
 document.getElementById('undo-btn').addEventListener('click',doUndo);
 document.getElementById('save-btn').addEventListener('click',doSave);
@@ -1534,6 +1546,7 @@ function startDiff(msg){
         diffLabelRight.classList.add('show');
         modeInfoEl.textContent='Diff Mode (skeletons differ)';
         enterDiffRender();
+        layoutPanels();
         return;
     }
 
@@ -1555,6 +1568,7 @@ function startDiff(msg){
     modeInfoEl.textContent='Diff Mode ('+totalDiff+' differences)';
 
     enterDiffRender(diffs,mapping);
+    layoutPanels();
 }
 
 function buildDiffResultsHTML(diffs,totalDiff){
@@ -1631,6 +1645,28 @@ function recomputeDiff(){
     modeInfoEl.textContent='Diff Mode ('+totalDiff+' differences)';
     updateDiffHighlights(diffs);
 }
+function refreshDiff(){
+    if(!diffMode)return;
+    diffDetBonds1=detectBondsFromAtoms(MD.atoms);
+    diffMapping=findAtomMapping(MD.atoms,diffDetBonds1,diffData.atoms,diffDetBonds2);
+    if(diffMapping){
+        diffReverseMapping=new Array(diffData.atoms.length).fill(-1);
+        for(var mi=0;mi<diffMapping.length;mi++){diffReverseMapping[diffMapping[mi]]=mi}
+        recomputeDiff();
+    }else{
+        diffReverseMapping=null;
+        diffPanelEl.innerHTML='<span class="diff-close">×</span>'+
+            '<h4>Skeletons Differ</h4>'+
+            '<div class="diff-row">After edit, molecular skeletons differ — cannot compare.</div>'+
+            '<div class="diff-row">Left: '+MD.atoms.length+' atoms, '+diffDetBonds1.length+' bonds (detected)</div>'+
+            '<div class="diff-row">Right: '+diffData.atoms.length+' atoms, '+diffDetBonds2.length+' bonds (detected)</div>';
+        diffLabelRight.textContent='Diff: '+diffData.fileName+' (skeleton differs)';
+        atomMeshes.forEach(function(m){m.userData.diffHi=false;m.material.emissive=new THREE.Color(0x000000);m.material.emissiveIntensity=0});
+        diffAtomMeshes.forEach(function(m){m.userData.diffHi=false;if(m.material){if(m.userData.origColor)m.material.color.copy(m.userData.origColor);m.material.emissive=new THREE.Color(0x000000);m.material.emissiveIntensity=0}});
+        diffBondMeshes.forEach(function(m){if(m.material)m.material.emissive=new THREE.Color(0x000000)});
+        needsRender=true;
+    }
+}
 
 function updateDiffHighlights(diffs){
     var highlightAtoms={};
@@ -1688,9 +1724,11 @@ function showDiffPanel(html,isResults){
         closeBtn.addEventListener('click',function(){
             diffPanelEl.classList.remove('show');
             diffReopenEl.classList.add('show');
+            layoutPanels();
         });
     }
     wireDiffSlider();
+    layoutPanels();
 }
 
 diffReopenEl.addEventListener('click',function(){
@@ -1703,9 +1741,11 @@ diffReopenEl.addEventListener('click',function(){
         closeBtn.addEventListener('click',function(){
             diffPanelEl.classList.remove('show');
             diffReopenEl.classList.add('show');
+            layoutPanels();
         });
     }
     wireDiffSlider();
+    layoutPanels();
 });
 
 function enterDiffRender(diffs,mapping){
@@ -1819,7 +1859,17 @@ function hBondDiff(s,e,d,hl,r,c){
 
 function exitDiff(){
     diffMode=false;
-    if(diffPivot){scene.remove(diffPivot);diffPivot=null;diffMolGroup=null}
+    if(diffPivot){
+        scene.remove(diffPivot);
+        diffPivot.traverse(function(ch){
+            if(ch.geometry)ch.geometry.dispose();
+            if(ch.material){
+                if(ch.material.map)ch.material.map.dispose();
+                ch.material.dispose();
+            }
+        });
+        diffPivot=null;diffMolGroup=null;
+    }
     diffAtomMeshes=[];diffBondMeshes=[];
     diffSelectedAtoms=[];
     diffMapping=null;diffReverseMapping=null;
@@ -1835,6 +1885,7 @@ function exitDiff(){
     diffResultsHTML='';
     diffLabelLeft.classList.remove('show');
     diffLabelRight.classList.remove('show');
+    layoutPanels();
     modeInfoEl.textContent='View Mode';
     atomMeshes.forEach(function(m){
         m.userData.diffHi=false;
@@ -1898,11 +1949,13 @@ function switchFrame(idx){
     if(MD.bonds.length===0){
         MD.bonds=detectBondsFromAtoms(MD.atoms);
     }
+    undoStack.length=0;updateUndoBtn();
+    if(diffMode)resetSelection();
     rebuildScene();
     updateFrameInfo();
 }
 function detectBondsFromAtoms(atoms){
-    var CR2={H:0.31,He:0.28,Li:1.28,Be:0.96,B:0.85,C:0.76,N:0.71,O:0.66,F:0.57,Ne:0.58,Na:1.66,Mg:1.41,Al:1.21,Si:1.11,P:1.07,S:1.05,Cl:1.02,Ar:1.06,K:2.03,Ca:1.76,Sc:1.70,Ti:1.60,V:1.53,Cr:1.39,Mn:1.39,Fe:1.32,Co:1.26,Ni:1.24,Cu:1.32,Zn:1.22,Ga:1.22,Ge:1.20,As:1.19,Se:1.20,Br:1.20,Kr:1.16,I:1.39};
+    var CR2={H:0.31,He:0.28,Li:1.28,Be:0.96,B:0.85,C:0.76,N:0.71,O:0.66,F:0.57,Ne:0.58,Na:1.66,Mg:1.41,Al:1.21,Si:1.11,P:1.07,S:1.05,Cl:1.02,Ar:1.06,K:2.03,Ca:1.76,Sc:1.70,Ti:1.60,V:1.53,Cr:1.39,Mn:1.39,Fe:1.32,Co:1.26,Ni:1.24,Cu:1.32,Zn:1.22,Ga:1.22,Ge:1.20,As:1.19,Se:1.20,Br:1.20,Kr:1.16,Rb:2.20,Sr:1.95,Y:1.90,Zr:1.75,Nb:1.64,Mo:1.54,Tc:1.47,Ru:1.46,Rh:1.42,Pd:1.39,Ag:1.45,Cd:1.44,In:1.42,Sn:1.39,Sb:1.39,Te:1.38,Xe:1.40,Cs:2.44,Ba:2.15,La:2.07,Ce:2.04,Pr:2.03,Nd:2.01,Pm:1.99,Sm:1.98,Eu:1.98,Gd:1.96,Tb:1.94,Dy:1.92,Ho:1.92,Er:1.89,Tm:1.90,Yb:1.87,Lu:1.87,Hf:1.75,Ta:1.70,W:1.62,Re:1.51,Os:1.44,Ir:1.41,Pt:1.36,Au:1.36,Hg:1.32,Tl:1.45,Pb:1.46,Bi:1.48,Po:1.40,At:1.50,Rn:1.50,I:1.39};
     var BS={'C+C':[{o:3,l:1.20,t:0.05},{o:1.5,l:1.39,t:0.05},{o:2,l:1.38,t:0.05},{o:1,l:1.51,t:0.10}],'C+N':[{o:2,l:1.26,t:0.05},{o:1.5,l:1.36,t:0.05},{o:1,l:1.43,t:0.10},{o:3,l:1.16,t:0.06}],'C+O':[{o:2,l:1.24,t:0.05},{o:1,l:1.39,t:0.05}],'N+N':[{o:1,l:1.41,t:0.10},{o:2,l:1.25,t:0.06},{o:3,l:1.10,t:0.06}],'N+O':[{o:2,l:1.20,t:0.06},{o:1.5,l:1.30,t:0.06},{o:1,l:1.40,t:0.15}],'O+O':[{o:2,l:1.21,t:0.06},{o:1,l:1.48,t:0.15}],'C+S':[{o:1.5,l:1.73,t:0.06},{o:2,l:1.60,t:0.10},{o:1,l:1.82,t:0.15}],'C+F':[{o:1,l:1.33,t:0.10}],'C+H':[{o:1,l:0.97,t:0.15}],'N+H':[{o:1,l:0.88,t:0.15}],'O+H':[{o:1,l:0.85,t:0.15}]};
     var BC={HH:0,CH:1.3,HO:1.2,HN:1.3,CC:1.9,CO:1.7,CN:1.7,NN:1.7,NO:1.8,CF:1.6,CS:2.0};
     var MV={H:1,C:4,N:3,O:2,F:1,S:6,P:5,Cl:1,Br:1,I:1,B:3};
@@ -1963,6 +2016,153 @@ document.getElementById('auto-play').addEventListener('click',function(){
     }
 });
 
+function formatAtomList(indices,atoms){
+    atoms=atoms||MD.atoms;
+    if(indices.length===0)return '';
+    var list=indices.slice(0,15).map(function(i){var a=atoms[i];return(a?a.element:'?')+(i+1)});
+    var str=list.join(', ');
+    if(indices.length>15)str+=' ... ('+indices.length+' atoms)';
+    return str;
+}
+function getMoleculeScreenBox(){
+    var container=document.getElementById('container');
+    if(!container)return null;
+    var w=container.clientWidth,h=container.clientHeight;
+    if(w<2||h<2)return null;
+    if(!atomMeshes||atomMeshes.length===0||!moleculeGroup)return null;
+    scene.updateMatrixWorld(true);
+    var minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+    function projectGroup(group,camW,offX){
+        if(!group||!group.children.length)return;
+        var box=new THREE.Box3().setFromObject(group);
+        if(box.isEmpty())return;
+        var cs=[
+            [box.min.x,box.min.y,box.min.z],[box.min.x,box.min.y,box.max.z],
+            [box.min.x,box.max.y,box.min.z],[box.min.x,box.max.y,box.max.z],
+            [box.max.x,box.min.y,box.min.z],[box.max.x,box.min.y,box.max.z],
+            [box.max.x,box.max.y,box.min.z],[box.max.x,box.max.y,box.max.z]
+        ];
+        var v=new THREE.Vector3();
+        for(var k=0;k<cs.length;k++){
+            v.set(cs[k][0],cs[k][1],cs[k][2]);
+            v.project(camera);
+            if(v.z>-1&&v.z<1){
+                var sx=offX+(v.x*0.5+0.5)*camW;
+                var sy=(-v.y*0.5+0.5)*h;
+                if(sx<minX)minX=sx; if(sx>maxX)maxX=sx;
+                if(sy<minY)minY=sy; if(sy>maxY)maxY=sy;
+            }
+        }
+    }
+    var sa=camera.aspect,sp=camera.position.clone();
+    try{
+        if(diffMode&&diffPivot&&diffAtomMeshes.length>0){
+            var halfW=Math.floor(w/2);
+            camera.aspect=halfW/h;camera.updateProjectionMatrix();
+            camera.position.set(0,0,camDist);camera.updateMatrixWorld(true);
+            projectGroup(moleculeGroup,halfW,0);
+            camera.aspect=(w-halfW)/h;camera.updateProjectionMatrix();
+            camera.position.set(0,0,diffCamDist);camera.updateMatrixWorld(true);
+            projectGroup(diffMolGroup,(w-halfW),halfW);
+        }else{
+            camera.aspect=w/h;camera.updateProjectionMatrix();
+            camera.position.set(0,0,camDist);camera.updateMatrixWorld(true);
+            projectGroup(moleculeGroup,w,0);
+        }
+    }finally{
+        camera.aspect=sa;camera.updateProjectionMatrix();
+        camera.position.copy(sp);camera.updateMatrixWorld(true);
+    }
+    if(minX===Infinity)return null;
+    var pad=12;
+    return {left:Math.max(0,minX-pad),top:Math.max(0,minY-pad),
+            right:Math.min(w,maxX+pad),bottom:Math.min(h,maxY+pad)};
+}
+function layoutPanels(){
+    var container=document.getElementById('container');
+    if(!container)return;
+    var cRect=container.getBoundingClientRect();
+    var cTop=cRect.top,cLeft=cRect.left,cW=cRect.width,cH=cRect.height;
+    var molBox=getMoleculeScreenBox();
+    var molVR=null;
+    if(molBox){
+        molVR={left:cLeft+molBox.left,top:cTop+molBox.top,
+               right:cLeft+molBox.right,bottom:cTop+molBox.bottom};
+    }
+    var defs=[
+        {id:'mol-info',pr:0,anc:'tl'},
+        {id:'crystal-panel',pr:1,anc:'tr'},
+        {id:'diff-panel',pr:2,anc:'br'},
+        {id:'select-panel',pr:3,anc:'bl'},
+        {id:'diff-label',pr:4,anc:'tc',pct:0.25},
+        {id:'diff-label-right',pr:5,anc:'tc',pct:0.75},
+        {id:'axes-indicator',pr:6,anc:'bl'}
+    ];
+    var vis=[];
+    defs.forEach(function(d){
+        var el=document.getElementById(d.id);
+        if(!el||window.getComputedStyle(el).display==='none')return;
+        el.style.top='';el.style.bottom='';el.style.left='';el.style.right='';
+        el.style.transform='';el.style.maxWidth='';el.style.fontSize='';
+        vis.push({d:d,el:el});
+    });
+    vis.sort(function(a,b){return a.d.pr-b.d.pr;});
+    function rect(el){return el.getBoundingClientRect();}
+    function ov(a,b){return !(a.right<=b.left+1||a.left>=b.right-1||a.bottom<=b.top+1||a.top>=b.bottom-1);}
+    for(var i=0;i<vis.length;i++){
+        var cur=vis[i];
+        for(var pass=0;pass<8;pass++){
+            var cr=rect(cur.el);
+            var conf=null,cfR=null,isMol=false;
+            if(molVR&&ov(cr,molVR)){conf='mol';cfR=molVR;isMol=true}
+            if(!conf){
+                for(var j=0;j<i;j++){
+                    var rr=rect(vis[j].el);
+                    if(ov(cr,rr)){conf=vis[j];cfR=rr;break;}
+                }
+            }
+            if(!conf)break;
+            var a=cur.d.anc;
+            var resolved=false;
+            if(isMol&&a==='tc'&&!resolved){
+                var cc=(cr.left+cr.right)/2;
+                var contC=cLeft+cW/2;
+                if(cc<contC){
+                    var tl=molBox.left-cr.width-4;
+                    if(tl>=2){cur.el.style.left=tl+'px';cur.el.style.transform='none';cur.el.style.right='auto';resolved=true;}
+                }else{
+                    var tr=cW-molBox.right-cr.width-4;
+                    if(tr>=2){cur.el.style.right=tr+'px';cur.el.style.left='auto';cur.el.style.transform='none';resolved=true;}
+                }
+            }
+            if(!resolved&&!isMol&&(a==='tc'||a==='tl'||a==='tr')){
+                var nt=cfR.bottom-cTop+4;
+                if(nt+cr.height<cH-8){cur.el.style.top=nt+'px';resolved=true;}
+            }
+            if(!resolved&&!isMol&&(a==='bl'||a==='br')){
+                var nb=cH-(cfR.top-cTop)+4;
+                if(nb+cr.height<cH-8){cur.el.style.bottom=nb+'px';resolved=true;}
+            }
+            if(!resolved){
+                var mw=parseInt(window.getComputedStyle(cur.el).maxWidth)||1000;
+                if(mw>80){cur.el.style.maxWidth=Math.max(80,mw-30)+'px';resolved=true;}
+            }
+            if(!resolved){
+                var fs=parseInt(window.getComputedStyle(cur.el).fontSize)||11;
+                if(fs>8){cur.el.style.fontSize=(fs-1)+'px';resolved=true;}
+            }
+            if(!resolved&&!isMol&&conf.el){
+                var cmw=parseInt(window.getComputedStyle(conf.el).maxWidth)||1000;
+                if(cmw>80){conf.el.style.maxWidth=Math.max(80,cmw-30)+'px';resolved=true;}
+            }
+            if(!resolved&&!isMol&&conf.el){
+                var cfs=parseInt(window.getComputedStyle(conf.el).fontSize)||11;
+                if(cfs>8){conf.el.style.fontSize=(cfs-1)+'px';resolved=true;}
+            }
+            if(!resolved)break;
+        }
+    }
+}
 function highlightSelected(){
     atomMeshes.forEach(function(m,i){
         var sel=selectedAtoms.indexOf(i)>=0;
@@ -2019,7 +2219,7 @@ function selectAtom(idx){
         if(pos>=0){
             selectedAtoms.splice(pos,1);
             highlightSelected();
-            var dn=selectedAtoms.map(function(i){return MD.atoms[i].element+(i+1)}).join(', ');
+            var dn=formatAtomList(selectedAtoms);
             selInfoEl.textContent=selectedAtoms.length?('Selected: '+dn):'';
             checkSelectionComplete();
             return;
@@ -2028,14 +2228,14 @@ function selectAtom(idx){
     if(selectedAtoms.indexOf(idx)>=0)return;
     selectedAtoms.push(idx);
     highlightSelected();
-    var names=selectedAtoms.map(function(i){return MD.atoms[i].element+(i+1)}).join(', ');
+    var names=formatAtomList(selectedAtoms);
     selInfoEl.textContent='Selected: '+names;
     checkSelectionComplete();
 }
 
 function updateDiffSelInfo(){
-    var lNames=selectedAtoms.map(function(i){return MD.atoms[i].element+(i+1)}).join(', ');
-    var rNames=diffSelectedAtoms.map(function(i){return diffData.atoms[i].element+(i+1)}).join(', ');
+    var lNames=formatAtomList(selectedAtoms);
+    var rNames=formatAtomList(diffSelectedAtoms,diffData.atoms);
     selInfoEl.textContent='[Left] '+(lNames||'-')+'   |   [Right] '+(rNames||'-');
 }
 
@@ -2055,8 +2255,12 @@ function checkSelectionComplete(){
             if(selectedAtoms.length===3||diffSelectedAtoms.length===3)showDiffMeasurement('bondAngle');
         }else if(currentMode==='dihedral'){
             if(selectedAtoms.length===4||diffSelectedAtoms.length===4)showDiffMeasurement('dihedral');
-        }else if(currentMode==='selectAtoms'){
+        }else if(currentMode==='selectAtoms'||currentMode==='boxSelect'||currentMode==='replaceAtom'){
             updateDiffSelInfo();
+        }else if(currentMode==='deleteAtom'&&selectedAtoms.length===1){
+            showDeleteAtomModal();
+        }else if(currentMode==='addAtom'&&selectedAtoms.length===1){
+            showAddAtomModal();
         }
         return;
     }
@@ -2066,11 +2270,11 @@ function checkSelectionComplete(){
     else if(currentMode==='addAtom'&&selectedAtoms.length===1)showAddAtomModal();
     else if(currentMode==='deleteAtom'&&selectedAtoms.length===1)showDeleteAtomModal();
     else if(currentMode==='selectAtoms'){
-        var names=selectedAtoms.map(function(i){return MD.atoms[i].element+(i+1)}).join(', ');
+        var names=formatAtomList(selectedAtoms);
         selInfoEl.textContent='Selected: '+names;
     }
     else if(currentMode==='replaceAtom'){
-        var rnames=selectedAtoms.map(function(i){return MD.atoms[i].element+(i+1)}).join(', ');
+        var rnames=formatAtomList(selectedAtoms);
         selInfoEl.textContent='Selected to replace: '+rnames+' (click Replace Atom button to confirm)';
     }
 }
@@ -2299,7 +2503,7 @@ function showBondLengthModal(){
     document.getElementById('m-ok').addEventListener('click',function(){hideModal();originalCoords=null;resetSelection()});
     document.getElementById('m-cancel').addEventListener('click',function(){
         if(existingBond&&originalCoords){existingBond.order=curOrder}
-        restoreOriginal();rebuildScene();hideModal();originalCoords=null;resetSelection()
+        restoreOriginal();rebuildScene();undoStack.pop();updateUndoBtn();hideModal();originalCoords=null;resetSelection()
     });
 }
 
@@ -2321,7 +2525,7 @@ function showBondAngleModal(){
     fixEl.addEventListener('change',function(){applyBondAngle(parseFloat(valEl.value),this.value==='1',moveEl.value)});
     moveEl.addEventListener('change',function(){applyBondAngle(parseFloat(valEl.value),fixEl.value==='1',this.value)});
     document.getElementById('m-ok').addEventListener('click',function(){hideModal();originalCoords=null;resetSelection()});
-    document.getElementById('m-cancel').addEventListener('click',function(){restoreOriginal();rebuildScene();hideModal();originalCoords=null;resetSelection()});
+    document.getElementById('m-cancel').addEventListener('click',function(){restoreOriginal();rebuildScene();undoStack.pop();updateUndoBtn();hideModal();originalCoords=null;resetSelection()});
 }
 
 function showDihedralModal(){
@@ -2342,7 +2546,7 @@ function showDihedralModal(){
     fixEl.addEventListener('change',function(){applyDihedral(parseFloat(valEl.value),this.value==='1',moveEl.value)});
     moveEl.addEventListener('change',function(){applyDihedral(parseFloat(valEl.value),fixEl.value==='1',this.value)});
     document.getElementById('m-ok').addEventListener('click',function(){hideModal();originalCoords=null;resetSelection()});
-    document.getElementById('m-cancel').addEventListener('click',function(){restoreOriginal();rebuildScene();hideModal();originalCoords=null;resetSelection()});
+    document.getElementById('m-cancel').addEventListener('click',function(){restoreOriginal();rebuildScene();undoStack.pop();updateUndoBtn();hideModal();originalCoords=null;resetSelection()});
 }
 
 var UNIT_CANDIDATES=(function(){
@@ -2374,7 +2578,7 @@ function pickFreeDirection(neighbors){
 function showAddAtomModal(){
     var anchorIdx=selectedAtoms[0];
     var anchor=MD.atoms[anchorIdx];
-    saveOriginal();
+    if(!anchor)return;
     showModal('<h3>Add Atom</h3>'+
         '<label>Element:</label><select id="m-elem">'+
         '<option>H</option><option>He</option>'+
@@ -2460,8 +2664,7 @@ function showAddAtomModal(){
 
 function showReplaceAtomModal(){
     if(selectedAtoms.length===0)return;
-    saveOriginal();
-    var names=selectedAtoms.map(function(i){return MD.atoms[i].element+(i+1)}).join(', ');
+    var names=formatAtomList(selectedAtoms);
     showModal('<h3>Replace Atom</h3>'+
         '<div class="current-val">Replace '+selectedAtoms.length+' atom(s): '+names+'</div>'+
         '<label>New element:</label><select id="m-elem">'+
@@ -2500,14 +2703,15 @@ function showReplaceAtomModal(){
 }
 
 function showDeleteAtomModal(){
-    pushUndo();
     var idx=selectedAtoms[0];
     var a=MD.atoms[idx];
+    if(!a)return;
     var name=a.element+(idx+1);
     showModal('<h3>Delete Atom</h3>'+
         '<div class="current-val">Delete '+name+'?</div>'+
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok mbtn-danger" id="m-ok">Delete</button></div>',null);
     document.getElementById('m-ok').addEventListener('click',function(){
+        pushUndo();
         if(CRY){
             var baseIdx=a.baseIdx!=null?a.baseIdx:idx;
             CRY.baseAtoms.splice(baseIdx,1);
@@ -2530,12 +2734,11 @@ function showDeleteAtomModal(){
 
 function showBatchDeleteModal(){
     if(selectedAtoms.length===0)return;
-    pushUndo();
-    var names=selectedAtoms.map(function(i){return MD.atoms[i].element+(i+1)}).join(', ');
+    var names=formatAtomList(selectedAtoms);
     showModal('<h3>Delete Atoms</h3>'+
         '<div class="current-val">Delete '+selectedAtoms.length+' atoms: '+names+'?</div>'+
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok mbtn-danger" id="m-ok">Delete</button></div>',null);
-    document.getElementById('m-ok').addEventListener('click',function(){batchDeleteSelected()});
+    document.getElementById('m-ok').addEventListener('click',function(){pushUndo();batchDeleteSelected()});
     document.getElementById('m-cancel').addEventListener('click',function(){hideModal();resetSelection()});
 }
 
@@ -2730,7 +2933,7 @@ function doSave(){
         cifContent+='_cell_angle_gamma '+CRY.gamma.toFixed(6)+'\\n';
         if(CRY.spaceGroup)cifContent+='_symmetry_space_group_name_H-M \\''+CRY.spaceGroup+'\\'\\n';
         cifContent+='loop_\\n_symmetry_equiv_pos_as_xyz\\n';
-        CRY.symmetryOps.forEach(function(op){cifContent+='\\''+op+'\\'\\n'});
+        (CRY.symmetryOps||['x, y, z']).forEach(function(op){cifContent+='\\''+op+'\\'\\n'});
         cifContent+='loop_\\n_atom_site_label\\n_atom_site_type_symbol\\n_atom_site_fract_x\\n_atom_site_fract_y\\n_atom_site_fract_z\\n_atom_site_occupancy\\n';
         CRY.baseAtoms.forEach(function(ba,i){
             var fx=inv[0][0]*ba.x+inv[0][1]*ba.y+inv[0][2]*ba.z;
@@ -3055,17 +3258,41 @@ canvas.addEventListener('mouseup',function(e){
         var rect=canvas.getBoundingClientRect();
         var bx=Math.min(boxStart.x,e.clientX),by=Math.min(boxStart.y,e.clientY);
         var bw=Math.abs(e.clientX-boxStart.x),bh=Math.abs(e.clientY-boxStart.y);
-        if(bw<3&&bh<3){boxStart=null;return;}
+        if(bw<3&&bh<3){boxStart=null;layoutPanels();return;}
         var v=new THREE.Vector3();
-        atomMeshes.forEach(function(m){
-            m.getWorldPosition(v);v.project(camera);
-            var sx=(v.x*0.5+0.5)*rect.width+rect.left;
-            var sy=(-v.y*0.5+0.5)*rect.height+rect.top;
-            if(sx>=bx&&sx<=bx+bw&&sy>=by&&sy<=by+bh){selectAtom(m.userData.index);}
-        });
-        boxStart=null;needsRender=true;return;
+        if(diffMode){
+            var dw=rect.width,dh=rect.height,dhalfW=Math.floor(dw/2);
+            diffActiveSide='left';
+            camera.aspect=dhalfW/dh;camera.updateProjectionMatrix();
+            camera.position.set(0,0,camDist);camera.updateMatrixWorld(true);
+            atomMeshes.forEach(function(m){
+                m.getWorldPosition(v);v.project(camera);
+                var sx=(v.x*0.5+0.5)*dhalfW+rect.left;
+                var sy=(-v.y*0.5+0.5)*dh+rect.top;
+                if(sx>=bx&&sx<=bx+bw&&sy>=by&&sy<=by+bh){selectAtom(m.userData.index);}
+            });
+            if(diffAtomMeshes&&diffAtomMeshes.length>0){
+                diffActiveSide='right';
+                camera.aspect=(dw-dhalfW)/dh;camera.updateProjectionMatrix();
+                camera.position.set(0,0,diffCamDist);camera.updateMatrixWorld(true);
+                diffAtomMeshes.forEach(function(m){
+                    m.getWorldPosition(v);v.project(camera);
+                    var sx=(v.x*0.5+0.5)*(dw-dhalfW)+rect.left+dhalfW;
+                    var sy=(-v.y*0.5+0.5)*dh+rect.top;
+                    if(sx>=bx&&sx<=bx+bw&&sy>=by&&sy<=by+bh){selectAtom(m.userData.index);}
+                });
+            }
+        }else{
+            atomMeshes.forEach(function(m){
+                m.getWorldPosition(v);v.project(camera);
+                var sx=(v.x*0.5+0.5)*rect.width+rect.left;
+                var sy=(-v.y*0.5+0.5)*rect.height+rect.top;
+                if(sx>=bx&&sx<=bx+bw&&sy>=by&&sy<=by+bh){selectAtom(m.userData.index);}
+            });
+        }
+        boxStart=null;needsRender=true;layoutPanels();return;
     }
-    isRot=false;isPan=false;
+    isRot=false;isPan=false;layoutPanels();
 });
 canvas.addEventListener('mouseleave',function(){isRot=false;isPan=false;tooltipEl.style.display='none';if(isBoxSelecting){isBoxSelecting=false;boxRectEl.style.display='none';boxStart=null}});
 canvas.addEventListener('wheel',function(e){e.preventDefault();
@@ -3085,7 +3312,7 @@ canvas.addEventListener('wheel',function(e){e.preventDefault();
         camDist=Math.max(1,Math.min(500,camDist));
         camera.position.z=camDist;
     }
-    needsRender=true;
+    needsRender=true;layoutPanels();
 },{passive:false});
 canvas.addEventListener('contextmenu',function(e){e.preventDefault()});
 
@@ -3129,7 +3356,7 @@ canvas.addEventListener('touchend',function(e){isRot=false;if(e.touches.length<2
 document.addEventListener('keydown',function(e){
     if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'||e.target.tagName==='SELECT')return;
     if(e.key in keyState){keyState[e.key]=true;e.preventDefault()}
-    if(e.key==='Delete'&&!diffMode){
+    if(e.key==='Delete'){
         e.preventDefault();
         if(selectedAtoms.length>0){showBatchDeleteModal()}
         else{setMode('deleteAtom')}
@@ -3139,7 +3366,7 @@ document.addEventListener('keyup',function(e){
     if(e.key in keyState){keyState[e.key]=false;e.preventDefault()}
 });
 
-window.addEventListener('resize',function(){var rw=container.clientWidth||window.innerWidth;var rh=container.clientHeight||(window.innerHeight-60);if(rw<1)rw=window.innerWidth;if(rh<1)rh=window.innerHeight-60;camera.aspect=rw/rh;camera.updateProjectionMatrix();renderer.setSize(rw,rh);needsRender=true});
+window.addEventListener('resize',function(){var rw=container.clientWidth||window.innerWidth;var rh=container.clientHeight||(window.innerHeight-60);if(rw<1)rw=window.innerWidth;if(rh<1)rh=window.innerHeight-60;camera.aspect=rw/rh;camera.updateProjectionMatrix();renderer.setSize(rw,rh);needsRender=true;layoutPanels()});
 
 function animate(){
     requestAnimationFrame(animate);

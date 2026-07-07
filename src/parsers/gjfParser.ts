@@ -29,10 +29,6 @@ function resolveElement(raw: string): string {
     return cleaned;
 }
 
-function isFixedAtomMarker(val: number): boolean {
-    return val === -1 || val === 0 || val === 1;
-}
-
 function parseAtomLine(parts: string[]): { element: string; x: number; y: number; z: number } | null {
     if (parts.length < 4) return null;
     const element = resolveElement(parts[0]);
@@ -45,31 +41,27 @@ function parseAtomLine(parts: string[]): { element: string; x: number; y: number
         return null;
     }
 
-    const coordVals: number[] = [];
-    const markerIndices: number[] = [];
+    // 5+ columns: in Gaussian GJF, extra trailing integer columns after x y z are
+    // fixed-atom markers (0/1/-1). The marker column always follows the coordinates.
+    // Strategy: take the first 3 numeric values after the element as coordinates,
+    // then any remaining integer values that look like markers are ignored.
+    const coords: number[] = [];
+    for (let pi = 1; pi < parts.length && coords.length < 3; pi++) {
+        const v = parseFloat(parts[pi]);
+        if (!isNaN(v)) coords.push(v);
+    }
+    if (coords.length === 3) {
+        return { element, x: coords[0], y: coords[1], z: coords[2] };
+    }
+
+    // Fallback: last 3 numeric values
+    const allNums: number[] = [];
     for (let pi = 1; pi < parts.length; pi++) {
         const v = parseFloat(parts[pi]);
-        if (isNaN(v)) continue;
-        if (isFixedAtomMarker(v) && Number.isInteger(v)) {
-            markerIndices.push(coordVals.length);
-        }
-        coordVals.push(v);
+        if (!isNaN(v)) allNums.push(v);
     }
-
-    if (coordVals.length === 3) {
-        return { element, x: coordVals[0], y: coordVals[1], z: coordVals[2] };
-    }
-
-    if (coordVals.length === 4 && markerIndices.length === 1) {
-        const coords = coordVals.filter((_, idx) => idx !== markerIndices[0]);
-        if (coords.length === 3) return { element, x: coords[0], y: coords[1], z: coords[2] };
-    }
-
-    if (coordVals.length >= 3) {
-        const floatVals = coordVals.filter(v => !isFixedAtomMarker(v) || !Number.isInteger(v));
-        if (floatVals.length >= 3) {
-            return { element, x: floatVals[floatVals.length - 3], y: floatVals[floatVals.length - 2], z: floatVals[floatVals.length - 1] };
-        }
+    if (allNums.length >= 3) {
+        return { element, x: allNums[allNums.length - 3], y: allNums[allNums.length - 2], z: allNums[allNums.length - 1] };
     }
 
     return null;

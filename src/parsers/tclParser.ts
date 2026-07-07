@@ -93,12 +93,12 @@ export function parseTcl(content: string): TclParseResult {
     for (const line of lines) {
         const trimmed = line.trim();
 
-        const molNewMatch = trimmed.match(/^mol\s+new\s+(\S+)/);
+        const molNewMatch = trimmed.match(/^mol\s+new\s+(?:"([^"]+)"|'([^']+)'|(\S+))/);
         if (molNewMatch) {
-            sourceFile = molNewMatch[1];
+            sourceFile = molNewMatch[1] || molNewMatch[2] || molNewMatch[3];
         }
 
-        const typeMatch = trimmed.match(/^mol\s+new\s+\S+\s+type\s+(\S+)/);
+        const typeMatch = trimmed.match(/^mol\s+new\s+(?:"[^"]+"|'[^']+'|\S+)\s+type\s+(\S+)/);
         if (typeMatch) {
             sourceType = typeMatch[1];
         }

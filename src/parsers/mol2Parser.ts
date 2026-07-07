@@ -50,10 +50,16 @@ export function parseMol2(content: string): MolecularData {
                     const atom2 = parseInt(parts[2], 10) - 1;
                     const bondTypeStr = parts[3].toLowerCase();
                     let order = 1;
-                    if (bondTypeStr === '2' || bondTypeStr === 'am' || bondTypeStr === 'ar') {
-                        order = bondTypeStr === 'ar' ? 1.5 : 2;
+                    if (bondTypeStr === '2') {
+                        order = 2;
+                    } else if (bondTypeStr === 'ar') {
+                        order = 1.5;
+                    } else if (bondTypeStr === 'am') {
+                        order = 1;
                     } else if (bondTypeStr === '3') {
                         order = 3;
+                    } else if (bondTypeStr === 'du') {
+                        order = 1;
                     } else {
                         const parsed = parseFloat(bondTypeStr);
                         if (!isNaN(parsed)) order = parsed;

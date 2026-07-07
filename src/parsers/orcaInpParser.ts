@@ -11,6 +11,7 @@ export function parseOrcainp(content: string): MolecularData {
 
     let inXyz = false;
     let inCoordsBlock = false;
+    let inCoordsBohr = false;
     let atomIndex = 0;
 
     for (let i = 0; i < lines.length; i++) {
@@ -57,12 +58,14 @@ export function parseOrcainp(content: string): MolecularData {
 
         if (line.toLowerCase().startsWith('%coords')) {
             inCoordsBlock = true;
+            inCoordsBohr = false;
             continue;
         }
 
         if (inCoordsBlock) {
             if (line.toLowerCase() === 'end') {
                 inCoordsBlock = false;
+                inCoordsBohr = false;
                 continue;
             }
             const lowerLine = line.toLowerCase();
@@ -74,15 +77,24 @@ export function parseOrcainp(content: string): MolecularData {
                 }
                 continue;
             }
-            if (lowerLine.startsWith('units')) continue;
+            if (lowerLine.startsWith('units')) {
+                if (lowerLine.includes('bohr') || lowerLine.includes('angs')) {
+                    inCoordsBohr = lowerLine.includes('bohr');
+                }
+                continue;
+            }
             if (line !== '' && !line.startsWith('%')) {
                 const parts = line.split(/\s+/);
                 if (parts.length >= 4) {
                     const elem = parts[0];
-                    const x = parseFloat(parts[1]);
-                    const y = parseFloat(parts[2]);
-                    const z = parseFloat(parts[3]);
+                    let x = parseFloat(parts[1]);
+                    let y = parseFloat(parts[2]);
+                    let z = parseFloat(parts[3]);
                     if (!isNaN(x) && !isNaN(y) && !isNaN(z) && /^[A-Za-z]{1,2}$/.test(elem)) {
+                        if (inCoordsBohr) {
+                            const BOHR = 0.529177249;
+                            x *= BOHR; y *= BOHR; z *= BOHR;
+                        }
                         atoms.push({
                             element: elem.charAt(0).toUpperCase() + elem.slice(1).toLowerCase(),
                             x, y, z, index: atomIndex

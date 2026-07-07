@@ -1,7 +1,7 @@
 {
   "name": "Molecular-Viewer",
   "displayName": "Molecular Viewer",
-  "description": "3D molecular structure viewer and editor for computational chemistry files (Gaussian .gjf/.log, ORCA .inp/.out, .xyz, .mol2, .coord, .mol, .sdf, VMD .tcl). Features ball-and-stick rendering, auto bond detection, interactive rotation/zoom, bond length/angle/dihedral editing, atom add/delete, optimization trajectory navigation, VMD TCL script color groups, and save-as — like GaussView in your IDE.",
+  "description": "3D molecular structure viewer and editor for computational chemistry files (Gaussian .gjf/.log, ORCA .inp/.out, .xyz, .mol2, .coord, VMD .tcl). Features ball-and-stick rendering, auto bond detection, interactive rotation/zoom, bond length/angle/dihedral editing, atom add/delete, optimization trajectory navigation, VMD TCL script color groups, and save-as — like GaussView in your IDE.",
   "version": "0.9.3",
   "publisher": "Atreides-Jimmy",
   "license": "MIT",
@@ -64,14 +64,14 @@
       "explorer/context": [
         {
           "command": "molecularViewer.openViewer",
-          "when": "resourceExtname == .gjf || resourceExtname == .xyz || resourceExtname == .mol || resourceExtname == .sdf || resourceExtname == .com || resourceExtname == .gjf03 || resourceExtname == .gjf09 || resourceExtname == .gjf16 || resourceExtname == .mol2 || resourceExtname == .log || resourceExtname == .out || resourceExtname == .coord || resourceExtname == .inp || resourceExtname == .pdb || resourceExtname == .ent || resourceExtname == .mop || resourceExtname == .mopac || resourceExtname == .dat || resourceExtname == .tcl || resourceExtname == .cif || resourceExtname == .vasp || resourceExtname == .cube || resourceExtname == .vesta || resourceFilename =~ /^(POSCAR|CONTCAR|poscar|contcar)$/i",
+          "when": "resourceExtname == .gjf || resourceExtname == .xyz || resourceExtname == .com || resourceExtname == .gjf03 || resourceExtname == .gjf09 || resourceExtname == .gjf16 || resourceExtname == .mol2 || resourceExtname == .log || resourceExtname == .out || resourceExtname == .coord || resourceExtname == .inp || resourceExtname == .pdb || resourceExtname == .ent || resourceExtname == .mop || resourceExtname == .mopac || resourceExtname == .dat || resourceExtname == .tcl || resourceExtname == .cif || resourceExtname == .vasp || resourceExtname == .cube || resourceExtname == .vesta || resourceFilename =~ /^(POSCAR|CONTCAR|poscar|contcar)$/i",
           "group": "navigation"
         }
       ],
       "editor/title/context": [
         {
           "command": "molecularViewer.openViewer",
-          "when": "resourceExtname == .gjf || resourceExtname == .xyz || resourceExtname == .mol || resourceExtname == .sdf || resourceExtname == .com || resourceExtname == .gjf03 || resourceExtname == .gjf09 || resourceExtname == .gjf16 || resourceExtname == .mol2 || resourceExtname == .log || resourceExtname == .out || resourceExtname == .coord || resourceExtname == .inp || resourceExtname == .pdb || resourceExtname == .ent || resourceExtname == .mop || resourceExtname == .mopac || resourceExtname == .dat || resourceExtname == .tcl || resourceExtname == .cif || resourceExtname == .vasp || resourceExtname == .cube || resourceExtname == .vesta || resourceFilename =~ /^(POSCAR|CONTCAR|poscar|contcar)$/i",
+          "when": "resourceExtname == .gjf || resourceExtname == .xyz || resourceExtname == .com || resourceExtname == .gjf03 || resourceExtname == .gjf09 || resourceExtname == .gjf16 || resourceExtname == .mol2 || resourceExtname == .log || resourceExtname == .out || resourceExtname == .coord || resourceExtname == .inp || resourceExtname == .pdb || resourceExtname == .ent || resourceExtname == .mop || resourceExtname == .mopac || resourceExtname == .dat || resourceExtname == .tcl || resourceExtname == .cif || resourceExtname == .vasp || resourceExtname == .cube || resourceExtname == .vesta || resourceFilename =~ /^(POSCAR|CONTCAR|poscar|contcar)$/i",
           "group": "navigation"
         }
       ]
@@ -86,12 +86,6 @@
           },
           {
             "filenamePattern": "*.xyz"
-          },
-          {
-            "filenamePattern": "*.mol"
-          },
-          {
-            "filenamePattern": "*.sdf"
           },
           {
             "filenamePattern": "*.com"
