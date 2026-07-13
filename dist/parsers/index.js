@@ -71,7 +71,13 @@ function parseLogFile(content, fileName) {
         const result = (0, orcaOutParser_1.parseOrcaOut)(content);
         return { frames: result.frames, title: result.title };
     }
-    return (0, logParser_1.parseGaussianLog)(content);
+    const gResult = (0, logParser_1.parseGaussianLog)(content);
+    return {
+        frames: gResult.frames,
+        title: gResult.title,
+        optSteps: gResult.optSteps,
+        normalModes: gResult.normalModes
+    };
 }
 function parseLogAsSingleFrame(content) {
     const result = (0, logParser_1.parseGaussianLog)(content);

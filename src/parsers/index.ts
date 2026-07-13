@@ -1,8 +1,8 @@
-import { MolecularData, AtomGroup } from '../types';
+import { MolecularData, AtomGroup, OptStep, NormalMode } from '../types';
 import { parseGjf } from './gjfParser';
 import { parseXyz } from './xyzParser';
 import { parseMol2 } from './mol2Parser';
-import { parseGaussianLog, LogFrame } from './logParser';
+import { parseGaussianLog, LogFrame, GaussianLogResult } from './logParser';
 import { parseCoord } from './coordParser';
 import { parseOrcainp } from './orcaInpParser';
 import { parseOrcaOut, OrcaFrame } from './orcaOutParser';
@@ -14,13 +14,20 @@ import { parseVasp } from './vaspParser';
 import { parseCube } from './cubeParser';
 import { parseVesta } from './vestaParser';
 
-export { parseGaussianLog, LogFrame };
+export { parseGaussianLog, LogFrame, GaussianLogResult };
 export { parseOrcaOut, OrcaFrame };
 export { parseTcl, TclParseResult };
 export { parseCif };
 export { parseVasp };
 export { parseCube };
 export { parseVesta };
+
+export interface LogFileResult {
+    frames: LogFrame[] | OrcaFrame[];
+    title: string;
+    optSteps?: OptStep[];
+    normalModes?: NormalMode[];
+}
 
 export function parseFile(content: string, fileName: string): MolecularData {
     const ext = fileName.toLowerCase().split('.').pop() || '';
@@ -65,13 +72,19 @@ export function parseFile(content: string, fileName: string): MolecularData {
     }
 }
 
-export function parseLogFile(content: string, fileName?: string): { frames: LogFrame[] | OrcaFrame[], title: string } {
+export function parseLogFile(content: string, fileName?: string): LogFileResult {
     const ext = (fileName || '').toLowerCase().split('.').pop() || '';
     if (ext === 'out') {
         const result = parseOrcaOut(content);
         return { frames: result.frames, title: result.title };
     }
-    return parseGaussianLog(content);
+    const gResult = parseGaussianLog(content);
+    return {
+        frames: gResult.frames,
+        title: gResult.title,
+        optSteps: gResult.optSteps,
+        normalModes: gResult.normalModes
+    };
 }
 
 function parseLogAsSingleFrame(content: string): MolecularData {

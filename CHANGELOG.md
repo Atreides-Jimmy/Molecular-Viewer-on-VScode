@@ -1,5 +1,18 @@
 # Change Log
 
+## [0.9.4] - 2026-07-07
+
+### Added
+
+- **Optimization convergence panel** — Gaussian structure optimization log files (`.log`) now display a collapsible convergence panel showing energy, force (max + RMS), and displacement (max + RMS) curves versus optimization step, mirroring GaussView's convergence plot. Each chart is Canvas-rendered with gridlines, threshold lines (dashed amber), data points, and a legend. The panel includes a vertical resize handle (drag up/down to adjust height) and a close/reopen toggle (📈 Convergence button) to reclaim screen space. Energy is extracted from `SCF Done` lines; force/displacement values from the `Maximum Force` / `RMS Force` / `Maximum Displacement` / `RMS Displacement` criteria block after each optimization step
+- **Normal mode vibration playback** — Gaussian log files containing a frequency calculation (`freq` keyword or `CalcAll`) now display a collapsible Normal Modes panel listing every harmonic frequency (cm⁻¹) with symmetry label and a ▶ play button. Clicking a frequency animates the molecular vibration by modulating each atom's position with a sine wave along its mass-weighted displacement vector (amplitude normalized to 0.35 Å max, 60 FPS via `requestAnimationFrame` with in-place mesh updates). Vibration playback automatically jumps to the last optimization frame (where the frequency calculation was performed) before animating. Clicking the playing mode again or the ⏹ Stop button stops the animation and restores equilibrium positions. Vibration auto-stops on frame switch, undo, diff entry, or opening any edit modal to prevent stale-position conflicts. Imaginary frequencies (transition states) are marked with an asterisk (`*`)
+- **Frequency data parsing** — `logParser.ts` now extracts the full `Harmonic frequencies` block from Gaussian logs: frequencies, symmetry labels, reduced masses, force constants, IR intensities, and per-atom Cartesian displacement vectors. Handles 1–3 columns per frequency block (last block may have fewer modes). For `CalcAll` calculations (where a Hessian is computed at every optimization step), the parser uses the LAST frequency block rather than the first. Displacement vectors are stored as `[atomIndex][xyz]` arrays for vibration animation
+
+### Fixed
+
+- **Vibration animation lag** — The vibration playback was stuttering because every frame disposed and recreated all bond meshes (CylinderGeometry + MeshPhongMaterial + Mesh per bond half), causing 100–300 GPU object allocations/deallocations per frame. Fixed by storing bond metadata (bond index, half, perpendicular offset, original length) on each mesh's `userData` during creation, then updating mesh `position`/`quaternion`/`scale.y` in-place during vibration — zero geometry creation or disposal per frame. Additionally switched from `setInterval` (12.5–20 FPS) to `requestAnimationFrame` (60 FPS) with time-based phase calculation, giving smooth animation with a consistent 3-second cycle period
+- **Convergence panel scrollbar** — The convergence panel required scrolling horizontally before the vertical scrollbar appeared, because the Canvas chart's intrinsic bitmap width (set via `canvas.width = w * dpr`) could act as a presentational hint that overrides CSS `width:100%` in the webview rendering engine. Fixed by explicitly setting `canvas.style.width` and `canvas.style.maxWidth='100%'` in `drawConvergenceChart()` and `drawDualChart()`, using `parentElement.clientWidth` as a fallback when `canvas.clientWidth` is unavailable, and adding `overflow-x:hidden; width:100%; box-sizing:border-box` to `.opt-body`/`.freq-body` plus `max-width:100%` to the canvas CSS rule
+
 ## [0.9.3] - 2026-06-30
 
 ### Added

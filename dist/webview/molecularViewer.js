@@ -50,6 +50,8 @@ class MolecularViewerProvider {
         let data;
         let frames = [];
         let atomGroups;
+        let optSteps;
+        let normalModes;
         try {
             if (ext === 'tcl') {
                 const tclResult = (0, index_1.parseTcl)(textContent);
@@ -73,6 +75,8 @@ class MolecularViewerProvider {
                         if (sourceExt === 'log' || sourceExt === 'out') {
                             const logResult = (0, index_1.parseLogFile)(sourceText, sourceFileName);
                             frames = logResult.frames;
+                            optSteps = logResult.optSteps;
+                            normalModes = logResult.normalModes;
                             if (frames.length > 0) {
                                 data = (0, bondDetector_1.ensureBonds)({
                                     atoms: frames[0].atoms,
@@ -112,6 +116,8 @@ class MolecularViewerProvider {
             else if (ext === 'log' || ext === 'out') {
                 const logResult = (0, index_1.parseLogFile)(textContent, fileName);
                 frames = logResult.frames;
+                optSteps = logResult.optSteps;
+                normalModes = logResult.normalModes;
                 if (frames.length > 0) {
                     data = (0, bondDetector_1.ensureBonds)({
                         atoms: frames[0].atoms,
@@ -141,17 +147,19 @@ class MolecularViewerProvider {
             const msg = err instanceof Error ? err.message : String(err);
             data = { atoms: [], bonds: [], title: 'Parse error: ' + msg, hasExplicitBonds: false };
             frames = [];
+            optSteps = undefined;
+            normalModes = undefined;
         }
         if (ext !== 'tcl') {
             data.filePath = uri.fsPath;
         }
-        return new MolecularDocument(uri, data, frames);
+        return new MolecularDocument(uri, data, frames, optSteps, normalModes);
     }
     async resolveCustomEditor(document, webviewPanel, _token) {
         webviewPanel.webview.options = {
             enableScripts: true,
         };
-        webviewPanel.webview.html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames);
+        webviewPanel.webview.html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes);
         webviewPanel.webview.onDidReceiveMessage(async (message) => {
             switch (message.command) {
                 case 'saveFile':
@@ -354,7 +362,7 @@ class MolecularViewerProvider {
             }
         });
     }
-    async getHtmlForWebview(webview, data, frames = []) {
+    async getHtmlForWebview(webview, data, frames = [], optSteps, normalModes) {
         const nonce = getNonce();
         const threeJsBytes = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'three.min.js'));
         const threeJsContent = new TextDecoder().decode(threeJsBytes);
@@ -430,7 +438,16 @@ class MolecularViewerProvider {
                 atom1: b.atom1, atom2: b.atom2, order: b.order
             }))
         } : null;
-        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData });
+        const optStepsData = optSteps ? optSteps.map(s => ({
+            step: s.step, energy: s.energy, maxForce: s.maxForce, rmsForce: s.rmsForce,
+            maxDisplacement: s.maxDisplacement, rmsDisplacement: s.rmsDisplacement
+        })) : null;
+        const normalModesData = normalModes ? normalModes.map(m => ({
+            index: m.index, frequency: m.frequency, symmetry: m.symmetry || '',
+            reducedMass: m.reducedMass, forceConstant: m.forceConstant, irIntensity: m.irIntensity,
+            displacements: m.displacements
+        })) : null;
+        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData });
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -507,6 +524,39 @@ canvas{display:block}
 #diff-label.show,#diff-label-right.show{display:block}
 #diff-label{left:25%;transform:translateX(-50%)}
 #diff-label-right{left:75%;transform:translateX(-50%)}
+#opt-panel{display:none;position:absolute;top:36px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.78);padding:8px 10px;border-radius:4px;z-index:25;width:340px;max-height:70%;overflow:hidden;pointer-events:auto;line-height:1.4}
+#opt-panel.show{display:block}
+#opt-panel .opt-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.15)}
+#opt-panel .opt-title{font-size:12px;font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff)}
+#opt-panel .opt-close{cursor:pointer;color:var(--vscode-descriptionForeground,#999);font-size:14px;padding:0 4px}
+#opt-panel .opt-close:hover{color:var(--vscode-errorForeground,#f66)}
+#opt-panel .opt-resize{height:6px;cursor:ns-resize;background:rgba(255,255,255,0.1);border-radius:3px;margin:4px 0}
+#opt-panel .opt-resize:hover{background:rgba(255,255,255,0.25)}
+#opt-panel .opt-body{overflow-y:auto;overflow-x:hidden;max-height:480px;width:100%;box-sizing:border-box;scrollbar-gutter:stable}
+#opt-panel canvas{display:block;width:100%;max-width:100%;margin:2px 0 6px}
+#opt-panel .opt-chart-title{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:4px}
+#opt-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
+#opt-reopen.show{display:block}
+#opt-reopen:hover{background:var(--vscode-button-background,#0e639c)}
+#freq-panel{display:none;position:absolute;top:36px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.78);padding:8px 10px;border-radius:4px;z-index:25;width:300px;max-height:70%;overflow:hidden;pointer-events:auto;line-height:1.4}
+#freq-panel.show{display:block}
+#freq-panel .freq-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.15)}
+#freq-panel .freq-title{font-size:12px;font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff)}
+#freq-panel .freq-close{cursor:pointer;color:var(--vscode-descriptionForeground,#999);font-size:14px;padding:0 4px}
+#freq-panel .freq-close:hover{color:var(--vscode-errorForeground,#f66)}
+#freq-panel .freq-body{overflow-y:auto;overflow-x:hidden;max-height:480px;width:100%;box-sizing:border-box;scrollbar-gutter:stable}
+#freq-panel .freq-row{display:flex;justify-content:space-between;align-items:center;padding:3px 4px;cursor:pointer;border-radius:3px}
+#freq-panel .freq-row:hover{background:rgba(255,255,255,0.1)}
+#freq-panel .freq-row.playing{background:var(--vscode-button-background,#0e639c);color:#fff}
+#freq-panel .freq-idx{width:28px;color:var(--vscode-descriptionForeground,#999)}
+#freq-panel .freq-val{flex:1;font-family:monospace}
+#freq-panel .freq-sym{width:30px;text-align:right;color:var(--vscode-descriptionForeground,#999)}
+#freq-panel .freq-play{width:18px;text-align:center}
+#freq-panel .freq-stop{margin-top:6px;width:100%;padding:4px;border-radius:3px;border:1px solid var(--vscode-button-border,#555);background:var(--vscode-button-background,#0e639c);color:#fff;cursor:pointer;font-size:11px}
+#freq-panel .freq-stop:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
+#freq-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
+#freq-reopen.show{display:block}
+#freq-reopen:hover{background:var(--vscode-button-background,#0e639c)}
 </style>
 </head>
 <body>
@@ -537,7 +587,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="box-select-rect"></div>
@@ -984,6 +1034,7 @@ function updateAxesIndicator(){
 
 var atomMeshes=[];
 var bondMeshes=[];
+var currentBondIdx=-1;
 var needsRender=true;
 
 function disposeMesh(ch){
@@ -1027,7 +1078,7 @@ function rebuildScene(){
         moleculeGroup.add(mesh);
         atomMeshes.push(mesh);
     });
-    MD.bonds.forEach(function(b){createBond(b)});
+    for(var bi=0;bi<MD.bonds.length;bi++){currentBondIdx=bi;createBond(MD.bonds[bi])}
     if(CRY)buildCellWireframe();
     highlightSelected();
     needsRender=true;
@@ -1042,7 +1093,7 @@ function updateScenePositions(keepCenter){
     atomMeshes.forEach(function(m,i){var a=MD.atoms[i];if(a)m.position.set(a.x-CX,a.y-CY,a.z-CZ)});
     for(var i=bondMeshes.length-1;i>=0;i--){disposeMesh(bondMeshes[i]);moleculeGroup.remove(bondMeshes[i])}
     bondMeshes.length=0;
-    MD.bonds.forEach(function(b){createBond(b)});
+    for(var bi=0;bi<MD.bonds.length;bi++){currentBondIdx=bi;createBond(MD.bonds[bi])}
     if(CRY)buildCellWireframe();
     highlightSelected();
     needsRender=true;
@@ -1070,21 +1121,21 @@ function createBond(b){
     var mp=new THREE.Vector3().addVectors(s,e).multiplyScalar(0.5);
     var br=0.12,ord=b.order||1;
     var c1=new THREE.Color(a1.color),c2=new THREE.Color(a2.color);
-    if(ord<1.25){hBond(s,mp,d,l/2,br,c1);hBond(mp,e,d,l/2,br,c2)}
+    if(ord<1.25){hBond(s,mp,d,l/2,br,c1,{half:0});hBond(mp,e,d,l/2,br,c2,{half:1})}
     else if(ord<1.75){var off=0.10,p=getPerp(d).multiplyScalar(off);
-        hBond(s,mp,d,l/2,br,c1);hBond(mp,e,d,l/2,br,c2);
-        hDashedBond(s.clone().add(p),e.clone().add(p),d,l,br*0.7,c1,6);
+        hBond(s,mp,d,l/2,br,c1,{half:0});hBond(mp,e,d,l/2,br,c2,{half:1});
+        hDashedBond(s.clone().add(p),e.clone().add(p),d,l,br*0.7,c1,6,1,off);
     }else if(ord<2.5){var off=0.12,p=getPerp(d).multiplyScalar(off);
-        hBond(s.clone().add(p),mp.clone().add(p),d,l/2,br*0.6,c1);hBond(mp.clone().add(p),e.clone().add(p),d,l/2,br*0.6,c2);
-        hBond(s.clone().sub(p),mp.clone().sub(p),d,l/2,br*0.6,c1);hBond(mp.clone().sub(p),e.clone().sub(p),d,l/2,br*0.6,c2);
+        hBond(s.clone().add(p),mp.clone().add(p),d,l/2,br*0.6,c1,{half:0,perpSign:1,perpMag:off});hBond(mp.clone().add(p),e.clone().add(p),d,l/2,br*0.6,c2,{half:1,perpSign:1,perpMag:off});
+        hBond(s.clone().sub(p),mp.clone().sub(p),d,l/2,br*0.6,c1,{half:0,perpSign:-1,perpMag:off});hBond(mp.clone().sub(p),e.clone().sub(p),d,l/2,br*0.6,c2,{half:1,perpSign:-1,perpMag:off});
     }else if(ord<3.5){var off=0.15,p=getPerp(d).multiplyScalar(off);
-        hBond(s,mp,d,l/2,br*0.45,c1);hBond(mp,e,d,l/2,br*0.45,c2);
-        hBond(s.clone().add(p),mp.clone().add(p),d,l/2,br*0.45,c1);hBond(mp.clone().add(p),e.clone().add(p),d,l/2,br*0.45,c2);
-        hBond(s.clone().sub(p),mp.clone().sub(p),d,l/2,br*0.45,c1);hBond(mp.clone().sub(p),e.clone().sub(p),d,l/2,br*0.45,c2);
-    }else{hBond(s,mp,d,l/2,br,c1);hBond(mp,e,d,l/2,br,c2)}
+        hBond(s,mp,d,l/2,br*0.45,c1,{half:0});hBond(mp,e,d,l/2,br*0.45,c2,{half:1});
+        hBond(s.clone().add(p),mp.clone().add(p),d,l/2,br*0.45,c1,{half:0,perpSign:1,perpMag:off});hBond(mp.clone().add(p),e.clone().add(p),d,l/2,br*0.45,c2,{half:1,perpSign:1,perpMag:off});
+        hBond(s.clone().sub(p),mp.clone().sub(p),d,l/2,br*0.45,c1,{half:0,perpSign:-1,perpMag:off});hBond(mp.clone().sub(p),e.clone().sub(p),d,l/2,br*0.45,c2,{half:1,perpSign:-1,perpMag:off});
+    }else{hBond(s,mp,d,l/2,br,c1,{half:0});hBond(mp,e,d,l/2,br,c2,{half:1})}
 }
 
-function hDashedBond(s,e,d,hl,r,c,dashes){
+function hDashedBond(s,e,d,hl,r,c,dashes,perpSign,perpMag){
     var seg=hl/dashes, gap=seg*0.35, dashLen=seg-gap;
     var dir=d.clone().normalize();
     for(var k=0;k<dashes;k++){
@@ -1102,11 +1153,18 @@ function hDashedBond(s,e,d,hl,r,c,dashes){
         mesh.position.copy(dm);
         var axis=new THREE.Vector3(0,1,0);
         mesh.quaternion.copy(new THREE.Quaternion().setFromUnitVectors(axis,dir));
+        mesh.userData.bondIdx=currentBondIdx;
+        mesh.userData.origHl=dl;
+        mesh.userData.isDashed=true;
+        mesh.userData.dashT0=t0/hl;
+        mesh.userData.dashT1=t1/hl;
+        mesh.userData.perpSign=perpSign||0;
+        mesh.userData.perpMag=perpMag||0;
         moleculeGroup.add(mesh);
         bondMeshes.push(mesh);
     }
 }
-function hBond(s,e,d,hl,r,c){
+function hBond(s,e,d,hl,r,c,meta){
     var g=new THREE.CylinderGeometry(r,r,hl,8,1);
     var m=new THREE.MeshPhongMaterial({color:c,shininess:40,specular:0x222222});
     var mesh=new THREE.Mesh(g,m);
@@ -1114,6 +1172,13 @@ function hBond(s,e,d,hl,r,c){
     mesh.position.copy(mid);
     var axis=new THREE.Vector3(0,1,0);
     mesh.quaternion.copy(new THREE.Quaternion().setFromUnitVectors(axis,d.clone().normalize()));
+    if(meta){
+        mesh.userData.bondIdx=currentBondIdx;
+        mesh.userData.origHl=hl;
+        mesh.userData.half=meta.half;
+        mesh.userData.perpSign=meta.perpSign||0;
+        mesh.userData.perpMag=meta.perpMag||0;
+    }
     moleculeGroup.add(mesh);
     bondMeshes.push(mesh);
 }
@@ -1279,6 +1344,7 @@ function pushUndo(){
 function updateUndoBtn(){var b=document.getElementById('undo-btn');if(b)b.disabled=undoStack.length===0}
 function doUndo(){
     if(undoStack.length===0)return;
+    if(vibActive)stopVibration();
     var snap=undoStack.pop();
     MD.atoms=snap.atoms;MD.bonds=snap.bonds;
     if(CRY&&snap.baseAtoms){CRY.baseAtoms=snap.baseAtoms;CRY.baseBonds=snap.baseBonds}
@@ -1776,6 +1842,7 @@ diffReopenEl.addEventListener('click',function(){
 });
 
 function enterDiffRender(diffs,mapping){
+    if(vibActive)stopVibration();
     diffPivot=new THREE.Group();scene.add(diffPivot);
     diffMolGroup=new THREE.Group();diffPivot.add(diffMolGroup);
 
@@ -2043,6 +2110,403 @@ document.getElementById('auto-play').addEventListener('click',function(){
     }
 });
 
+// ===== Opt Convergence & Frequency Vibration Panels =====
+var optPanelEl=document.getElementById('opt-panel');
+var optReopenEl=document.getElementById('opt-reopen');
+var freqPanelEl=document.getElementById('freq-panel');
+var freqReopenEl=document.getElementById('freq-reopen');
+var OPT_STEPS=MD.optSteps||null;
+var NORMAL_MODES=MD.normalModes||null;
+
+function drawConvergenceChart(canvas,steps,field,label,color,threshold){
+    var ctx=canvas.getContext('2d');
+    var dpr=window.devicePixelRatio||1;
+    var w=canvas.clientWidth||(canvas.parentElement&&canvas.parentElement.clientWidth)||300;
+    var h=canvas.clientHeight||100;
+    canvas.width=w*dpr;canvas.height=h*dpr;
+    canvas.style.width='100%';canvas.style.height=h+'px';canvas.style.maxWidth='100%';canvas.style.display='block';
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    ctx.clearRect(0,0,w,h);
+    var padL=40,padR=8,padT=8,padB=18;
+    var pw=w-padL-padR,ph=h-padT-padB;
+    var vals=steps.map(function(s){return s[field]}).filter(function(v){return v!=null&&!isNaN(v)});
+    if(vals.length===0){ctx.fillStyle='#888';ctx.font='10px sans-serif';ctx.fillText('No data',padL,padT+12);return}
+    var vmin=Math.min.apply(null,vals),vmax=Math.max.apply(null,vals);
+    if(threshold!=null){vmin=Math.min(vmin,threshold);vmax=Math.max(vmax,threshold)}
+    if(vmax-vmin<1e-12)vmax=vmin+1;
+    var n=steps.length;
+    // Grid + axes
+    ctx.strokeStyle='rgba(255,255,255,0.12)';ctx.lineWidth=1;
+    ctx.fillStyle='#888';ctx.font='9px sans-serif';ctx.textAlign='right';ctx.textBaseline='middle';
+    for(var g=0;g<=4;g++){
+        var y=padT+ph*g/4;
+        ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(padL+pw,y);ctx.stroke();
+        var val=vmax-(vmax-vmin)*g/4;
+        ctx.fillText(val.toExponential(2),padL-3,y);
+    }
+    ctx.textAlign='center';ctx.textBaseline='top';
+    for(g=0;g<n;g+=Math.max(1,Math.floor(n/6))){
+        var x=padL+(n<=1?0:pw*g/(n-1));
+        ctx.fillText(String(g+1),x,padT+ph+2);
+    }
+    // Threshold line
+    if(threshold!=null){
+        var ty=padT+ph*(vmax-threshold)/(vmax-vmin);
+        ctx.strokeStyle='rgba(255,180,0,0.6)';ctx.setLineDash([3,3]);
+        ctx.beginPath();ctx.moveTo(padL,ty);ctx.lineTo(padL+pw,ty);ctx.stroke();
+        ctx.setLineDash([]);
+    }
+    // Data line
+    ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.beginPath();
+    var drew=false;
+    for(var i=0;i<n;i++){
+        var v=steps[i][field];
+        if(v==null||isNaN(v))continue;
+        x=padL+(n<=1?0:pw*i/(n-1));
+        y=padT+ph*(vmax-v)/(vmax-vmin);
+        if(!drew){ctx.moveTo(x,y);drew=true}else ctx.lineTo(x,y);
+    }
+    ctx.stroke();
+    // Points
+    ctx.fillStyle=color;
+    for(i=0;i<n;i++){
+        v=steps[i][field];
+        if(v==null||isNaN(v))continue;
+        x=padL+(n<=1?0:pw*i/(n-1));
+        y=padT+ph*(vmax-v)/(vmax-vmin);
+        ctx.beginPath();ctx.arc(x,y,2,0,Math.PI*2);ctx.fill();
+    }
+    // Label
+    ctx.fillStyle='#ccc';ctx.font='10px sans-serif';ctx.textAlign='left';ctx.textBaseline='top';
+    ctx.fillText(label,padL,padT-2);
+}
+
+function buildOptPanel(){
+    if(!OPT_STEPS||OPT_STEPS.length===0)return;
+    var hasEnergy=OPT_STEPS.some(function(s){return s.energy!=null});
+    var hasForce=OPT_STEPS.some(function(s){return s.maxForce!=null||s.rmsForce!=null});
+    var hasDisp=OPT_STEPS.some(function(s){return s.maxDisplacement!=null||s.rmsDisplacement!=null});
+    var chartsHTML='';
+    if(hasEnergy)chartsHTML+='<div class="opt-chart-title">Energy (Hartree)</div><canvas data-field="energy" data-color="#3794ff" data-label="Energy"></canvas>';
+    if(hasForce)chartsHTML+='<div class="opt-chart-title">Force (max + rms)</div><canvas data-field="force" data-color="#ff6b6b" data-label="Force"></canvas>';
+    if(hasDisp)chartsHTML+='<div class="opt-chart-title">Displacement (max + rms)</div><canvas data-field="disp" data-color="#51cf66" data-label="Displacement"></canvas>';
+    optPanelEl.innerHTML=
+        '<div class="opt-head"><span class="opt-title">Optimization Convergence ('+OPT_STEPS.length+' steps)</span>'+
+        '<span class="opt-close">×</span></div>'+
+        '<div class="opt-resize" id="opt-resize"></div>'+
+        '<div class="opt-body" id="opt-body">'+chartsHTML+'</div>';
+    optPanelEl.classList.add('show');
+    optReopenEl.classList.remove('show');
+
+    // Draw charts (deferred to ensure layout is computed)
+    function renderCharts(){
+        var canvases=optPanelEl.querySelectorAll('canvas');
+        canvases.forEach(function(cv){
+            var field=cv.dataset.field;
+            if(field==='energy'){
+                cv.style.height='90px';
+                drawConvergenceChart(cv,OPT_STEPS,'energy','Energy (Hartree)','#3794ff',null);
+            }else if(field==='force'){
+                cv.style.height='110px';
+                drawDualChart(cv,OPT_STEPS,['maxForce','rmsForce'],['Max Force','RMS Force'],['#ff6b6b','#ffa94d'],0.000450,0.000300);
+            }else if(field==='disp'){
+                cv.style.height='110px';
+                drawDualChart(cv,OPT_STEPS,['maxDisplacement','rmsDisplacement'],['Max Disp','RMS Disp'],['#51cf66','#74c0fc'],0.001800,0.001200);
+            }
+        });
+    }
+    requestAnimationFrame(renderCharts);
+
+    // Close handler
+    var closeBtn=optPanelEl.querySelector('.opt-close');
+    if(closeBtn){
+        closeBtn.addEventListener('click',function(){
+            optPanelEl.classList.remove('show');
+            optReopenEl.classList.add('show');
+            layoutPanels();
+        });
+    }
+    // Resize handler (vertical drag)
+    var resizeH=optPanelEl.querySelector('#opt-resize');
+    if(resizeH){
+        var dragging=false,startY=0,startH=0;
+        resizeH.addEventListener('mousedown',function(e){dragging=true;startY=e.clientY;startH=optPanelEl.offsetHeight;e.preventDefault();document.body.style.cursor='ns-resize'});
+        document.addEventListener('mousemove',function(e){
+            if(!dragging)return;
+            var nh=Math.max(120,Math.min(600,startH-(e.clientY-startY)));
+            optPanelEl.style.maxHeight=nh+'px';
+            var body=optPanelEl.querySelector('#opt-body');
+            if(body)body.style.maxHeight=(nh-50)+'px';
+            // Redraw charts
+            var cvs=optPanelEl.querySelectorAll('canvas');
+            cvs.forEach(function(cv){
+                var f=cv.dataset.field;
+                if(f==='energy')drawConvergenceChart(cv,OPT_STEPS,'energy','Energy (Hartree)','#3794ff',null);
+                else if(f==='force')drawDualChart(cv,OPT_STEPS,['maxForce','rmsForce'],['Max Force','RMS Force'],['#ff6b6b','#ffa94d'],0.000450,0.000300);
+                else if(f==='disp')drawDualChart(cv,OPT_STEPS,['maxDisplacement','rmsDisplacement'],['Max Disp','RMS Disp'],['#51cf66','#74c0fc'],0.001800,0.001200);
+            });
+        });
+        document.addEventListener('mouseup',function(){if(dragging){dragging=false;document.body.style.cursor='';layoutPanels()}});
+    }
+    layoutPanels();
+}
+
+function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
+    var ctx=canvas.getContext('2d');
+    var dpr=window.devicePixelRatio||1;
+    var w=canvas.clientWidth||(canvas.parentElement&&canvas.parentElement.clientWidth)||300;
+    var h=canvas.clientHeight||110;
+    canvas.width=w*dpr;canvas.height=h*dpr;
+    canvas.style.width='100%';canvas.style.height=h+'px';canvas.style.maxWidth='100%';canvas.style.display='block';
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    ctx.clearRect(0,0,w,h);
+    var padL=40,padR=8,padT=14,padB=18;
+    var pw=w-padL-padR,ph=h-padT-padB;
+    var allVals=[];
+    steps.forEach(function(s){fields.forEach(function(f){if(s[f]!=null&&!isNaN(s[f]))allVals.push(s[f])})});
+    if(allVals.length===0){ctx.fillStyle='#888';ctx.font='10px sans-serif';ctx.fillText('No data',padL,padT+12);return}
+    var vmin=Math.min.apply(null,allVals),vmax=Math.max.apply(null,allVals);
+    if(thresh1!=null){vmin=Math.min(vmin,thresh1);vmax=Math.max(vmax,thresh1)}
+    if(thresh2!=null){vmin=Math.min(vmin,thresh2);vmax=Math.max(vmax,thresh2)}
+    if(vmax-vmin<1e-12)vmax=vmin+1;
+    var n=steps.length;
+    // Grid
+    ctx.strokeStyle='rgba(255,255,255,0.12)';ctx.lineWidth=1;
+    ctx.fillStyle='#888';ctx.font='9px sans-serif';ctx.textAlign='right';ctx.textBaseline='middle';
+    for(var g=0;g<=4;g++){
+        var y=padT+ph*g/4;
+        ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(padL+pw,y);ctx.stroke();
+        var val=vmax-(vmax-vmin)*g/4;
+        ctx.fillText(val.toExponential(2),padL-3,y);
+    }
+    ctx.textAlign='center';ctx.textBaseline='top';
+    for(g=0;g<n;g+=Math.max(1,Math.floor(n/6))){
+        var x=padL+(n<=1?0:pw*g/(n-1));
+        ctx.fillText(String(g+1),x,padT+ph+2);
+    }
+    // Threshold lines
+    [thresh1,thresh2].forEach(function(th,idx){
+        if(th==null)return;
+        var ty=padT+ph*(vmax-th)/(vmax-vmin);
+        ctx.strokeStyle='rgba(255,180,0,0.5)';ctx.setLineDash([3,3]);
+        ctx.beginPath();ctx.moveTo(padL,ty);ctx.lineTo(padL+pw,ty);ctx.stroke();
+        ctx.setLineDash([]);
+    });
+    // Legend
+    ctx.font='9px sans-serif';ctx.textAlign='left';ctx.textBaseline='top';
+    for(var fi=0;fi<fields.length;fi++){
+        ctx.fillStyle=colors[fi];
+        ctx.fillRect(padL+fi*80,padT-12,8,2);
+        ctx.fillText(labels[fi],padL+fi*80+10,padT-14);
+    }
+    // Data lines
+    for(fi=0;fi<fields.length;fi++){
+        ctx.strokeStyle=colors[fi];ctx.lineWidth=1.5;ctx.beginPath();
+        var drew=false;
+        for(var i=0;i<n;i++){
+            var v=steps[i][fields[fi]];
+            if(v==null||isNaN(v))continue;
+            x=padL+(n<=1?0:pw*i/(n-1));
+            y=padT+ph*(vmax-v)/(vmax-vmin);
+            if(!drew){ctx.moveTo(x,y);drew=true}else ctx.lineTo(x,y);
+        }
+        ctx.stroke();
+        ctx.fillStyle=colors[fi];
+        for(i=0;i<n;i++){
+            v=steps[i][fields[fi]];
+            if(v==null||isNaN(v))continue;
+            x=padL+(n<=1?0:pw*i/(n-1));
+            y=padT+ph*(vmax-v)/(vmax-vmin);
+            ctx.beginPath();ctx.arc(x,y,2,0,Math.PI*2);ctx.fill();
+        }
+    }
+}
+
+// Vibration animation
+var vibActive=false,vibModeIdx=-1,vibBasePositions=null,vibTimer=null;
+var _vibTmpV1=new THREE.Vector3(),_vibTmpQ=new THREE.Quaternion(),_vibYAxis=new THREE.Vector3(0,1,0);
+function updateVibBondMeshes(){
+    for(var i=0;i<bondMeshes.length;i++){
+        var mesh=bondMeshes[i];
+        var ud=mesh.userData;
+        if(ud.bondIdx===undefined||ud.bondIdx<0||ud.bondIdx>=MD.bonds.length)continue;
+        var b=MD.bonds[ud.bondIdx];
+        if(!b)continue;
+        var a1=MD.atoms[b.atom1],a2=MD.atoms[b.atom2];
+        if(!a1||!a2)continue;
+        var a2x=a2.x,a2y=a2.y,a2z=a2.z;
+        if(b.shift&&CRY){
+            var lv=CRY.latticeVectors;
+            a2x+=b.shift[0]*lv[0][0]+b.shift[1]*lv[1][0]+b.shift[2]*lv[2][0];
+            a2y+=b.shift[0]*lv[0][1]+b.shift[1]*lv[1][1]+b.shift[2]*lv[2][1];
+            a2z+=b.shift[0]*lv[0][2]+b.shift[1]*lv[1][2]+b.shift[2]*lv[2][2];
+        }
+        var sx=a1.x-CX,sy=a1.y-CY,sz=a1.z-CZ;
+        var ex=a2x-CX,ey=a2y-CY,ez=a2z-CZ;
+        var dx=ex-sx,dy=ey-sy,dz=ez-sz;
+        var l=Math.sqrt(dx*dx+dy*dy+dz*dz);
+        if(l<0.001)continue;
+        var mpx=(sx+ex)*0.5,mpy=(sy+ey)*0.5,mpz=(sz+ez)*0.5;
+        var px=0,py=0,pz=0;
+        if(ud.perpMag){
+            var upx=0,upy=1,upz=0;
+            if(Math.abs(dy)>=0.99){upx=1;upy=0;upz=0}
+            var perpx=dy*upz-dz*upy,perpy=dz*upx-dx*upz,perpz=dx*upy-dy*upx;
+            var perpLen=Math.sqrt(perpx*perpx+perpy*perpy+perpz*perpz);
+            if(perpLen>0.0001){perpx/=perpLen;perpy/=perpLen;perpz/=perpLen}
+            var off=ud.perpMag*ud.perpSign;
+            px=perpx*off;py=perpy*off;pz=perpz*off;
+        }
+        if(ud.isDashed){
+            var dirx=dx/l,diry=dy/l,dirz=dz/l;
+            var t0=ud.dashT0*l,t1=ud.dashT1*l;
+            var dsx=sx+dirx*t0+px,dsy=sy+diry*t0+py,dsz=sz+dirz*t0+pz;
+            var dex=sx+dirx*t1+px,dey=sy+diry*t1+py,dez=sz+dirz*t1+pz;
+            var dl=t1-t0;
+            if(dl<0.001)continue;
+            mesh.position.set((dsx+dex)*0.5,(dsy+dey)*0.5,(dsz+dez)*0.5);
+            _vibTmpV1.set(dirx,diry,dirz);
+            _vibTmpQ.setFromUnitVectors(_vibYAxis,_vibTmpV1);
+            mesh.quaternion.copy(_vibTmpQ);
+            mesh.scale.y=dl/ud.origHl;
+        }else{
+            var msx,msy,msz,mex,mey,mez;
+            if(ud.half===0){
+                msx=sx+px;msy=sy+py;msz=sz+pz;
+                mex=mpx+px;mey=mpy+py;mez=mpz+pz;
+            }else{
+                msx=mpx+px;msy=mpy+py;msz=mpz+pz;
+                mex=ex+px;mey=ey+py;mez=ez+pz;
+            }
+            var hdx=mex-msx,hdy=mey-msy,hdz=mez-msz;
+            var hl=Math.sqrt(hdx*hdx+hdy*hdy+hdz*hdz);
+            if(hl<0.001)continue;
+            mesh.position.set((msx+mex)*0.5,(msy+mey)*0.5,(msz+mez)*0.5);
+            _vibTmpV1.set(hdx,hdy,hdz).normalize();
+            _vibTmpQ.setFromUnitVectors(_vibYAxis,_vibTmpV1);
+            mesh.quaternion.copy(_vibTmpQ);
+            mesh.scale.y=hl/ud.origHl;
+        }
+    }
+    needsRender=true;
+}
+function updateVibrationPositions(){
+    for(var i=0;i<MD.atoms.length&&i<atomMeshes.length;i++){
+        atomMeshes[i].position.set(MD.atoms[i].x-CX,MD.atoms[i].y-CY,MD.atoms[i].z-CZ);
+    }
+    updateVibBondMeshes();
+}
+function startVibration(modeIdx){
+    stopVibration();
+    if(!NORMAL_MODES||modeIdx<0||modeIdx>=NORMAL_MODES.length)return;
+    if(totalFrames>0&&currentFrame!==totalFrames-1){switchFrame(totalFrames-1)}
+    var mode=NORMAL_MODES[modeIdx];
+    if(!mode.displacements||mode.displacements.length!==MD.atoms.length)return;
+    vibBasePositions=MD.atoms.map(function(a){return{x:a.x,y:a.y,z:a.z}});
+    var maxMag=0;
+    mode.displacements.forEach(function(d){var m=Math.sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]);if(m>maxMag)maxMag=m});
+    if(maxMag<1e-8)maxMag=1;
+    var amplitude=0.35;
+    vibActive=true;vibModeIdx=modeIdx;
+    var periodMs=3000; // 3 seconds per cycle
+    var startTime=performance.now();
+    function vibTick(){
+        if(!vibActive)return;
+        var elapsed=performance.now()-startTime;
+        var s=Math.sin(2*Math.PI*(elapsed%periodMs)/periodMs)*amplitude/maxMag;
+        for(var i=0;i<MD.atoms.length&&i<mode.displacements.length;i++){
+            var d=mode.displacements[i];
+            MD.atoms[i].x=vibBasePositions[i].x+d[0]*s;
+            MD.atoms[i].y=vibBasePositions[i].y+d[1]*s;
+            MD.atoms[i].z=vibBasePositions[i].z+d[2]*s;
+        }
+        updateVibrationPositions();
+        vibTimer=requestAnimationFrame(vibTick);
+    }
+    vibTimer=requestAnimationFrame(vibTick);
+}
+function stopVibration(){
+    if(vibTimer){cancelAnimationFrame(vibTimer);vibTimer=null}
+    if(vibBasePositions){
+        for(var i=0;i<MD.atoms.length&&i<vibBasePositions.length;i++){
+            MD.atoms[i].x=vibBasePositions[i].x;
+            MD.atoms[i].y=vibBasePositions[i].y;
+            MD.atoms[i].z=vibBasePositions[i].z;
+        }
+        vibBasePositions=null;
+        updateVibrationPositions();
+    }
+    vibActive=false;vibModeIdx=-1;
+    // Update freq panel highlight
+    var rows=freqPanelEl.querySelectorAll('.freq-row');
+    rows.forEach(function(r){r.classList.remove('playing')});
+}
+
+function buildFreqPanel(){
+    if(!NORMAL_MODES||NORMAL_MODES.length===0)return;
+    var rowsHTML=NORMAL_MODES.map(function(m,idx){
+        var freqStr=m.frequency.toFixed(2);
+        var symStr=m.symmetry||'';
+        var sign=m.frequency<0?'*':'';
+        return '<div class="freq-row" data-idx="'+idx+'">'+
+            '<span class="freq-idx">'+(idx+1)+'</span>'+
+            '<span class="freq-val">'+sign+freqStr+' cm⁻¹</span>'+
+            '<span class="freq-sym">'+symStr+'</span>'+
+            '<span class="freq-play">▶</span></div>';
+    }).join('');
+    freqPanelEl.innerHTML=
+        '<div class="freq-head"><span class="freq-title">Normal Modes ('+NORMAL_MODES.length+')</span>'+
+        '<span class="freq-close">×</span></div>'+
+        '<div class="freq-body">'+rowsHTML+'</div>'+
+        '<button class="freq-stop" id="freq-stop">⏹ Stop</button>';
+    freqPanelEl.classList.add('show');
+    freqReopenEl.classList.remove('show');
+
+    var rows=freqPanelEl.querySelectorAll('.freq-row');
+    rows.forEach(function(r){
+        r.addEventListener('click',function(){
+            var idx=parseInt(r.dataset.idx);
+            if(isNaN(idx))return;
+            if(vibActive&&vibModeIdx===idx){
+                stopVibration();
+            }else{
+                rows.forEach(function(rr){rr.classList.remove('playing')});
+                r.classList.add('playing');
+                startVibration(idx);
+            }
+        });
+    });
+    var closeBtn=freqPanelEl.querySelector('.freq-close');
+    if(closeBtn){
+        closeBtn.addEventListener('click',function(){
+            stopVibration();
+            freqPanelEl.classList.remove('show');
+            freqReopenEl.classList.add('show');
+            layoutPanels();
+        });
+    }
+    var stopBtn=freqPanelEl.querySelector('#freq-stop');
+    if(stopBtn){
+        stopBtn.addEventListener('click',function(){stopVibration()});
+    }
+    layoutPanels();
+}
+
+optReopenEl.addEventListener('click',function(){buildOptPanel()});
+freqReopenEl.addEventListener('click',function(){buildFreqPanel()});
+
+// Initial panel display
+if(OPT_STEPS&&OPT_STEPS.length>0){
+    buildOptPanel();
+}
+if(NORMAL_MODES&&NORMAL_MODES.length>0){
+    buildFreqPanel();
+}
+
+// Stop vibration on frame switch to avoid stale positions
+var origSwitchFrame=switchFrame;
+switchFrame=function(idx){if(vibActive)stopVibration();origSwitchFrame(idx)};
+
 function formatAtomList(indices,atoms){
     atoms=atoms||MD.atoms;
     if(indices.length===0)return '';
@@ -2123,6 +2587,10 @@ function layoutPanels(){
         {id:'select-panel',pr:3,anc:'bl'},
         {id:'diff-label',pr:4,anc:'tc',pct:0.25},
         {id:'diff-label-right',pr:5,anc:'tc',pct:0.75},
+        {id:'opt-panel',pr:7,anc:'tl'},
+        {id:'freq-panel',pr:8,anc:'tl'},
+        {id:'opt-reopen',pr:9,anc:'tl'},
+        {id:'freq-reopen',pr:10,anc:'tl'},
         {id:'axes-indicator',pr:6,anc:'bl'}
     ];
     var vis=[];
@@ -2492,7 +2960,7 @@ function applyDihedral(targetDeg,fixFirstThree,moveMode){
     updateScenePositions(true);
 }
 
-function showModal(html,cb){modalEl.innerHTML=html;modalOverlay.classList.add('show');modalCallback=cb}
+function showModal(html,cb){if(vibActive)stopVibration();modalEl.innerHTML=html;modalOverlay.classList.add('show');modalCallback=cb}
 function hideModal(){modalOverlay.classList.remove('show');modalCallback=null}
 
 function showBondLengthModal(){
@@ -3467,10 +3935,12 @@ animate();
 }
 exports.MolecularViewerProvider = MolecularViewerProvider;
 class MolecularDocument {
-    constructor(uri, data, frames = []) {
+    constructor(uri, data, frames = [], optSteps, normalModes) {
         this.uri = uri;
         this.data = data;
         this.frames = frames;
+        this.optSteps = optSteps;
+        this.normalModes = normalModes;
     }
     dispose() { }
 }

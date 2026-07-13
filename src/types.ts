@@ -47,6 +47,25 @@ export interface AtomGroup {
     indices: number[];
 }
 
+export interface OptStep {
+    step: number;
+    energy?: number;
+    maxForce?: number;
+    rmsForce?: number;
+    maxDisplacement?: number;
+    rmsDisplacement?: number;
+}
+
+export interface NormalMode {
+    index: number;
+    frequency: number;
+    symmetry?: string;
+    reducedMass?: number;
+    forceConstant?: number;
+    irIntensity?: number;
+    displacements: number[][];
+}
+
 export interface MolecularData {
     atoms: Atom[];
     bonds: Bond[];
