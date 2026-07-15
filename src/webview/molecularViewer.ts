@@ -434,25 +434,29 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
 *{margin:0;padding:0;box-sizing:border-box}
 html{width:100%;height:100%;overflow:hidden}
 body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;background:var(--vscode-editor-background,#1e1e1e);font-family:var(--vscode-font-family,sans-serif);color:var(--vscode-editor-foreground,#ccc)}
-#toolbar{height:36px;flex-shrink:0;background:var(--vscode-editor-background,#1e1e1e);border-bottom:1px solid var(--vscode-panel-border,#444);display:flex;align-items:center;padding:0 8px;z-index:20;gap:2px}
-.tbtn{background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#fff);border:1px solid var(--vscode-panel-border,#444);padding:3px 10px;border-radius:3px;cursor:pointer;font-size:11px;white-space:nowrap}
+#toolbar{height:36px;flex-shrink:0;background:var(--vscode-editor-background,#1e1e1e);border-bottom:1px solid var(--vscode-panel-border,#444);display:flex;align-items:center;padding:0 8px;z-index:20;gap:2px;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
+#toolbar::-webkit-scrollbar{height:3px}
+#toolbar::-webkit-scrollbar-track{background:transparent}
+#toolbar::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.15);border-radius:2px}
+.tbtn{background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#fff);border:1px solid var(--vscode-panel-border,#444);padding:3px 10px;border-radius:3px;cursor:pointer;font-size:11px;white-space:nowrap;flex-shrink:0}
 .tbtn:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e)}
 .tbtn.active{background:var(--vscode-button-background,#0e639c);border-color:var(--vscode-button-background,#0e639c)}
-.tsep{width:1px;height:20px;background:var(--vscode-panel-border,#444);margin:0 4px}
+.tsep{width:1px;height:20px;background:var(--vscode-panel-border,#444);margin:0 4px;flex-shrink:0}
 #status-bar{height:24px;flex-shrink:0;background:var(--vscode-statusBar-background,#007acc);color:var(--vscode-statusBar-foreground,#fff);display:flex;align-items:center;padding:0 10px;font-size:11px;z-index:20;gap:12px;overflow:hidden}
 #selection-info{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+#mode-info{white-space:nowrap;flex-shrink:0}
 #container{flex:1;position:relative;overflow:hidden;min-height:0;outline:none}
-#mol-info{position:absolute;top:8px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.55);padding:6px 10px;border-radius:4px;z-index:25;pointer-events:none;line-height:1.6}
+#mol-info{position:absolute;top:8px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.55);padding:6px 10px;border-radius:4px;z-index:25;pointer-events:none;line-height:1.6;max-width:calc(100% - 16px);overflow:hidden}
 #axes-indicator{position:absolute;bottom:12px;left:12px;width:90px;height:90px;z-index:25;pointer-events:none}
 #axes-indicator svg{width:100%;height:100%}
-#crystal-panel{position:absolute;top:8px;right:8px;background:rgba(0,0,0,0.6);border:1px solid var(--vscode-panel-border,#444);border-radius:4px;padding:8px 10px;font-size:11px;color:var(--vscode-editor-foreground,#ccc);z-index:25;display:none;min-width:180px}
+#crystal-panel{position:absolute;top:8px;right:8px;background:rgba(0,0,0,0.6);border:1px solid var(--vscode-panel-border,#444);border-radius:4px;padding:8px 10px;font-size:11px;color:var(--vscode-editor-foreground,#ccc);z-index:25;display:none;min-width:180px;max-width:calc(100% - 16px)}
 #crystal-panel h4{margin:0 0 6px 0;font-size:11px;font-weight:600}
 #crystal-panel .bnd-row{display:flex;align-items:center;gap:4px;margin:3px 0}
 #crystal-panel .bnd-row label{width:42px;text-align:right}
 #crystal-panel .bnd-row input{width:48px;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;padding:1px 3px;font-size:11px;text-align:center}
 #crystal-panel .bnd-btn{margin-top:6px;width:100%;background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff);border:none;border-radius:3px;padding:4px 6px;font-size:11px;cursor:pointer}
 #crystal-panel .bnd-btn:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
-#select-panel{display:none;position:absolute;bottom:40px;left:8px;z-index:50;background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:4px;padding:8px;width:280px;box-shadow:0 2px 8px rgba(0,0,0,0.3)}
+#select-panel{display:none;position:absolute;bottom:40px;left:8px;z-index:50;background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:4px;padding:8px;width:280px;max-width:calc(100% - 16px);box-shadow:0 2px 8px rgba(0,0,0,0.3)}
 #select-panel .sp-title{font-size:12px;font-weight:bold;margin-bottom:4px}
 #select-panel input[type=text]{width:100%;padding:6px 8px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:12px;box-sizing:border-box}
 #select-panel .sp-btns{display:flex;gap:4px;margin-top:4px}
@@ -462,7 +466,7 @@ canvas{display:block}
 #box-select-rect{position:fixed;display:none;border:1px dashed #ffeb3b;background:rgba(255,235,59,0.12);pointer-events:none;z-index:40}
 #modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:100;display:none;align-items:center;justify-content:center}
 #modal-overlay.show{display:flex}
-#modal{background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-panel-border,#444);border-radius:6px;padding:16px 20px;min-width:320px;max-width:420px;box-shadow:0 8px 30px rgba(0,0,0,0.5)}
+#modal{background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-panel-border,#444);border-radius:6px;padding:16px 20px;min-width:min(320px,calc(100vw - 32px));max-width:min(420px,calc(100vw - 32px));box-shadow:0 8px 30px rgba(0,0,0,0.5)}
 #modal h3{font-size:14px;margin-bottom:10px;color:var(--vscode-editor-foreground,#ccc)}
 #modal label{font-size:12px;display:block;margin:6px 0 2px}
 #modal input[type=number],#modal select{width:100%;padding:4px 8px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:12px}
@@ -481,10 +485,10 @@ canvas{display:block}
 #loading{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--vscode-editor-foreground,#ccc);font-size:14px}
 #error-msg{display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#f66;padding:20px;font-size:13px;text-align:center;max-width:80%;z-index:50}
 .hidden{display:none!important}
-#frame-nav{display:none;align-items:center;gap:2px}
+#frame-nav{display:none;align-items:center;gap:2px;flex-shrink:0}
 #frame-nav.show{display:flex}
 #frame-num{width:40px;padding:2px 4px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:11px;text-align:center}
-#frame-info{color:var(--vscode-statusBar-foreground,#fff);font-size:11px;padding:0 4px;white-space:nowrap}
+#frame-info{color:var(--vscode-statusBar-foreground,#fff);font-size:11px;padding:0 4px;white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis}
 #auto-play.playing{background:var(--vscode-button-background,#0e639c);border-color:var(--vscode-button-background,#0e639c)}
 #diff-panel{display:none;position:absolute;bottom:40px;right:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.65);padding:8px 12px;border-radius:4px;z-index:25;max-width:40%;max-height:60%;overflow-y:auto;pointer-events:auto;line-height:1.5}
 #diff-panel.show{display:block}
@@ -499,7 +503,7 @@ canvas{display:block}
 #diff-label.show,#diff-label-right.show{display:block}
 #diff-label{left:25%;transform:translateX(-50%)}
 #diff-label-right{left:75%;transform:translateX(-50%)}
-#opt-panel{display:none;position:absolute;top:36px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.78);padding:8px 10px;border-radius:4px;z-index:25;width:340px;max-height:70%;overflow:hidden;pointer-events:auto;line-height:1.4}
+#opt-panel{display:none;position:absolute;top:36px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.78);padding:8px 10px;border-radius:4px;z-index:25;width:340px;max-width:calc(100% - 16px);max-height:70%;overflow:hidden;pointer-events:auto;line-height:1.4}
 #opt-panel.show{display:block}
 #opt-panel .opt-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.15)}
 #opt-panel .opt-title{font-size:12px;font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff)}
@@ -513,7 +517,7 @@ canvas{display:block}
 #opt-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
 #opt-reopen.show{display:block}
 #opt-reopen:hover{background:var(--vscode-button-background,#0e639c)}
-#freq-panel{display:none;position:absolute;top:36px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.78);padding:8px 10px;border-radius:4px;z-index:25;width:300px;max-height:70%;overflow:hidden;pointer-events:auto;line-height:1.4}
+#freq-panel{display:none;position:absolute;top:36px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.78);padding:8px 10px;border-radius:4px;z-index:25;width:300px;max-width:calc(100% - 16px);max-height:70%;overflow:hidden;pointer-events:auto;line-height:1.4}
 #freq-panel.show{display:block}
 #freq-panel .freq-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.15)}
 #freq-panel .freq-title{font-size:12px;font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff)}
@@ -532,6 +536,7 @@ canvas{display:block}
 #freq-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
 #freq-reopen.show{display:block}
 #freq-reopen:hover{background:var(--vscode-button-background,#0e639c)}
+@media (max-width:600px){.tbtn{padding:3px 6px;font-size:10px}#frame-info{font-size:10px}#toolbar{gap:1px}}
 </style>
 </head>
 <body>
@@ -2470,13 +2475,14 @@ function buildFreqPanel(){
 optReopenEl.addEventListener('click',function(){buildOptPanel()});
 freqReopenEl.addEventListener('click',function(){buildFreqPanel()});
 
-// Initial panel display
+// Initial panel display — show reopen buttons only, don't auto-open panels
 if(OPT_STEPS&&OPT_STEPS.length>0){
-    buildOptPanel();
+    optReopenEl.classList.add('show');
 }
 if(NORMAL_MODES&&NORMAL_MODES.length>0){
-    buildFreqPanel();
+    freqReopenEl.classList.add('show');
 }
+layoutPanels();
 
 // Stop vibration on frame switch to avoid stale positions
 var origSwitchFrame=switchFrame;
