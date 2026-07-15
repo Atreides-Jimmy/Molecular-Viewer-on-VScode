@@ -41,27 +41,39 @@ function parseAtomLine(parts: string[]): { element: string; x: number; y: number
         return null;
     }
 
-    // 5+ columns: in Gaussian GJF, extra trailing integer columns after x y z are
-    // fixed-atom markers (0/1/-1). The marker column always follows the coordinates.
-    // Strategy: take the first 3 numeric values after the element as coordinates,
-    // then any remaining integer values that look like markers are ignored.
+    // 5+ columns: extra columns are fixed-atom markers (0/-1/1).
+    // Markers can appear after the element (e.g., "C -1 x y z") or after coordinates (e.g., "C x y z -1").
+    // In Gaussian GJF, coordinates always have decimal points; markers are plain integers.
+    // Strategy: filter out marker values (plain integers with value 0/-1/1), take first 3 remaining.
+    const isMarker = (s: string): boolean => {
+        if (s.includes('.') || /[eE]/.test(s)) return false; // has decimal point or exponent → coordinate
+        const v = parseFloat(s);
+        return !isNaN(v) && (v === 0 || v === -1 || v === 1);
+    };
+
     const coords: number[] = [];
-    for (let pi = 1; pi < parts.length && coords.length < 3; pi++) {
+    for (let pi = 1; pi < parts.length; pi++) {
+        if (isMarker(parts[pi])) continue;
         const v = parseFloat(parts[pi]);
         if (!isNaN(v)) coords.push(v);
     }
-    if (coords.length === 3) {
+
+    if (coords.length >= 3) {
         return { element, x: coords[0], y: coords[1], z: coords[2] };
     }
 
-    // Fallback: last 3 numeric values
+    // Fallback: all values were plain integers — use positional logic.
+    // If first value after element is 0/-1/1, treat as marker and skip.
     const allNums: number[] = [];
     for (let pi = 1; pi < parts.length; pi++) {
         const v = parseFloat(parts[pi]);
         if (!isNaN(v)) allNums.push(v);
     }
+    if (allNums.length >= 4 && (allNums[0] === 0 || allNums[0] === -1 || allNums[0] === 1)) {
+        return { element, x: allNums[1], y: allNums[2], z: allNums[3] };
+    }
     if (allNums.length >= 3) {
-        return { element, x: allNums[allNums.length - 3], y: allNums[allNums.length - 2], z: allNums[allNums.length - 1] };
+        return { element, x: allNums[0], y: allNums[1], z: allNums[2] };
     }
 
     return null;

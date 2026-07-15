@@ -276,6 +276,27 @@ export function parseGaussianLog(content: string): GaussianLogResult {
         }
     }
 
+    // If the log contains both "Input orientation" and "Standard orientation" frames,
+    // keep only the first "Input" frame (initial geometry) and skip all subsequent ones.
+    // "Input orientation" of step N+1 is the same molecular structure as "Standard orientation"
+    // of step N, just in a different coordinate system (original input vs principal axes).
+    // This creates visually redundant frames in the 3D viewer (which normalizes orientation).
+    const hasInput = frames.some(f => f.stepLabel.startsWith('Input'));
+    const hasStandard = frames.some(f => f.stepLabel.startsWith('Step'));
+    if (hasInput && hasStandard) {
+        let inputSeen = false;
+        const filtered = frames.filter(f => {
+            if (f.stepLabel.startsWith('Input')) {
+                if (inputSeen) return false;
+                inputSeen = true;
+                return true;
+            }
+            return true;
+        });
+        frames.length = 0;
+        frames.push(...filtered);
+    }
+
     if (frames.length === 0) {
         for (let i = 0; i < lines.length; i++) {
             if (lines[i].includes('Coordinates (Angstroms)')) {

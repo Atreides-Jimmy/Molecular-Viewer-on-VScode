@@ -1,5 +1,13 @@
 # Change Log
 
+## [Unreleased]
+
+### Fixed
+
+- **GJF fixed-atom marker parsing** — Atom lines like `C  -1  -4.67083500  -0.24081200  0.53486900` (where `-1` is a fixed-atom marker between the element and coordinates) were incorrectly parsed, treating `-1` as the x coordinate. The parser now distinguishes markers (plain integers 0/-1/1 without decimal points) from coordinates (which always have decimal points in Gaussian GJF format), correctly handling markers in both positions: after the element symbol or after the three coordinates
+- **Gaussian log duplicate frames** — Optimization log files that output both "Input orientation" and "Standard orientation" for each step (e.g., `tetramethylammonium.log`) produced double the expected frames. "Input orientation" of step N+1 shows the same molecular structure as "Standard orientation" of step N, but in a different coordinate system (original input vs principal axes), making them visually redundant in the 3D viewer. The parser now keeps only the first "Input" frame (initial geometry) and skips all subsequent "Input" frames when "Standard" frames are present, giving a clean sequence: initial geometry → step 1 → step 2 → ...
+- **Convergence panel auto-open** — The convergence and normal modes panels no longer auto-open when loading a file with optimization/frequency data; instead, the reopen buttons (📈 Convergence / 🎵 Modes) are shown for the user to click when ready
+
 ## [0.9.4] - 2026-07-07
 
 ### Added
