@@ -2,11 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Vibration pause/resume** — The Stop button in the Normal Modes panel has been replaced with a Pause/Resume toggle. Clicking Pause halts the animation at the current displacement (atoms stay in place); the button then becomes Resume, which continues the animation from the same phase. Clicking a different frequency row or closing the panel fully stops the vibration as before
+- **Vibration mode highlight** — The currently playing (or paused) frequency row is highlighted in amber/yellow to clearly indicate which mode is being demonstrated
+
 ### Fixed
 
 - **GJF fixed-atom marker parsing** — Atom lines like `C  -1  -4.67083500  -0.24081200  0.53486900` (where `-1` is a fixed-atom marker between the element and coordinates) were incorrectly parsed, treating `-1` as the x coordinate. The parser now distinguishes markers (plain integers 0/-1/1 without decimal points) from coordinates (which always have decimal points in Gaussian GJF format), correctly handling markers in both positions: after the element symbol or after the three coordinates
 - **Gaussian log duplicate frames** — Optimization log files that output both "Input orientation" and "Standard orientation" for each step (e.g., `tetramethylammonium.log`) produced double the expected frames. "Input orientation" of step N+1 shows the same molecular structure as "Standard orientation" of step N, but in a different coordinate system (original input vs principal axes), making them visually redundant in the 3D viewer. The parser now keeps only the first "Input" frame (initial geometry) and skips all subsequent "Input" frames when "Standard" frames are present, giving a clean sequence: initial geometry → step 1 → step 2 → ...
 - **Convergence panel auto-open** — The convergence and normal modes panels no longer auto-open when loading a file with optimization/frequency data; instead, the reopen buttons (📈 Convergence / 🎵 Modes) are shown for the user to click when ready
+- **Panel scrollbar layout** — Fixed two scrollbar issues in the convergence and normal modes panels: (1) The normal modes panel scrollbar could exceed the panel's visual boundary when many frequencies were listed, because the body had a fixed `max-height:480px` independent of the panel's actual height. Both panels now use flexbox layout (`display:flex;flex-direction:column` on the panel, `flex:1 1 auto;min-height:0` on the body) so the scrollable body always fills the available panel height. (2) The convergence panel showed a horizontal scrollbar before the vertical scrollbar appeared, because `overflow-y:auto` caused the vertical scrollbar to appear late (after the canvas was already drawn at the wider pre-scrollbar width), triggering horizontal overflow. Changed to `overflow-y:scroll` so the scrollbar space is always reserved, and canvas width is measured from `parentElement.clientWidth` (which accounts for the scrollbar) instead of `canvas.clientWidth`
 
 ## [0.9.4] - 2026-07-07
 

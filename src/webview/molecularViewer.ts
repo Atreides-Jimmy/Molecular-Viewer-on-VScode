@@ -504,29 +504,29 @@ canvas{display:block}
 #diff-label{left:25%;transform:translateX(-50%)}
 #diff-label-right{left:75%;transform:translateX(-50%)}
 #opt-panel{display:none;position:absolute;top:36px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.78);padding:8px 10px;border-radius:4px;z-index:25;width:340px;max-width:calc(100% - 16px);max-height:70%;overflow:hidden;pointer-events:auto;line-height:1.4}
-#opt-panel.show{display:block}
+#opt-panel.show{display:flex;flex-direction:column}
 #opt-panel .opt-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.15)}
 #opt-panel .opt-title{font-size:12px;font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff)}
 #opt-panel .opt-close{cursor:pointer;color:var(--vscode-descriptionForeground,#999);font-size:14px;padding:0 4px}
 #opt-panel .opt-close:hover{color:var(--vscode-errorForeground,#f66)}
 #opt-panel .opt-resize{height:6px;cursor:ns-resize;background:rgba(255,255,255,0.1);border-radius:3px;margin:4px 0}
 #opt-panel .opt-resize:hover{background:rgba(255,255,255,0.25)}
-#opt-panel .opt-body{overflow-y:auto;overflow-x:hidden;max-height:480px;width:100%;box-sizing:border-box;scrollbar-gutter:stable}
+#opt-panel .opt-body{overflow-y:scroll;overflow-x:hidden;flex:1 1 auto;min-height:0;width:100%;box-sizing:border-box}
 #opt-panel canvas{display:block;width:100%;max-width:100%;margin:2px 0 6px}
 #opt-panel .opt-chart-title{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:4px}
 #opt-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
 #opt-reopen.show{display:block}
 #opt-reopen:hover{background:var(--vscode-button-background,#0e639c)}
 #freq-panel{display:none;position:absolute;top:36px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.78);padding:8px 10px;border-radius:4px;z-index:25;width:300px;max-width:calc(100% - 16px);max-height:70%;overflow:hidden;pointer-events:auto;line-height:1.4}
-#freq-panel.show{display:block}
+#freq-panel.show{display:flex;flex-direction:column}
 #freq-panel .freq-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.15)}
 #freq-panel .freq-title{font-size:12px;font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff)}
 #freq-panel .freq-close{cursor:pointer;color:var(--vscode-descriptionForeground,#999);font-size:14px;padding:0 4px}
 #freq-panel .freq-close:hover{color:var(--vscode-errorForeground,#f66)}
-#freq-panel .freq-body{overflow-y:auto;overflow-x:hidden;max-height:480px;width:100%;box-sizing:border-box;scrollbar-gutter:stable}
+#freq-panel .freq-body{overflow-y:scroll;overflow-x:hidden;flex:1 1 auto;min-height:0;width:100%;box-sizing:border-box}
 #freq-panel .freq-row{display:flex;justify-content:space-between;align-items:center;padding:3px 4px;cursor:pointer;border-radius:3px}
 #freq-panel .freq-row:hover{background:rgba(255,255,255,0.1)}
-#freq-panel .freq-row.playing{background:var(--vscode-button-background,#0e639c);color:#fff}
+#freq-panel .freq-row.playing{background:rgba(255,200,0,0.25);color:#ffd700}
 #freq-panel .freq-idx{width:28px;color:var(--vscode-descriptionForeground,#999)}
 #freq-panel .freq-val{flex:1;font-family:monospace}
 #freq-panel .freq-sym{width:30px;text-align:right;color:var(--vscode-descriptionForeground,#999)}
@@ -1324,7 +1324,7 @@ function pushUndo(){
 function updateUndoBtn(){var b=document.getElementById('undo-btn');if(b)b.disabled=undoStack.length===0}
 function doUndo(){
     if(undoStack.length===0)return;
-    if(vibActive)stopVibration();
+    if(vibActive||vibPaused)stopVibration();
     var snap=undoStack.pop();
     MD.atoms=snap.atoms;MD.bonds=snap.bonds;
     if(CRY&&snap.baseAtoms){CRY.baseAtoms=snap.baseAtoms;CRY.baseBonds=snap.baseBonds}
@@ -1822,7 +1822,7 @@ diffReopenEl.addEventListener('click',function(){
 });
 
 function enterDiffRender(diffs,mapping){
-    if(vibActive)stopVibration();
+    if(vibActive||vibPaused)stopVibration();
     diffPivot=new THREE.Group();scene.add(diffPivot);
     diffMolGroup=new THREE.Group();diffPivot.add(diffMolGroup);
 
@@ -2101,10 +2101,10 @@ var NORMAL_MODES=MD.normalModes||null;
 function drawConvergenceChart(canvas,steps,field,label,color,threshold){
     var ctx=canvas.getContext('2d');
     var dpr=window.devicePixelRatio||1;
-    var w=canvas.clientWidth||(canvas.parentElement&&canvas.parentElement.clientWidth)||300;
+    var w=(canvas.parentElement&&canvas.parentElement.clientWidth)||canvas.clientWidth||300;
     var h=canvas.clientHeight||100;
     canvas.width=w*dpr;canvas.height=h*dpr;
-    canvas.style.width='100%';canvas.style.height=h+'px';canvas.style.maxWidth='100%';canvas.style.display='block';
+    canvas.style.width=w+'px';canvas.style.height=h+'px';canvas.style.maxWidth='100%';canvas.style.display='block';
     ctx.setTransform(dpr,0,0,dpr,0,0);
     ctx.clearRect(0,0,w,h);
     var padL=40,padR=8,padT=8,padB=18;
@@ -2215,8 +2215,6 @@ function buildOptPanel(){
             if(!dragging)return;
             var nh=Math.max(120,Math.min(600,startH-(e.clientY-startY)));
             optPanelEl.style.maxHeight=nh+'px';
-            var body=optPanelEl.querySelector('#opt-body');
-            if(body)body.style.maxHeight=(nh-50)+'px';
             // Redraw charts
             var cvs=optPanelEl.querySelectorAll('canvas');
             cvs.forEach(function(cv){
@@ -2234,10 +2232,10 @@ function buildOptPanel(){
 function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
     var ctx=canvas.getContext('2d');
     var dpr=window.devicePixelRatio||1;
-    var w=canvas.clientWidth||(canvas.parentElement&&canvas.parentElement.clientWidth)||300;
+    var w=(canvas.parentElement&&canvas.parentElement.clientWidth)||canvas.clientWidth||300;
     var h=canvas.clientHeight||110;
     canvas.width=w*dpr;canvas.height=h*dpr;
-    canvas.style.width='100%';canvas.style.height=h+'px';canvas.style.maxWidth='100%';canvas.style.display='block';
+    canvas.style.width=w+'px';canvas.style.height=h+'px';canvas.style.maxWidth='100%';canvas.style.display='block';
     ctx.setTransform(dpr,0,0,dpr,0,0);
     ctx.clearRect(0,0,w,h);
     var padL=40,padR=8,padT=14,padB=18;
@@ -2304,6 +2302,8 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
 
 // Vibration animation
 var vibActive=false,vibModeIdx=-1,vibBasePositions=null,vibTimer=null;
+var vibPaused=false,vibPausedElapsed=0,vibStartTime=0;
+var vibPeriodMs=3000,vibAmplitude=0.35,vibMaxMag=1;
 var _vibTmpV1=new THREE.Vector3(),_vibTmpQ=new THREE.Quaternion(),_vibYAxis=new THREE.Vector3(0,1,0);
 function updateVibBondMeshes(){
     for(var i=0;i<bondMeshes.length;i++){
@@ -2386,24 +2386,47 @@ function startVibration(modeIdx){
     var maxMag=0;
     mode.displacements.forEach(function(d){var m=Math.sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]);if(m>maxMag)maxMag=m});
     if(maxMag<1e-8)maxMag=1;
-    var amplitude=0.35;
-    vibActive=true;vibModeIdx=modeIdx;
-    var periodMs=3000; // 3 seconds per cycle
-    var startTime=performance.now();
-    function vibTick(){
-        if(!vibActive)return;
-        var elapsed=performance.now()-startTime;
-        var s=Math.sin(2*Math.PI*(elapsed%periodMs)/periodMs)*amplitude/maxMag;
-        for(var i=0;i<MD.atoms.length&&i<mode.displacements.length;i++){
-            var d=mode.displacements[i];
-            MD.atoms[i].x=vibBasePositions[i].x+d[0]*s;
-            MD.atoms[i].y=vibBasePositions[i].y+d[1]*s;
-            MD.atoms[i].z=vibBasePositions[i].z+d[2]*s;
-        }
-        updateVibrationPositions();
-        vibTimer=requestAnimationFrame(vibTick);
-    }
+    vibAmplitude=0.35;
+    vibMaxMag=maxMag;
+    vibActive=true;vibPaused=false;vibModeIdx=modeIdx;
+    vibPausedElapsed=0;
+    vibStartTime=performance.now();
     vibTimer=requestAnimationFrame(vibTick);
+    updateFreqButton('pause');
+}
+function vibTick(){
+    if(!vibActive)return;
+    var mode=NORMAL_MODES[vibModeIdx];
+    if(!mode||!vibBasePositions)return;
+    var elapsed=vibPausedElapsed+(performance.now()-vibStartTime);
+    var s=Math.sin(2*Math.PI*(elapsed%vibPeriodMs)/vibPeriodMs)*vibAmplitude/vibMaxMag;
+    for(var i=0;i<MD.atoms.length&&i<mode.displacements.length;i++){
+        var d=mode.displacements[i];
+        MD.atoms[i].x=vibBasePositions[i].x+d[0]*s;
+        MD.atoms[i].y=vibBasePositions[i].y+d[1]*s;
+        MD.atoms[i].z=vibBasePositions[i].z+d[2]*s;
+    }
+    updateVibrationPositions();
+    vibTimer=requestAnimationFrame(vibTick);
+}
+function pauseVibration(){
+    if(!vibActive)return;
+    vibPausedElapsed+=performance.now()-vibStartTime;
+    if(vibTimer){cancelAnimationFrame(vibTimer);vibTimer=null}
+    vibActive=false;vibPaused=true;
+    updateFreqButton('resume');
+}
+function resumeVibration(){
+    if(!vibPaused)return;
+    vibActive=true;vibPaused=false;
+    vibStartTime=performance.now();
+    vibTimer=requestAnimationFrame(vibTick);
+    updateFreqButton('pause');
+}
+function updateFreqButton(state){
+    var btn=freqPanelEl.querySelector('#freq-stop');
+    if(!btn)return;
+    btn.textContent=state==='resume'?'▶ Resume':'⏸ Pause';
 }
 function stopVibration(){
     if(vibTimer){cancelAnimationFrame(vibTimer);vibTimer=null}
@@ -2416,10 +2439,12 @@ function stopVibration(){
         vibBasePositions=null;
         updateVibrationPositions();
     }
-    vibActive=false;vibModeIdx=-1;
+    vibActive=false;vibPaused=false;vibModeIdx=-1;
+    vibPausedElapsed=0;
     // Update freq panel highlight
     var rows=freqPanelEl.querySelectorAll('.freq-row');
     rows.forEach(function(r){r.classList.remove('playing')});
+    updateFreqButton('pause');
 }
 
 function buildFreqPanel(){
@@ -2438,7 +2463,7 @@ function buildFreqPanel(){
         '<div class="freq-head"><span class="freq-title">Normal Modes ('+NORMAL_MODES.length+')</span>'+
         '<span class="freq-close">×</span></div>'+
         '<div class="freq-body">'+rowsHTML+'</div>'+
-        '<button class="freq-stop" id="freq-stop">⏹ Stop</button>';
+        '<button class="freq-stop" id="freq-stop">⏸ Pause</button>';
     freqPanelEl.classList.add('show');
     freqReopenEl.classList.remove('show');
 
@@ -2447,12 +2472,15 @@ function buildFreqPanel(){
         r.addEventListener('click',function(){
             var idx=parseInt(r.dataset.idx);
             if(isNaN(idx))return;
-            if(vibActive&&vibModeIdx===idx){
+            if((vibActive||vibPaused)&&vibModeIdx===idx){
                 stopVibration();
             }else{
-                rows.forEach(function(rr){rr.classList.remove('playing')});
-                r.classList.add('playing');
+                stopVibration();
                 startVibration(idx);
+                if(vibActive){
+                    rows.forEach(function(rr){rr.classList.remove('playing')});
+                    r.classList.add('playing');
+                }
             }
         });
     });
@@ -2467,7 +2495,10 @@ function buildFreqPanel(){
     }
     var stopBtn=freqPanelEl.querySelector('#freq-stop');
     if(stopBtn){
-        stopBtn.addEventListener('click',function(){stopVibration()});
+        stopBtn.addEventListener('click',function(){
+            if(vibActive){pauseVibration()}
+            else if(vibPaused){resumeVibration()}
+        });
     }
     layoutPanels();
 }
@@ -2486,7 +2517,7 @@ layoutPanels();
 
 // Stop vibration on frame switch to avoid stale positions
 var origSwitchFrame=switchFrame;
-switchFrame=function(idx){if(vibActive)stopVibration();origSwitchFrame(idx)};
+switchFrame=function(idx){if(vibActive||vibPaused)stopVibration();origSwitchFrame(idx)};
 
 function formatAtomList(indices,atoms){
     atoms=atoms||MD.atoms;
@@ -2941,7 +2972,7 @@ function applyDihedral(targetDeg,fixFirstThree,moveMode){
     updateScenePositions(true);
 }
 
-function showModal(html,cb){if(vibActive)stopVibration();modalEl.innerHTML=html;modalOverlay.classList.add('show');modalCallback=cb}
+function showModal(html,cb){if(vibActive||vibPaused)stopVibration();modalEl.innerHTML=html;modalOverlay.classList.add('show');modalCallback=cb}
 function hideModal(){modalOverlay.classList.remove('show');modalCallback=null}
 
 function showBondLengthModal(){
