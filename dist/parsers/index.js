@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.parseVesta = exports.parseCube = exports.parseVasp = exports.parseCif = exports.parseTcl = exports.parseOrcaOut = exports.parseGaussianLog = void 0;
+exports.isXtbLog = exports.parseXtbLog = exports.parseVesta = exports.parseCube = exports.parseVasp = exports.parseCif = exports.parseTcl = exports.parseOrcaOut = exports.parseGaussianLog = void 0;
 exports.parseFile = parseFile;
 exports.parseLogFile = parseLogFile;
 const gjfParser_1 = require("./gjfParser");
@@ -24,6 +24,9 @@ const cubeParser_1 = require("./cubeParser");
 Object.defineProperty(exports, "parseCube", { enumerable: true, get: function () { return cubeParser_1.parseCube; } });
 const vestaParser_1 = require("./vestaParser");
 Object.defineProperty(exports, "parseVesta", { enumerable: true, get: function () { return vestaParser_1.parseVesta; } });
+const xtbParser_1 = require("./xtbParser");
+Object.defineProperty(exports, "parseXtbLog", { enumerable: true, get: function () { return xtbParser_1.parseXtbLog; } });
+Object.defineProperty(exports, "isXtbLog", { enumerable: true, get: function () { return xtbParser_1.isXtbLog; } });
 function parseFile(content, fileName) {
     const ext = fileName.toLowerCase().split('.').pop() || '';
     switch (ext) {
@@ -71,6 +74,17 @@ function parseLogFile(content, fileName) {
         const result = (0, orcaOutParser_1.parseOrcaOut)(content);
         return { frames: result.frames, title: result.title };
     }
+    // Content-based sniffing: xtb trajectories share the .log extension with
+    // Gaussian logs but are structurally unrelated (extended multi-frame XYZ).
+    if ((0, xtbParser_1.isXtbLog)(content)) {
+        const xResult = (0, xtbParser_1.parseXtbLog)(content);
+        return {
+            frames: xResult.frames,
+            title: xResult.title,
+            optSteps: xResult.optSteps,
+            normalModes: xResult.normalModes
+        };
+    }
     const gResult = (0, logParser_1.parseGaussianLog)(content);
     return {
         frames: gResult.frames,
@@ -80,6 +94,18 @@ function parseLogFile(content, fileName) {
     };
 }
 function parseLogAsSingleFrame(content) {
+    if ((0, xtbParser_1.isXtbLog)(content)) {
+        const result = (0, xtbParser_1.parseXtbLog)(content);
+        if (result.frames.length > 0) {
+            return {
+                atoms: result.frames[0].atoms,
+                bonds: result.frames[0].bonds,
+                title: result.frames[0].title,
+                hasExplicitBonds: result.frames[0].hasExplicitBonds
+            };
+        }
+        return { atoms: [], bonds: [], title: 'Empty', hasExplicitBonds: false };
+    }
     const result = (0, logParser_1.parseGaussianLog)(content);
     if (result.frames.length > 0) {
         return {

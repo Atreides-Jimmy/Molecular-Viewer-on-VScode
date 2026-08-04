@@ -15,7 +15,7 @@ const ATOMIC_NUMBER_MAP: { [key: number]: string } = {
     111: 'Rg', 112: 'Cn', 113: 'Nh', 114: 'Fl', 115: 'Mc', 116: 'Lv', 117: 'Ts', 118: 'Og'
 };
 
-function resolveElement(raw: string): string {
+export function resolveElement(raw: string): string {
     const trimmed = raw.trim();
     const asNum = parseInt(trimmed, 10);
     if (!isNaN(asNum) && asNum > 0 && ATOMIC_NUMBER_MAP[asNum]) {

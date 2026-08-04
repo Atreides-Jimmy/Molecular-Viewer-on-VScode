@@ -41,7 +41,7 @@ A VS Code / Trae extension for visualizing and editing molecular structures in 3
 - **Frame Stepping** — ◀ Prev / Next ▶ buttons to step through optimization frames
 - **Jump to Frame** — Direct input field to jump to a specific frame number
 - **Auto Play** — Automatically cycle through all frames with 500ms interval
-- **Convergence Panel** — Gaussian structure optimization logs display a collapsible panel (📈 Convergence) showing energy, force (max + RMS), and displacement (max + RMS) curves versus optimization step, mirroring GaussView's convergence plot; includes threshold lines (dashed amber), a vertical resize handle to adjust panel height, and a close/reopen toggle
+- **Convergence Panel** — Gaussian and xtb structure optimization logs display a collapsible panel (📈 Convergence) showing energy, force (max + RMS), and displacement (max + RMS) curves versus optimization step, mirroring GaussView's convergence plot; includes threshold lines (dashed amber), a vertical resize handle to adjust panel height, and a close/reopen toggle. For xtb trajectories, the gradient norm (`gnorm`) from each step's comment line is plotted as the RMS Force curve
 - **Normal Mode Vibration** — Gaussian logs with a frequency calculation (`freq` / `CalcAll`) display a collapsible Normal Modes panel (🎵 Modes) listing all harmonic frequencies (cm⁻¹) with symmetry labels; clicking a frequency plays the vibration animation (60 FPS via `requestAnimationFrame`, amplitude normalized to 0.35 Å, 3-second cycle); imaginary frequencies (transition states) marked with `*`; vibration auto-stops on frame switch, undo, diff entry, or edit modal open
 
 ### Structure Diff
@@ -74,7 +74,7 @@ A VS Code / Trae extension for visualizing and editing molecular structures in 3
 | Gaussian Input | `.gjf`, `.gjf03`, `.gjf09`, `.gjf16`, `.com` | Reads Link 0, route, title, charge/mult, coordinates, connect section; supports fixed atom notation (`C -1 x y z` or `C x y z -1`) |
 | XYZ | `.xyz` | Standard XYZ format with atom count header |
 | MOL2 | `.mol2` | Tripos MOL2 format; reads `@<TRIPOS>ATOM` and `@<TRIPOS>BOND` sections with bond order support (aromatic `ar` → 1.5) |
-| Gaussian LOG | `.log` | Reads `Standard orientation:` / `Input orientation:` blocks; skips lines where atomic numbers are written as element symbols (e.g. from ONIOM external program calls); supports multi-frame optimization trajectory; extracts SCF energy and convergence criteria (force/displacement) for convergence panel; parses `Harmonic frequencies` block for normal mode vibration playback |
+| Gaussian LOG | `.log` | Reads `Standard orientation:` / `Input orientation:` blocks; skips lines where atomic numbers are written as element symbols (e.g. from ONIOM external program calls); supports multi-frame optimization trajectory; extracts SCF energy and convergence criteria (force/displacement) for convergence panel; parses `Harmonic frequencies` block for normal mode vibration playback. xtb trajectories (extended multi-frame XYZ with `xtb:` comment marker) are auto-detected and parsed as optimization trajectories with energy + gradient norm convergence |
 | ORCA Input | `.inp` | Reads `* xyz CHARGE MULT ... *` blocks and `%coords` blocks; supports xyz and xyzfile coordinate formats; parses `units bohr/angs` for coordinate conversion |
 | ORCA Output | `.out` | Reads `CARTESIAN COORDINATES (ANGSTROEM)` blocks; supports multi-frame optimization trajectory; extracts charge and multiplicity |
 | Turbomole Coord | `.coord` | Reads `$coord` section (Bohr → Å conversion), `$chrg` and `$spin`/`$mult` for charge and multiplicity; supports both `$chrg 1` and `$chrg=1` syntax |
@@ -191,6 +191,7 @@ molecular-viewer/
 │   │   ├── xyzParser.ts       # XYZ format parser
 │   │   ├── mol2Parser.ts      # Tripos MOL2 format parser
 │   │   ├── logParser.ts       # Gaussian LOG parser (optimization trajectory)
+│   │   ├── xtbParser.ts       # xtb LOG parser (optimization trajectory, content-sniffed)
 │   │   ├── coordParser.ts     # Turbomole .coord parser (Bohr → Å)
 │   │   ├── orcaInpParser.ts   # ORCA input .inp parser
 │   │   ├── orcaOutParser.ts   # ORCA output .out parser (optimization trajectory)

@@ -13,6 +13,7 @@ import { parseCif } from './cifParser';
 import { parseVasp } from './vaspParser';
 import { parseCube } from './cubeParser';
 import { parseVesta } from './vestaParser';
+import { parseXtbLog, isXtbLog, XtbLogResult } from './xtbParser';
 
 export { parseGaussianLog, LogFrame, GaussianLogResult };
 export { parseOrcaOut, OrcaFrame };
@@ -21,6 +22,7 @@ export { parseCif };
 export { parseVasp };
 export { parseCube };
 export { parseVesta };
+export { parseXtbLog, isXtbLog, XtbLogResult };
 
 export interface LogFileResult {
     frames: LogFrame[] | OrcaFrame[];
@@ -78,6 +80,17 @@ export function parseLogFile(content: string, fileName?: string): LogFileResult 
         const result = parseOrcaOut(content);
         return { frames: result.frames, title: result.title };
     }
+    // Content-based sniffing: xtb trajectories share the .log extension with
+    // Gaussian logs but are structurally unrelated (extended multi-frame XYZ).
+    if (isXtbLog(content)) {
+        const xResult = parseXtbLog(content);
+        return {
+            frames: xResult.frames,
+            title: xResult.title,
+            optSteps: xResult.optSteps,
+            normalModes: xResult.normalModes
+        };
+    }
     const gResult = parseGaussianLog(content);
     return {
         frames: gResult.frames,
@@ -88,6 +101,18 @@ export function parseLogFile(content: string, fileName?: string): LogFileResult 
 }
 
 function parseLogAsSingleFrame(content: string): MolecularData {
+    if (isXtbLog(content)) {
+        const result = parseXtbLog(content);
+        if (result.frames.length > 0) {
+            return {
+                atoms: result.frames[0].atoms,
+                bonds: result.frames[0].bonds,
+                title: result.frames[0].title,
+                hasExplicitBonds: result.frames[0].hasExplicitBonds
+            };
+        }
+        return { atoms: [], bonds: [], title: 'Empty', hasExplicitBonds: false };
+    }
     const result = parseGaussianLog(content);
     if (result.frames.length > 0) {
         return {
