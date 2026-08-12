@@ -4,6 +4,7 @@
 
 ### Added
 
+- **Rotate group around axis** — A new "Rotate Group" toolbar mode lets you select a group of atoms and rotate them around a user-defined rotation axis (a line through 2+ axis atoms), with a 0–360° slider for manual adjustment. The axis is validated chemically: any bonded pairs among the axis atoms must be single bonds (double/triple bonds are rejected), so the rotation obeys chemical rules. Axis atoms are kept fixed while the rest of the selected group rotates, and an orange line visualizes the axis. Works for multi-atom collinear axes (e.g. `C32 C33 C43 C53`) or a simple two-atom bond axis (e.g. `C33 C43`). Atom input now also accepts the `ElementN` shorthand (e.g. `H581`, `C44`), in addition to plain indices, ranges, and element symbols
 - **Vibration pause/resume** — The Stop button in the Normal Modes panel has been replaced with a Pause/Resume toggle. Clicking Pause halts the animation at the current displacement (atoms stay in place); the button then becomes Resume, which continues the animation from the same phase. Clicking a different frequency row or closing the panel fully stops the vibration as before
 - **Vibration mode highlight** — The currently playing (or paused) frequency row is highlighted in amber/yellow to clearly indicate which mode is being demonstrated
 

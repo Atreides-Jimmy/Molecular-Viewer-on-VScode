@@ -461,6 +461,19 @@ body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;b
 #select-panel input[type=text]{width:100%;padding:6px 8px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:12px;box-sizing:border-box}
 #select-panel .sp-btns{display:flex;gap:4px;margin-top:4px}
 #select-panel .sp-btns button{flex:1}
+#rotate-panel{display:none;position:absolute;bottom:40px;left:8px;z-index:50;background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:4px;padding:8px;width:320px;max-width:calc(100% - 16px);box-shadow:0 2px 8px rgba(0,0,0,0.3)}
+#rotate-panel .rp-title{font-size:12px;font-weight:bold;margin-bottom:6px}
+#rotate-panel .rp-field{margin:4px 0}
+#rotate-panel .rp-field label{display:block;font-size:11px;color:var(--vscode-descriptionForeground,#999);margin-bottom:2px}
+#rotate-panel input[type=text]{width:100%;padding:6px 8px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:12px;box-sizing:border-box}
+#rotate-panel .rp-btns{display:flex;gap:4px;margin-top:6px}
+#rotate-panel .rp-btns button{flex:1}
+#rotate-panel .rp-slider-row{display:flex;align-items:center;gap:6px;margin:4px 0}
+#rotate-panel .rp-slider-row label{font-size:11px;white-space:nowrap}
+#rotate-panel .rp-slider-row input[type=range]{flex:1}
+#rotate-panel .rp-angle-val{font-size:12px;font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff);min-width:46px;text-align:right}
+#rotate-panel .rp-error{color:var(--vscode-errorForeground,#f66);font-size:11px;margin-top:4px;line-height:1.4}
+#rotate-panel .rp-hint{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:4px;line-height:1.4}
 canvas{display:block}
 #atom-tooltip{position:absolute;display:none;color:var(--vscode-editor-foreground,#ccc);font-size:12px;background:var(--vscode-editor-background,#1e1e1e);padding:4px 8px;border-radius:3px;border:1px solid var(--vscode-panel-border,#444);pointer-events:none;z-index:30}
 #box-select-rect{position:fixed;display:none;border:1px dashed #ffeb3b;background:rgba(255,235,59,0.12);pointer-events:none;z-index:40}
@@ -552,6 +565,7 @@ canvas{display:block}
 <div class="tsep"></div>
 <button class="tbtn" data-mode="selectAtoms">Select Atoms</button>
 <button class="tbtn" data-mode="boxSelect">Box Select</button>
+<button class="tbtn" data-mode="rotateGroup">Rotate Group</button>
 <div class="tsep"></div>
 <button class="tbtn" id="diff-btn">Diff</button>
 <button class="tbtn" id="undo-btn" disabled>Undo</button>
@@ -567,7 +581,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="box-select-rect"></div>
@@ -1036,6 +1050,7 @@ function rebuildScene(){
     atomMeshes.length=0;
     bondMeshes.length=0;
     cellWireframe=null;
+    rotAxisLineMesh=null;
     CX=0;CY=0;CZ=0;
     MD.atoms.forEach(function(a){CX+=a.x;CY+=a.y;CZ+=a.z});
     if(MD.atoms.length>0){CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length}
@@ -1238,13 +1253,17 @@ var initCam=maxD*2.5+5;
 camera.position.set(0,0,initCam);camera.lookAt(0,0,0);
 camDist=initCam;
 
-var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',replaceAtom:'Replace Atom - Click atom(s) to select, click button again to confirm',selectAtoms:'Select Atoms - Input indices or element symbols',boxSelect:'Box Select - Drag a rectangle to select atoms'};
+var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',replaceAtom:'Replace Atom - Click atom(s) to select, click button again to confirm',selectAtoms:'Select Atoms - Input indices or element symbols',boxSelect:'Box Select - Drag a rectangle to select atoms',rotateGroup:'Rotate Group - Select group + axis atoms, then adjust angle'};
 
 function setMode(m){
     if(currentMode===m){
         if(m==='selectAtoms'){
             var sp=document.getElementById('select-panel');
             if(sp)sp.style.display=(sp.style.display==='none'?'block':'none');
+        }
+        if(m==='rotateGroup'){
+            var rp=document.getElementById('rotate-panel');
+            if(rp)rp.style.display=(rp.style.display==='none'?'block':'none');
         }
         if(m==='replaceAtom'){
             if(selectedAtoms.length>0){showReplaceAtomModal();return}
@@ -1254,7 +1273,7 @@ function setMode(m){
     }
     var oldMode=currentMode;
     currentMode=m;
-    var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect'||oldMode==='replaceAtom')&&(m==='selectAtoms'||m==='boxSelect'||m==='replaceAtom'));
+    var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect'||oldMode==='replaceAtom'||oldMode==='rotateGroup')&&(m==='selectAtoms'||m==='boxSelect'||m==='replaceAtom'||m==='rotateGroup'));
     if(!preserveSel){
         selectedAtoms=[];diffSelectedAtoms=[];originalCoords=null;
     }
@@ -1264,6 +1283,15 @@ function setMode(m){
     document.querySelectorAll('.tbtn[data-mode]').forEach(function(b){b.classList.toggle('active',b.dataset.mode===m)});
     var sp2=document.getElementById('select-panel');
     if(sp2)sp2.style.display=(m==='selectAtoms')?'block':'none';
+    var rp2=document.getElementById('rotate-panel');
+    if(rp2)rp2.style.display=(m==='rotateGroup')?'block':'none';
+    if(m==='rotateGroup'){
+        resetRotAxisState();
+        syncRotatePanelGroupField();
+    }
+    if(oldMode==='rotateGroup'&&m!=='rotateGroup'){
+        removeRotAxisLine();
+    }
     layoutPanels();
 }
 
@@ -1301,6 +1329,190 @@ document.querySelectorAll('.tbtn[data-mode]').forEach(function(b){b.addEventList
     inp.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();doSelect()}});
     clrBtn.addEventListener('click',function(){
         selectedAtoms=[];diffSelectedAtoms=[];highlightSelected();selInfoEl.textContent='';
+    });
+})();
+
+// ===== Rotate Group Around Axis =====
+var rotActive=false;
+var rotateGroupAtoms=[];
+var rotateAxisAtoms=[];
+var rotAxisParams=null;
+var rotAxisLineMesh=null;
+
+function resetRotAxisState(){
+    rotActive=false;
+    rotateGroupAtoms=[];
+    rotateAxisAtoms=[];
+    rotAxisParams=null;
+    removeRotAxisLine();
+    var ew=document.getElementById('rp-error');if(ew)ew.textContent='';
+    var sw=document.getElementById('rp-slider-wrap');if(sw)sw.style.display='none';
+    var slider=document.getElementById('rp-slider');if(slider)slider.value=0;
+    var av=document.getElementById('rp-angle-val');if(av)av.textContent='0°';
+}
+function syncRotatePanelGroupField(){
+    if(currentMode!=='rotateGroup')return;
+    var inp=document.getElementById('rp-group-input');
+    if(!inp)return;
+    inp.value=selectedAtoms.map(function(i){return i+1}).join(' ');
+}
+function setRotatePanelError(msg){
+    var ew=document.getElementById('rp-error');
+    if(ew)ew.textContent=msg||'';
+}
+function showRotAxisLine(){
+    removeRotAxisLine();
+    if(!rotAxisParams)return;
+    var p=rotAxisParams;
+    var len=maxD*2+5;
+    var s=new THREE.Vector3(p.ox-CX-p.dx*len,p.oy-CY-p.dy*len,p.oz-CZ-p.dz*len);
+    var e=new THREE.Vector3(p.ox-CX+p.dx*len,p.oy-CY+p.dy*len,p.oz-CZ+p.dz*len);
+    var dir=new THREE.Vector3().subVectors(e,s);
+    var hl=dir.length();
+    if(hl<0.001)return;
+    var g=new THREE.CylinderGeometry(0.04,0.04,hl,6,1);
+    var m=new THREE.MeshPhongMaterial({color:0xff8800,transparent:true,opacity:0.8});
+    var mesh=new THREE.Mesh(g,m);
+    var mid=new THREE.Vector3().addVectors(s,e).multiplyScalar(0.5);
+    mesh.position.copy(mid);
+    var axis=new THREE.Vector3(0,1,0);
+    mesh.quaternion.copy(new THREE.Quaternion().setFromUnitVectors(axis,dir.normalize()));
+    moleculeGroup.add(mesh);
+    rotAxisLineMesh=mesh;
+    needsRender=true;
+}
+function removeRotAxisLine(){
+    if(rotAxisLineMesh){
+        moleculeGroup.remove(rotAxisLineMesh);
+        disposeMesh(rotAxisLineMesh);
+        rotAxisLineMesh=null;
+        needsRender=true;
+    }
+}
+function validateRotationAxis(axisIdx){
+    if(!axisIdx||axisIdx.length<2){
+        return {valid:false,error:'Rotation axis needs at least 2 atoms.'};
+    }
+    var seen={};
+    for(var k=0;k<axisIdx.length;k++){
+        if(seen[axisIdx[k]]){
+            return {valid:false,error:'Duplicate atom in axis: '+(axisIdx[k]+1)+'.'};
+        }
+        seen[axisIdx[k]]=true;
+    }
+    var axisSet={};
+    axisIdx.forEach(function(i){axisSet[i]=true});
+    for(var bi=0;bi<MD.bonds.length;bi++){
+        var b=MD.bonds[bi];
+        if(axisSet[b.atom1]&&axisSet[b.atom2]){
+            if(b.order>=1.75){
+                var ordStr=b.order>=2.5?'triple':'double';
+                return {valid:false,error:'Atoms '+(b.atom1+1)+' and '+(b.atom2+1)+' on the axis are connected by a '+ordStr+' bond. A rotation axis must use single bonds.'};
+            }
+        }
+    }
+    return {valid:true};
+}
+function computeRotAxisParams(axisIdx){
+    if(axisIdx.length<2)return null;
+    var p0=MD.atoms[axisIdx[0]],p1=MD.atoms[axisIdx[axisIdx.length-1]];
+    var dx=p1.x-p0.x,dy=p1.y-p0.y,dz=p1.z-p0.z;
+    var l=Math.sqrt(dx*dx+dy*dy+dz*dz);
+    if(l<1e-6)return null;
+    dx/=l;dy/=l;dz/=l;
+    return {ox:p0.x,oy:p0.y,oz:p0.z,dx:dx,dy:dy,dz:dz};
+}
+function applyGroupRotation(angleDeg){
+    if(!rotAxisParams||!originalCoords)return;
+    var p=rotAxisParams;
+    var rad=angleDeg*Math.PI/180;
+    var axisSet={};
+    rotateAxisAtoms.forEach(function(i){axisSet[i]=true});
+    for(var gi=0;gi<rotateGroupAtoms.length;gi++){
+        var idx=rotateGroupAtoms[gi];
+        if(axisSet[idx])continue;
+        var oc=originalCoords[idx];
+        if(!oc)continue;
+        var r=rotAroundAxis(oc.x,oc.y,oc.z,p.ox,p.oy,p.oz,p.dx,p.dy,p.dz,rad);
+        MD.atoms[idx].x=r.x;MD.atoms[idx].y=r.y;MD.atoms[idx].z=r.z;
+    }
+    updateScenePositions(true);
+}
+(function(){
+    var gi=document.getElementById('rp-group-input');
+    var ai=document.getElementById('rp-axis-input');
+    var applyBtn=document.getElementById('rp-apply');
+    var clearBtn=document.getElementById('rp-clear');
+    var slider=document.getElementById('rp-slider');
+    var doneBtn=document.getElementById('rp-done');
+    var resetBtn=document.getElementById('rp-reset');
+    if(!gi||!ai||!applyBtn||!clearBtn||!slider||!doneBtn||!resetBtn)return;
+
+    function syncGroupFromField(){
+        var parsed=parseSelectInput(gi.value);
+        selectedAtoms=parsed;
+        highlightSelected();
+        var names=formatAtomList(selectedAtoms);
+        selInfoEl.textContent=selectedAtoms.length?('Selected: '+names):'';
+    }
+    gi.addEventListener('keydown',function(e){
+        if(e.key==='Enter'){e.preventDefault();syncGroupFromField();}
+    });
+    ai.addEventListener('keydown',function(e){
+        if(e.key==='Enter'){e.preventDefault();applyBtn.click();}
+    });
+    applyBtn.addEventListener('click',function(){
+        var groupField=gi.value.trim();
+        var axisField=ai.value.trim();
+        var groupIdx=groupField?parseSelectInput(groupField):selectedAtoms.slice();
+        var axisIdx=parseSelectInput(axisField);
+        var verr=validateRotationAxis(axisIdx);
+        if(!verr.valid){setRotatePanelError(verr.error);return;}
+        if(groupIdx.length===0){setRotatePanelError('Please specify at least one group atom.');return;}
+        var params=computeRotAxisParams(axisIdx);
+        if(!params){setRotatePanelError('Axis atoms are too close together to define a direction.');return;}
+        setRotatePanelError('');
+        rotateGroupAtoms=groupIdx.slice();
+        rotateAxisAtoms=axisIdx.slice();
+        rotAxisParams=params;
+        saveOriginal();
+        var sw=document.getElementById('rp-slider-wrap');if(sw)sw.style.display='block';
+        slider.value=0;
+        var av=document.getElementById('rp-angle-val');if(av)av.textContent='0°';
+        showRotAxisLine();
+        rotActive=true;
+        applyGroupRotation(0);
+        modeInfoEl.textContent='Rotate Group - adjust angle (0-360°)';
+    });
+    slider.addEventListener('input',function(){
+        restoreOriginal();
+        applyGroupRotation(parseFloat(slider.value));
+        var av=document.getElementById('rp-angle-val');
+        if(av)av.textContent=parseFloat(slider.value).toFixed(1)+'°';
+    });
+    doneBtn.addEventListener('click',function(){
+        restoreOriginal();
+        applyGroupRotation(parseFloat(slider.value));
+        resetRotAxisState();
+        selectedAtoms=[];originalCoords=null;highlightSelected();
+        selInfoEl.textContent='';
+        gi.value='';ai.value='';
+        modeInfoEl.textContent=MODE_INFO.rotateGroup;
+    });
+    resetBtn.addEventListener('click',function(){
+        restoreOriginal();
+        rebuildScene();
+        undoStack.pop();
+        updateUndoBtn();
+        resetRotAxisState();
+        slider.value=0;
+        var av=document.getElementById('rp-angle-val');if(av)av.textContent='0°';
+    });
+    clearBtn.addEventListener('click',function(){
+        resetRotAxisState();
+        selectedAtoms=[];originalCoords=null;highlightSelected();
+        selInfoEl.textContent='';
+        gi.value='';ai.value='';
     });
 })();
 document.getElementById('reset-btn').addEventListener('click',function(){
@@ -2025,6 +2237,7 @@ function switchFrame(idx){
     }
     undoStack.length=0;updateUndoBtn();
     if(diffMode)resetSelection();
+    resetRotAxisState();
     rebuildScene();
     updateFrameInfo();
 }
@@ -2597,6 +2810,7 @@ function layoutPanels(){
         {id:'crystal-panel',pr:1,anc:'tr'},
         {id:'diff-panel',pr:2,anc:'br'},
         {id:'select-panel',pr:3,anc:'bl'},
+        {id:'rotate-panel',pr:3,anc:'bl'},
         {id:'diff-label',pr:4,anc:'tc',pct:0.25},
         {id:'diff-label-right',pr:5,anc:'tc',pct:0.75},
         {id:'opt-panel',pr:7,anc:'tl'},
@@ -2721,13 +2935,14 @@ function selectAtom(idx){
         checkSelectionComplete();
         return;
     }
-    if(currentMode==='selectAtoms'||currentMode==='replaceAtom'){
+    if(currentMode==='selectAtoms'||currentMode==='replaceAtom'||currentMode==='rotateGroup'){
         var pos=selectedAtoms.indexOf(idx);
         if(pos>=0){
             selectedAtoms.splice(pos,1);
             highlightSelected();
             var dn=formatAtomList(selectedAtoms);
             selInfoEl.textContent=selectedAtoms.length?('Selected: '+dn):'';
+            if(currentMode==='rotateGroup')syncRotatePanelGroupField();
             checkSelectionComplete();
             return;
         }
@@ -2737,6 +2952,7 @@ function selectAtom(idx){
     highlightSelected();
     var names=formatAtomList(selectedAtoms);
     selInfoEl.textContent='Selected: '+names;
+    if(currentMode==='rotateGroup')syncRotatePanelGroupField();
     checkSelectionComplete();
 }
 
@@ -3577,6 +3793,14 @@ function parseSelectInput(input){
                     if(idx>=0&&idx<MD.atoms.length&&result.indexOf(idx)<0)result.push(idx);
                 }
             }
+            return;
+        }
+        var elNumMatch=tok.match(/^([A-Za-z]+)(\d+)$/);
+        if(elNumMatch){
+            var elName=elNumMatch[1].charAt(0).toUpperCase()+elNumMatch[1].slice(1).toLowerCase();
+            var en=parseInt(elNumMatch[2],10);
+            var ei=en-1;
+            if(ei>=0&&ei<MD.atoms.length&&MD.atoms[ei].element===elName&&result.indexOf(ei)<0)result.push(ei);
             return;
         }
         var num=parseInt(tok,10);
