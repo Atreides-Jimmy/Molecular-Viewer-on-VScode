@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-08
+
 ### Added
 
 - **Rotate group around axis** — A new "Rotate Group" toolbar mode lets you select a group of atoms and rotate them around a user-defined rotation axis (a line through 2+ axis atoms), with a 0–360° slider for manual adjustment. The axis is validated chemically: any bonded pairs among the axis atoms must be single bonds (double/triple bonds are rejected), so the rotation obeys chemical rules. Axis atoms are kept fixed while the rest of the selected group rotates, and an orange line visualizes the axis. Works for multi-atom collinear axes (e.g. `C32 C33 C43 C53`) or a simple two-atom bond axis (e.g. `C33 C43`). Atom input now also accepts the `ElementN` shorthand (e.g. `H581`, `C44`), in addition to plain indices, ranges, and element symbols
