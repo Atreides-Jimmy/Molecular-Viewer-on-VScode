@@ -999,15 +999,28 @@ function buildCellWireframe(){
 }
 
 function updateAxesIndicator(){
-    if(!CRY)return;
     var el=document.getElementById('axes-indicator');
     if(!el)return;
-    var lv=CRY.latticeVectors;
-    var vectors=[
-        {dir:new THREE.Vector3(lv[0][0],lv[0][1],lv[0][2]).normalize(),color:'#FF4444',label:'a'},
-        {dir:new THREE.Vector3(lv[1][0],lv[1][1],lv[1][2]).normalize(),color:'#44FF44',label:'b'},
-        {dir:new THREE.Vector3(lv[2][0],lv[2][1],lv[2][2]).normalize(),color:'#4488FF',label:'c'}
-    ];
+    var vectors;
+    if(CRY){
+        var lv=CRY.latticeVectors;
+        vectors=[
+            {dir:new THREE.Vector3(lv[0][0],lv[0][1],lv[0][2]).normalize(),color:'#FF4444',label:'a'},
+            {dir:new THREE.Vector3(lv[1][0],lv[1][1],lv[1][2]).normalize(),color:'#44FF44',label:'b'},
+            {dir:new THREE.Vector3(lv[2][0],lv[2][1],lv[2][2]).normalize(),color:'#4488FF',label:'c'}
+        ];
+    }else{
+        // Molecular structure: show the Cartesian X/Y/Z axes of the molecule's
+        // initial coordinate frame. rotQuat starts as identity, so at load time
+        // the indicator matches the world axes; applying rotQuat afterwards
+        // shows the current orientation no matter how the molecule is rotated
+        // or edited (orientation is purely rotQuat-driven).
+        vectors=[
+            {dir:new THREE.Vector3(1,0,0),color:'#FF4444',label:'X'},
+            {dir:new THREE.Vector3(0,1,0),color:'#44FF44',label:'Y'},
+            {dir:new THREE.Vector3(0,0,1),color:'#4488FF',label:'Z'}
+        ];
+    }
     vectors.forEach(function(v){v.dir.applyQuaternion(rotQuat)});
     vectors.sort(function(a,b){return a.dir.z-b.dir.z});
     var cx=45,cy=45,scale=30;
@@ -1199,9 +1212,6 @@ container.focus();
 if(CRY){
     var crystalPanel=document.getElementById('crystal-panel');
     if(crystalPanel)crystalPanel.style.display='block';
-    var axesEl=document.getElementById('axes-indicator');
-    if(axesEl)axesEl.style.display='block';
-    updateAxesIndicator();
     layoutPanels();
     ['bnd-a-min','bnd-a-max','bnd-b-min','bnd-b-max','bnd-c-min','bnd-c-max'].forEach(function(id){
         var inp=document.getElementById(id);
@@ -1247,6 +1257,13 @@ if(CRY){
         });
     }
 }
+
+// Axes indicator is shown for ALL structures: crystal files display the
+// lattice a/b/c axes, molecular files display the Cartesian X/Y/Z axes of
+// the initial coordinate frame.
+var axesInitEl=document.getElementById('axes-indicator');
+if(axesInitEl)axesInitEl.style.display='block';
+updateAxesIndicator();
 
 var maxD=0;
 MD.atoms.forEach(function(a){var dx=a.x-CX,dy=a.y-CY,dz=a.z-CZ,dd=Math.sqrt(dx*dx+dy*dy+dz*dz);if(dd>maxD)maxD=dd});
@@ -4199,7 +4216,7 @@ function animate(){
     }
     if(!needsRender&&!keyActive)return;
     needsRender=false;
-    if(CRY)updateAxesIndicator();
+    updateAxesIndicator();
     var w=container.clientWidth||window.innerWidth;
     var h=container.clientHeight||(window.innerHeight-60);
     if(w<1)w=window.innerWidth;
