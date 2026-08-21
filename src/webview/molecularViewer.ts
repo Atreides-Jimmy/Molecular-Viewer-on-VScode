@@ -472,6 +472,7 @@ body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;b
 #rotate-panel .rp-slider-row label{font-size:11px;white-space:nowrap}
 #rotate-panel .rp-slider-row input[type=range]{flex:1}
 #rotate-panel .rp-angle-val{font-size:12px;font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff);min-width:46px;text-align:right}
+#rotate-panel .rp-slider-row input[type=number]{width:58px;flex-shrink:0;padding:3px 4px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:11px;box-sizing:border-box}
 #rotate-panel .rp-error{color:var(--vscode-errorForeground,#f66);font-size:11px;margin-top:4px;line-height:1.4}
 #rotate-panel .rp-hint{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:4px;line-height:1.4}
 canvas{display:block}
@@ -558,6 +559,7 @@ canvas{display:block}
 <button class="tbtn" data-mode="bondLength">Bond Length</button>
 <button class="tbtn" data-mode="bondAngle">Bond Angle</button>
 <button class="tbtn" data-mode="dihedral">Dihedral</button>
+<button class="tbtn" data-mode="rotateGroup">Rotate Group</button>
 <div class="tsep"></div>
 <button class="tbtn" data-mode="addAtom">Add Atom</button>
 <button class="tbtn" data-mode="deleteAtom">Delete Atom</button>
@@ -565,7 +567,6 @@ canvas{display:block}
 <div class="tsep"></div>
 <button class="tbtn" data-mode="selectAtoms">Select Atoms</button>
 <button class="tbtn" data-mode="boxSelect">Box Select</button>
-<button class="tbtn" data-mode="rotateGroup">Rotate Group</button>
 <div class="tsep"></div>
 <button class="tbtn" id="diff-btn">Diff</button>
 <button class="tbtn" id="undo-btn" disabled>Undo</button>
@@ -581,7 +582,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="box-select-rect"></div>
@@ -1338,16 +1339,19 @@ var rotateGroupAtoms=[];
 var rotateAxisAtoms=[];
 var rotAxisParams=null;
 var rotAxisLineMesh=null;
+var rotCommittedAngle=0;
 
 function resetRotAxisState(){
     rotActive=false;
     rotateGroupAtoms=[];
     rotateAxisAtoms=[];
     rotAxisParams=null;
+    rotCommittedAngle=0;
     removeRotAxisLine();
     var ew=document.getElementById('rp-error');if(ew)ew.textContent='';
     var sw=document.getElementById('rp-slider-wrap');if(sw)sw.style.display='none';
     var slider=document.getElementById('rp-slider');if(slider)slider.value=0;
+    var ain=document.getElementById('rp-angle-input');if(ain)ain.value='0';
     var av=document.getElementById('rp-angle-val');if(av)av.textContent='0°';
 }
 function syncRotatePanelGroupField(){
@@ -1438,6 +1442,29 @@ function applyGroupRotation(angleDeg){
     }
     updateScenePositions(true);
 }
+function commitRotAngle(newAngle){
+    // Commit one angle adjustment: push an undo snapshot of the state at the
+    // previously committed angle (tagged with rotAngle so doUndo can sync the
+    // slider display), then apply the new angle.
+    if(!rotActive||!rotAxisParams||!originalCoords)return;
+    if(isNaN(newAngle))newAngle=rotCommittedAngle;
+    newAngle=Math.max(0,Math.min(360,newAngle));
+    if(Math.abs(newAngle-rotCommittedAngle)>1e-9){
+        restoreOriginal();
+        applyGroupRotation(rotCommittedAngle);
+        pushUndo();
+        undoStack[undoStack.length-1].rotAngle=rotCommittedAngle;
+        restoreOriginal();
+        applyGroupRotation(newAngle);
+        rotCommittedAngle=newAngle;
+    }
+    var slider=document.getElementById('rp-slider');
+    if(slider)slider.value=newAngle;
+    var av=document.getElementById('rp-angle-val');
+    if(av)av.textContent=newAngle.toFixed(1)+'°';
+    var ain=document.getElementById('rp-angle-input');
+    if(ain)ain.value=newAngle;
+}
 (function(){
     var gi=document.getElementById('rp-group-input');
     var ai=document.getElementById('rp-axis-input');
@@ -1475,9 +1502,14 @@ function applyGroupRotation(angleDeg){
         rotateGroupAtoms=groupIdx.slice();
         rotateAxisAtoms=axisIdx.slice();
         rotAxisParams=params;
-        saveOriginal();
+        // Capture the session baseline WITHOUT pushing an undo snapshot here —
+        // each committed angle adjustment pushes its own snapshot, so undo
+        // steps back one angle adjustment at a time.
+        originalCoords=MD.atoms.map(function(a){return{x:a.x,y:a.y,z:a.z}});
+        rotCommittedAngle=0;
         var sw=document.getElementById('rp-slider-wrap');if(sw)sw.style.display='block';
         slider.value=0;
+        var ain=document.getElementById('rp-angle-input');if(ain)ain.value='0';
         var av=document.getElementById('rp-angle-val');if(av)av.textContent='0°';
         showRotAxisLine();
         rotActive=true;
@@ -1485,11 +1517,31 @@ function applyGroupRotation(angleDeg){
         modeInfoEl.textContent='Rotate Group - adjust angle (0-360°)';
     });
     slider.addEventListener('input',function(){
+        if(!rotActive||!originalCoords)return;
+        var v=parseFloat(slider.value);
         restoreOriginal();
-        applyGroupRotation(parseFloat(slider.value));
+        applyGroupRotation(v);
         var av=document.getElementById('rp-angle-val');
-        if(av)av.textContent=parseFloat(slider.value).toFixed(1)+'°';
+        if(av)av.textContent=v.toFixed(1)+'°';
+        var ain=document.getElementById('rp-angle-input');
+        if(ain)ain.value=v;
     });
+    slider.addEventListener('change',function(){
+        if(!rotActive)return;
+        commitRotAngle(parseFloat(slider.value));
+    });
+    var angleInput=document.getElementById('rp-angle-input');
+    if(angleInput){
+        angleInput.addEventListener('keydown',function(e){
+            if(e.key!=='Enter')return;
+            e.preventDefault();
+            commitRotAngle(parseFloat(angleInput.value));
+        });
+        angleInput.addEventListener('change',function(){
+            if(!rotActive)return;
+            commitRotAngle(parseFloat(angleInput.value));
+        });
+    }
     doneBtn.addEventListener('click',function(){
         restoreOriginal();
         applyGroupRotation(parseFloat(slider.value));
@@ -1500,13 +1552,15 @@ function applyGroupRotation(angleDeg){
         modeInfoEl.textContent=MODE_INFO.rotateGroup;
     });
     resetBtn.addEventListener('click',function(){
-        restoreOriginal();
+        if(originalCoords)restoreOriginal();
         rebuildScene();
-        undoStack.pop();
+        // Remove all undo snapshots pushed by this rotation session (tagged
+        // with rotAngle) so Reset reverts the whole session at once.
+        while(undoStack.length>0&&undoStack[undoStack.length-1].rotAngle!=null){
+            undoStack.pop();
+        }
         updateUndoBtn();
         resetRotAxisState();
-        slider.value=0;
-        var av=document.getElementById('rp-angle-val');if(av)av.textContent='0°';
     });
     clearBtn.addEventListener('click',function(){
         resetRotAxisState();
@@ -1542,6 +1596,25 @@ function doUndo(){
     if(CRY&&snap.baseAtoms){CRY.baseAtoms=snap.baseAtoms;CRY.baseBonds=snap.baseBonds}
     if(CRY){rebuildCrystal()}rebuildScene();updateMolInfo();updateUndoBtn();
     if(diffMode)resetSelection();
+    if(currentMode==='rotateGroup'&&rotActive){
+        if(snap.rotAngle!=null){
+            // Undo one angle adjustment: sync slider and displays to the
+            // restored angle so the panel stays consistent with the molecule.
+            rotCommittedAngle=snap.rotAngle;
+            var slider=document.getElementById('rp-slider');
+            if(slider)slider.value=snap.rotAngle;
+            var av=document.getElementById('rp-angle-val');
+            if(av)av.textContent=snap.rotAngle.toFixed(1)+'°';
+            var ain=document.getElementById('rp-angle-input');
+            if(ain)ain.value=snap.rotAngle;
+            showRotAxisLine();
+        }else{
+            // Undo stepped past this rotation session's own history (e.g. an
+            // earlier unrelated edit) — close the session cleanly.
+            resetRotAxisState();
+            originalCoords=null;
+        }
+    }
 }
 document.getElementById('undo-btn').addEventListener('click',doUndo);
 document.getElementById('save-btn').addEventListener('click',doSave);
@@ -3090,7 +3163,7 @@ function rotAroundAxis(px,py,pz,ox,oy,oz,dx,dy,dz,angle){
 }
 
 function saveOriginal(){originalCoords=MD.atoms.map(function(a){return{x:a.x,y:a.y,z:a.z}});pushUndo()}
-function restoreOriginal(){if(!originalCoords)return;originalCoords.forEach(function(c,i){MD.atoms[i].x=c.x;MD.atoms[i].y=c.y;MD.atoms[i].z=c.z})}
+function restoreOriginal(){if(!originalCoords)return;originalCoords.forEach(function(c,i){var a=MD.atoms[i];if(!a)return;a.x=c.x;a.y=c.y;a.z=c.z})}
 
 function applyBondLength(targetLen,fixFirst,moveMode){
     var i1=selectedAtoms[0],i2=selectedAtoms[1];
@@ -3466,6 +3539,9 @@ function showBatchDeleteModal(){
 }
 
 function batchDeleteSelected(){
+    // Atom indices become invalid after deletion — close any active rotate
+    // group session so stale originalCoords/rotAxisParams can't be reused.
+    if(rotActive){resetRotAxisState();originalCoords=null}
     var delSet={};
     selectedAtoms.forEach(function(idx){delSet[idx]=true});
     var sortedAsc=selectedAtoms.slice().sort(function(a,b){return a-b});
