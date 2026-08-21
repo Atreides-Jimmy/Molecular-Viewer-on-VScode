@@ -560,6 +560,7 @@ canvas{display:block}
 <button class="tbtn" data-mode="bondAngle">Bond Angle</button>
 <button class="tbtn" data-mode="dihedral">Dihedral</button>
 <button class="tbtn" data-mode="rotateGroup">Rotate Group</button>
+<button class="tbtn" data-mode="moveAtoms">Move Atoms</button>
 <div class="tsep"></div>
 <button class="tbtn" data-mode="addAtom">Add Atom</button>
 <button class="tbtn" data-mode="deleteAtom">Delete Atom</button>
@@ -1201,6 +1202,137 @@ var selectedAtoms=[];
 var originalCoords=null;
 var modalCallback=null;
 
+// ===== Move Atoms mode interactions =====
+// In move-atoms mode: plain left-drag / arrow keys rotate the whole view,
+// plain right-drag pans the whole view (cursor-locked); Ctrl+left-drag /
+// Ctrl+arrow keys rotate the selected fragment, Ctrl+right-drag translates
+// the fragment with the cursor locked onto the grabbed point.
+var moveDragActive=false;      // a Ctrl+right-drag fragment translate in progress
+var moveDragOrig=null;         // {idx:{x,y,z}} positions at drag start
+var moveDragMoved=false;       // whether the drag produced any displacement
+var moveDragPlaneZ=0;          // world-Z of the movement plane (screen-parallel)
+var moveDragStartWorld=null;   // reference point on the movement plane at drag start
+var fragRotActive=false;       // a Ctrl+left-drag fragment rotation in progress
+var fragRotMoved=false;        // whether the rotation drag produced any change
+var fragRotCx=0,fragRotCy=0,fragRotCz=0; // rotation pivot (absolute file coords)
+var moveKeyActive=false;       // a Ctrl+arrow fragment rotation session in progress
+var moveKeyLatch=false;        // block fragment-key restart until arrows released
+var keyRotLatch=false;         // block view rotation until arrows released (after a fragment session ends mid-hold)
+var ctrlDown=false;            // live Ctrl modifier state
+var panGrabActive=false;       // view pan uses cursor locking
+var panGrabOffset={x:0,y:0};   // grabbed point world xy minus pan offset
+var panRefZ=0;                 // world z of the pan reference plane
+
+function recomputeMovedBonds(){
+    // Real-time bond + bond order re-detection while atoms move. Files with
+    // explicit bond blocks (mol2/PDB CONECT) keep their authored bonds.
+    if(MD.hasExplicitBonds)return;
+    MD.bonds=detectBondsFromAtoms(MD.atoms);
+}
+function endMoveDrag(){
+    if(!moveDragActive)return;
+    moveDragActive=false;
+    moveDragOrig=null;
+    // A Ctrl+click without any displacement pushes a redundant snapshot — drop it.
+    if(!moveDragMoved&&undoStack.length>0){undoStack.pop();updateUndoBtn()}
+    document.body.style.cursor='';
+    if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
+}
+function endFragRot(){
+    if(!fragRotActive)return;
+    fragRotActive=false;
+    // A Ctrl+click without any rotation pushes a redundant snapshot — drop it.
+    if(!fragRotMoved&&undoStack.length>0){undoStack.pop();updateUndoBtn()}
+    document.body.style.cursor='';
+    if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
+}
+function stopMoveSession(){
+    // Force-terminate any in-progress move/rotate (mode switch, frame switch,
+    // undo, delete...). The latch prevents arrow keys (still held down) from
+    // instantly starting a new session; it clears once all keys are released.
+    if(moveDragActive||moveKeyActive||fragRotActive){
+        moveDragActive=false;moveKeyActive=false;fragRotActive=false;
+        moveKeyLatch=true;
+        moveDragOrig=null;
+        document.body.style.cursor='';
+    }
+}
+function applyMoveWorldDelta(dw){
+    // dw: world-space displacement. Convert to molecule-local space (the view
+    // rotation is applied to moleculeGroup, not the camera) so the group moves
+    // exactly along the drag direction on screen regardless of orientation.
+    var dl=dw.clone().applyQuaternion(rotQuat.clone().conjugate());
+    selectedAtoms.forEach(function(i){
+        var a=MD.atoms[i];if(!a)return;
+        if(moveDragOrig&&moveDragOrig[i]){
+            var o=moveDragOrig[i];
+            a.x=o.x+dl.x;a.y=o.y+dl.y;a.z=o.z+dl.z;
+        }else{
+            a.x+=dl.x;a.y+=dl.y;a.z+=dl.z;
+        }
+    });
+    recomputeMovedBonds();
+    updateScenePositions(true);
+    needsRender=true;
+}
+function applyFragRotDelta(ax,ay){
+    // Incremental rotation of the selected fragment around its (fixed) center,
+    // in WORLD space: ax = angle around world X, ay = angle around world Y.
+    // Same axis/angle convention as the whole-molecule rotation, so the
+    // fragment turns in the same direction the view would. The world-space
+    // quaternion is converted to molecule-local space via conjugation.
+    if(!ax&&!ay)return;
+    var Q=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),ay);
+    if(ax)Q.premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),ax));
+    var qComb=rotQuat.clone().conjugate().multiply(Q).multiply(rotQuat);
+    var v=new THREE.Vector3();
+    selectedAtoms.forEach(function(i){
+        var a=MD.atoms[i];if(!a)return;
+        v.set(a.x-fragRotCx,a.y-fragRotCy,a.z-fragRotCz).applyQuaternion(qComb);
+        a.x=fragRotCx+v.x;a.y=fragRotCy+v.y;a.z=fragRotCz+v.z;
+    });
+    recomputeMovedBonds();
+    updateScenePositions(true);
+    needsRender=true;
+}
+function screenPointOnPlane(e,planeZ){
+    // Intersect the mouse ray with the z=planeZ plane (camera sits on the
+    // Z axis looking at the origin, so this plane is parallel to screen).
+    // planeZ must stay in front of the camera, otherwise the hit is a
+    // mirrored point behind the camera (inverted drag direction).
+    var rect=canvas.getBoundingClientRect();
+    mouse.x=((e.clientX-rect.left)/rect.width)*2-1;
+    mouse.y=-((e.clientY-rect.top)/rect.height)*2+1;
+    raycaster.setFromCamera(mouse,camera);
+    var dz=raycaster.ray.direction.z;
+    if(Math.abs(dz)<1e-6)return null;
+    var t=(planeZ-raycaster.ray.origin.z)/dz;
+    return raycaster.ray.origin.clone().add(raycaster.ray.direction.clone().multiplyScalar(t));
+}
+function screenToPlanePoint(e){
+    return screenPointOnPlane(e,moveDragPlaneZ);
+}
+function atomWorldZ(a){
+    // World Z of an atom: local (a - center) rotated by the view quaternion.
+    // pan offsets only shift x/y, so z is unaffected by panning.
+    return new THREE.Vector3(a.x-CX,a.y-CY,a.z-CZ).applyQuaternion(rotQuat).z;
+}
+function initPanGrab(e){
+    // Cursor-locked view panning: grab the atom under the cursor (or the
+    // molecule-center plane when clicking empty space) so the grabbed point
+    // sticks to the cursor while panning — 1:1 cursor speed.
+    panGrabActive=false;
+    if(diffMode)return;
+    var idx=getClickedAtom(e);
+    var refZ=0;
+    if(idx>=0&&MD.atoms[idx])refZ=atomWorldZ(MD.atoms[idx]);
+    var hit=screenPointOnPlane(e,refZ);
+    if(!hit)return;
+    panGrabOffset={x:hit.x-panX,y:hit.y-panY};
+    panRefZ=refZ;
+    panGrabActive=true;
+}
+
 if(CRY){rebuildCrystal();}
 rebuildScene();
 
@@ -1271,9 +1403,15 @@ var initCam=maxD*2.5+5;
 camera.position.set(0,0,initCam);camera.lookAt(0,0,0);
 camDist=initCam;
 
-var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',replaceAtom:'Replace Atom - Click atom(s) to select, click button again to confirm',selectAtoms:'Select Atoms - Input indices or element symbols',boxSelect:'Box Select - Drag a rectangle to select atoms',rotateGroup:'Rotate Group - Select group + axis atoms, then adjust angle'};
+var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',replaceAtom:'Replace Atom - Click atom(s) to select, click button again to confirm',selectAtoms:'Select Atoms - Input indices or element symbols',boxSelect:'Box Select - Drag a rectangle to select atoms',rotateGroup:'Rotate Group - Select group + axis atoms, then adjust angle',moveAtoms:'Move Atoms - Select atoms; drag/arrows rotate view, right-drag pans; Ctrl+drag or Ctrl+arrows rotates group, Ctrl+right-drag moves group'};
 
 function setMode(m){
+    if(m==='moveAtoms'&&CRY){
+        // Moving atoms in a periodic supercell breaks image consistency;
+        // the mode is only offered for molecular structures.
+        modeInfoEl.textContent='Move Atoms is not available for crystal structures';
+        return;
+    }
     if(currentMode===m){
         if(m==='selectAtoms'){
             var sp=document.getElementById('select-panel');
@@ -1291,7 +1429,8 @@ function setMode(m){
     }
     var oldMode=currentMode;
     currentMode=m;
-    var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect'||oldMode==='replaceAtom'||oldMode==='rotateGroup')&&(m==='selectAtoms'||m==='boxSelect'||m==='replaceAtom'||m==='rotateGroup'));
+    var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect'||oldMode==='replaceAtom'||oldMode==='rotateGroup'||oldMode==='moveAtoms')&&(m==='selectAtoms'||m==='boxSelect'||m==='replaceAtom'||m==='rotateGroup'||m==='moveAtoms'));
+    if(oldMode==='moveAtoms'&&m!=='moveAtoms')stopMoveSession();
     if(!preserveSel){
         selectedAtoms=[];diffSelectedAtoms=[];originalCoords=null;
     }
@@ -1608,6 +1747,7 @@ function updateUndoBtn(){var b=document.getElementById('undo-btn');if(b)b.disabl
 function doUndo(){
     if(undoStack.length===0)return;
     if(vibActive||vibPaused)stopVibration();
+    if(moveDragActive||moveKeyActive||fragRotActive)stopMoveSession();
     var snap=undoStack.pop();
     MD.atoms=snap.atoms;MD.bonds=snap.bonds;
     if(CRY&&snap.baseAtoms){CRY.baseAtoms=snap.baseAtoms;CRY.baseBonds=snap.baseBonds}
@@ -2125,6 +2265,7 @@ diffReopenEl.addEventListener('click',function(){
 
 function enterDiffRender(diffs,mapping){
     if(vibActive||vibPaused)stopVibration();
+    stopMoveSession();
     diffPivot=new THREE.Group();scene.add(diffPivot);
     diffMolGroup=new THREE.Group();diffPivot.add(diffMolGroup);
 
@@ -2318,6 +2459,7 @@ function updateFrameInfo(){
 }
 function switchFrame(idx){
     if(idx<0||idx>=totalFrames)return;
+    stopMoveSession();
     currentFrame=idx;
     var f=MD.frames[idx];
     MD.atoms=f.atoms.map(function(a,i){a.index=i;return a});
@@ -3025,7 +3167,7 @@ function selectAtom(idx){
         checkSelectionComplete();
         return;
     }
-    if(currentMode==='selectAtoms'||currentMode==='replaceAtom'||currentMode==='rotateGroup'){
+    if(currentMode==='selectAtoms'||currentMode==='replaceAtom'||currentMode==='rotateGroup'||currentMode==='moveAtoms'){
         var pos=selectedAtoms.indexOf(idx);
         if(pos>=0){
             selectedAtoms.splice(pos,1);
@@ -3278,7 +3420,7 @@ function applyDihedral(targetDeg,fixFirstThree,moveMode){
     updateScenePositions(true);
 }
 
-function showModal(html,cb){if(vibActive||vibPaused)stopVibration();modalEl.innerHTML=html;modalOverlay.classList.add('show');modalCallback=cb}
+function showModal(html,cb){if(vibActive||vibPaused)stopVibration();stopMoveSession();modalEl.innerHTML=html;modalOverlay.classList.add('show');modalCallback=cb}
 function hideModal(){modalOverlay.classList.remove('show');modalCallback=null}
 
 function showBondLengthModal(){
@@ -3547,6 +3689,7 @@ function showDeleteAtomModal(){
 
 function showBatchDeleteModal(){
     if(selectedAtoms.length===0)return;
+    stopMoveSession();
     var names=formatAtomList(selectedAtoms);
     showModal('<h3>Delete Atoms</h3>'+
         '<div class="current-val">Delete '+selectedAtoms.length+' atoms: '+names+'?</div>'+
@@ -3557,7 +3700,8 @@ function showBatchDeleteModal(){
 
 function batchDeleteSelected(){
     // Atom indices become invalid after deletion — close any active rotate
-    // group session so stale originalCoords/rotAxisParams can't be reused.
+    // group session or move session so stale state can't be reused.
+    stopMoveSession();
     if(rotActive){resetRotAxisState();originalCoords=null}
     var delSet={};
     selectedAtoms.forEach(function(idx){delSet[idx]=true});
@@ -3980,12 +4124,64 @@ canvas.addEventListener('mousedown',function(e){
         boxRectEl.style.width='0px';boxRectEl.style.height='0px';
         e.preventDefault();return;
     }
+    if(currentMode==='moveAtoms'&&!diffMode&&selectedAtoms.length>0&&e.ctrlKey&&(e.button===0||e.button===2)){
+        // Ctrl+left-drag: rotate the selected fragment around its center.
+        // Ctrl+right-drag: translate the fragment, cursor-locked onto the
+        // grabbed atom (or the fragment-center plane when clicking space).
+        // One undo snapshot per drag; a click without change drops it again.
+        if(vibActive||vibPaused)stopVibration();
+        moveDragOrig={};
+        var mcx=0,mcy=0,mcz=0,mn=0;
+        selectedAtoms.forEach(function(i){
+            var a=MD.atoms[i];if(!a)return;
+            moveDragOrig[i]={x:a.x,y:a.y,z:a.z};
+            mcx+=a.x;mcy+=a.y;mcz+=a.z;mn++;
+        });
+        if(mn===0)return;
+        mcx/=mn;mcy/=mn;mcz/=mn;
+        pushUndo();
+        if(e.button===0){
+            // Fragment rotation: pivot is the fragment center, kept fixed in
+            // absolute file coordinates for the whole drag.
+            fragRotCx=mcx;fragRotCy=mcy;fragRotCz=mcz;
+            fragRotActive=true;fragRotMoved=false;
+            document.body.style.cursor='move';
+            modeInfoEl.textContent='Rotating '+mn+' atom(s) - release Ctrl or mouse button to finish';
+        }else{
+            // Fragment translation. The movement plane goes through the world
+            // position of the atom under the cursor (if it belongs to the
+            // selection) so that atom stays exactly under the cursor; through
+            // the fragment center otherwise. planeZ is derived from LOCAL
+            // coordinates (atom - molecule center): using absolute file
+            // coordinates can place the plane behind the camera, which mirrors
+            // the ray intersection and inverts the drag direction.
+            var hitIdx=getClickedAtom(e);
+            var planeZ;
+            if(hitIdx>=0&&selectedAtoms.indexOf(hitIdx)>=0&&MD.atoms[hitIdx]){
+                planeZ=atomWorldZ(MD.atoms[hitIdx]);
+            }else{
+                planeZ=new THREE.Vector3(mcx-CX,mcy-CY,mcz-CZ).applyQuaternion(rotQuat).z;
+            }
+            moveDragPlaneZ=planeZ;
+            moveDragStartWorld=screenToPlanePoint(e);
+            if(!moveDragStartWorld)moveDragStartWorld=new THREE.Vector3(mcx-CX,mcy-CY,mcz-CZ).applyQuaternion(rotQuat);
+            moveDragActive=true;moveDragMoved=false;
+            document.body.style.cursor='move';
+            modeInfoEl.textContent='Moving '+mn+' atom(s) - release Ctrl or mouse button to finish';
+        }
+        prevM={x:e.clientX,y:e.clientY};
+        e.preventDefault();return;
+    }
     if(currentMode!=='view'&&e.button===0){
         var idx=getClickedAtom(e);
         if(idx>=0){selectAtom(idx);e.preventDefault();return}
     }
     if(e.button===0)isRot=true;
-    else if(e.button===1||e.button===2)isPan=true;
+    else if(e.button===1||e.button===2){
+        isPan=true;
+        // Cursor-locked panning: the point under the cursor sticks to it.
+        initPanGrab(e);
+    }
     if(diffMode){
         var rect=canvas.getBoundingClientRect();
         var halfW=Math.floor(rect.width/2);
@@ -4003,6 +4199,25 @@ canvas.addEventListener('mousemove',function(e){
         boxRectEl.style.width=bw+'px';boxRectEl.style.height=bh+'px';
         return;
     }
+    if(moveDragActive){
+        if(!e.ctrlKey){endMoveDrag();return}
+        var cur=screenToPlanePoint(e);
+        if(cur){
+            var dw=cur.sub(moveDragStartWorld);
+            if(dw.lengthSq()>1e-10)moveDragMoved=true;
+            applyMoveWorldDelta(dw);
+        }
+        prevM={x:e.clientX,y:e.clientY};
+        return;
+    }
+    if(fragRotActive){
+        if(!e.ctrlKey){endFragRot();return}
+        var rdm={x:e.clientX-prevM.x,y:e.clientY-prevM.y};
+        if(rdm.x!==0||rdm.y!==0)fragRotMoved=true;
+        applyFragRotDelta(rdm.y*0.008,rdm.x*0.008);
+        prevM={x:e.clientX,y:e.clientY};
+        return;
+    }
     var dm={x:e.clientX-prevM.x,y:e.clientY-prevM.y};
     if(diffMode){
         var side=diffTransformSide;
@@ -4014,8 +4229,12 @@ canvas.addEventListener('mousemove',function(e){
             updateTransform()
         }
         if(isPan){
-            if(side==='right'){diffPanX+=dm.x*0.01*(diffCamDist/20);diffPanY-=dm.y*0.01*(diffCamDist/20)}
-            else{panX+=dm.x*0.01*(camDist/20);panY-=dm.y*0.01*(camDist/20)}
+            if(panGrabActive){
+                // Cursor-locked: recompute pan so the grabbed point follows
+                // the cursor 1:1 (same world-z reference plane as at grab).
+                var pc=screenPointOnPlane(e,panRefZ);
+                if(pc){panX=pc.x-panGrabOffset.x;panY=pc.y-panGrabOffset.y}
+            }else{panX+=dm.x*0.01*(camDist/20);panY-=dm.y*0.01*(camDist/20)}
             updateTransform()
         }
     }else{
@@ -4025,7 +4244,15 @@ canvas.addEventListener('mousemove',function(e){
             rotQuat.premultiply(qx);rotQuat.premultiply(qy);rotQuat.normalize();
             updateTransform()
         }
-        if(isPan){panX+=dm.x*0.01*(camDist/20);panY-=dm.y*0.01*(camDist/20);updateTransform()}
+        if(isPan){
+            if(panGrabActive){
+                // Cursor-locked: recompute pan so the grabbed point follows
+                // the cursor 1:1 (same world-z reference plane as at grab).
+                var pc2=screenPointOnPlane(e,panRefZ);
+                if(pc2){panX=pc2.x-panGrabOffset.x;panY=pc2.y-panGrabOffset.y}
+            }else{panX+=dm.x*0.01*(camDist/20);panY-=dm.y*0.01*(camDist/20)}
+            updateTransform()
+        }
     }
     prevM={x:e.clientX,y:e.clientY};
     var rect=canvas.getBoundingClientRect();
@@ -4077,6 +4304,9 @@ canvas.addEventListener('mousemove',function(e){
 });
 
 canvas.addEventListener('mouseup',function(e){
+    if(moveDragActive){endMoveDrag()}
+    if(fragRotActive){endFragRot()}
+    panGrabActive=false;
     if(isBoxSelecting){
         isBoxSelecting=false;boxRectEl.style.display='none';
         var rect=canvas.getBoundingClientRect();
@@ -4118,7 +4348,7 @@ canvas.addEventListener('mouseup',function(e){
     }
     isRot=false;isPan=false;layoutPanels();
 });
-canvas.addEventListener('mouseleave',function(){isRot=false;isPan=false;tooltipEl.style.display='none';if(isBoxSelecting){isBoxSelecting=false;boxRectEl.style.display='none';boxStart=null}});
+canvas.addEventListener('mouseleave',function(){isRot=false;isPan=false;panGrabActive=false;tooltipEl.style.display='none';if(moveDragActive)endMoveDrag();if(fragRotActive)endFragRot();if(isBoxSelecting){isBoxSelecting=false;boxRectEl.style.display='none';boxStart=null}});
 canvas.addEventListener('wheel',function(e){e.preventDefault();
     if(diffMode){
         var rect=canvas.getBoundingClientRect();
@@ -4179,6 +4409,7 @@ canvas.addEventListener('touchend',function(e){isRot=false;if(e.touches.length<2
 
 document.addEventListener('keydown',function(e){
     if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'||e.target.tagName==='SELECT')return;
+    ctrlDown=e.ctrlKey;
     if(e.key in keyState){keyState[e.key]=true;e.preventDefault()}
     if(e.key==='Delete'){
         e.preventDefault();
@@ -4187,7 +4418,17 @@ document.addEventListener('keydown',function(e){
     }
 });
 document.addEventListener('keyup',function(e){
-    if(e.key in keyState){keyState[e.key]=false;e.preventDefault()}
+    ctrlDown=e.ctrlKey;
+    if(e.key in keyState){
+        keyState[e.key]=false;e.preventDefault();
+        // Clear the move-session latches once every arrow key is released, so
+        // fresh sessions may start on the next key press.
+        if(!keyState.ArrowLeft&&!keyState.ArrowRight&&!keyState.ArrowUp&&!keyState.ArrowDown){moveKeyLatch=false;keyRotLatch=false}
+    }
+});
+window.addEventListener('blur',function(){
+    ctrlDown=false;
+    keyState.ArrowLeft=keyState.ArrowRight=keyState.ArrowUp=keyState.ArrowDown=false;
 });
 
 window.addEventListener('resize',function(){var rw=container.clientWidth||window.innerWidth;var rh=container.clientHeight||(window.innerHeight-60);if(rw<1)rw=window.innerWidth;if(rh<1)rh=window.innerHeight-60;camera.aspect=rw/rh;camera.updateProjectionMatrix();renderer.setSize(rw,rh);needsRender=true;layoutPanels()});
@@ -4197,14 +4438,47 @@ function animate(){
     var keyActive=false;
     if(keyState.ArrowLeft||keyState.ArrowRight||keyState.ArrowUp||keyState.ArrowDown){
         keyActive=true;
-        if(!diffMode){
+        if(moveKeyActive&&!ctrlDown){
+            // Ctrl released mid-hold: end the fragment rotation session and
+            // latch view rotation until all arrow keys are released.
+            moveKeyActive=false;
+            keyRotLatch=true;
+            if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
+        }
+        if(currentMode==='moveAtoms'&&selectedAtoms.length>0&&!diffMode&&!moveKeyLatch&&ctrlDown){
+            // Ctrl+arrow keys rotate the selected fragment instead of the
+            // view. One undo snapshot per key-hold session; releasing all
+            // arrow keys (or Ctrl) ends the session.
+            var fAx=0,fAy=0;
+            if(keyState.ArrowRight)fAy+=keyRotSpeed;
+            if(keyState.ArrowLeft)fAy-=keyRotSpeed;
+            if(keyState.ArrowDown)fAx+=keyRotSpeed;
+            if(keyState.ArrowUp)fAx-=keyRotSpeed;
+            if(fAx!==0||fAy!==0){
+                if(!moveKeyActive){
+                    moveKeyActive=true;
+                    if(vibActive||vibPaused)stopVibration();
+                    pushUndo();
+                    // Rotation pivot = fragment center, fixed for the session.
+                    var fcx=0,fcy=0,fcz=0,fn=0;
+                    selectedAtoms.forEach(function(i){var a=MD.atoms[i];if(!a)return;fcx+=a.x;fcy+=a.y;fcz+=a.z;fn++});
+                    if(fn>0){fcx/=fn;fcy/=fn;fcz/=fn}
+                    fragRotCx=fcx;fragRotCy=fcy;fragRotCz=fcz;
+                    modeInfoEl.textContent='Rotating '+fn+' atom(s) - release Ctrl or arrow keys to finish';
+                }
+                applyFragRotDelta(fAx,fAy);
+            }else if(moveKeyActive){
+                moveKeyActive=false;
+                if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
+            }
+        }else if(!diffMode&&!keyRotLatch){
             if(keyState.ArrowLeft){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),-keyRotSpeed);rotQuat.premultiply(qx)}
             if(keyState.ArrowRight){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),keyRotSpeed);rotQuat.premultiply(qx)}
             if(keyState.ArrowUp){var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),-keyRotSpeed);rotQuat.premultiply(qy)}
             if(keyState.ArrowDown){var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),keyRotSpeed);rotQuat.premultiply(qy)}
             rotQuat.normalize();
             updateTransform();
-        }else{
+        }else if(diffMode){
             var rq=(diffTransformSide==='right')?diffRotQuat:rotQuat;
             if(keyState.ArrowLeft){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),-keyRotSpeed);rq.premultiply(qx)}
             if(keyState.ArrowRight){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),keyRotSpeed);rq.premultiply(qx)}
