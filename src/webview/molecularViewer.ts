@@ -4,6 +4,31 @@ import { parseFile, parseLogFile, LogFrame, OrcaFrame, parseTcl } from '../parse
 import { ensureBonds } from '../parsers/bondDetector';
 import { MolecularData, AtomGroup, OptStep, NormalMode } from '../types';
 
+const ATOM_COLORS: { [key: string]: string } = {
+    H: '#FFFFFF', He: '#D9FFFF', Li: '#CC80FF', Be: '#C2FF00', B: '#FFB5B5',
+    C: '#909090', N: '#3050F8', O: '#FF0D0D', F: '#90E050', Ne: '#B3E3F5',
+    Na: '#AB5CF2', Mg: '#8AFF00', Al: '#BFA6A6', Si: '#F0C8A0', P: '#FF8000',
+    S: '#FFFF30', Cl: '#1FF01F', Ar: '#80D1E3', K: '#8F40D4', Ca: '#3DFF00',
+    Sc: '#E6E6E6', Ti: '#BFC2C7', V: '#A6A6AB', Cr: '#8A99C7', Mn: '#9C7AC7',
+    Fe: '#E06633', Co: '#F090A0', Ni: '#50D050', Cu: '#C88033', Zn: '#7D80B0',
+    Ga: '#C28F8F', Ge: '#668F8F', As: '#BD80E3', Se: '#FFA100', Br: '#A62929',
+    Kr: '#5CB8D1', Rb: '#702EB0', Sr: '#00FF00', Y: '#94FFFF', Zr: '#94E0E0',
+    Nb: '#73C2C9', Mo: '#54B5B5', Tc: '#3B9E9E', Ru: '#248F8F', Rh: '#0A7D8C',
+    Pd: '#006985', Ag: '#C0C0C0', Cd: '#FFD98F', In: '#A67573', Sn: '#668080',
+    Sb: '#9E63B5', Te: '#D47A00', I: '#940094', Xe: '#429EB0', Cs: '#57178F',
+    Ba: '#00C900', La: '#70D4FF', Ce: '#FFFFC7', Pr: '#D9FFC7', Nd: '#C7FFC7',
+    Pm: '#A3FFC7', Sm: '#8FFFC7', Eu: '#61FFC7', Gd: '#45FFC7', Tb: '#30FFC7',
+    Dy: '#1FFFC7', Ho: '#00FF9C', Er: '#00E675', Tm: '#00D452', Yb: '#00BF38',
+    Lu: '#00AB24', Hf: '#4DC2FF', Ta: '#4DA6FF', W: '#2194D6', Re: '#267DAB',
+    Os: '#266696', Ir: '#175487', Pt: '#D0D0E0', Au: '#FFD123', Hg: '#B8B8D0',
+    Tl: '#A6544D', Pb: '#575961', Bi: '#9E4FB5', Po: '#AB5C00', At: '#754F45',
+    Rn: '#428296', Fr: '#420066', Ra: '#007D00', Ac: '#70ABFA', Th: '#00BAFF',
+    Pa: '#00A1FF', U: '#008FFF', Np: '#0080FF', Pu: '#006BFF', Am: '#545CF2',
+    Cm: '#785CE3', Bk: '#8A4FE3', Cf: '#A136D4', Es: '#B31FD4', Fm: '#B31FBA',
+    Md: '#B30DA6', No: '#BD0D87', Lr: '#C70066', Rf: '#CC0059', Db: '#D9004F',
+    Sg: '#E00045', Bh: '#E6002E', Hs: '#EB0026'
+};
+
 export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvider<MolecularDocument> {
     constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -313,6 +338,96 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         webviewPanel.webview.postMessage({ command: 'diffResult', cancelled: true });
                     }
                     break;
+                case 'importFile':
+                    try {
+                        const result = await vscode.window.showOpenDialog({
+                            canSelectMany: false,
+                            openLabel: 'Select Structure to Import',
+                            filters: {
+                                'Molecular Files': ['gjf', 'xyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta'],
+                                'All Files': ['*']
+                            }
+                        });
+                        if (!result || result.length === 0) {
+                            webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                            break;
+                        }
+                        const impUri = result[0];
+                        const impContent = await vscode.workspace.fs.readFile(impUri);
+                        const impText = new TextDecoder().decode(impContent);
+                        const impFileName = impUri.path.split('/').pop() || 'unknown.xyz';
+                        const impExt = impFileName.toLowerCase().split('.').pop() || '';
+
+                        if (impExt === 'tcl') {
+                            vscode.window.showErrorMessage('Import: TCL scripts are not supported (use Diff for TCL).');
+                            webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                            break;
+                        }
+
+                        let impData: MolecularData | undefined;
+                        if (impExt === 'log' || impExt === 'out') {
+                            const logResult = parseLogFile(impText, impFileName);
+                            if (logResult.frames.length === 0) {
+                                vscode.window.showErrorMessage('Import: no structure found in ' + impFileName);
+                                webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                                break;
+                            }
+                            let frameIdx = 0;
+                            if (logResult.frames.length > 1) {
+                                const items = logResult.frames.map((f, i) => ({
+                                    label: `Frame ${i + 1}: ${f.stepLabel || ''}`,
+                                    description: `${f.atoms.length} atoms`,
+                                    index: i
+                                }));
+                                const picked = await vscode.window.showQuickPick(items, {
+                                    placeHolder: `Select frame to import (${logResult.frames.length} frames found)`,
+                                    canPickMany: false
+                                });
+                                if (!picked) {
+                                    webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                                    break;
+                                }
+                                frameIdx = picked.index;
+                            }
+                            const sf = logResult.frames[frameIdx];
+                            impData = ensureBonds({
+                                atoms: sf.atoms, bonds: sf.bonds, title: sf.title,
+                                hasExplicitBonds: sf.hasExplicitBonds, charge: sf.charge, multiplicity: sf.multiplicity
+                            });
+                        } else {
+                            impData = parseFile(impText, impFileName);
+                            // Crystal files (CIF/VASP/VESTA/Cube): import the
+                            // unit-cell content as a molecule; periodicity is
+                            // dropped (the current structure stays molecular).
+                            if (impData.crystal) {
+                                const cellAtoms = (impData.atoms.length > 0 ? impData.atoms : impData.crystal.baseAtoms)
+                                    .map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, index: 0 }));
+                                impData = ensureBonds({ atoms: cellAtoms, bonds: [], title: impData.title, hasExplicitBonds: false });
+                            } else {
+                                impData = ensureBonds(impData);
+                            }
+                        }
+                        if (!impData || impData.atoms.length === 0) {
+                            vscode.window.showErrorMessage('Import: no atoms found in ' + impFileName);
+                            webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                            break;
+                        }
+
+                        const impAtoms = impData.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: ATOM_COLORS[a.element] || '#FF1493' }));
+                        const impBonds = impData.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order }));
+                        webviewPanel.webview.postMessage({
+                            command: 'importResult',
+                            cancelled: false,
+                            fileName: impFileName,
+                            atoms: impAtoms,
+                            bonds: impBonds,
+                            hasExplicitBonds: !!impData.hasExplicitBonds
+                        });
+                    } catch (e: any) {
+                        vscode.window.showErrorMessage('Import failed: ' + (e.message || e));
+                        webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                    }
+                    break;
                 case 'info':
                     vscode.window.showInformationMessage(message.text);
                     break;
@@ -331,30 +446,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         );
         const threeJsContent = new TextDecoder().decode(threeJsBytes);
 
-        const atomColors: { [key: string]: string } = {
-            H: '#FFFFFF', He: '#D9FFFF', Li: '#CC80FF', Be: '#C2FF00', B: '#FFB5B5',
-            C: '#909090', N: '#3050F8', O: '#FF0D0D', F: '#90E050', Ne: '#B3E3F5',
-            Na: '#AB5CF2', Mg: '#8AFF00', Al: '#BFA6A6', Si: '#F0C8A0', P: '#FF8000',
-            S: '#FFFF30', Cl: '#1FF01F', Ar: '#80D1E3', K: '#8F40D4', Ca: '#3DFF00',
-            Sc: '#E6E6E6', Ti: '#BFC2C7', V: '#A6A6AB', Cr: '#8A99C7', Mn: '#9C7AC7',
-            Fe: '#E06633', Co: '#F090A0', Ni: '#50D050', Cu: '#C88033', Zn: '#7D80B0',
-            Ga: '#C28F8F', Ge: '#668F8F', As: '#BD80E3', Se: '#FFA100', Br: '#A62929',
-            Kr: '#5CB8D1', Rb: '#702EB0', Sr: '#00FF00', Y: '#94FFFF', Zr: '#94E0E0',
-            Nb: '#73C2C9', Mo: '#54B5B5', Tc: '#3B9E9E', Ru: '#248F8F', Rh: '#0A7D8C',
-            Pd: '#006985', Ag: '#C0C0C0', Cd: '#FFD98F', In: '#A67573', Sn: '#668080',
-            Sb: '#9E63B5', Te: '#D47A00', I: '#940094', Xe: '#429EB0', Cs: '#57178F',
-            Ba: '#00C900', La: '#70D4FF', Ce: '#FFFFC7', Pr: '#D9FFC7', Nd: '#C7FFC7',
-            Pm: '#A3FFC7', Sm: '#8FFFC7', Eu: '#61FFC7', Gd: '#45FFC7', Tb: '#30FFC7',
-            Dy: '#1FFFC7', Ho: '#00FF9C', Er: '#00E675', Tm: '#00D452', Yb: '#00BF38',
-            Lu: '#00AB24', Hf: '#4DC2FF', Ta: '#4DA6FF', W: '#2194D6', Re: '#267DAB',
-            Os: '#266696', Ir: '#175487', Pt: '#D0D0E0', Au: '#FFD123', Hg: '#B8B8D0',
-            Tl: '#A6544D', Pb: '#575961', Bi: '#9E4FB5', Po: '#AB5C00', At: '#754F45',
-            Rn: '#428296', Fr: '#420066', Ra: '#007D00', Ac: '#70ABFA', Th: '#00BAFF',
-            Pa: '#00A1FF', U: '#008FFF', Np: '#0080FF', Pu: '#006BFF', Am: '#545CF2',
-            Cm: '#785CE3', Bk: '#8A4FE3', Cf: '#A136D4', Es: '#B31FD4', Fm: '#B31FBA',
-            Md: '#B30DA6', No: '#BD0D87', Lr: '#C70066', Rf: '#CC0059', Db: '#D9004F',
-            Sg: '#E00045', Bh: '#E6002E', Hs: '#EB0026'
-        };
+        const atomColors = ATOM_COLORS;
 
         const atomData = data.atoms.map(a => {
             let color = atomColors[a.element] || '#FF1493';
@@ -565,6 +657,7 @@ canvas{display:block}
 <button class="tbtn" data-mode="addAtom">Add Atom</button>
 <button class="tbtn" data-mode="deleteAtom">Delete Atom</button>
 <button class="tbtn" data-mode="replaceAtom">Replace Atom</button>
+<button class="tbtn" id="import-btn">Import Structure</button>
 <div class="tsep"></div>
 <button class="tbtn" data-mode="selectAtoms">Select Atoms</button>
 <button class="tbtn" data-mode="boxSelect">Box Select</button>
@@ -1775,6 +1868,13 @@ function doUndo(){
 }
 document.getElementById('undo-btn').addEventListener('click',doUndo);
 document.getElementById('save-btn').addEventListener('click',doSave);
+document.getElementById('import-btn').addEventListener('click',function(){
+    if(diffMode){modeInfoEl.textContent='Import is not available in diff mode';return}
+    if(CRY){modeInfoEl.textContent='Import is not available for crystal structures';return}
+    if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
+    modeInfoEl.textContent='Import: selecting file...';
+    vscodeApi.postMessage({command:'importFile'});
+});
 document.getElementById('diff-btn').addEventListener('click',function(){
     if(diffMode){
         exitDiff();
@@ -1817,8 +1917,89 @@ window.addEventListener('message',function(event){
             return;
         }
         startDiff(msg);
+    }else if(msg.command==='importResult'){
+        if(msg.cancelled){
+            modeInfoEl.textContent=MODE_INFO[currentMode]||currentMode;
+            return;
+        }
+        importStructure(msg);
     }
 });
+
+function importStructure(msg){
+    // Append an imported structure (parsed by the extension host) beside the
+    // current structure at a guaranteed non-overlapping position. One undo
+    // snapshot per import.
+    if(diffMode||CRY)return;
+    if(vibActive||vibPaused)stopVibration();
+    if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
+    var newAtoms=msg.atoms||[];
+    var newBonds=msg.bonds||[];
+    if(newAtoms.length===0)return;
+    pushUndo();
+    var N0=MD.atoms.length;
+    // --- Non-overlap placement via bounding spheres ---
+    // Place the incoming structure on the +X side of the existing structure:
+    // centroid distance = (R1+buf) + (R2+buf) + gap, where R is each
+    // structure's max distance from its own centroid and buf=2.5 Å covers
+    // any atom radius. A bounding sphere contains every atom, so this single
+    // O(n) check guarantees no imported atom overlaps ANY existing atom —
+    // including previously imported structures, which are part of
+    // "existing" by now. Rotation-invariant, no overlap iterations needed.
+    var i,a;
+    var c1x=0,c1y=0,c1z=0;
+    if(N0>0){
+        for(i=0;i<N0;i++){a=MD.atoms[i];c1x+=a.x;c1y+=a.y;c1z+=a.z}
+        c1x/=N0;c1y/=N0;c1z/=N0;
+    }
+    var c2x=0,c2y=0,c2z=0;
+    for(i=0;i<newAtoms.length;i++){a=newAtoms[i];c2x+=a.x;c2y+=a.y;c2z+=a.z}
+    c2x/=newAtoms.length;c2y/=newAtoms.length;c2z/=newAtoms.length;
+    var R1=0,R2=0;
+    if(N0>0){
+        for(i=0;i<N0;i++){a=MD.atoms[i];var d1=Math.sqrt((a.x-c1x)*(a.x-c1x)+(a.y-c1y)*(a.y-c1y)+(a.z-c1z)*(a.z-c1z));if(d1>R1)R1=d1}
+    }
+    for(i=0;i<newAtoms.length;i++){a=newAtoms[i];var d2=Math.sqrt((a.x-c2x)*(a.x-c2x)+(a.y-c2y)*(a.y-c2y)+(a.z-c2z)*(a.z-c2z));if(d2>R2)R2=d2}
+    var BUF=2.5,GAP=2.0;
+    var tx,ty,tz;
+    if(N0===0){tx=-c2x;ty=-c2y;tz=-c2z}
+    else{var D=(R1+BUF)+(R2+BUF)+GAP;tx=c1x+D-c2x;ty=c1y-c2y;tz=c1z-c2z}
+    for(i=0;i<newAtoms.length;i++){
+        a=newAtoms[i];
+        MD.atoms.push({element:a.element,x:a.x+tx,y:a.y+ty,z:a.z+tz,color:a.color||((MD.atomColors&&MD.atomColors[a.element])||'#FF1493')});
+    }
+    // --- Bonds ---
+    if(!MD.hasExplicitBonds&&!msg.hasExplicitBonds){
+        // Fully automatic bond detection for the combined system (regular
+        // behavior for auto-detected files).
+        MD.bonds=detectBondsFromAtoms(MD.atoms);
+    }else{
+        // At least one side has authored bonds: keep them and connect the
+        // imported part explicitly instead of re-detecting everything
+        // (re-detection could alter authored bond orders).
+        MD.hasExplicitBonds=true;
+        if(msg.hasExplicitBonds){
+            newBonds.forEach(function(b){
+                if(b.atom1<newAtoms.length&&b.atom2<newAtoms.length)
+                    MD.bonds.push({atom1:N0+b.atom1,atom2:N0+b.atom2,order:b.order==null?1:b.order});
+            });
+        }else{
+            // Imported file had no authored bonds: auto-detect, keeping only
+            // bonds that touch a new atom (existing bonds stay as authored).
+            var det=detectBondsFromAtoms(MD.atoms);
+            det.forEach(function(b){if(b.atom1>=N0||b.atom2>=N0)MD.bonds.push(b)});
+        }
+    }
+    rebuildScene();
+    updateMolInfo();
+    // Zoom out if the combined structure no longer fits the current view.
+    var maxD=0;
+    MD.atoms.forEach(function(a){var dx=a.x-CX,dy=a.y-CY,dz=a.z-CZ,dd=Math.sqrt(dx*dx+dy*dy+dz*dz);if(dd>maxD)maxD=dd});
+    var need=maxD*2.5+5;
+    if(camDist<need){camDist=need;camera.position.set(0,0,camDist);camera.lookAt(0,0,0)}
+    needsRender=true;
+    modeInfoEl.textContent='Imported '+newAtoms.length+' atoms from '+(msg.fileName||'file')+' - placed beside the existing structure';
+}
 
 function buildAdjacency(atoms,bonds){
     var adj=[];
