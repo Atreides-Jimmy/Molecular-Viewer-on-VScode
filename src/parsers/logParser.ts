@@ -58,6 +58,17 @@ function parseOptStepsAndModes(content: string, lines: string[]): { optSteps?: O
             continue;
         }
 
+        // External energy (opt=external, e.g. Gaussian + xTB/XO combined runs
+        // have no SCF Done; the optimizer prints the external energy as):
+        //  Energy=    -9905.57592     NIter=   0.
+        // Anchored so lines like "Predicted change in Energy=-5.282751D-01"
+        // do not match.
+        const extEnergyMatch = line.match(/^\s*Energy=\s*(-?\d+\.\d+)\s+NIter=/);
+        if (extEnergyMatch) {
+            pendingEnergy = parseFloat(extEnergyMatch[1]);
+            continue;
+        }
+
         // Convergence criteria block starts with "Maximum Force" data line
         if (line.includes('Maximum Force') && /-?\d+\.\d/.test(line)) {
             const step: OptStep = { step: stepCounter + 1, energy: pendingEnergy };
