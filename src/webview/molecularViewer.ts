@@ -2688,19 +2688,58 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
     var allVals=[];
     steps.forEach(function(s){fields.forEach(function(f){if(s[f]!=null&&!isNaN(s[f]))allVals.push(s[f])})});
     if(allVals.length===0){ctx.fillStyle='#888';ctx.font='10px sans-serif';ctx.fillText('No data',padL,padT+12);return}
-    var vmin=Math.min.apply(null,allVals),vmax=Math.max.apply(null,allVals);
-    if(thresh1!=null){vmin=Math.min(vmin,thresh1);vmax=Math.max(vmax,thresh1)}
-    if(thresh2!=null){vmin=Math.min(vmin,thresh2);vmax=Math.max(vmax,thresh2)}
-    if(vmax-vmin<1e-12)vmax=vmin+1;
+    // Logarithmic Y axis: force/displacement values span decades across an
+    // optimization, so a linear axis squeezes the convergence-threshold lines
+    // against the bottom once early steps dominate the range. Non-positive
+    // values (e.g. a converged step printed as 0.000000) are clamped to a
+    // floor just below the smallest positive value; falls back to linear
+    // only when nothing positive remains or a threshold is non-positive.
+    var posVals=allVals.filter(function(v){return v>0});
+    var useLog=posVals.length>0;
+    [thresh1,thresh2].forEach(function(th){if(th!=null&&th<=0)useLog=false});
+    var vmin,vmax,vFloor=0;
+    if(useLog){
+        vFloor=Math.min.apply(null,posVals)*1e-2;
+        var lv=allVals.map(function(v){return Math.log10(Math.max(v,vFloor))});
+        if(thresh1!=null)lv.push(Math.log10(thresh1));
+        if(thresh2!=null)lv.push(Math.log10(thresh2));
+        vmin=Math.min.apply(null,lv);vmax=Math.max.apply(null,lv);
+        if(vmax-vmin<1e-12)vmax=vmin+1;
+    }else{
+        vmin=Math.min.apply(null,allVals),vmax=Math.max.apply(null,allVals);
+        if(thresh1!=null){vmin=Math.min(vmin,thresh1);vmax=Math.max(vmax,thresh1)}
+        if(thresh2!=null){vmin=Math.min(vmin,thresh2);vmax=Math.max(vmax,thresh2)}
+        if(vmax-vmin<1e-12)vmax=vmin+1;
+    }
+    function yOf(v){
+        if(useLog)return padT+ph*(vmax-Math.log10(Math.max(v,vFloor)))/(vmax-vmin);
+        return padT+ph*(vmax-v)/(vmax-vmin);
+    }
+    function valAtFrac(frac){
+        // Axis value at vertical fraction frac (0=top): inverse of yOf.
+        if(useLog)return Math.pow(10,vmax-(vmax-vmin)*frac);
+        return vmax-(vmax-vmin)*frac;
+    }
     var n=steps.length;
-    // Grid
+    // Grid + axis label. On the log axis the tick values ARE the log10
+    // values (evenly spaced, e.g. -3.35), with a rotated "log₁₀" axis label
+    // on the left; the linear fallback keeps exponential labels.
     ctx.strokeStyle='rgba(255,255,255,0.12)';ctx.lineWidth=1;
     ctx.fillStyle='#888';ctx.font='9px sans-serif';ctx.textAlign='right';ctx.textBaseline='middle';
     for(var g=0;g<=4;g++){
         var y=padT+ph*g/4;
         ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(padL+pw,y);ctx.stroke();
-        var val=vmax-(vmax-vmin)*g/4;
-        ctx.fillText(val.toExponential(2),padL-3,y);
+        if(useLog)ctx.fillText((vmax-(vmax-vmin)*g/4).toFixed(2),padL-3,y);
+        else ctx.fillText(valAtFrac(g/4).toExponential(1),padL-3,y);
+    }
+    if(useLog){
+        ctx.save();
+        ctx.translate(9,padT+ph/2);
+        ctx.rotate(-Math.PI/2);
+        ctx.textAlign='center';ctx.textBaseline='middle';
+        ctx.fillText('log\u2081\u2080',0,0);
+        ctx.restore();
+        ctx.fillStyle='#888';ctx.font='9px sans-serif';ctx.textAlign='right';ctx.textBaseline='middle';
     }
     ctx.textAlign='center';ctx.textBaseline='top';
     for(g=0;g<n;g+=Math.max(1,Math.floor(n/6))){
@@ -2710,7 +2749,7 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
     // Threshold lines
     [thresh1,thresh2].forEach(function(th,idx){
         if(th==null)return;
-        var ty=padT+ph*(vmax-th)/(vmax-vmin);
+        var ty=yOf(th);
         ctx.strokeStyle='rgba(255,180,0,0.5)';ctx.setLineDash([3,3]);
         ctx.beginPath();ctx.moveTo(padL,ty);ctx.lineTo(padL+pw,ty);ctx.stroke();
         ctx.setLineDash([]);
@@ -2730,7 +2769,7 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
             var v=steps[i][fields[fi]];
             if(v==null||isNaN(v))continue;
             x=padL+(n<=1?0:pw*i/(n-1));
-            y=padT+ph*(vmax-v)/(vmax-vmin);
+            y=yOf(v);
             if(!drew){ctx.moveTo(x,y);drew=true}else ctx.lineTo(x,y);
         }
         ctx.stroke();
@@ -2739,7 +2778,7 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
             v=steps[i][fields[fi]];
             if(v==null||isNaN(v))continue;
             x=padL+(n<=1?0:pw*i/(n-1));
-            y=padT+ph*(vmax-v)/(vmax-vmin);
+            y=yOf(v);
             ctx.beginPath();ctx.arc(x,y,2,0,Math.PI*2);ctx.fill();
         }
     }
