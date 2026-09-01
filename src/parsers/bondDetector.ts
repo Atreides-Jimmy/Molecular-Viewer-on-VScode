@@ -286,12 +286,83 @@ function fixBondOrders(
     });
 }
 
+// Distance above which two atoms of the given (normalized) elements can
+// never bond: the pair-specific cutoff when defined, otherwise the covalent
+// radii sum + 0.5 (mirrors getBondOrder's early-exit test exactly).
+function pairCutoff(e1: string, e2: string): number {
+    const c = BOND_CUTOFF[pairKey(e1, e2)];
+    if (c !== undefined) return c;
+    const r1 = COVALENT_RADII[e1] || 1.5;
+    const r2 = COVALENT_RADII[e2] || 1.5;
+    return r1 + r2 + 0.5;
+}
+
 export function detectBonds(atoms: Atom[]): Bond[] {
     const n = atoms.length;
     const bondMap = new Map<number, Map<number, number>>();
+    if (n === 0) return [];
 
+    // --- Spatial hash grid (3 Å cells) instead of the O(N²) pair loop ---
+    // A bond requires d <= cutoff(element pair), so per element we compute
+    // the maximum possible cutoff against every other element present; the
+    // grid search radius floor(maxCutoff/CELL)+1 then safely covers every
+    // pair that could bond. Candidate pairs are enumerated in exactly the
+    // same (i asc, j asc) order as the full pair loop, so the bondMap
+    // insertion sequence — and therefore bond order refinement results —
+    // are identical to the previous implementation.
+    const CELL = 3;
+    const normElements = atoms.map(a => a.element.charAt(0).toUpperCase() + a.element.slice(1).toLowerCase());
+    const distinct = Array.from(new Set(normElements));
+    const rangeFor = new Map<string, number>();
+    for (const e1 of distinct) {
+        let maxC = 0;
+        for (const e2 of distinct) {
+            const c = pairCutoff(e1, e2);
+            if (c > maxC) maxC = c;
+        }
+        rangeFor.set(e1, Math.floor(maxC / CELL) + 1);
+    }
+
+    const grid = new Map<number, number[]>();
+    const cellX = new Int32Array(n), cellY = new Int32Array(n), cellZ = new Int32Array(n);
     for (let i = 0; i < n; i++) {
-        for (let j = i + 1; j < n; j++) {
+        const cx = Math.floor(atoms[i].x / CELL);
+        const cy = Math.floor(atoms[i].y / CELL);
+        const cz = Math.floor(atoms[i].z / CELL);
+        cellX[i] = cx; cellY[i] = cy; cellZ[i] = cz;
+        // XOR hash may collide between different cells; collisions only merge
+        // buckets (extra candidates filtered by the distance test), never lose one.
+        const key = (cx * 73856093) ^ (cy * 19349663) ^ (cz * 83492791);
+        let bucket = grid.get(key);
+        if (!bucket) { bucket = []; grid.set(key, bucket); }
+        bucket.push(i);
+    }
+
+    const candidates: number[] = [];
+    for (let i = 0; i < n; i++) {
+        const range = rangeFor.get(normElements[i])!;
+        const cx = cellX[i], cy = cellY[i], cz = cellZ[i];
+        candidates.length = 0;
+        for (let dx = -range; dx <= range; dx++) {
+            for (let dy = -range; dy <= range; dy++) {
+                for (let dz = -range; dz <= range; dz++) {
+                    const key = ((cx + dx) * 73856093) ^ ((cy + dy) * 19349663) ^ ((cz + dz) * 83492791);
+                    const bucket = grid.get(key);
+                    if (!bucket) continue;
+                    for (let k = 0; k < bucket.length; k++) {
+                        const j = bucket[k];
+                        if (j > i) candidates.push(j);
+                    }
+                }
+            }
+        }
+        if (candidates.length === 0) continue;
+        candidates.sort((a, b) => a - b);
+        let prev = -1;
+        for (let ci = 0; ci < candidates.length; ci++) {
+            const j = candidates[ci];
+            if (j === prev) continue; // hash-collision duplicate
+            prev = j;
             const d = distance(atoms[i], atoms[j]);
             const bo = getBondOrder(atoms[i].element, atoms[j].element, d);
             if (bo > 0) {

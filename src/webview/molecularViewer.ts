@@ -1202,6 +1202,38 @@ function updateScenePositions(keepCenter){
     needsRender=true;
 }
 
+function updateAtomMeshPositions(){
+    // Light per-frame update used during Move Atoms drags: refresh atom
+    // sphere positions + selection highlights only (no bond mesh rebuild).
+    atomMeshes.forEach(function(m,i){var a=MD.atoms[i];if(a)m.position.set(a.x-CX,a.y-CY,a.z-CZ)});
+    highlightSelected();
+}
+
+// Incremental bond-mesh rebuild for Move Atoms drags: only bonds with at
+// least one endpoint in the moving selection are rebuilt; every other bond
+// mesh is left untouched (its endpoints did not move, so it is still exact).
+// Runs synchronously on every drag frame so bonds never lag behind atoms.
+function rebuildBondsTouching(selSet){
+    var sel={};
+    for(var i=0;i<selSet.length;i++)sel[selSet[i]]=true;
+    var affected={};
+    for(var bi=0;bi<MD.bonds.length;bi++){
+        var b=MD.bonds[bi];
+        if(sel[b.atom1]||sel[b.atom2])affected[bi]=true;
+    }
+    for(var i=bondMeshes.length-1;i>=0;i--){
+        if(affected[bondMeshes[i].userData.bondIdx]){
+            disposeMesh(bondMeshes[i]);moleculeGroup.remove(bondMeshes[i]);
+            bondMeshes.splice(i,1);
+        }
+    }
+    for(var bi=0;bi<MD.bonds.length;bi++){
+        if(!affected[bi])continue;
+        currentBondIdx=bi;createBond(MD.bonds[bi]);
+    }
+    needsRender=true;
+}
+
 function getPerp(dir){
     var up=Math.abs(dir.y)<0.99?new THREE.Vector3(0,1,0):new THREE.Vector3(1,0,0);
     return new THREE.Vector3().crossVectors(dir,up).normalize();
@@ -1317,8 +1349,9 @@ var panGrabOffset={x:0,y:0};   // grabbed point world xy minus pan offset
 var panRefZ=0;                 // world z of the pan reference plane
 
 function recomputeMovedBonds(){
-    // Real-time bond + bond order re-detection while atoms move. Files with
-    // explicit bond blocks (mol2/PDB CONECT) keep their authored bonds.
+    // Bond + bond order re-detection after a fragment move/rotate session
+    // ends (previously ran on every drag frame). Files with explicit bond
+    // blocks (mol2/PDB CONECT) keep their authored bonds.
     if(MD.hasExplicitBonds)return;
     MD.bonds=detectBondsFromAtoms(MD.atoms);
 }
@@ -1328,6 +1361,8 @@ function endMoveDrag(){
     moveDragOrig=null;
     // A Ctrl+click without any displacement pushes a redundant snapshot — drop it.
     if(!moveDragMoved&&undoStack.length>0){undoStack.pop();updateUndoBtn()}
+    // Re-detect connectivity once on release (not per frame during the drag).
+    if(moveDragMoved){recomputeMovedBonds();updateScenePositions(true)}
     document.body.style.cursor='';
     if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
 }
@@ -1336,6 +1371,8 @@ function endFragRot(){
     fragRotActive=false;
     // A Ctrl+click without any rotation pushes a redundant snapshot — drop it.
     if(!fragRotMoved&&undoStack.length>0){undoStack.pop();updateUndoBtn()}
+    // Re-detect connectivity once on release (not per frame during the drag).
+    if(fragRotMoved){recomputeMovedBonds();updateScenePositions(true)}
     document.body.style.cursor='';
     if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
 }
@@ -1347,6 +1384,9 @@ function stopMoveSession(){
         moveDragActive=false;moveKeyActive=false;fragRotActive=false;
         moveKeyLatch=true;
         moveDragOrig=null;
+        // Atoms may have moved — re-detect connectivity once.
+        recomputeMovedBonds();
+        updateScenePositions(true);
         document.body.style.cursor='';
     }
 }
@@ -1364,9 +1404,8 @@ function applyMoveWorldDelta(dw){
             a.x+=dl.x;a.y+=dl.y;a.z+=dl.z;
         }
     });
-    recomputeMovedBonds();
-    updateScenePositions(true);
-    needsRender=true;
+    updateAtomMeshPositions();
+    rebuildBondsTouching(selectedAtoms);
 }
 function applyFragRotDelta(ax,ay){
     // Incremental rotation of the selected fragment around its (fixed) center,
@@ -1384,9 +1423,8 @@ function applyFragRotDelta(ax,ay){
         v.set(a.x-fragRotCx,a.y-fragRotCy,a.z-fragRotCz).applyQuaternion(qComb);
         a.x=fragRotCx+v.x;a.y=fragRotCy+v.y;a.z=fragRotCz+v.z;
     });
-    recomputeMovedBonds();
-    updateScenePositions(true);
-    needsRender=true;
+    updateAtomMeshPositions();
+    rebuildBondsTouching(selectedAtoms);
 }
 function screenPointOnPlane(e,planeZ){
     // Intersect the mouse ray with the z=planeZ plane (camera sits on the
@@ -2670,11 +2708,47 @@ function detectBondsFromAtoms(atoms){
         if(ratio<0.85)return 3;if(ratio<0.90)return 2;return 1;
     }
     var n=atoms.length;var bm=new Map();
-    for(var i=0;i<n;i++){for(var j=i+1;j<n;j++){
-        var dx=atoms[i].x-atoms[j].x,dy=atoms[i].y-atoms[j].y,dz=atoms[i].z-atoms[j].z;
-        var d=Math.sqrt(dx*dx+dy*dy+dz*dz);var bo=gbo(atoms[i].element,atoms[j].element,d);
-        if(bo>0){if(!bm.has(i))bm.set(i,new Map());if(!bm.has(j))bm.set(j,new Map());bm.get(i).set(j,bo);bm.get(j).set(i,bo)}
-    }}
+    // Spatial hash grid (3 A cells) instead of the O(N^2) pair loop. A bond
+    // needs d<=cutoff(pair), so per element we take the max cutoff against
+    // every other element present; the search radius floor(max/CELL)+1 then
+    // covers every pair that could bond. Candidates are enumerated in the
+    // same (i asc, j asc) order as the old full pair loop, so the bondMap
+    // insertion sequence - and the bond-order fix/refine results - are
+    // identical to the previous implementation.
+    var CELL=3;
+    function pcut(e1,e2){var E1=e1.toUpperCase(),E2=e2.toUpperCase();var co=BC[E1<E2?E1+E2:E2+E1];
+        if(co!==undefined)return co;
+        var r1=CR2[e1]||1.5,r2=CR2[e2]||1.5;return r1+r2+0.5}
+    var normEls=new Array(n);var distinct=[];var seenEl={};
+    for(var i=0;i<n;i++){var ne=atoms[i].element.charAt(0).toUpperCase()+atoms[i].element.slice(1).toLowerCase();normEls[i]=ne;
+        if(!seenEl[ne]){seenEl[ne]=1;distinct.push(ne)}}
+    var rangeFor={};
+    for(var di=0;di<distinct.length;di++){var e1=distinct[di];var mc=0;
+        for(var dj=0;dj<distinct.length;dj++){var c2=pcut(e1,distinct[dj]);if(c2>mc)mc=c2}
+        rangeFor[e1]=Math.floor(mc/CELL)+1}
+    var grid=new Map();var cX=new Int32Array(n),cY=new Int32Array(n),cZ=new Int32Array(n);
+    for(var i=0;i<n;i++){var cx=Math.floor(atoms[i].x/CELL),cy=Math.floor(atoms[i].y/CELL),cz=Math.floor(atoms[i].z/CELL);
+        cX[i]=cx;cY[i]=cy;cZ[i]=cz;
+        // XOR hash collisions only merge buckets (extra candidates are
+        // filtered by the distance test), never lose one.
+        var key=(cx*73856093)^(cy*19349663)^(cz*83492791);
+        var bkt=grid.get(key);if(!bkt){bkt=[];grid.set(key,bkt)}bkt.push(i)}
+    var cand=[];
+    for(var i=0;i<n;i++){
+        var range=rangeFor[normEls[i]];var cx=cX[i],cy=cY[i],cz=cZ[i];cand.length=0;
+        for(var dx=-range;dx<=range;dx++)for(var dy=-range;dy<=range;dy++)for(var dz=-range;dz<=range;dz++){
+            var key=((cx+dx)*73856093)^((cy+dy)*19349663)^((cz+dz)*83492791);
+            var bkt=grid.get(key);if(!bkt)continue;
+            for(var k=0;k<bkt.length;k++){var j=bkt[k];if(j>i)cand.push(j)}}
+        if(cand.length===0)continue;
+        cand.sort(function(a,b){return a-b});
+        var prev=-1;
+        for(var ci=0;ci<cand.length;ci++){var j=cand[ci];if(j===prev)continue;prev=j;
+            var dx2=atoms[i].x-atoms[j].x,dy2=atoms[i].y-atoms[j].y,dz2=atoms[i].z-atoms[j].z;
+            var d=Math.sqrt(dx2*dx2+dy2*dy2+dz2*dz2);var bo=gbo(atoms[i].element,atoms[j].element,d);
+            if(bo>0){if(!bm.has(i))bm.set(i,new Map());if(!bm.has(j))bm.set(j,new Map());bm.get(i).set(j,bo);bm.get(j).set(i,bo)}
+        }
+    }
     bm.forEach(function(nb,i){nb.forEach(function(o,j){if(i>j)return;var e1=atoms[i].element.toUpperCase(),e2=atoms[j].element.toUpperCase();var els=new Set([e1,e2]);
         if(els.has('C')&&els.has('O')&&o!==1&&o!==2){var no=o<1.7?1:2;nb.set(j,no);bm.get(j).set(i,no)}
         if(e1==='BR'||e2==='BR'){nb.set(j,1);bm.get(j).set(i,1)}
@@ -4663,6 +4737,8 @@ function animate(){
             // latch view rotation until all arrow keys are released.
             moveKeyActive=false;
             keyRotLatch=true;
+            recomputeMovedBonds();
+            updateScenePositions(true);
             if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
         }
         if(currentMode==='moveAtoms'&&selectedAtoms.length>0&&!diffMode&&!moveKeyLatch&&ctrlDown){
@@ -4689,6 +4765,8 @@ function animate(){
                 applyFragRotDelta(fAx,fAy);
             }else if(moveKeyActive){
                 moveKeyActive=false;
+                recomputeMovedBonds();
+                updateScenePositions(true);
                 if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
             }
         }else if(!diffMode&&!keyRotLatch){

@@ -43,84 +43,24 @@ function skipDashedLines(lines: string[], startIdx: number, count: number): numb
     return i;
 }
 
-function parseOptStepsAndModes(content: string, lines: string[]): { optSteps?: OptStep[]; normalModes?: NormalMode[] } {
-    const optSteps: OptStep[] = [];
-    let pendingEnergy: number | undefined;
-    let stepCounter = 0;
-
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-
-        // SCF Done:  E(RHF) =  -76.0107469158     A.U. after   10 cycles
-        const scfMatch = line.match(/SCF Done:\s+E\([^)]+\)\s*=\s*(-?\d+\.\d+)/);
-        if (scfMatch) {
-            pendingEnergy = parseFloat(scfMatch[1]);
-            continue;
-        }
-
-        // External energy (opt=external, e.g. Gaussian + xTB/XO combined runs
-        // have no SCF Done; the optimizer prints the external energy as):
-        //  Energy=    -9905.57592     NIter=   0.
-        // Anchored so lines like "Predicted change in Energy=-5.282751D-01"
-        // do not match.
-        const extEnergyMatch = line.match(/^\s*Energy=\s*(-?\d+\.\d+)\s+NIter=/);
-        if (extEnergyMatch) {
-            pendingEnergy = parseFloat(extEnergyMatch[1]);
-            continue;
-        }
-
-        // Convergence criteria block starts with "Maximum Force" data line
-        if (line.includes('Maximum Force') && /-?\d+\.\d/.test(line)) {
-            const step: OptStep = { step: stepCounter + 1, energy: pendingEnergy };
-            stepCounter++;
-            pendingEnergy = undefined;
-
-            // Parse this block: 4 lines (Maximum Force, RMS Force, Maximum Displacement, RMS Displacement)
-            for (let k = 0; k < 4 && i < lines.length; k++, i++) {
-                const cur = lines[i];
-                const valMatch = cur.match(/(-?\d+\.\d+(?:[EDed][-+]?\d+)?)/);
-                if (!valMatch) continue;
-                const val = parseFloat(valMatch[1].replace(/[EDed]/i, 'e'));
-                if (cur.includes('Maximum Force') && !cur.includes('RMS')) {
-                    step.maxForce = val;
-                } else if (cur.includes('RMS') && cur.includes('Force')) {
-                    step.rmsForce = val;
-                } else if (cur.includes('Maximum Displacement')) {
-                    step.maxDisplacement = val;
-                } else if (cur.includes('RMS') && cur.includes('Displacement')) {
-                    step.rmsDisplacement = val;
-                }
-            }
-            i--; // compensate for loop increment
-            optSteps.push(step);
-            continue;
-        }
-    }
-
-    const normalModes = parseNormalModes(lines);
-
-    return {
-        optSteps: optSteps.length > 0 ? optSteps : undefined,
-        normalModes: normalModes && normalModes.length > 0 ? normalModes : undefined
-    };
-}
-
-function parseNormalModes(lines: string[]): NormalMode[] | undefined {
-    // Find the LAST "Harmonic frequencies (cm**-1)" header (CalcAll has multiple blocks)
-    let headerIdx = -1;
-    for (let i = 0; i < lines.length; i++) {
-        if (lines[i].includes('Harmonic frequencies') && lines[i].includes('cm**-1')) {
-            headerIdx = i;
-        }
-    }
-    if (headerIdx < 0) return undefined;
-
+/**
+ * Parse ONE harmonic-frequencies section starting AT the header line.
+ * Returns the modes found and the line index where the section ends so the
+ * caller's single-pass scan can resume there. Stops early at another section
+ * header, so each section is parsed independently and the last one wins
+ * (matching the previous "scan for the last header, then parse" behavior).
+ */
+function parseModesFromHeader(lines: string[], headerIdx: number): { modes: NormalMode[]; endIdx: number } {
     const modes: NormalMode[] = [];
     let i = headerIdx + 1;
 
     // Skip blank lines and column header text until we reach the first frequency block
     while (i < lines.length) {
-        const line = lines[i].trim();
+        const raw = lines[i];
+        // A new section header ends this one (caller re-checks and parses there)
+        if (raw.includes('Harmonic frequencies') && raw.includes('cm**-1')) break;
+
+        const line = raw.trim();
 
         // Detect end of normal modes section
         if (line === '' && modes.length > 0) {
@@ -213,7 +153,7 @@ function parseNormalModes(lines: string[]): NormalMode[] | undefined {
         i = rowIdx;
     }
 
-    return modes.length > 0 ? modes : undefined;
+    return { modes, endIdx: i };
 }
 
 export function parseGaussianLog(content: string): GaussianLogResult {
@@ -239,10 +179,32 @@ export function parseGaussianLog(content: string): GaussianLogResult {
         logMultiplicity = parseInt(chargeMultMatch[2], 10);
     }
 
-    let optStep = 0;
-    for (let i = 0; i < lines.length; i++) {
+    // Single pass over the file: geometry frames, convergence-table steps and
+    // harmonic-frequency sections are all detected in ONE traversal (these
+    // used to be three separate full scans). Consumed branches skip only
+    // atom-coordinate rows / frequency tables, which never match the other
+    // detectors, so the merged scan yields exactly the previous results.
+    let stdFrames = 0;          // standard-orientation frame counter
+    const optSteps: OptStep[] = [];
+    let pendingEnergy: number | undefined;
+    let stepCounter = 0;        // convergence-table step counter
+    let modes: NormalMode[] | undefined;
+    let fallbackSeen = false;
+    let fallbackFrame: LogFrame | undefined;
+
+    let i = 0;
+    while (i < lines.length) {
         const line = lines[i];
 
+        // --- Harmonic frequencies section (parsed inline; the LAST section wins) ---
+        if (line.includes('Harmonic frequencies') && line.includes('cm**-1')) {
+            const res = parseModesFromHeader(lines, i);
+            modes = res.modes.length > 0 ? res.modes : undefined;
+            i = res.endIdx;
+            continue;
+        }
+
+        // --- Geometry frames (opt/freq logs) ---
         if (line.includes('Standard orientation:') || line.includes('Input orientation:')) {
             const isStandard = line.includes('Standard orientation:');
 
@@ -271,7 +233,7 @@ export function parseGaussianLog(content: string): GaussianLogResult {
 
             if (atoms.length > 0) {
                 const label = isStandard
-                    ? `Step ${optStep + 1}${chargeMultLine ? ' (' + chargeMultLine + ')' : ''}`
+                    ? `Step ${stdFrames + 1}${chargeMultLine ? ' (' + chargeMultLine + ')' : ''}`
                     : `Input${chargeMultLine ? ' (' + chargeMultLine + ')' : ''}`;
                 frames.push({
                     atoms,
@@ -282,9 +244,100 @@ export function parseGaussianLog(content: string): GaussianLogResult {
                     charge: logCharge,
                     multiplicity: logMultiplicity
                 });
-                if (isStandard) optStep++;
+                if (isStandard) stdFrames++;
             }
+            i++; // matches the previous outer-loop increment
+            continue;
         }
+
+        // --- Fallback frame for old-style logs: only the first occurrence is
+        // considered, and it is used only when no orientation frames exist ---
+        if (!fallbackSeen && line.includes('Coordinates (Angstroms)')) {
+            fallbackSeen = true;
+            i = skipDashedLines(lines, i + 1, 2);
+
+            const atoms: Atom[] = [];
+            while (i < lines.length) {
+                const coordLine = lines[i].trim();
+                if (coordLine === '' || coordLine.includes('---')) break;
+
+                const parts = coordLine.split(/\s+/);
+                if (parts.length >= 4) {
+                    const element = parts[1].replace(/[0-9]/g, '');
+                    const el = element.charAt(0).toUpperCase() + element.slice(1).toLowerCase();
+                    const x = parseFloat(parts[2]);
+                    const y = parseFloat(parts[3]);
+                    const z = parseFloat(parts[4]);
+
+                    if (el && !isNaN(x) && !isNaN(y) && !isNaN(z)) {
+                        atoms.push({ element: el, x, y, z, index: atoms.length });
+                    }
+                }
+                i++;
+            }
+
+            if (atoms.length > 0) {
+                fallbackFrame = {
+                    atoms,
+                    bonds: [],
+                    title: 'Coordinates',
+                    hasExplicitBonds: false,
+                    stepLabel: 'Coordinates',
+                    charge: logCharge,
+                    multiplicity: logMultiplicity
+                };
+            }
+            continue;
+        }
+
+        // --- Convergence table steps ---
+        // SCF Done:  E(RHF) =  -76.0107469158     A.U. after   10 cycles
+        const scfMatch = line.match(/SCF Done:\s+E\([^)]+\)\s*=\s*(-?\d+\.\d+)/);
+        if (scfMatch) {
+            pendingEnergy = parseFloat(scfMatch[1]);
+            i++;
+            continue;
+        }
+
+        // External energy (opt=external, e.g. Gaussian + xTB/XO combined runs
+        // have no SCF Done; the optimizer prints the external energy as):
+        //  Energy=    -9905.57592     NIter=   0.
+        // Anchored so lines like "Predicted change in Energy=-5.282751D-01"
+        // do not match.
+        const extEnergyMatch = line.match(/^\s*Energy=\s*(-?\d+\.\d+)\s+NIter=/);
+        if (extEnergyMatch) {
+            pendingEnergy = parseFloat(extEnergyMatch[1]);
+            i++;
+            continue;
+        }
+
+        // Convergence criteria block starts with "Maximum Force" data line
+        if (line.includes('Maximum Force') && /-?\d+\.\d/.test(line)) {
+            const step: OptStep = { step: stepCounter + 1, energy: pendingEnergy };
+            stepCounter++;
+            pendingEnergy = undefined;
+
+            // Parse this block: 4 lines (Maximum Force, RMS Force, Maximum Displacement, RMS Displacement)
+            for (let k = 0; k < 4 && i < lines.length; k++, i++) {
+                const cur = lines[i];
+                const valMatch = cur.match(/(-?\d+\.\d+(?:[EDed][-+]?\d+)?)/);
+                if (!valMatch) continue;
+                const val = parseFloat(valMatch[1].replace(/[EDed]/i, 'e'));
+                if (cur.includes('Maximum Force') && !cur.includes('RMS')) {
+                    step.maxForce = val;
+                } else if (cur.includes('RMS') && cur.includes('Force')) {
+                    step.rmsForce = val;
+                } else if (cur.includes('Maximum Displacement')) {
+                    step.maxDisplacement = val;
+                } else if (cur.includes('RMS') && cur.includes('Displacement')) {
+                    step.rmsDisplacement = val;
+                }
+            }
+            optSteps.push(step);
+            continue;
+        }
+
+        i++;
     }
 
     // If the log contains both "Input orientation" and "Standard orientation" frames,
@@ -308,53 +361,14 @@ export function parseGaussianLog(content: string): GaussianLogResult {
         frames.push(...filtered);
     }
 
-    if (frames.length === 0) {
-        for (let i = 0; i < lines.length; i++) {
-            if (lines[i].includes('Coordinates (Angstroms)')) {
-                i = skipDashedLines(lines, i + 1, 2);
-
-                const atoms: Atom[] = [];
-                while (i < lines.length) {
-                    const coordLine = lines[i].trim();
-                    if (coordLine === '' || coordLine.includes('---')) break;
-
-                    const parts = coordLine.split(/\s+/);
-                    if (parts.length >= 4) {
-                        const element = parts[1].replace(/[0-9]/g, '');
-                        const el = element.charAt(0).toUpperCase() + element.slice(1).toLowerCase();
-                        const x = parseFloat(parts[2]);
-                        const y = parseFloat(parts[3]);
-                        const z = parseFloat(parts[4]);
-
-                        if (el && !isNaN(x) && !isNaN(y) && !isNaN(z)) {
-                            atoms.push({ element: el, x, y, z, index: atoms.length });
-                        }
-                    }
-                    i++;
-                }
-
-                if (atoms.length > 0) {
-                    frames.push({
-                        atoms,
-                        bonds: [],
-                        title: 'Coordinates',
-                        hasExplicitBonds: false,
-                        stepLabel: 'Coordinates',
-                        charge: logCharge,
-                        multiplicity: logMultiplicity
-                    });
-                }
-                break;
-            }
-        }
+    if (frames.length === 0 && fallbackFrame) {
+        frames.push(fallbackFrame);
     }
-
-    const extra = parseOptStepsAndModes(content, lines);
 
     return {
         frames,
         title,
-        optSteps: extra.optSteps,
-        normalModes: extra.normalModes
+        optSteps: optSteps.length > 0 ? optSteps : undefined,
+        normalModes: modes
     };
 }

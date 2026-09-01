@@ -12,11 +12,16 @@ export interface OrcaFrame {
 
 export function parseOrcaOut(content: string): { frames: OrcaFrame[], title: string, charge?: number, multiplicity?: number } {
     const lines = content.split(/\r?\n/);
-    const frames: OrcaFrame[] = [];
+    // Single pass: charge/multiplicity, Angstrom geometry blocks and A.U.
+    // geometry blocks are all detected in ONE traversal (the A.U. blocks used
+    // to be a second full scan). Consumed atom rows never match the other
+    // detectors, so the merged scan yields exactly the previous results; the
+    // A.U. frames are used only when no Angstrom frame exists.
+    const angstromFrames: OrcaFrame[] = [];
+    const auFrames: OrcaFrame[] = [];
     let title = '';
     let charge: number | undefined;
     let multiplicity: number | undefined;
-    let stepCount = 0;
 
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
@@ -53,69 +58,67 @@ export function parseOrcaOut(content: string): { frames: OrcaFrame[], title: str
                 j++;
             }
             if (atoms.length > 0) {
-                stepCount++;
-                frames.push({
+                angstromFrames.push({
                     atoms,
                     bonds: [],
                     title,
                     hasExplicitBonds: false,
-                    stepLabel: 'Step ' + stepCount,
+                    stepLabel: 'Step ' + (angstromFrames.length + 1),
                     charge,
                     multiplicity
                 });
             }
+            i = j - 1; // resume after the consumed atom block
+            continue;
         }
-    }
 
-    if (frames.length === 0) {
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i].trim();
-            if (line.includes('CARTESIAN COORDINATES (A.U.)')) {
-                const atoms: Atom[] = [];
-                let j = i + 2;
-                while (j < lines.length) {
-                    const tl = lines[j].trim();
-                    if (tl === '' || tl.startsWith('-')) break;
-                    const parts = tl.split(/\s+/);
-                    // ORCA A.U. format: "index elem nuclear_charge x y z" (6 cols)
-                    // but some variants have extra columns. Find the element symbol
-                    // (first non-numeric token) and take the last 3 numbers as coords.
-                    let elem = '';
-                    const nums: number[] = [];
-                    for (const p of parts) {
-                        if (/^[A-Za-z]{1,2}$/.test(p) && !elem) {
-                            elem = p;
-                        } else {
-                            const n = parseFloat(p);
-                            if (!isNaN(n)) nums.push(n);
-                        }
+        if (line.includes('CARTESIAN COORDINATES (A.U.)')) {
+            const atoms: Atom[] = [];
+            let j = i + 2;
+            while (j < lines.length) {
+                const tl = lines[j].trim();
+                if (tl === '' || tl.startsWith('-')) break;
+                const parts = tl.split(/\s+/);
+                // ORCA A.U. format: "index elem nuclear_charge x y z" (6 cols)
+                // but some variants have extra columns. Find the element symbol
+                // (first non-numeric token) and take the last 3 numbers as coords.
+                let elem = '';
+                const nums: number[] = [];
+                for (const p of parts) {
+                    if (/^[A-Za-z]{1,2}$/.test(p) && !elem) {
+                        elem = p;
+                    } else {
+                        const n = parseFloat(p);
+                        if (!isNaN(n)) nums.push(n);
                     }
-                    if (elem && nums.length >= 3) {
-                        const x = nums[nums.length - 3] * 0.529177249;
-                        const y = nums[nums.length - 2] * 0.529177249;
-                        const z = nums[nums.length - 1] * 0.529177249;
-                        atoms.push({
-                            element: elem.charAt(0).toUpperCase() + elem.slice(1).toLowerCase(),
-                            x, y, z, index: atoms.length
-                        });
-                    }
-                    j++;
                 }
-                if (atoms.length > 0) {
-                    stepCount++;
-                    frames.push({
-                        atoms,
-                        bonds: [],
-                        title,
-                        hasExplicitBonds: false,
-                        stepLabel: 'Step ' + stepCount,
-                        charge,
-                        multiplicity
+                if (elem && nums.length >= 3) {
+                    const x = nums[nums.length - 3] * 0.529177249;
+                    const y = nums[nums.length - 2] * 0.529177249;
+                    const z = nums[nums.length - 1] * 0.529177249;
+                    atoms.push({
+                        element: elem.charAt(0).toUpperCase() + elem.slice(1).toLowerCase(),
+                        x, y, z, index: atoms.length
                     });
                 }
+                j++;
             }
+            if (atoms.length > 0) {
+                auFrames.push({
+                    atoms,
+                    bonds: [],
+                    title,
+                    hasExplicitBonds: false,
+                    stepLabel: 'Step ' + (auFrames.length + 1),
+                    charge,
+                    multiplicity
+                });
+            }
+            i = j - 1; // resume after the consumed atom block
+            continue;
         }
     }
 
+    const frames = angstromFrames.length > 0 ? angstromFrames : auFrames;
     return { frames, title, charge, multiplicity };
 }

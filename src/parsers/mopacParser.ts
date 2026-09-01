@@ -35,9 +35,36 @@ export function parseMopac(content: string): MolecularData {
     let inCoords = false;
     let coordLines: string[] = [];
     let foundChargeMult = false;
+    // Fallback strategy state (previously a separate full-file scan that ran
+    // only when the primary strategy found no atoms). The first fallback
+    // header's block is now captured inline during the same traversal; both
+    // collectors see every line exactly as the two passes did.
+    let fallbackPastHeader = false;
+    const fallbackAtoms: Atom[] = [];
 
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
+
+        // --- Fallback block rows: captured without consuming the line, so
+        // the primary strategy still processes it as before ---
+        if (fallbackPastHeader && line !== '' && !line.startsWith('-') && !line.startsWith('=')) {
+            const parts = line.split(/\s+/);
+            if (parts.length >= 4) {
+                const elem = parseMopacElement(parts[0]);
+                const x = parseFloat(parts[1]);
+                const y = parseFloat(parts[2]);
+                const z = parseFloat(parts[3]);
+                if (!isNaN(x) && !isNaN(y) && !isNaN(z)) {
+                    fallbackAtoms.push({ element: elem, x, y, z, index: fallbackAtoms.length });
+                }
+            }
+        }
+
+        if (!fallbackPastHeader) {
+            if (line.match(/CARTESIAN COORDINATES/i) || line.match(/ATOM\s+X\s+Y\s+Z/i) || line.match(/FINAL GEOMETRY/i)) {
+                fallbackPastHeader = true;
+            }
+        }
 
         if (i === 0) {
             title = line || 'MOPAC Calculation';
@@ -64,7 +91,14 @@ export function parseMopac(content: string): MolecularData {
 
         if (inCoords) {
             if (line === '' || line.toLowerCase().startsWith('old') || line.toLowerCase().startsWith('===')) {
-                if (coordLines.length > 0) break;
+                if (coordLines.length > 0) {
+                    // Primary block complete. The previous implementation broke
+                    // out of the loop here; freezing these flags and continuing
+                    // keeps the primary result identical while the fallback
+                    // header search still runs inline.
+                    inCoords = false;
+                    foundChargeMult = true;
+                }
                 continue;
             }
             coordLines.push(line);
@@ -104,37 +138,8 @@ export function parseMopac(content: string): MolecularData {
         atomIndex++;
     }
 
-    if (atoms.length === 0) {
-        inCoords = false;
-        coordLines = [];
-        let pastHeader = false;
-
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i].trim();
-
-            if (line.match(/CARTESIAN COORDINATES/i) || line.match(/ATOM\s+X\s+Y\s+Z/i) || line.match(/FINAL GEOMETRY/i)) {
-                pastHeader = true;
-                continue;
-            }
-
-            if (pastHeader) {
-                if (line === '' || line.startsWith('-') || line.startsWith('=')) {
-                    if (coordLines.length > 0) break;
-                    continue;
-                }
-                const parts = line.split(/\s+/);
-                if (parts.length >= 4) {
-                    const elem = parseMopacElement(parts[0]);
-                    const x = parseFloat(parts[1]);
-                    const y = parseFloat(parts[2]);
-                    const z = parseFloat(parts[3]);
-                    if (!isNaN(x) && !isNaN(y) && !isNaN(z)) {
-                        atoms.push({ element: elem, x, y, z, index: atomIndex });
-                        atomIndex++;
-                    }
-                }
-            }
-        }
+    if (atoms.length === 0 && fallbackAtoms.length > 0) {
+        for (const fa of fallbackAtoms) atoms.push(fa);
     }
 
     return { atoms, bonds, title, hasExplicitBonds, charge, multiplicity };
