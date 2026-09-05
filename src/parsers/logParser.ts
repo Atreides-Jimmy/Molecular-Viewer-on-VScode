@@ -29,6 +29,7 @@ export interface GaussianLogResult {
     title: string;
     optSteps?: OptStep[];
     normalModes?: NormalMode[];
+    routes?: RouteSection[];
 }
 
 function skipDashedLines(lines: string[], startIdx: number, count: number): number {
@@ -41,6 +42,112 @@ function skipDashedLines(lines: string[], startIdx: number, count: number): numb
         i++;
     }
     return i;
+}
+
+/** A route card starts with '#' optionally followed by a single-letter print
+ *  level (#p/#P/#t/#n, case-insensitive) or a bare '#'; the keyword part must
+ *  follow. '#pop'-style strings are not route cards. */
+const ROUTE_START_RE = /^#(\s|[A-Za-z]\b|$)/;
+/** Pure dashed separator line (Gaussian prints 50-70 dashes). Route cards are
+ *  always enclosed between two of these, single-line or wrapped. */
+const DASH_RE = /^\s*-{5,}\s*$/;
+
+export interface RouteKeyword {
+    name: string;       // keyword as written (case preserved), e.g. 'opt', 'SCRF'
+    options: string[];  // option list as written, e.g. ['SMD','Solvent=Acetone']
+}
+
+export interface RouteSection {
+    raw: string;             // route text joined into one line
+    keywords: RouteKeyword[];
+    hasOpt: boolean;         // the section requests an optimization
+}
+
+/**
+ * Structured parse of one route section, used both for the optimization gate
+ * and for the webview's Route panel. Tokenization is paren- and quote-aware
+ * at the top level, so scrf=(SMD, Solvent=Acetone) and external="python3
+ * /usr/bin/xtb --alpb water" each stay a single token, and a bare '=(calcall)'
+ * continuation token (route wrapping can split 'opt' from its option list) is
+ * folded into the preceding keyword's options. Full-width characters are
+ * normalized for parsing; the raw text is kept for display.
+ */
+function parseRouteSection(routeText: string): RouteSection {
+    const r = routeText
+        .replace(/（/g, '(').replace(/）/g, ')')
+        .replace(/＝/g, '=').replace(/，/g, ',');
+    // Top-level tokens: whitespace splits only outside parens/quotes
+    const tokens: string[] = [];
+    let cur = '';
+    let depth = 0;
+    let inQuote = false;
+    for (let c = 0; c < r.length; c++) {
+        const ch = r[c];
+        if (inQuote) { cur += ch; if (ch === '"') inQuote = false; continue; }
+        if (ch === '"') { inQuote = true; cur += ch; continue; }
+        if (ch === '(') depth++;
+        else if (ch === ')') { if (depth > 0) depth--; }
+        else if (depth === 0 && /\s/.test(ch)) { if (cur !== '') { tokens.push(cur); cur = ''; } continue; }
+        cur += ch;
+    }
+    if (cur !== '') tokens.push(cur);
+    // Split tokens into keyword entries. The '=' separating a keyword from
+    // its value is the first '=' OUTSIDE parentheses/quotes — iop(5/17=17)
+    // is a bare-paren keyword, not 'iop(5/17' = '17)'.
+    const eqOutside = (s: string): number => {
+        let d = 0;
+        let q = false;
+        for (let c = 0; c < s.length; c++) {
+            const ch = s[c];
+            if (q) { if (ch === '"') q = false; continue; }
+            if (ch === '"') q = true;
+            else if (ch === '(') d++;
+            else if (ch === ')') { if (d > 0) d--; }
+            else if (ch === '=' && d === 0) return c;
+        }
+        return -1;
+    };
+    const keywords: RouteKeyword[] = [];
+    const pushValue = (kw: RouteKeyword | null, value: string) => {
+        let v = value.trim();
+        if (v.startsWith('(') && v.endsWith(')')) v = v.slice(1, -1);
+        const opts = v.split(',').map(s => s.trim()).filter(s => s !== '');
+        if (kw && opts.length > 0) kw.options.push(...opts);
+    };
+    for (const t of tokens) {
+        if (t[0] === '=') {
+            // Wrapped continuation: '=(calcall)' belongs to the previous keyword
+            pushValue(keywords.length > 0 ? keywords[keywords.length - 1] : null, t.slice(1));
+            continue;
+        }
+        const eq = eqOutside(t);
+        if (eq > 0) {
+            const kw: RouteKeyword = { name: t.slice(0, eq), options: [] };
+            pushValue(kw, t.slice(eq + 1));
+            keywords.push(kw);
+            continue;
+        }
+        const pi = t.indexOf('(');
+        if (pi > 0 && t.endsWith(')')) {
+            // Keyword with a bare parenthesized option list, e.g. iop(5/17=17)
+            keywords.push({
+                name: t.slice(0, pi),
+                options: t.slice(pi + 1, -1).split(',').map(s => s.trim()).filter(s => s !== '')
+            });
+            continue;
+        }
+        keywords.push({ name: t, options: [] });
+    }
+    // Optimization request — the same semantics as the panel-visibility gate:
+    // whole-token opt / optimization (any spelling, with or without options),
+    // or calcall (standalone non-standard form, or as a keyword option such as
+    // freq=calcall which implies an optimization).
+    const hasOpt = keywords.some(k => {
+        const n = k.name.toLowerCase();
+        return n === 'opt' || n === 'optimization' || n === 'calcall' ||
+            k.options.some(o => o.toLowerCase() === 'calcall');
+    });
+    return { raw: routeText.replace(/\s+/g, ' ').trim(), keywords, hasOpt };
 }
 
 /**
@@ -191,10 +298,58 @@ export function parseGaussianLog(content: string): GaussianLogResult {
     let modes: NormalMode[] | undefined;
     let fallbackSeen = false;
     let fallbackFrame: LogFrame | undefined;
+    // Optimization steps are the optimizer's per-step Item/Value/Converged?
+    // tables — but SP jobs that compute gradients (Force keyword) and freq
+    // jobs print the SAME gradient banner and the same 4-metric table without
+    // running an optimizer. The reliable trigger is the route card: emit
+    // optSteps only when a '#...' route section in the file actually requests
+    // an optimization (opt / optimization / freq=calcall). All route sections
+    // are collected (parsed into RouteSection[]) for the Route panel.
+    let routeHasOpt = false;
+    const routes: RouteSection[] = [];
 
     let i = 0;
     while (i < lines.length) {
         const line = lines[i];
+
+        // --- Route card (keywords line) at the start of each job section ---
+        // Route cards are enclosed between two dashed separator lines (the
+        // section may wrap onto continuation lines, e.g. '... Fre' / 'q' or
+        // '... opt' / '=(calcall) freq'), so the dash+'#...' pairing anchors
+        // the section and the closing dash bounds it; everything between the
+        // dashes is route content. A '#...' line without its top dash (only
+        // possible in non-standard output) still triggers collection bounded
+        // by blank/dash lines, preserving the previous behavior.
+        // Pre-filter: only '-'/'#'-leading lines (after blanks/tabs) can
+        // participate, so long logs skip the regex work for most lines.
+        {
+            let p0 = 0;
+            const L0 = line.length;
+            while (p0 < L0 && (line.charCodeAt(p0) === 32 || line.charCodeAt(p0) === 9)) p0++;
+            const c0 = p0 < L0 ? line[p0] : '';
+            if (c0 === '-' || c0 === '#') {
+                const tr = line.trim();
+                let routeStart = -1;
+                if (DASH_RE.test(tr)) {
+                    if (i + 1 < lines.length && ROUTE_START_RE.test(lines[i + 1].trim())) routeStart = i + 1;
+                } else if (ROUTE_START_RE.test(tr)) {
+                    routeStart = i;
+                }
+                if (routeStart >= 0) {
+                    let j = routeStart + 1;
+                    while (j < lines.length) {
+                        const t2 = lines[j].trim();
+                        if (t2 === '' || DASH_RE.test(t2) || ROUTE_START_RE.test(t2)) break;
+                        j++;
+                    }
+                    const sec = parseRouteSection(lines.slice(routeStart, j).map(l => l.trim()).join(' '));
+                    routes.push(sec);
+                    if (sec.hasOpt) routeHasOpt = true;
+                    i = j;
+                    continue;
+                }
+            }
+        }
 
         // --- Harmonic frequencies section (parsed inline; the LAST section wins) ---
         if (line.includes('Harmonic frequencies') && line.includes('cm**-1')) {
@@ -368,7 +523,8 @@ export function parseGaussianLog(content: string): GaussianLogResult {
     return {
         frames,
         title,
-        optSteps: optSteps.length > 0 ? optSteps : undefined,
-        normalModes: modes
+        optSteps: routeHasOpt && optSteps.length > 0 ? optSteps : undefined,
+        normalModes: modes,
+        routes: routes.length > 0 ? routes : undefined
     };
 }

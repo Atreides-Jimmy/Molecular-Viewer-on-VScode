@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { parseFile, parseLogFile, LogFrame, OrcaFrame, parseTcl } from '../parsers/index';
+import { parseFile, parseLogFile, LogFrame, OrcaFrame, parseTcl, RouteSection } from '../parsers/index';
 import { ensureBonds } from '../parsers/bondDetector';
 import { MolecularData, AtomGroup, OptStep, NormalMode } from '../types';
 
@@ -47,6 +47,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         let atomGroups: AtomGroup[] | undefined;
         let optSteps: OptStep[] | undefined;
         let normalModes: NormalMode[] | undefined;
+        let routes: RouteSection[] | undefined;
+        let logSource: string | undefined;
 
         try {
         if (ext === 'tcl') {
@@ -73,6 +75,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         frames = logResult.frames;
                         optSteps = logResult.optSteps;
                         normalModes = logResult.normalModes;
+                        routes = logResult.routes;
+                        logSource = logResult.source;
                         if (frames.length > 0) {
                             data = ensureBonds({
                                 atoms: frames[0].atoms,
@@ -108,6 +112,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             frames = logResult.frames;
             optSteps = logResult.optSteps;
             normalModes = logResult.normalModes;
+            routes = logResult.routes;
+            logSource = logResult.source;
             if (frames.length > 0) {
                 data = ensureBonds({
                     atoms: frames[0].atoms,
@@ -141,7 +147,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             data.filePath = uri.fsPath;
         }
 
-        return new MolecularDocument(uri, data, frames, optSteps, normalModes);
+        return new MolecularDocument(uri, data, frames, optSteps, normalModes, logSource, routes);
     }
 
     async resolveCustomEditor(
@@ -153,7 +159,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             enableScripts: true,
         };
 
-        webviewPanel.webview.html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes);
+        webviewPanel.webview.html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes);
 
         webviewPanel.webview.onDidReceiveMessage(async (message) => {
             switch (message.command) {
@@ -438,7 +444,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         });
     }
 
-    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[]): Promise<string> {
+    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[], logSource?: string, routes?: RouteSection[]): Promise<string> {
         const nonce = getNonce();
 
         const threeJsBytes = await vscode.workspace.fs.readFile(
@@ -513,7 +519,12 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             displacements: m.displacements
         })) : null;
 
-        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData });
+        const routesData = routes ? routes.map(r => ({
+            raw: r.raw, hasOpt: r.hasOpt,
+            keywords: r.keywords.map(k => ({ name: k.name, options: k.options }))
+        })) : null;
+
+        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, routes: routesData });
 
         return `<!DOCTYPE html>
 <html lang="en">
@@ -642,6 +653,22 @@ canvas{display:block}
 #freq-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
 #freq-reopen.show{display:block}
 #freq-reopen:hover{background:var(--vscode-button-background,#0e639c)}
+#route-panel{display:none;position:absolute;top:36px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.78);padding:8px 10px;border-radius:4px;z-index:25;width:360px;max-width:calc(100% - 16px);max-height:70%;overflow:hidden;pointer-events:auto;line-height:1.4}
+#route-panel.show{display:flex;flex-direction:column}
+#route-panel .rt-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.15)}
+#route-panel .rt-title{font-size:12px;font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff)}
+#route-panel .rt-close{cursor:pointer;color:var(--vscode-descriptionForeground,#999);font-size:14px;padding:0 4px}
+#route-panel .rt-close:hover{color:var(--vscode-errorForeground,#f66)}
+#route-panel .rt-body{overflow-y:scroll;overflow-x:hidden;flex:1 1 auto;min-height:0;width:100%;box-sizing:border-box}
+#route-panel .rt-job{font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff);margin:6px 0 3px}
+#route-panel .rt-badge{display:inline-block;background:rgba(80,200,120,0.25);color:#69db7c;border-radius:3px;padding:0 5px;font-size:10px;font-weight:normal;margin-left:5px}
+#route-panel .rt-raw{font-family:monospace;font-size:10px;background:rgba(255,255,255,0.06);border-radius:3px;padding:4px 6px;margin:3px 0 6px;word-break:break-all;color:var(--vscode-descriptionForeground,#aaa)}
+#route-panel .rt-kw{display:flex;align-items:baseline;padding:1px 2px}
+#route-panel .rt-kname{font-family:monospace;font-weight:bold;color:#ffd700;min-width:60px;flex:none}
+#route-panel .rt-kopts{font-family:monospace;color:var(--vscode-descriptionForeground,#aaa);word-break:break-all}
+#route-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
+#route-reopen.show{display:block}
+#route-reopen:hover{background:var(--vscode-button-background,#0e639c)}
 @media (max-width:600px){.tbtn{padding:3px 6px;font-size:10px}#frame-info{font-size:10px}#toolbar{gap:1px}}
 </style>
 </head>
@@ -676,7 +703,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="box-select-rect"></div>
@@ -3108,7 +3135,17 @@ var optPanelEl=document.getElementById('opt-panel');
 var optReopenEl=document.getElementById('opt-reopen');
 var freqPanelEl=document.getElementById('freq-panel');
 var freqReopenEl=document.getElementById('freq-reopen');
+var routePanelEl=document.getElementById('route-panel');
+var routeReopenEl=document.getElementById('route-reopen');
 var OPT_STEPS=MD.optSteps||null;
+var OPT_SOURCE=MD.optSource||null;
+// Gaussian's own convergence criteria (force 0.000450/0.000300 Hartree/Bohr,
+// displacement 0.001800/0.001200 Bohr) are the Item/Value/Converged? table
+// thresholds of Gaussian optimization logs. They apply ONLY when the log
+// really came from Gaussian — other programs (e.g. xtb, whose charts are
+// driven by its gnorm criterion) draw no threshold lines rather than a
+// borrowed, meaningless scale.
+var OPT_IS_GAUSSIAN=OPT_SOURCE==='gaussian';
 var NORMAL_MODES=MD.normalModes||null;
 
 function drawConvergenceChart(canvas,steps,field,label,color,threshold){
@@ -3201,10 +3238,10 @@ function buildOptPanel(){
                 drawConvergenceChart(cv,OPT_STEPS,'energy','Energy (Hartree)','#3794ff',null);
             }else if(field==='force'){
                 cv.style.height='110px';
-                drawDualChart(cv,OPT_STEPS,['maxForce','rmsForce'],['Max Force','RMS Force'],['#ff6b6b','#ffa94d'],0.000450,0.000300);
+                drawDualChart(cv,OPT_STEPS,['maxForce','rmsForce'],['Max Force','RMS Force'],['#ff6b6b','#ffa94d'],OPT_IS_GAUSSIAN?0.000450:null,OPT_IS_GAUSSIAN?0.000300:null);
             }else if(field==='disp'){
                 cv.style.height='110px';
-                drawDualChart(cv,OPT_STEPS,['maxDisplacement','rmsDisplacement'],['Max Disp','RMS Disp'],['#51cf66','#74c0fc'],0.001800,0.001200);
+                drawDualChart(cv,OPT_STEPS,['maxDisplacement','rmsDisplacement'],['Max Disp','RMS Disp'],['#51cf66','#74c0fc'],OPT_IS_GAUSSIAN?0.001800:null,OPT_IS_GAUSSIAN?0.001200:null);
             }
         });
     }
@@ -3233,8 +3270,8 @@ function buildOptPanel(){
             cvs.forEach(function(cv){
                 var f=cv.dataset.field;
                 if(f==='energy')drawConvergenceChart(cv,OPT_STEPS,'energy','Energy (Hartree)','#3794ff',null);
-                else if(f==='force')drawDualChart(cv,OPT_STEPS,['maxForce','rmsForce'],['Max Force','RMS Force'],['#ff6b6b','#ffa94d'],0.000450,0.000300);
-                else if(f==='disp')drawDualChart(cv,OPT_STEPS,['maxDisplacement','rmsDisplacement'],['Max Disp','RMS Disp'],['#51cf66','#74c0fc'],0.001800,0.001200);
+                else if(f==='force')drawDualChart(cv,OPT_STEPS,['maxForce','rmsForce'],['Max Force','RMS Force'],['#ff6b6b','#ffa94d'],OPT_IS_GAUSSIAN?0.000450:null,OPT_IS_GAUSSIAN?0.000300:null);
+                else if(f==='disp')drawDualChart(cv,OPT_STEPS,['maxDisplacement','rmsDisplacement'],['Max Disp','RMS Disp'],['#51cf66','#74c0fc'],OPT_IS_GAUSSIAN?0.001800:null,OPT_IS_GAUSSIAN?0.001200:null);
             });
         });
         document.addEventListener('mouseup',function(){if(dragging){dragging=false;document.body.style.cursor='';layoutPanels()}});
@@ -3558,12 +3595,46 @@ function buildFreqPanel(){
 optReopenEl.addEventListener('click',function(){buildOptPanel()});
 freqReopenEl.addEventListener('click',function(){buildFreqPanel()});
 
+// ===== Route Keywords Panel (Gaussian log route cards) =====
+var ROUTES=MD.routes||null;
+function rtEsc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function buildRoutePanel(){
+    if(!ROUTES||ROUTES.length===0)return;
+    var multi=ROUTES.length>1;
+    var html='<div class="rt-head"><span class="rt-title">Route Keywords</span><span class="rt-close">×</span></div><div class="rt-body">';
+    ROUTES.forEach(function(sec,si){
+        if(multi)html+='<div class="rt-job">Job '+(si+1)+(sec.hasOpt?'<span class="rt-badge">opt</span>':'')+'</div>';
+        html+='<div class="rt-raw">'+rtEsc(sec.raw)+'</div>';
+        html+=sec.keywords.map(function(k){
+            var opts=(k.options&&k.options.length>0)?'<span class="rt-kopts">= '+rtEsc(k.options.join(', '))+'</span>':'';
+            return '<div class="rt-kw"><span class="rt-kname">'+rtEsc(k.name)+'</span>'+opts+'</div>';
+        }).join('');
+    });
+    html+='</div>';
+    routePanelEl.innerHTML=html;
+    routePanelEl.classList.add('show');
+    routeReopenEl.classList.remove('show');
+    var closeBtn=routePanelEl.querySelector('.rt-close');
+    if(closeBtn){
+        closeBtn.addEventListener('click',function(){
+            routePanelEl.classList.remove('show');
+            routeReopenEl.classList.add('show');
+            layoutPanels();
+        });
+    }
+    layoutPanels();
+}
+routeReopenEl.addEventListener('click',function(){buildRoutePanel()});
+
 // Initial panel display — show reopen buttons only, don't auto-open panels
 if(OPT_STEPS&&OPT_STEPS.length>0){
     optReopenEl.classList.add('show');
 }
 if(NORMAL_MODES&&NORMAL_MODES.length>0){
     freqReopenEl.classList.add('show');
+}
+if(ROUTES&&ROUTES.length>0){
+    routeReopenEl.classList.add('show');
 }
 layoutPanels();
 
@@ -3654,8 +3725,10 @@ function layoutPanels(){
         {id:'diff-label-right',pr:5,anc:'tc',pct:0.75},
         {id:'opt-panel',pr:7,anc:'tl'},
         {id:'freq-panel',pr:8,anc:'tl'},
+        {id:'route-panel',pr:8,anc:'tl'},
         {id:'opt-reopen',pr:9,anc:'tl'},
         {id:'freq-reopen',pr:10,anc:'tl'},
+        {id:'route-reopen',pr:10,anc:'tl'},
         {id:'axes-indicator',pr:6,anc:'bl'}
     ];
     var vis=[];
@@ -5152,7 +5225,9 @@ class MolecularDocument implements vscode.CustomDocument {
         public readonly data: MolecularData,
         public readonly frames: (LogFrame | OrcaFrame)[] = [],
         public readonly optSteps?: OptStep[],
-        public readonly normalModes?: NormalMode[]
+        public readonly normalModes?: NormalMode[],
+        public readonly logSource?: string,
+        public readonly routes?: RouteSection[]
     ) {}
 
     dispose(): void {}

@@ -2,7 +2,7 @@ import { MolecularData, AtomGroup, OptStep, NormalMode } from '../types';
 import { parseGjf } from './gjfParser';
 import { parseXyz } from './xyzParser';
 import { parseMol2 } from './mol2Parser';
-import { parseGaussianLog, LogFrame, GaussianLogResult } from './logParser';
+import { parseGaussianLog, LogFrame, GaussianLogResult, RouteSection, RouteKeyword } from './logParser';
 import { parseCoord } from './coordParser';
 import { parseOrcainp } from './orcaInpParser';
 import { parseOrcaOut, OrcaFrame } from './orcaOutParser';
@@ -16,6 +16,7 @@ import { parseVesta } from './vestaParser';
 import { parseXtbLog, isXtbLog, XtbLogResult } from './xtbParser';
 
 export { parseGaussianLog, LogFrame, GaussianLogResult };
+export { RouteSection, RouteKeyword };
 export { parseOrcaOut, OrcaFrame };
 export { parseTcl, TclParseResult };
 export { parseCif };
@@ -29,6 +30,14 @@ export interface LogFileResult {
     title: string;
     optSteps?: OptStep[];
     normalModes?: NormalMode[];
+    // Gaussian route-card sections (keywords lines), one per --Link1-- job —
+    // shown in the webview's Route panel. Other formats leave it undefined.
+    routes?: RouteSection[];
+    // Which log format produced this result. The webview uses it to decide
+    // whether Gaussian's own convergence thresholds (0.000450/0.000300 force,
+    // 0.001800/0.001200 displacement) apply to the charts — they are
+    // meaningless for other programs (e.g. xtb's gnorm criterion).
+    source?: 'gaussian' | 'xtb' | 'orca';
 }
 
 export function parseFile(content: string, fileName: string): MolecularData {
@@ -78,7 +87,7 @@ export function parseLogFile(content: string, fileName?: string): LogFileResult 
     const ext = (fileName || '').toLowerCase().split('.').pop() || '';
     if (ext === 'out') {
         const result = parseOrcaOut(content);
-        return { frames: result.frames, title: result.title };
+        return { frames: result.frames, title: result.title, source: 'orca' };
     }
     // Content-based sniffing: xtb trajectories share the .log extension with
     // Gaussian logs but are structurally unrelated (extended multi-frame XYZ).
@@ -88,7 +97,8 @@ export function parseLogFile(content: string, fileName?: string): LogFileResult 
             frames: xResult.frames,
             title: xResult.title,
             optSteps: xResult.optSteps,
-            normalModes: xResult.normalModes
+            normalModes: xResult.normalModes,
+            source: 'xtb'
         };
     }
     const gResult = parseGaussianLog(content);
@@ -96,7 +106,9 @@ export function parseLogFile(content: string, fileName?: string): LogFileResult 
         frames: gResult.frames,
         title: gResult.title,
         optSteps: gResult.optSteps,
-        normalModes: gResult.normalModes
+        normalModes: gResult.normalModes,
+        routes: gResult.routes,
+        source: 'gaussian'
     };
 }
 
