@@ -18,11 +18,16 @@ export interface XtbLogResult {
  * (they start with a route card or banner text, not a bare integer).
  */
 export function isXtbLog(content: string): boolean {
-    const lines = content.split(/\r?\n/);
-    if (lines.length < 2) return false;
-    const count = parseInt(lines[0].trim(), 10);
+    // Only the first two lines are needed; slicing avoids allocating the full
+    // line array just for the sniff (the parser splits the content again).
+    const firstNl = content.indexOf('\n');
+    if (firstNl < 0) return false;
+    const count = parseInt(content.slice(0, firstNl).trim(), 10);
     if (isNaN(count) || count <= 0 || count > 1000000) return false;
-    return /\bxtb:\s*\S+/i.test(lines[1]);
+    const rest = content.slice(firstNl + 1);
+    const secondNl = rest.indexOf('\n');
+    const second = (secondNl < 0 ? rest : rest.slice(0, secondNl)).trim();
+    return /\bxtb:\s*\S+/i.test(second);
 }
 
 /**

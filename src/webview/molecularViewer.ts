@@ -1,8 +1,33 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { parseFile, parseLogFile, LogFrame, OrcaFrame, parseTcl } from '../parsers/index';
+import { parseFile, parseLogFile, LogFrame, OrcaFrame, parseTcl, RouteSection } from '../parsers/index';
 import { ensureBonds } from '../parsers/bondDetector';
 import { MolecularData, AtomGroup, OptStep, NormalMode } from '../types';
+
+const ATOM_COLORS: { [key: string]: string } = {
+    H: '#FFFFFF', He: '#D9FFFF', Li: '#CC80FF', Be: '#C2FF00', B: '#FFB5B5',
+    C: '#909090', N: '#3050F8', O: '#FF0D0D', F: '#90E050', Ne: '#B3E3F5',
+    Na: '#AB5CF2', Mg: '#8AFF00', Al: '#BFA6A6', Si: '#F0C8A0', P: '#FF8000',
+    S: '#FFFF30', Cl: '#1FF01F', Ar: '#80D1E3', K: '#8F40D4', Ca: '#3DFF00',
+    Sc: '#E6E6E6', Ti: '#BFC2C7', V: '#A6A6AB', Cr: '#8A99C7', Mn: '#9C7AC7',
+    Fe: '#E06633', Co: '#F090A0', Ni: '#50D050', Cu: '#C88033', Zn: '#7D80B0',
+    Ga: '#C28F8F', Ge: '#668F8F', As: '#BD80E3', Se: '#FFA100', Br: '#A62929',
+    Kr: '#5CB8D1', Rb: '#702EB0', Sr: '#00FF00', Y: '#94FFFF', Zr: '#94E0E0',
+    Nb: '#73C2C9', Mo: '#54B5B5', Tc: '#3B9E9E', Ru: '#248F8F', Rh: '#0A7D8C',
+    Pd: '#006985', Ag: '#C0C0C0', Cd: '#FFD98F', In: '#A67573', Sn: '#668080',
+    Sb: '#9E63B5', Te: '#D47A00', I: '#940094', Xe: '#429EB0', Cs: '#57178F',
+    Ba: '#00C900', La: '#70D4FF', Ce: '#FFFFC7', Pr: '#D9FFC7', Nd: '#C7FFC7',
+    Pm: '#A3FFC7', Sm: '#8FFFC7', Eu: '#61FFC7', Gd: '#45FFC7', Tb: '#30FFC7',
+    Dy: '#1FFFC7', Ho: '#00FF9C', Er: '#00E675', Tm: '#00D452', Yb: '#00BF38',
+    Lu: '#00AB24', Hf: '#4DC2FF', Ta: '#4DA6FF', W: '#2194D6', Re: '#267DAB',
+    Os: '#266696', Ir: '#175487', Pt: '#D0D0E0', Au: '#FFD123', Hg: '#B8B8D0',
+    Tl: '#A6544D', Pb: '#575961', Bi: '#9E4FB5', Po: '#AB5C00', At: '#754F45',
+    Rn: '#428296', Fr: '#420066', Ra: '#007D00', Ac: '#70ABFA', Th: '#00BAFF',
+    Pa: '#00A1FF', U: '#008FFF', Np: '#0080FF', Pu: '#006BFF', Am: '#545CF2',
+    Cm: '#785CE3', Bk: '#8A4FE3', Cf: '#A136D4', Es: '#B31FD4', Fm: '#B31FBA',
+    Md: '#B30DA6', No: '#BD0D87', Lr: '#C70066', Rf: '#CC0059', Db: '#D9004F',
+    Sg: '#E00045', Bh: '#E6002E', Hs: '#EB0026'
+};
 
 export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvider<MolecularDocument> {
     constructor(private readonly context: vscode.ExtensionContext) {}
@@ -22,6 +47,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         let atomGroups: AtomGroup[] | undefined;
         let optSteps: OptStep[] | undefined;
         let normalModes: NormalMode[] | undefined;
+        let routes: RouteSection[] | undefined;
+        let logSource: string | undefined;
 
         try {
         if (ext === 'tcl') {
@@ -48,6 +75,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         frames = logResult.frames;
                         optSteps = logResult.optSteps;
                         normalModes = logResult.normalModes;
+                        routes = logResult.routes;
+                        logSource = logResult.source;
                         if (frames.length > 0) {
                             data = ensureBonds({
                                 atoms: frames[0].atoms,
@@ -83,6 +112,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             frames = logResult.frames;
             optSteps = logResult.optSteps;
             normalModes = logResult.normalModes;
+            routes = logResult.routes;
+            logSource = logResult.source;
             if (frames.length > 0) {
                 data = ensureBonds({
                     atoms: frames[0].atoms,
@@ -116,7 +147,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             data.filePath = uri.fsPath;
         }
 
-        return new MolecularDocument(uri, data, frames, optSteps, normalModes);
+        return new MolecularDocument(uri, data, frames, optSteps, normalModes, logSource, routes);
     }
 
     async resolveCustomEditor(
@@ -128,7 +159,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             enableScripts: true,
         };
 
-        webviewPanel.webview.html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes);
+        webviewPanel.webview.html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes);
 
         webviewPanel.webview.onDidReceiveMessage(async (message) => {
             switch (message.command) {
@@ -313,6 +344,96 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         webviewPanel.webview.postMessage({ command: 'diffResult', cancelled: true });
                     }
                     break;
+                case 'importFile':
+                    try {
+                        const result = await vscode.window.showOpenDialog({
+                            canSelectMany: false,
+                            openLabel: 'Select Structure to Import',
+                            filters: {
+                                'Molecular Files': ['gjf', 'xyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta'],
+                                'All Files': ['*']
+                            }
+                        });
+                        if (!result || result.length === 0) {
+                            webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                            break;
+                        }
+                        const impUri = result[0];
+                        const impContent = await vscode.workspace.fs.readFile(impUri);
+                        const impText = new TextDecoder().decode(impContent);
+                        const impFileName = impUri.path.split('/').pop() || 'unknown.xyz';
+                        const impExt = impFileName.toLowerCase().split('.').pop() || '';
+
+                        if (impExt === 'tcl') {
+                            vscode.window.showErrorMessage('Import: TCL scripts are not supported (use Diff for TCL).');
+                            webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                            break;
+                        }
+
+                        let impData: MolecularData | undefined;
+                        if (impExt === 'log' || impExt === 'out') {
+                            const logResult = parseLogFile(impText, impFileName);
+                            if (logResult.frames.length === 0) {
+                                vscode.window.showErrorMessage('Import: no structure found in ' + impFileName);
+                                webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                                break;
+                            }
+                            let frameIdx = 0;
+                            if (logResult.frames.length > 1) {
+                                const items = logResult.frames.map((f, i) => ({
+                                    label: `Frame ${i + 1}: ${f.stepLabel || ''}`,
+                                    description: `${f.atoms.length} atoms`,
+                                    index: i
+                                }));
+                                const picked = await vscode.window.showQuickPick(items, {
+                                    placeHolder: `Select frame to import (${logResult.frames.length} frames found)`,
+                                    canPickMany: false
+                                });
+                                if (!picked) {
+                                    webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                                    break;
+                                }
+                                frameIdx = picked.index;
+                            }
+                            const sf = logResult.frames[frameIdx];
+                            impData = ensureBonds({
+                                atoms: sf.atoms, bonds: sf.bonds, title: sf.title,
+                                hasExplicitBonds: sf.hasExplicitBonds, charge: sf.charge, multiplicity: sf.multiplicity
+                            });
+                        } else {
+                            impData = parseFile(impText, impFileName);
+                            // Crystal files (CIF/VASP/VESTA/Cube): import the
+                            // unit-cell content as a molecule; periodicity is
+                            // dropped (the current structure stays molecular).
+                            if (impData.crystal) {
+                                const cellAtoms = (impData.atoms.length > 0 ? impData.atoms : impData.crystal.baseAtoms)
+                                    .map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, index: 0 }));
+                                impData = ensureBonds({ atoms: cellAtoms, bonds: [], title: impData.title, hasExplicitBonds: false });
+                            } else {
+                                impData = ensureBonds(impData);
+                            }
+                        }
+                        if (!impData || impData.atoms.length === 0) {
+                            vscode.window.showErrorMessage('Import: no atoms found in ' + impFileName);
+                            webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                            break;
+                        }
+
+                        const impAtoms = impData.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: ATOM_COLORS[a.element] || '#FF1493' }));
+                        const impBonds = impData.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order }));
+                        webviewPanel.webview.postMessage({
+                            command: 'importResult',
+                            cancelled: false,
+                            fileName: impFileName,
+                            atoms: impAtoms,
+                            bonds: impBonds,
+                            hasExplicitBonds: !!impData.hasExplicitBonds
+                        });
+                    } catch (e: any) {
+                        vscode.window.showErrorMessage('Import failed: ' + (e.message || e));
+                        webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                    }
+                    break;
                 case 'info':
                     vscode.window.showInformationMessage(message.text);
                     break;
@@ -323,7 +444,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         });
     }
 
-    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[]): Promise<string> {
+    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[], logSource?: string, routes?: RouteSection[]): Promise<string> {
         const nonce = getNonce();
 
         const threeJsBytes = await vscode.workspace.fs.readFile(
@@ -331,30 +452,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         );
         const threeJsContent = new TextDecoder().decode(threeJsBytes);
 
-        const atomColors: { [key: string]: string } = {
-            H: '#FFFFFF', He: '#D9FFFF', Li: '#CC80FF', Be: '#C2FF00', B: '#FFB5B5',
-            C: '#909090', N: '#3050F8', O: '#FF0D0D', F: '#90E050', Ne: '#B3E3F5',
-            Na: '#AB5CF2', Mg: '#8AFF00', Al: '#BFA6A6', Si: '#F0C8A0', P: '#FF8000',
-            S: '#FFFF30', Cl: '#1FF01F', Ar: '#80D1E3', K: '#8F40D4', Ca: '#3DFF00',
-            Sc: '#E6E6E6', Ti: '#BFC2C7', V: '#A6A6AB', Cr: '#8A99C7', Mn: '#9C7AC7',
-            Fe: '#E06633', Co: '#F090A0', Ni: '#50D050', Cu: '#C88033', Zn: '#7D80B0',
-            Ga: '#C28F8F', Ge: '#668F8F', As: '#BD80E3', Se: '#FFA100', Br: '#A62929',
-            Kr: '#5CB8D1', Rb: '#702EB0', Sr: '#00FF00', Y: '#94FFFF', Zr: '#94E0E0',
-            Nb: '#73C2C9', Mo: '#54B5B5', Tc: '#3B9E9E', Ru: '#248F8F', Rh: '#0A7D8C',
-            Pd: '#006985', Ag: '#C0C0C0', Cd: '#FFD98F', In: '#A67573', Sn: '#668080',
-            Sb: '#9E63B5', Te: '#D47A00', I: '#940094', Xe: '#429EB0', Cs: '#57178F',
-            Ba: '#00C900', La: '#70D4FF', Ce: '#FFFFC7', Pr: '#D9FFC7', Nd: '#C7FFC7',
-            Pm: '#A3FFC7', Sm: '#8FFFC7', Eu: '#61FFC7', Gd: '#45FFC7', Tb: '#30FFC7',
-            Dy: '#1FFFC7', Ho: '#00FF9C', Er: '#00E675', Tm: '#00D452', Yb: '#00BF38',
-            Lu: '#00AB24', Hf: '#4DC2FF', Ta: '#4DA6FF', W: '#2194D6', Re: '#267DAB',
-            Os: '#266696', Ir: '#175487', Pt: '#D0D0E0', Au: '#FFD123', Hg: '#B8B8D0',
-            Tl: '#A6544D', Pb: '#575961', Bi: '#9E4FB5', Po: '#AB5C00', At: '#754F45',
-            Rn: '#428296', Fr: '#420066', Ra: '#007D00', Ac: '#70ABFA', Th: '#00BAFF',
-            Pa: '#00A1FF', U: '#008FFF', Np: '#0080FF', Pu: '#006BFF', Am: '#545CF2',
-            Cm: '#785CE3', Bk: '#8A4FE3', Cf: '#A136D4', Es: '#B31FD4', Fm: '#B31FBA',
-            Md: '#B30DA6', No: '#BD0D87', Lr: '#C70066', Rf: '#CC0059', Db: '#D9004F',
-            Sg: '#E00045', Bh: '#E6002E', Hs: '#EB0026'
-        };
+        const atomColors = ATOM_COLORS;
 
         const atomData = data.atoms.map(a => {
             let color = atomColors[a.element] || '#FF1493';
@@ -421,7 +519,12 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             displacements: m.displacements
         })) : null;
 
-        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData });
+        const routesData = routes ? routes.map(r => ({
+            raw: r.raw, hasOpt: r.hasOpt,
+            keywords: r.keywords.map(k => ({ name: k.name, options: k.options }))
+        })) : null;
+
+        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, routes: routesData });
 
         return `<!DOCTYPE html>
 <html lang="en">
@@ -550,6 +653,22 @@ canvas{display:block}
 #freq-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
 #freq-reopen.show{display:block}
 #freq-reopen:hover{background:var(--vscode-button-background,#0e639c)}
+#route-panel{display:none;position:absolute;top:36px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.78);padding:8px 10px;border-radius:4px;z-index:25;width:360px;max-width:calc(100% - 16px);max-height:70%;overflow:hidden;pointer-events:auto;line-height:1.4}
+#route-panel.show{display:flex;flex-direction:column}
+#route-panel .rt-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.15)}
+#route-panel .rt-title{font-size:12px;font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff)}
+#route-panel .rt-close{cursor:pointer;color:var(--vscode-descriptionForeground,#999);font-size:14px;padding:0 4px}
+#route-panel .rt-close:hover{color:var(--vscode-errorForeground,#f66)}
+#route-panel .rt-body{overflow-y:scroll;overflow-x:hidden;flex:1 1 auto;min-height:0;width:100%;box-sizing:border-box}
+#route-panel .rt-job{font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff);margin:6px 0 3px}
+#route-panel .rt-badge{display:inline-block;background:rgba(80,200,120,0.25);color:#69db7c;border-radius:3px;padding:0 5px;font-size:10px;font-weight:normal;margin-left:5px}
+#route-panel .rt-raw{font-family:monospace;font-size:10px;background:rgba(255,255,255,0.06);border-radius:3px;padding:4px 6px;margin:3px 0 6px;word-break:break-all;color:var(--vscode-descriptionForeground,#aaa)}
+#route-panel .rt-kw{display:flex;align-items:baseline;padding:1px 2px}
+#route-panel .rt-kname{font-family:monospace;font-weight:bold;color:#ffd700;min-width:60px;flex:none}
+#route-panel .rt-kopts{font-family:monospace;color:var(--vscode-descriptionForeground,#aaa);word-break:break-all}
+#route-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
+#route-reopen.show{display:block}
+#route-reopen:hover{background:var(--vscode-button-background,#0e639c)}
 @media (max-width:600px){.tbtn{padding:3px 6px;font-size:10px}#frame-info{font-size:10px}#toolbar{gap:1px}}
 </style>
 </head>
@@ -560,10 +679,12 @@ canvas{display:block}
 <button class="tbtn" data-mode="bondAngle">Bond Angle</button>
 <button class="tbtn" data-mode="dihedral">Dihedral</button>
 <button class="tbtn" data-mode="rotateGroup">Rotate Group</button>
+<button class="tbtn" data-mode="moveAtoms">Move Atoms</button>
 <div class="tsep"></div>
 <button class="tbtn" data-mode="addAtom">Add Atom</button>
 <button class="tbtn" data-mode="deleteAtom">Delete Atom</button>
 <button class="tbtn" data-mode="replaceAtom">Replace Atom</button>
+<button class="tbtn" id="import-btn">Import Structure</button>
 <div class="tsep"></div>
 <button class="tbtn" data-mode="selectAtoms">Select Atoms</button>
 <button class="tbtn" data-mode="boxSelect">Box Select</button>
@@ -582,7 +703,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="box-select-rect"></div>
@@ -999,15 +1120,28 @@ function buildCellWireframe(){
 }
 
 function updateAxesIndicator(){
-    if(!CRY)return;
     var el=document.getElementById('axes-indicator');
     if(!el)return;
-    var lv=CRY.latticeVectors;
-    var vectors=[
-        {dir:new THREE.Vector3(lv[0][0],lv[0][1],lv[0][2]).normalize(),color:'#FF4444',label:'a'},
-        {dir:new THREE.Vector3(lv[1][0],lv[1][1],lv[1][2]).normalize(),color:'#44FF44',label:'b'},
-        {dir:new THREE.Vector3(lv[2][0],lv[2][1],lv[2][2]).normalize(),color:'#4488FF',label:'c'}
-    ];
+    var vectors;
+    if(CRY){
+        var lv=CRY.latticeVectors;
+        vectors=[
+            {dir:new THREE.Vector3(lv[0][0],lv[0][1],lv[0][2]).normalize(),color:'#FF4444',label:'a'},
+            {dir:new THREE.Vector3(lv[1][0],lv[1][1],lv[1][2]).normalize(),color:'#44FF44',label:'b'},
+            {dir:new THREE.Vector3(lv[2][0],lv[2][1],lv[2][2]).normalize(),color:'#4488FF',label:'c'}
+        ];
+    }else{
+        // Molecular structure: show the Cartesian X/Y/Z axes of the molecule's
+        // initial coordinate frame. rotQuat starts as identity, so at load time
+        // the indicator matches the world axes; applying rotQuat afterwards
+        // shows the current orientation no matter how the molecule is rotated
+        // or edited (orientation is purely rotQuat-driven).
+        vectors=[
+            {dir:new THREE.Vector3(1,0,0),color:'#FF4444',label:'X'},
+            {dir:new THREE.Vector3(0,1,0),color:'#44FF44',label:'Y'},
+            {dir:new THREE.Vector3(0,0,1),color:'#4488FF',label:'Z'}
+        ];
+    }
     vectors.forEach(function(v){v.dir.applyQuaternion(rotQuat)});
     vectors.sort(function(a,b){return a.dir.z-b.dir.z});
     var cx=45,cy=45,scale=30;
@@ -1092,6 +1226,76 @@ function updateScenePositions(keepCenter){
     for(var bi=0;bi<MD.bonds.length;bi++){currentBondIdx=bi;createBond(MD.bonds[bi])}
     if(CRY)buildCellWireframe();
     highlightSelected();
+    needsRender=true;
+}
+
+function updateAtomMeshPositions(){
+    // Light per-frame update used during Move Atoms drags: refresh atom
+    // sphere positions + selection highlights only (no bond mesh rebuild).
+    atomMeshes.forEach(function(m,i){var a=MD.atoms[i];if(a)m.position.set(a.x-CX,a.y-CY,a.z-CZ)});
+    highlightSelected();
+}
+
+// Incremental bond-mesh rebuild for Move Atoms drags: only bonds with at
+// least one endpoint in the moving selection are rebuilt; every other bond
+// mesh is left untouched (its endpoints did not move, so it is still exact).
+// Runs synchronously on every drag frame so bonds never lag behind atoms.
+function rebuildBondsTouching(selSet){
+    var sel={};
+    for(var i=0;i<selSet.length;i++)sel[selSet[i]]=true;
+    var affected={};
+    for(var bi=0;bi<MD.bonds.length;bi++){
+        var b=MD.bonds[bi];
+        if(sel[b.atom1]||sel[b.atom2])affected[bi]=true;
+    }
+    for(var i=bondMeshes.length-1;i>=0;i--){
+        if(affected[bondMeshes[i].userData.bondIdx]){
+            disposeMesh(bondMeshes[i]);moleculeGroup.remove(bondMeshes[i]);
+            bondMeshes.splice(i,1);
+        }
+    }
+    for(var bi=0;bi<MD.bonds.length;bi++){
+        if(!affected[bi])continue;
+        currentBondIdx=bi;createBond(MD.bonds[bi]);
+    }
+    needsRender=true;
+}
+
+// Release-time localized bond-mesh rebuild for Move Atoms: recomputeMovedBonds
+// just replaced MD.bonds with a re-derived list, so meshes for bonds in the
+// affected region are stale (bonds may have appeared, vanished or changed
+// order) while every other mesh is still exact (its endpoints never moved).
+// Disposes the meshes whose OLD bond touched the region (by old index — the
+// list has already been re-derived), renumbers the surviving meshes' bondIdx
+// into the new bond array (indices shifted because the removed bonds sat in
+// the middle of the old list — updateVibBondMeshes() dereferences bondIdx
+// into MD.bonds, so stale indices would vibrate the wrong bond), then
+// rebuilds only the new region bonds.
+function rebuildMovedBondMeshes(oldBonds,selSet){
+    var sel={};
+    for(var i=0;i<selSet.length;i++)sel[selSet[i]]=true;
+    var affected={};
+    for(var bi=0;bi<MD.bonds.length;bi++){
+        var b=MD.bonds[bi];
+        if(sel[b.atom1]||sel[b.atom2])affected[bi]=true;
+    }
+    for(var i=bondMeshes.length-1;i>=0;i--){
+        var ob=oldBonds[bondMeshes[i].userData.bondIdx];
+        if(ob&&(sel[ob.atom1]||sel[ob.atom2])){disposeMesh(bondMeshes[i]);moleculeGroup.remove(bondMeshes[i]);bondMeshes.splice(i,1)}
+    }
+    if(oldBonds!==MD.bonds){
+        var key2idx={};
+        for(bi=0;bi<MD.bonds.length;bi++){var b2=MD.bonds[bi];key2idx[Math.min(b2.atom1,b2.atom2)+'-'+Math.max(b2.atom1,b2.atom2)]=bi}
+        for(i=0;i<bondMeshes.length;i++){
+            var ob2=oldBonds[bondMeshes[i].userData.bondIdx];
+            if(!ob2)continue;
+            bondMeshes[i].userData.bondIdx=key2idx[Math.min(ob2.atom1,ob2.atom2)+'-'+Math.max(ob2.atom1,ob2.atom2)];
+        }
+    }
+    for(bi=0;bi<MD.bonds.length;bi++){
+        if(!affected[bi])continue;
+        currentBondIdx=bi;createBond(MD.bonds[bi]);
+    }
     needsRender=true;
 }
 
@@ -1188,6 +1392,409 @@ var selectedAtoms=[];
 var originalCoords=null;
 var modalCallback=null;
 
+// ===== Move Atoms mode interactions =====
+// In move-atoms mode: plain left-drag / arrow keys rotate the whole view,
+// plain right-drag pans the whole view (cursor-locked); Ctrl+left-drag /
+// Ctrl+arrow keys rotate the selected fragment, Ctrl+right-drag translates
+// the fragment with the cursor locked onto the grabbed point.
+var moveDragActive=false;      // a Ctrl+right-drag fragment translate in progress
+var moveDragOrig=null;         // {idx:{x,y,z}} positions at drag start
+var moveDragMoved=false;       // whether the drag produced any displacement
+var moveDragPlaneZ=0;          // world-Z of the movement plane (screen-parallel)
+var moveDragStartWorld=null;   // reference point on the movement plane at drag start
+var fragRotActive=false;       // a Ctrl+left-drag fragment rotation in progress
+var fragRotMoved=false;        // whether the rotation drag produced any change
+var fragRotCx=0,fragRotCy=0,fragRotCz=0; // rotation pivot (absolute file coords)
+var moveKeyActive=false;       // a Ctrl+arrow fragment rotation session in progress
+var moveKeyLatch=false;        // block fragment-key restart until arrows released
+var keyRotLatch=false;         // block view rotation until arrows released (after a fragment session ends mid-hold)
+var ctrlDown=false;            // live Ctrl modifier state
+var panGrabActive=false;       // view pan uses cursor locking
+var panGrabOffset={x:0,y:0};   // grabbed point world xy minus pan offset
+var panRefZ=0;                 // world z of the pan reference plane
+
+function recomputeMovedBonds(){
+    // Partial bond + bond-order re-detection after a fragment move/rotate
+    // session ends. Only the selected atoms changed position, so bonds with
+    // BOTH endpoints outside the selection cannot have changed (same
+    // distance, hence same gbo verdict — and their stored orders already
+    // carry every fix/repair) and are kept as-is; bonds with at least one
+    // selected endpoint are deleted and re-judged. New bonds can only
+    // involve a moved atom either, so the spatial-grid neighbor sweep runs
+    // for the selected atoms only (over a full-molecule grid, so a contact
+    // dragged onto a previously unrelated atom is still found). The affected
+    // region — selected atoms plus the atoms directly bonded to them, both
+    // pre-move neighbors and atoms that just gained a bond to the selection,
+    // whose bond sets may have changed — then goes through the same C-O/Br
+    // order fix, N special handling and valence-violation repair as the full
+    // detector, with each region atom's complete new bond set (new bonds +
+    // its surviving bonds). Files with explicit bond blocks (GJF connect
+    // section, mol2, PDB CONECT) keep their authored bonds and orders; only
+    // bonds pulled beyond the bonding cutoff are dropped (deletion only).
+    // Returns the final affected-region atom list (selected atoms + bonded
+    // neighborhood, incl. the N closure) so the caller can rebuild only the
+    // region's bond meshes; empty array when nothing was re-derived (explicit
+    // bonds without deletions / empty selection), null when it fell back to
+    // the full detector.
+    if(selectedAtoms.length===0)return [];
+    var sel={};
+    for(var si=0;si<selectedAtoms.length;si++)sel[selectedAtoms[si]]=true;
+    if(MD.hasExplicitBonds){
+        // Authored bonds keep their orders and are never re-derived — but a
+        // bond whose endpoints were pulled beyond the bonding cutoff can no
+        // longer be a bond. Drop such bonds (deletion only: no re-ordering,
+        // no new bonds) so stretched ghosts do not linger after the move.
+        // Only bonds touching the selection can have changed: every other
+        // pair kept its distance.
+        var atomsX=MD.atoms,keptB=[];
+        for(var bx=0;bx<MD.bonds.length;bx++){
+            var xb=MD.bonds[bx];
+            if(sel[xb.atom1]||sel[xb.atom2]){
+                var xu=atomsX[xb.atom1],xv=atomsX[xb.atom2];
+                if(xu&&xv){
+                    var xdx=xu.x-xv.x,xdy=xu.y-xv.y,xdz=xu.z-xv.z;
+                    if(bondGbo(xu.element,xv.element,Math.sqrt(xdx*xdx+xdy*xdy+xdz*xdz))<=0)continue;
+                }
+            }
+            keptB.push(xb);
+        }
+        if(keptB.length===MD.bonds.length)return [];
+        MD.bonds=keptB;
+        var selArr=[];for(var sk in sel)selArr.push(+sk);
+        return selArr;
+    }
+    var surviving=[],affected=[];
+    for(var bi=0;bi<MD.bonds.length;bi++){
+        var b=MD.bonds[bi];
+        if(sel[b.atom1]||sel[b.atom2])affected.push(b);else surviving.push(b);
+    }
+    // Affected region: selected atoms + their current direct neighbors.
+    var inA={};
+    for(si=0;si<selectedAtoms.length;si++)inA[selectedAtoms[si]]=true;
+    for(bi=0;bi<affected.length;bi++){inA[affected[bi].atom1]=true;inA[affected[bi].atom2]=true}
+    var A=[];for(var ki in inA)A.push(+ki);
+    A.sort(function(a,b){return a-b});
+
+    // Full-molecule spatial hash grid — O(N) bucketing; the per-atom
+    // candidate sweep (the expensive part) runs for selected atoms only.
+    // Same cell size, hash and per-element search radii as the full
+    // detector, so each selected atom sees exactly the candidates the full
+    // detection would find for it.
+    var atoms=MD.atoms;var n=atoms.length;var CELL=3;
+    var normEls=new Array(n);var distinct=[];var seenEl={};
+    for(var i=0;i<n;i++){var ne=atoms[i].element.charAt(0).toUpperCase()+atoms[i].element.slice(1).toLowerCase();normEls[i]=ne;
+        if(!seenEl[ne]){seenEl[ne]=1;distinct.push(ne)}}
+    var rangeFor={};
+    for(var di=0;di<distinct.length;di++){var e1=distinct[di];var mc=0;
+        for(var dj=0;dj<distinct.length;dj++){var c2=bondPcut(e1,distinct[dj]);if(c2>mc)mc=c2}
+        rangeFor[e1]=Math.floor(mc/CELL)+1}
+    var grid=new Map();
+    for(i=0;i<n;i++){var cx=Math.floor(atoms[i].x/CELL),cy=Math.floor(atoms[i].y/CELL),cz=Math.floor(atoms[i].z/CELL);
+        // XOR hash collisions only merge buckets (extra candidates are
+        // filtered by the distance test), never lose one.
+        var key=(cx*73856093)^(cy*19349663)^(cz*83492791);
+        var bkt=grid.get(key);if(!bkt){bkt=[];grid.set(key,bkt)}bkt.push(i)}
+
+    // Re-judge every pair involving a selected atom. The sweep looks in BOTH
+    // directions (j<i included): the full detector enumerates each pair from
+    // its lower index, but that atom may be unselected, so the selected side
+    // must find the pair itself. Symmetric bmA entries keep every pass below
+    // identical to the full detector.
+    var bmA=new Map();
+    function bmSet(i,j,o){if(!bmA.has(i))bmA.set(i,new Map());if(!bmA.has(j))bmA.set(j,new Map());bmA.get(i).set(j,o);bmA.get(j).set(i,o)}
+    var cand=[];var newNb={};
+    for(si=0;si<A.length;si++){
+        var s=A[si];
+        if(!sel[s]||!atoms[s])continue;
+        var range=rangeFor[normEls[s]];var csx=Math.floor(atoms[s].x/CELL),csy=Math.floor(atoms[s].y/CELL),csz=Math.floor(atoms[s].z/CELL);
+        cand.length=0;
+        for(var dx=-range;dx<=range;dx++)for(var dy=-range;dy<=range;dy++)for(var dz=-range;dz<=range;dz++){
+            var key2=((csx+dx)*73856093)^((csy+dy)*19349663)^((csz+dz)*83492791);
+            var bkt2=grid.get(key2);if(!bkt2)continue;
+            for(var k2=0;k2<bkt2.length;k2++){var j=bkt2[k2];if(j!==s)cand.push(j)}}
+        if(cand.length===0)continue;
+        cand.sort(function(a,b){return a-b});
+        var prev=-1;
+        for(var ci=0;ci<cand.length;ci++){j=cand[ci];if(j===prev)continue;prev=j;
+            var ddx=atoms[s].x-atoms[j].x,ddy=atoms[s].y-atoms[j].y,ddz=atoms[s].z-atoms[j].z;
+            var d=Math.sqrt(ddx*ddx+ddy*ddy+ddz*ddz);var bo=bondGbo(atoms[s].element,atoms[j].element,d);
+            if(bo>0){bmSet(s,j,bo);if(!inA[j])newNb[j]=1}
+        }
+    }
+    // Atoms that just came within bonding range of a moved atom join the
+    // region as well: their bond sets changed (they gained a bond), so the
+    // N handling and valence repair below must re-derive them from raw input
+    // exactly as the full detector does. The surviving-bond merge below picks
+    // up their remaining bonds automatically now that inA contains them.
+    for(var nk in newNb)inA[nk]=1;
+    // Merge the surviving bonds that touch the region so every region
+    // atom's bond set is complete for the fix/repair passes below. They are
+    // merged with their RAW gbo verdicts (recomputed from the current
+    // coordinates — both endpoints are unmoved, so the verdict is exactly
+    // what a full re-detection computes), NOT with their stored orders:
+    // stored orders carry earlier N-handling / valence-repair results, which
+    // the passes below must re-derive from raw input just like the full
+    // detector does (e.g. a bond degraded by a pre-move valence violation is
+    // restored if the violation is gone after the move).
+    var survKey={};
+    function mergeSurv(){
+        for(var mi=0;mi<surviving.length;mi++){
+            var mb=surviving[mi];
+            if(inA[mb.atom1]||inA[mb.atom2]){
+                var mu=atoms[mb.atom1],mv2=atoms[mb.atom2];
+                if(mu&&mv2){
+                    var mdx=mu.x-mv2.x,mdy=mu.y-mv2.y,mdz=mu.z-mv2.z;
+                    var mraw=bondGbo(mu.element,mv2.element,Math.sqrt(mdx*mdx+mdy*mdy+mdz*mdz));
+                    if(mraw>0)bmSet(mb.atom1,mb.atom2,mraw);
+                }
+                survKey[Math.min(mb.atom1,mb.atom2)+'-'+Math.max(mb.atom1,mb.atom2)]=mb;
+            }
+        }
+    }
+    mergeSurv();
+    // N-closure: an N atom bonded to a region atom must join the region.
+    // Its stored orders are N-handling outputs derived from exactly the
+    // bonds the region re-derives here, so replacing them with raw verdicts
+    // without re-running its N handling would drop the fix (e.g. an amide
+    // C-N kept at 1.5 by the N pass would fall back to the raw single-bond
+    // verdict). The closure runs transitively so coupled N-N chains are
+    // re-derived together, then the region atom list is rebuilt once.
+    for(;;){
+        var addN=null;
+        bmA.forEach(function(nb,i){
+            if(inA[i])return;
+            var e2=atoms[i]?atoms[i].element.toUpperCase():'';
+            if(e2==='N')(addN||(addN=[])).push(i);
+        });
+        if(!addN)break;
+        addN.forEach(function(i2){inA[i2]=1});
+        mergeSurv();
+    }
+    A=[];for(ki in inA)A.push(+ki);
+    A.sort(function(a,b){return a-b});
+    // Canonicalize region atoms' neighbor maps to ascending partner order.
+    // The full detector's per-atom maps end up in exactly this order (pairs
+    // are enumerated by lower index first), and the N handling / valence
+    // repair below break ties by first encounter, so the entry order must
+    // match for bit-identical results.
+    for(si=0;si<A.length;si++){
+        var ri=A[si];var rnb=bmA.get(ri);if(!rnb)continue;
+        var rents=Array.from(rnb.entries()).sort(function(p,q){return p[0]-q[0]});
+        var rnm=new Map();for(var re2=0;re2<rents.length;re2++)rnm.set(rents[re2][0],rents[re2][1]);
+        bmA.set(ri,rnm);
+    }
+    // C-O / Br order fixes — identical to the full detector. For surviving
+    // bonds it just reproduces their stored orders (same raw input).
+    bmA.forEach(function(nb,i){nb.forEach(function(o,j){if(i>j)return;var e1=atoms[i].element.toUpperCase(),e2=atoms[j].element.toUpperCase();var els=new Set([e1,e2]);
+        if(els.has('C')&&els.has('O')&&o!==1&&o!==2){var no=o<1.7?1:2;nb.set(j,no);bmA.get(j).set(i,no)}
+        if(e1==='BR'||e2==='BR'){nb.set(j,1);bmA.get(j).set(i,1)}
+    })});
+    // N special handling, only for N atoms inside the region (including
+    // atoms that just gained a bond to the selection and N atoms pulled in
+    // by the closure above). The full detector processes N atoms in bondMap
+    // creation order — ascending by each atom's smallest touching pair (i,j)
+    // — which matters when two region N atoms are bonded (their fixes read
+    // each other's output), so that exact order is replicated here. N atoms
+    // outside the region keep their exact pre-move bond set, so their stored
+    // result already matches what a full re-detection would produce.
+    var regionN=[];
+    for(si=0;si<A.length;si++){var iN=A[si];if(atoms[iN]&&atoms[iN].element.toUpperCase()==='N')regionN.push(iN)}
+    regionN=regionN.map(function(i){
+        var nb=bmA.get(i),mp=null;
+        if(nb)nb.forEach(function(o,j){var pa=Math.min(i,j),pb=Math.max(i,j);if(mp===null||pa<mp[0]||(pa===mp[0]&&pb<mp[1]))mp=[pa,pb]});
+        return {i:i,mp:mp||[i,i]};
+    }).sort(function(p,q){return p.mp[0]-q.mp[0]||p.mp[1]-q.mp[1]}).map(function(eN){return eN.i});
+    regionN.forEach(function(i){
+        var nb=bmA.get(i);if(!nb)return;var nl=Array.from(nb.entries());var nn=nl.length;
+        if(nn===3){for(var k=0;k<nl.length;k++){nb.set(nl[k][0],1);bmA.get(nl[k][0]).set(i,1)}}
+        else if(nn===2){var n1=nl[0][0],bo1=nl[0][1],n2=nl[1][0],bo2=nl[1][1];var n1H=atoms[n1].element.toUpperCase()==='H',n2H=atoms[n2].element.toUpperCase()==='H';var f1,f2;
+            if(n1H){f1=1;f2=2}else if(n2H){f1=2;f2=1}else{var d1=Math.abs(bo1-1.5)+Math.abs(bo2-1.5),d2=Math.abs(bo1-2)+Math.abs(bo2-1),d3=Math.abs(bo1-1)+Math.abs(bo2-2);var best=Math.min(d1,d2,d3);if(best===d1){f1=1.5;f2=1.5}else if(best===d2){f1=2;f2=1}else{f1=1;f2=2}}
+            nb.set(n1,f1);bmA.get(n1).set(i,f1);nb.set(n2,f2);bmA.get(n2).set(i,f2)}
+    });
+    // Valence-violation repair, iterated over region atoms only: atoms
+    // outside the region keep every bond they had, so their valence — and
+    // thus their validity — is unchanged. Region-atom valences are computed
+    // over their complete new bond sets (new + surviving). A degradation
+    // only lowers orders, so it can never push any atom over its cap; the
+    // loop converges within the region exactly like the full-molecule one.
+    for(var iter=0;iter<10;iter++){var changed=false;var val=new Map();
+        for(si=0;si<A.length;si++)val.set(A[si],0);
+        bmA.forEach(function(nb,i){nb.forEach(function(o){val.set(i,(val.get(i)||0)+o)})});
+        var viols=[];val.forEach(function(v,i){if(!inA[i])return;var el=atoms[i].element.charAt(0).toUpperCase()+atoms[i].element.slice(1).toLowerCase();var mv=BOND_MV[el]||100;if(v>mv+0.1)viols.push(i)});
+        if(viols.length===0)break;
+        for(var vi=0;vi<viols.length;vi++){var i2=viols[vi];var nb2=bmA.get(i2);if(!nb2)continue;var cv=Array.from(nb2.values()).reduce(function(s,v){return s+v},0);var el2=atoms[i2].element.charAt(0).toUpperCase()+atoms[i2].element.slice(1).toLowerCase();var mv2=BOND_MV[el2]||100;if(cv<=mv2+0.1)continue;
+            var bb=null,ml=Infinity;nb2.forEach(function(o,j){if(o<=1)return;var no;if(o===3)no=2;else if(o===2)no=1.5;else if(o===1.5)no=1;else return;
+                var el3=atoms[j].element;var dd=Math.sqrt(Math.pow(atoms[i2].x-atoms[j].x,2)+Math.pow(atoms[i2].y-atoms[j].y,2)+Math.pow(atoms[i2].z-atoms[j].z,2));var sp=BOND_BS[bondSk(atoms[i2].element,el3)];if(!sp)return;
+                var ci2=0,ni2=0,md=Infinity;for(var k=0;k<sp.length;k++){if(sp[k].o===o&&Math.abs(dd-sp[k].l)<md){md=Math.abs(dd-sp[k].l);ci2=sp[k].l}}md=Infinity;for(k=0;k<sp.length;k++){if(sp[k].o===no&&Math.abs(dd-sp[k].l)<md){md=Math.abs(dd-sp[k].l);ni2=sp[k].l}}if(!ci2||!ni2)return;
+                var loss=Math.abs(dd-ni2)-Math.abs(dd-ci2);if(loss<ml){ml=loss;bb=[j,no]}
+            });if(bb){nb2.set(bb[0],bb[1]);bmA.get(bb[0]).set(i2,bb[1]);changed=true}
+        }if(!changed)break;
+    }
+    // Boundary safety check. A non-region atom bonded to the region keeps
+    // its own stored orders, except on the region-touching bonds, whose
+    // values were re-derived from raw gbo above. If the pre-move state had
+    // degraded those bonds through a valence repair, the raw verdicts raise
+    // the boundary atom's valence back over its cap — the full detector
+    // would re-run the valence repair for it, which the region-scoped loop
+    // above cannot. Rather than replicate that global cascade, fall back to
+    // the exact full re-detection (the pre-optimization behavior) whenever
+    // the check trips; sane structures never do.
+    var bnd=[],bset={};
+    bmA.forEach(function(nb,i){if(!inA[i]){bnd.push(i);bset[i]=1}});
+    if(bnd.length){
+        var bstor=new Map();
+        for(var sbi=0;sbi<surviving.length;sbi++){
+            var sb=surviving[sbi],s1=sb.atom1,s2=sb.atom2;
+            if(bset[s1]&&!bmA.get(s1).has(s2))bstor.set(s1,(bstor.get(s1)||0)+sb.order);
+            if(bset[s2]&&!bmA.get(s2).has(s1))bstor.set(s2,(bstor.get(s2)||0)+sb.order);
+        }
+        var fall=false;
+        for(var bi2=0;bi2<bnd.length;bi2++){
+            var bi3=bnd[bi2],vb=0;
+            bmA.get(bi3).forEach(function(o){vb+=o});
+            vb+=(bstor.get(bi3)||0);
+            var elb=atoms[bi3].element.charAt(0).toUpperCase()+atoms[bi3].element.slice(1).toLowerCase();
+            if(vb>(BOND_MV[elb]||100)+0.1){fall=true;break}
+        }
+        if(fall){MD.bonds=detectBondsFromAtoms(atoms);return null}
+    }
+    // Emit: surviving bonds first (original relative order; bonds touching
+    // the region take their possibly-updated order from the map), then the
+    // newly detected pairs.
+    var bonds=[];var seen={};
+    for(bi=0;bi<surviving.length;bi++){
+        b=surviving[bi];
+        var key3=Math.min(b.atom1,b.atom2)+'-'+Math.max(b.atom1,b.atom2);seen[key3]=true;
+        if(survKey[key3]){
+            var m1=bmA.get(b.atom1);
+            var upd=m1?m1.get(b.atom2):undefined;
+            if(upd!==undefined)b.order=upd;
+        }
+        bonds.push(b);
+    }
+    bmA.forEach(function(nb,i){nb.forEach(function(o,j){if(i>j)return;var key4=i+'-'+j;if(!seen[key4]){seen[key4]=true;bonds.push({atom1:i,atom2:j,order:o})}})});
+    MD.bonds=bonds;
+    return A;
+}
+// Shared release path for every Move Atoms session end (mouse drag, fragment
+// rotation drag, arrow-key session, forced termination): re-derive the bonds
+// for the moved region, then rebuild only the affected region's bond meshes.
+// A full scene rebuild runs only when the region-scoped re-detection fell
+// back to the full detector (null region).
+function refreshMovedBondsAndMeshes(){
+    var oldBonds=MD.bonds;
+    var region=recomputeMovedBonds();
+    if(region){if(region.length)rebuildMovedBondMeshes(oldBonds,region)}
+    else updateScenePositions(true);
+}
+function endMoveDrag(){
+    if(!moveDragActive)return;
+    moveDragActive=false;
+    moveDragOrig=null;
+    // A Ctrl+click without any displacement pushes a redundant snapshot — drop it.
+    if(!moveDragMoved&&undoStack.length>0){undoStack.pop();updateUndoBtn()}
+    // Re-detect connectivity once on release (not per frame during the drag).
+    if(moveDragMoved)refreshMovedBondsAndMeshes();
+    document.body.style.cursor='';
+    if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
+}
+function endFragRot(){
+    if(!fragRotActive)return;
+    fragRotActive=false;
+    // A Ctrl+click without any rotation pushes a redundant snapshot — drop it.
+    if(!fragRotMoved&&undoStack.length>0){undoStack.pop();updateUndoBtn()}
+    // Re-detect connectivity once on release (not per frame during the drag).
+    if(fragRotMoved)refreshMovedBondsAndMeshes();
+    document.body.style.cursor='';
+    if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
+}
+function stopMoveSession(){
+    // Force-terminate any in-progress move/rotate (mode switch, frame switch,
+    // undo, delete...). The latch prevents arrow keys (still held down) from
+    // instantly starting a new session; it clears once all keys are released.
+    if(moveDragActive||moveKeyActive||fragRotActive){
+        moveDragActive=false;moveKeyActive=false;fragRotActive=false;
+        moveKeyLatch=true;
+        moveDragOrig=null;
+        // Atoms may have moved — re-detect connectivity once.
+        refreshMovedBondsAndMeshes();
+        document.body.style.cursor='';
+    }
+}
+function applyMoveWorldDelta(dw){
+    // dw: world-space displacement. Convert to molecule-local space (the view
+    // rotation is applied to moleculeGroup, not the camera) so the group moves
+    // exactly along the drag direction on screen regardless of orientation.
+    var dl=dw.clone().applyQuaternion(rotQuat.clone().conjugate());
+    selectedAtoms.forEach(function(i){
+        var a=MD.atoms[i];if(!a)return;
+        if(moveDragOrig&&moveDragOrig[i]){
+            var o=moveDragOrig[i];
+            a.x=o.x+dl.x;a.y=o.y+dl.y;a.z=o.z+dl.z;
+        }else{
+            a.x+=dl.x;a.y+=dl.y;a.z+=dl.z;
+        }
+    });
+    updateAtomMeshPositions();
+    rebuildBondsTouching(selectedAtoms);
+}
+function applyFragRotDelta(ax,ay){
+    // Incremental rotation of the selected fragment around its (fixed) center,
+    // in WORLD space: ax = angle around world X, ay = angle around world Y.
+    // Same axis/angle convention as the whole-molecule rotation, so the
+    // fragment turns in the same direction the view would. The world-space
+    // quaternion is converted to molecule-local space via conjugation.
+    if(!ax&&!ay)return;
+    var Q=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),ay);
+    if(ax)Q.premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),ax));
+    var qComb=rotQuat.clone().conjugate().multiply(Q).multiply(rotQuat);
+    var v=new THREE.Vector3();
+    selectedAtoms.forEach(function(i){
+        var a=MD.atoms[i];if(!a)return;
+        v.set(a.x-fragRotCx,a.y-fragRotCy,a.z-fragRotCz).applyQuaternion(qComb);
+        a.x=fragRotCx+v.x;a.y=fragRotCy+v.y;a.z=fragRotCz+v.z;
+    });
+    updateAtomMeshPositions();
+    rebuildBondsTouching(selectedAtoms);
+}
+function screenPointOnPlane(e,planeZ){
+    // Intersect the mouse ray with the z=planeZ plane (camera sits on the
+    // Z axis looking at the origin, so this plane is parallel to screen).
+    // planeZ must stay in front of the camera, otherwise the hit is a
+    // mirrored point behind the camera (inverted drag direction).
+    var rect=canvas.getBoundingClientRect();
+    mouse.x=((e.clientX-rect.left)/rect.width)*2-1;
+    mouse.y=-((e.clientY-rect.top)/rect.height)*2+1;
+    raycaster.setFromCamera(mouse,camera);
+    var dz=raycaster.ray.direction.z;
+    if(Math.abs(dz)<1e-6)return null;
+    var t=(planeZ-raycaster.ray.origin.z)/dz;
+    return raycaster.ray.origin.clone().add(raycaster.ray.direction.clone().multiplyScalar(t));
+}
+function screenToPlanePoint(e){
+    return screenPointOnPlane(e,moveDragPlaneZ);
+}
+function atomWorldZ(a){
+    // World Z of an atom: local (a - center) rotated by the view quaternion.
+    // pan offsets only shift x/y, so z is unaffected by panning.
+    return new THREE.Vector3(a.x-CX,a.y-CY,a.z-CZ).applyQuaternion(rotQuat).z;
+}
+function initPanGrab(e){
+    // Cursor-locked view panning: grab the atom under the cursor (or the
+    // molecule-center plane when clicking empty space) so the grabbed point
+    // sticks to the cursor while panning — 1:1 cursor speed.
+    panGrabActive=false;
+    if(diffMode)return;
+    var idx=getClickedAtom(e);
+    var refZ=0;
+    if(idx>=0&&MD.atoms[idx])refZ=atomWorldZ(MD.atoms[idx]);
+    var hit=screenPointOnPlane(e,refZ);
+    if(!hit)return;
+    panGrabOffset={x:hit.x-panX,y:hit.y-panY};
+    panRefZ=refZ;
+    panGrabActive=true;
+}
+
 if(CRY){rebuildCrystal();}
 rebuildScene();
 
@@ -1199,9 +1806,6 @@ container.focus();
 if(CRY){
     var crystalPanel=document.getElementById('crystal-panel');
     if(crystalPanel)crystalPanel.style.display='block';
-    var axesEl=document.getElementById('axes-indicator');
-    if(axesEl)axesEl.style.display='block';
-    updateAxesIndicator();
     layoutPanels();
     ['bnd-a-min','bnd-a-max','bnd-b-min','bnd-b-max','bnd-c-min','bnd-c-max'].forEach(function(id){
         var inp=document.getElementById(id);
@@ -1248,15 +1852,28 @@ if(CRY){
     }
 }
 
+// Axes indicator is shown for ALL structures: crystal files display the
+// lattice a/b/c axes, molecular files display the Cartesian X/Y/Z axes of
+// the initial coordinate frame.
+var axesInitEl=document.getElementById('axes-indicator');
+if(axesInitEl)axesInitEl.style.display='block';
+updateAxesIndicator();
+
 var maxD=0;
 MD.atoms.forEach(function(a){var dx=a.x-CX,dy=a.y-CY,dz=a.z-CZ,dd=Math.sqrt(dx*dx+dy*dy+dz*dz);if(dd>maxD)maxD=dd});
 var initCam=maxD*2.5+5;
 camera.position.set(0,0,initCam);camera.lookAt(0,0,0);
 camDist=initCam;
 
-var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',replaceAtom:'Replace Atom - Click atom(s) to select, click button again to confirm',selectAtoms:'Select Atoms - Input indices or element symbols',boxSelect:'Box Select - Drag a rectangle to select atoms',rotateGroup:'Rotate Group - Select group + axis atoms, then adjust angle'};
+var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',replaceAtom:'Replace Atom - Click atom(s) to select, click button again to confirm',selectAtoms:'Select Atoms - Input indices or element symbols',boxSelect:'Box Select - Drag a rectangle to select atoms',rotateGroup:'Rotate Group - Select group + axis atoms, then adjust angle',moveAtoms:'Move Atoms - Select atoms; drag/arrows rotate view, right-drag pans; Ctrl+drag or Ctrl+arrows rotates group, Ctrl+right-drag moves group'};
 
 function setMode(m){
+    if(m==='moveAtoms'&&CRY){
+        // Moving atoms in a periodic supercell breaks image consistency;
+        // the mode is only offered for molecular structures.
+        modeInfoEl.textContent='Move Atoms is not available for crystal structures';
+        return;
+    }
     if(currentMode===m){
         if(m==='selectAtoms'){
             var sp=document.getElementById('select-panel');
@@ -1274,7 +1891,8 @@ function setMode(m){
     }
     var oldMode=currentMode;
     currentMode=m;
-    var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect'||oldMode==='replaceAtom'||oldMode==='rotateGroup')&&(m==='selectAtoms'||m==='boxSelect'||m==='replaceAtom'||m==='rotateGroup'));
+    var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect'||oldMode==='replaceAtom'||oldMode==='rotateGroup'||oldMode==='moveAtoms')&&(m==='selectAtoms'||m==='boxSelect'||m==='replaceAtom'||m==='rotateGroup'||m==='moveAtoms'));
+    if(oldMode==='moveAtoms'&&m!=='moveAtoms')stopMoveSession();
     if(!preserveSel){
         selectedAtoms=[];diffSelectedAtoms=[];originalCoords=null;
     }
@@ -1581,7 +2199,11 @@ document.getElementById('reset-btn').addEventListener('click',function(){
 });
 var undoStack=[];var MAX_UNDO=50;
 function pushUndo(){
-    var snap={atoms:JSON.parse(JSON.stringify(MD.atoms)),bonds:JSON.parse(JSON.stringify(MD.bonds))};
+    // hasExplicitBonds is part of the restore state: an Import can flip it
+    // false→true, and an undo of that import must restore it, otherwise Move
+    // Atoms would keep using the explicit-bonds (deletion-only) path on what
+    // is an auto-detected structure again.
+    var snap={atoms:JSON.parse(JSON.stringify(MD.atoms)),bonds:JSON.parse(JSON.stringify(MD.bonds)),hasExplicitBonds:!!MD.hasExplicitBonds};
     if(CRY){snap.baseAtoms=JSON.parse(JSON.stringify(CRY.baseAtoms));snap.baseBonds=JSON.parse(JSON.stringify(CRY.baseBonds))}
     undoStack.push(snap);
     if(undoStack.length>MAX_UNDO)undoStack.shift();
@@ -1591,8 +2213,10 @@ function updateUndoBtn(){var b=document.getElementById('undo-btn');if(b)b.disabl
 function doUndo(){
     if(undoStack.length===0)return;
     if(vibActive||vibPaused)stopVibration();
+    if(moveDragActive||moveKeyActive||fragRotActive)stopMoveSession();
     var snap=undoStack.pop();
     MD.atoms=snap.atoms;MD.bonds=snap.bonds;
+    MD.hasExplicitBonds=!!snap.hasExplicitBonds;
     if(CRY&&snap.baseAtoms){CRY.baseAtoms=snap.baseAtoms;CRY.baseBonds=snap.baseBonds}
     if(CRY){rebuildCrystal()}rebuildScene();updateMolInfo();updateUndoBtn();
     if(diffMode)resetSelection();
@@ -1618,6 +2242,13 @@ function doUndo(){
 }
 document.getElementById('undo-btn').addEventListener('click',doUndo);
 document.getElementById('save-btn').addEventListener('click',doSave);
+document.getElementById('import-btn').addEventListener('click',function(){
+    if(diffMode){modeInfoEl.textContent='Import is not available in diff mode';return}
+    if(CRY){modeInfoEl.textContent='Import is not available for crystal structures';return}
+    if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
+    modeInfoEl.textContent='Import: selecting file...';
+    vscodeApi.postMessage({command:'importFile'});
+});
 document.getElementById('diff-btn').addEventListener('click',function(){
     if(diffMode){
         exitDiff();
@@ -1660,8 +2291,89 @@ window.addEventListener('message',function(event){
             return;
         }
         startDiff(msg);
+    }else if(msg.command==='importResult'){
+        if(msg.cancelled){
+            modeInfoEl.textContent=MODE_INFO[currentMode]||currentMode;
+            return;
+        }
+        importStructure(msg);
     }
 });
+
+function importStructure(msg){
+    // Append an imported structure (parsed by the extension host) beside the
+    // current structure at a guaranteed non-overlapping position. One undo
+    // snapshot per import.
+    if(diffMode||CRY)return;
+    if(vibActive||vibPaused)stopVibration();
+    if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
+    var newAtoms=msg.atoms||[];
+    var newBonds=msg.bonds||[];
+    if(newAtoms.length===0)return;
+    pushUndo();
+    var N0=MD.atoms.length;
+    // --- Non-overlap placement via bounding spheres ---
+    // Place the incoming structure on the +X side of the existing structure:
+    // centroid distance = (R1+buf) + (R2+buf) + gap, where R is each
+    // structure's max distance from its own centroid and buf=2.5 Å covers
+    // any atom radius. A bounding sphere contains every atom, so this single
+    // O(n) check guarantees no imported atom overlaps ANY existing atom —
+    // including previously imported structures, which are part of
+    // "existing" by now. Rotation-invariant, no overlap iterations needed.
+    var i,a;
+    var c1x=0,c1y=0,c1z=0;
+    if(N0>0){
+        for(i=0;i<N0;i++){a=MD.atoms[i];c1x+=a.x;c1y+=a.y;c1z+=a.z}
+        c1x/=N0;c1y/=N0;c1z/=N0;
+    }
+    var c2x=0,c2y=0,c2z=0;
+    for(i=0;i<newAtoms.length;i++){a=newAtoms[i];c2x+=a.x;c2y+=a.y;c2z+=a.z}
+    c2x/=newAtoms.length;c2y/=newAtoms.length;c2z/=newAtoms.length;
+    var R1=0,R2=0;
+    if(N0>0){
+        for(i=0;i<N0;i++){a=MD.atoms[i];var d1=Math.sqrt((a.x-c1x)*(a.x-c1x)+(a.y-c1y)*(a.y-c1y)+(a.z-c1z)*(a.z-c1z));if(d1>R1)R1=d1}
+    }
+    for(i=0;i<newAtoms.length;i++){a=newAtoms[i];var d2=Math.sqrt((a.x-c2x)*(a.x-c2x)+(a.y-c2y)*(a.y-c2y)+(a.z-c2z)*(a.z-c2z));if(d2>R2)R2=d2}
+    var BUF=2.5,GAP=2.0;
+    var tx,ty,tz;
+    if(N0===0){tx=-c2x;ty=-c2y;tz=-c2z}
+    else{var D=(R1+BUF)+(R2+BUF)+GAP;tx=c1x+D-c2x;ty=c1y-c2y;tz=c1z-c2z}
+    for(i=0;i<newAtoms.length;i++){
+        a=newAtoms[i];
+        MD.atoms.push({element:a.element,x:a.x+tx,y:a.y+ty,z:a.z+tz,color:a.color||((MD.atomColors&&MD.atomColors[a.element])||'#FF1493')});
+    }
+    // --- Bonds ---
+    if(!MD.hasExplicitBonds&&!msg.hasExplicitBonds){
+        // Fully automatic bond detection for the combined system (regular
+        // behavior for auto-detected files).
+        MD.bonds=detectBondsFromAtoms(MD.atoms);
+    }else{
+        // At least one side has authored bonds: keep them and connect the
+        // imported part explicitly instead of re-detecting everything
+        // (re-detection could alter authored bond orders).
+        MD.hasExplicitBonds=true;
+        if(msg.hasExplicitBonds){
+            newBonds.forEach(function(b){
+                if(b.atom1<newAtoms.length&&b.atom2<newAtoms.length)
+                    MD.bonds.push({atom1:N0+b.atom1,atom2:N0+b.atom2,order:b.order==null?1:b.order});
+            });
+        }else{
+            // Imported file had no authored bonds: auto-detect, keeping only
+            // bonds that touch a new atom (existing bonds stay as authored).
+            var det=detectBondsFromAtoms(MD.atoms);
+            det.forEach(function(b){if(b.atom1>=N0||b.atom2>=N0)MD.bonds.push(b)});
+        }
+    }
+    rebuildScene();
+    updateMolInfo();
+    // Zoom out if the combined structure no longer fits the current view.
+    var maxD=0;
+    MD.atoms.forEach(function(a){var dx=a.x-CX,dy=a.y-CY,dz=a.z-CZ,dd=Math.sqrt(dx*dx+dy*dy+dz*dz);if(dd>maxD)maxD=dd});
+    var need=maxD*2.5+5;
+    if(camDist<need){camDist=need;camera.position.set(0,0,camDist);camera.lookAt(0,0,0)}
+    needsRender=true;
+    modeInfoEl.textContent='Imported '+newAtoms.length+' atoms from '+(msg.fileName||'file')+' - placed beside the existing structure';
+}
 
 function buildAdjacency(atoms,bonds){
     var adj=[];
@@ -2108,6 +2820,7 @@ diffReopenEl.addEventListener('click',function(){
 
 function enterDiffRender(diffs,mapping){
     if(vibActive||vibPaused)stopVibration();
+    stopMoveSession();
     diffPivot=new THREE.Group();scene.add(diffPivot);
     diffMolGroup=new THREE.Group();diffPivot.add(diffMolGroup);
 
@@ -2301,6 +3014,7 @@ function updateFrameInfo(){
 }
 function switchFrame(idx){
     if(idx<0||idx>=totalFrames)return;
+    stopMoveSession();
     currentFrame=idx;
     var f=MD.frames[idx];
     MD.atoms=f.atoms.map(function(a,i){a.index=i;return a});
@@ -2314,27 +3028,67 @@ function switchFrame(idx){
     rebuildScene();
     updateFrameInfo();
 }
+// ===== Shared bond-detection tables and helpers =====
+// Used by both the full-molecule detector (detectBondsFromAtoms) and the
+// partial re-detection in Move Atoms (recomputeMovedBonds). Tables and
+// formulas are identical to the previous inline copies inside the detector.
+var BOND_CR2={H:0.31,He:0.28,Li:1.28,Be:0.96,B:0.85,C:0.76,N:0.71,O:0.66,F:0.57,Ne:0.58,Na:1.66,Mg:1.41,Al:1.21,Si:1.11,P:1.07,S:1.05,Cl:1.02,Ar:1.06,K:2.03,Ca:1.76,Sc:1.70,Ti:1.60,V:1.53,Cr:1.39,Mn:1.39,Fe:1.32,Co:1.26,Ni:1.24,Cu:1.32,Zn:1.22,Ga:1.22,Ge:1.20,As:1.19,Se:1.20,Br:1.20,Kr:1.16,Rb:2.20,Sr:1.95,Y:1.90,Zr:1.75,Nb:1.64,Mo:1.54,Tc:1.47,Ru:1.46,Rh:1.42,Pd:1.39,Ag:1.45,Cd:1.44,In:1.42,Sn:1.39,Sb:1.39,Te:1.38,Xe:1.40,Cs:2.44,Ba:2.15,La:2.07,Ce:2.04,Pr:2.03,Nd:2.01,Pm:1.99,Sm:1.98,Eu:1.98,Gd:1.96,Tb:1.94,Dy:1.92,Ho:1.92,Er:1.89,Tm:1.90,Yb:1.87,Lu:1.87,Hf:1.75,Ta:1.70,W:1.62,Re:1.51,Os:1.44,Ir:1.41,Pt:1.36,Au:1.36,Hg:1.32,Tl:1.45,Pb:1.46,Bi:1.48,Po:1.40,At:1.50,Rn:1.50,I:1.39};
+var BOND_BS={'C+C':[{o:3,l:1.20,t:0.05},{o:1.5,l:1.39,t:0.05},{o:2,l:1.38,t:0.05},{o:1,l:1.51,t:0.10}],'C+N':[{o:2,l:1.26,t:0.05},{o:1.5,l:1.36,t:0.05},{o:1,l:1.43,t:0.10},{o:3,l:1.16,t:0.06}],'C+O':[{o:2,l:1.24,t:0.05},{o:1,l:1.39,t:0.05}],'N+N':[{o:1,l:1.41,t:0.10},{o:2,l:1.25,t:0.06},{o:3,l:1.10,t:0.06}],'N+O':[{o:2,l:1.20,t:0.06},{o:1.5,l:1.30,t:0.06},{o:1,l:1.40,t:0.15}],'O+O':[{o:2,l:1.21,t:0.06},{o:1,l:1.48,t:0.15}],'C+S':[{o:1.5,l:1.73,t:0.06},{o:2,l:1.60,t:0.10},{o:1,l:1.82,t:0.15}],'C+F':[{o:1,l:1.33,t:0.10}],'C+H':[{o:1,l:0.97,t:0.15}],'N+H':[{o:1,l:0.88,t:0.15}],'O+H':[{o:1,l:0.85,t:0.15}]};
+var BOND_BC={HH:0,CH:1.3,HO:1.2,HN:1.3,CC:1.9,CO:1.7,CN:1.7,NN:1.7,NO:1.8,CF:1.6,CS:2.0};
+var BOND_MV={H:1,C:4,N:3,O:2,F:1,S:6,P:5,Cl:1,Br:1,I:1,B:3};
+function bondPk(e1,e2){e1=e1.toUpperCase();e2=e2.toUpperCase();return e1<e2?e1+e2:e2+e1}
+function bondSk(e1,e2){e1=e1.charAt(0).toUpperCase()+e1.slice(1).toLowerCase();e2=e2.charAt(0).toUpperCase()+e2.slice(1).toLowerCase();return e1<e2?e1+'+'+e2:e2+'+'+e1}
+function bondGbo(el1,el2,d){
+    var p=bondPk(el1,el2);var co=BOND_BC[p];
+    if(co!==undefined){if(d>co)return 0}else{var r1=BOND_CR2[el1.charAt(0).toUpperCase()+el1.slice(1).toLowerCase()]||1.5;var r2=BOND_CR2[el2.charAt(0).toUpperCase()+el2.slice(1).toLowerCase()]||1.5;if(d>(r1+r2)+0.5)return 0}
+    var s=bondSk(el1,el2);var sp=BOND_BS[s];
+    if(sp){for(var k=0;k<sp.length;k++){if(Math.abs(d-sp[k].l)<=sp[k].t)return sp[k].o}var bo=1,md=Infinity;for(var k=0;k<sp.length;k++){var df=Math.abs(d-sp[k].l);if(df<md){md=df;bo=sp[k].o}}return bo}
+    var r1=BOND_CR2[el1.charAt(0).toUpperCase()+el1.slice(1).toLowerCase()]||1.5;var r2=BOND_CR2[el2.charAt(0).toUpperCase()+el2.slice(1).toLowerCase()]||1.5;var rs=r1+r2;var ratio=rs?d/rs:1;
+    if(ratio<0.85)return 3;if(ratio<0.90)return 2;return 1;
+}
+function bondPcut(e1,e2){var E1=e1.toUpperCase(),E2=e2.toUpperCase();var co=BOND_BC[E1<E2?E1+E2:E2+E1];
+    if(co!==undefined)return co;
+    var r1=BOND_CR2[e1]||1.5,r2=BOND_CR2[e2]||1.5;return r1+r2+0.5}
 function detectBondsFromAtoms(atoms){
-    var CR2={H:0.31,He:0.28,Li:1.28,Be:0.96,B:0.85,C:0.76,N:0.71,O:0.66,F:0.57,Ne:0.58,Na:1.66,Mg:1.41,Al:1.21,Si:1.11,P:1.07,S:1.05,Cl:1.02,Ar:1.06,K:2.03,Ca:1.76,Sc:1.70,Ti:1.60,V:1.53,Cr:1.39,Mn:1.39,Fe:1.32,Co:1.26,Ni:1.24,Cu:1.32,Zn:1.22,Ga:1.22,Ge:1.20,As:1.19,Se:1.20,Br:1.20,Kr:1.16,Rb:2.20,Sr:1.95,Y:1.90,Zr:1.75,Nb:1.64,Mo:1.54,Tc:1.47,Ru:1.46,Rh:1.42,Pd:1.39,Ag:1.45,Cd:1.44,In:1.42,Sn:1.39,Sb:1.39,Te:1.38,Xe:1.40,Cs:2.44,Ba:2.15,La:2.07,Ce:2.04,Pr:2.03,Nd:2.01,Pm:1.99,Sm:1.98,Eu:1.98,Gd:1.96,Tb:1.94,Dy:1.92,Ho:1.92,Er:1.89,Tm:1.90,Yb:1.87,Lu:1.87,Hf:1.75,Ta:1.70,W:1.62,Re:1.51,Os:1.44,Ir:1.41,Pt:1.36,Au:1.36,Hg:1.32,Tl:1.45,Pb:1.46,Bi:1.48,Po:1.40,At:1.50,Rn:1.50,I:1.39};
-    var BS={'C+C':[{o:3,l:1.20,t:0.05},{o:1.5,l:1.39,t:0.05},{o:2,l:1.38,t:0.05},{o:1,l:1.51,t:0.10}],'C+N':[{o:2,l:1.26,t:0.05},{o:1.5,l:1.36,t:0.05},{o:1,l:1.43,t:0.10},{o:3,l:1.16,t:0.06}],'C+O':[{o:2,l:1.24,t:0.05},{o:1,l:1.39,t:0.05}],'N+N':[{o:1,l:1.41,t:0.10},{o:2,l:1.25,t:0.06},{o:3,l:1.10,t:0.06}],'N+O':[{o:2,l:1.20,t:0.06},{o:1.5,l:1.30,t:0.06},{o:1,l:1.40,t:0.15}],'O+O':[{o:2,l:1.21,t:0.06},{o:1,l:1.48,t:0.15}],'C+S':[{o:1.5,l:1.73,t:0.06},{o:2,l:1.60,t:0.10},{o:1,l:1.82,t:0.15}],'C+F':[{o:1,l:1.33,t:0.10}],'C+H':[{o:1,l:0.97,t:0.15}],'N+H':[{o:1,l:0.88,t:0.15}],'O+H':[{o:1,l:0.85,t:0.15}]};
-    var BC={HH:0,CH:1.3,HO:1.2,HN:1.3,CC:1.9,CO:1.7,CN:1.7,NN:1.7,NO:1.8,CF:1.6,CS:2.0};
-    var MV={H:1,C:4,N:3,O:2,F:1,S:6,P:5,Cl:1,Br:1,I:1,B:3};
-    function pk(e1,e2){e1=e1.toUpperCase();e2=e2.toUpperCase();return e1<e2?e1+e2:e2+e1}
-    function sk(e1,e2){e1=e1.charAt(0).toUpperCase()+e1.slice(1).toLowerCase();e2=e2.charAt(0).toUpperCase()+e2.slice(1).toLowerCase();return e1<e2?e1+'+'+e2:e2+'+'+e1}
-    function gbo(el1,el2,d){
-        var p=pk(el1,el2);var co=BC[p];
-        if(co!==undefined){if(d>co)return 0}else{var r1=CR2[el1.charAt(0).toUpperCase()+el1.slice(1).toLowerCase()]||1.5;var r2=CR2[el2.charAt(0).toUpperCase()+el2.slice(1).toLowerCase()]||1.5;if(d>(r1+r2)+0.5)return 0}
-        var s=sk(el1,el2);var sp=BS[s];
-        if(sp){for(var k=0;k<sp.length;k++){if(Math.abs(d-sp[k].l)<=sp[k].t)return sp[k].o}var bo=1,md=Infinity;for(var k=0;k<sp.length;k++){var df=Math.abs(d-sp[k].l);if(df<md){md=df;bo=sp[k].o}}return bo}
-        var r1=CR2[el1.charAt(0).toUpperCase()+el1.slice(1).toLowerCase()]||1.5;var r2=CR2[el2.charAt(0).toUpperCase()+el2.slice(1).toLowerCase()]||1.5;var rs=r1+r2;var ratio=rs?d/rs:1;
-        if(ratio<0.85)return 3;if(ratio<0.90)return 2;return 1;
-    }
     var n=atoms.length;var bm=new Map();
-    for(var i=0;i<n;i++){for(var j=i+1;j<n;j++){
-        var dx=atoms[i].x-atoms[j].x,dy=atoms[i].y-atoms[j].y,dz=atoms[i].z-atoms[j].z;
-        var d=Math.sqrt(dx*dx+dy*dy+dz*dz);var bo=gbo(atoms[i].element,atoms[j].element,d);
-        if(bo>0){if(!bm.has(i))bm.set(i,new Map());if(!bm.has(j))bm.set(j,new Map());bm.get(i).set(j,bo);bm.get(j).set(i,bo)}
-    }}
+    // Spatial hash grid (3 A cells) instead of the O(N^2) pair loop. A bond
+    // needs d<=cutoff(pair), so per element we take the max cutoff against
+    // every other element present; the search radius floor(max/CELL)+1 then
+    // covers every pair that could bond. Candidates are enumerated in the
+    // same (i asc, j asc) order as the old full pair loop, so the bondMap
+    // insertion sequence - and the bond-order fix/refine results - are
+    // identical to the previous implementation.
+    var CELL=3;
+    var normEls=new Array(n);var distinct=[];var seenEl={};
+    for(var i=0;i<n;i++){var ne=atoms[i].element.charAt(0).toUpperCase()+atoms[i].element.slice(1).toLowerCase();normEls[i]=ne;
+        if(!seenEl[ne]){seenEl[ne]=1;distinct.push(ne)}}
+    var rangeFor={};
+    for(var di=0;di<distinct.length;di++){var e1=distinct[di];var mc=0;
+        for(var dj=0;dj<distinct.length;dj++){var c2=bondPcut(e1,distinct[dj]);if(c2>mc)mc=c2}
+        rangeFor[e1]=Math.floor(mc/CELL)+1}
+    var grid=new Map();var cX=new Int32Array(n),cY=new Int32Array(n),cZ=new Int32Array(n);
+    for(var i=0;i<n;i++){var cx=Math.floor(atoms[i].x/CELL),cy=Math.floor(atoms[i].y/CELL),cz=Math.floor(atoms[i].z/CELL);
+        cX[i]=cx;cY[i]=cy;cZ[i]=cz;
+        // XOR hash collisions only merge buckets (extra candidates are
+        // filtered by the distance test), never lose one.
+        var key=(cx*73856093)^(cy*19349663)^(cz*83492791);
+        var bkt=grid.get(key);if(!bkt){bkt=[];grid.set(key,bkt)}bkt.push(i)}
+    var cand=[];
+    for(var i=0;i<n;i++){
+        var range=rangeFor[normEls[i]];var cx=cX[i],cy=cY[i],cz=cZ[i];cand.length=0;
+        for(var dx=-range;dx<=range;dx++)for(var dy=-range;dy<=range;dy++)for(var dz=-range;dz<=range;dz++){
+            var key=((cx+dx)*73856093)^((cy+dy)*19349663)^((cz+dz)*83492791);
+            var bkt=grid.get(key);if(!bkt)continue;
+            for(var k=0;k<bkt.length;k++){var j=bkt[k];if(j>i)cand.push(j)}}
+        if(cand.length===0)continue;
+        cand.sort(function(a,b){return a-b});
+        var prev=-1;
+        for(var ci=0;ci<cand.length;ci++){var j=cand[ci];if(j===prev)continue;prev=j;
+            var dx2=atoms[i].x-atoms[j].x,dy2=atoms[i].y-atoms[j].y,dz2=atoms[i].z-atoms[j].z;
+            var d=Math.sqrt(dx2*dx2+dy2*dy2+dz2*dz2);var bo=bondGbo(atoms[i].element,atoms[j].element,d);
+            if(bo>0){if(!bm.has(i))bm.set(i,new Map());if(!bm.has(j))bm.set(j,new Map());bm.get(i).set(j,bo);bm.get(j).set(i,bo)}
+        }
+    }
     bm.forEach(function(nb,i){nb.forEach(function(o,j){if(i>j)return;var e1=atoms[i].element.toUpperCase(),e2=atoms[j].element.toUpperCase();var els=new Set([e1,e2]);
         if(els.has('C')&&els.has('O')&&o!==1&&o!==2){var no=o<1.7?1:2;nb.set(j,no);bm.get(j).set(i,no)}
         if(e1==='BR'||e2==='BR'){nb.set(j,1);bm.get(j).set(i,1)}
@@ -2347,11 +3101,11 @@ function detectBondsFromAtoms(atoms){
     });
     for(var iter=0;iter<10;iter++){var changed=false;var val=new Map();for(var i=0;i<n;i++)val.set(i,0);
         bm.forEach(function(nb,i){nb.forEach(function(o){val.set(i,(val.get(i)||0)+o)})});
-        var viols=[];val.forEach(function(v,i){var el=atoms[i].element.charAt(0).toUpperCase()+atoms[i].element.slice(1).toLowerCase();var mv=MV[el]||100;if(v>mv+0.1)viols.push(i)});
+        var viols=[];val.forEach(function(v,i){var el=atoms[i].element.charAt(0).toUpperCase()+atoms[i].element.slice(1).toLowerCase();var mv=BOND_MV[el]||100;if(v>mv+0.1)viols.push(i)});
         if(viols.length===0)break;
-        for(var vi=0;vi<viols.length;vi++){var i=viols[vi];var nb=bm.get(i);if(!nb)continue;var cv=Array.from(nb.values()).reduce(function(s,v){return s+v},0);var el=atoms[i].element.charAt(0).toUpperCase()+atoms[i].element.slice(1).toLowerCase();var mv=MV[el]||100;if(cv<=mv+0.1)continue;
+        for(var vi=0;vi<viols.length;vi++){var i=viols[vi];var nb=bm.get(i);if(!nb)continue;var cv=Array.from(nb.values()).reduce(function(s,v){return s+v},0);var el=atoms[i].element.charAt(0).toUpperCase()+atoms[i].element.slice(1).toLowerCase();var mv=BOND_MV[el]||100;if(cv<=mv+0.1)continue;
             var bb=null,ml=Infinity;nb.forEach(function(o,j){if(o<=1)return;var no;if(o===3)no=2;else if(o===2)no=1.5;else if(o===1.5)no=1;else return;
-                var el2=atoms[j].element;var dd=Math.sqrt(Math.pow(atoms[i].x-atoms[j].x,2)+Math.pow(atoms[i].y-atoms[j].y,2)+Math.pow(atoms[i].z-atoms[j].z,2));var s=sk(atoms[i].element,el2);var sp=BS[s];if(!sp)return;
+                var el2=atoms[j].element;var dd=Math.sqrt(Math.pow(atoms[i].x-atoms[j].x,2)+Math.pow(atoms[i].y-atoms[j].y,2)+Math.pow(atoms[i].z-atoms[j].z,2));var sp=BOND_BS[bondSk(atoms[i].element,el2)];if(!sp)return;
                 var ci=0,ni=0,md=Infinity;for(var k=0;k<sp.length;k++){if(sp[k].o===o&&Math.abs(dd-sp[k].l)<md){md=Math.abs(dd-sp[k].l);ci=sp[k].l}}md=Infinity;for(var k=0;k<sp.length;k++){if(sp[k].o===no&&Math.abs(dd-sp[k].l)<md){md=Math.abs(dd-sp[k].l);ni=sp[k].l}}if(!ci||!ni)return;
                 var loss=Math.abs(dd-ni)-Math.abs(dd-ci);if(loss<ml){ml=loss;bb=[j,no]}
             });if(bb){nb.set(bb[0],bb[1]);bm.get(bb[0]).set(i,bb[1]);changed=true}
@@ -2381,7 +3135,17 @@ var optPanelEl=document.getElementById('opt-panel');
 var optReopenEl=document.getElementById('opt-reopen');
 var freqPanelEl=document.getElementById('freq-panel');
 var freqReopenEl=document.getElementById('freq-reopen');
+var routePanelEl=document.getElementById('route-panel');
+var routeReopenEl=document.getElementById('route-reopen');
 var OPT_STEPS=MD.optSteps||null;
+var OPT_SOURCE=MD.optSource||null;
+// Gaussian's own convergence criteria (force 0.000450/0.000300 Hartree/Bohr,
+// displacement 0.001800/0.001200 Bohr) are the Item/Value/Converged? table
+// thresholds of Gaussian optimization logs. They apply ONLY when the log
+// really came from Gaussian — other programs (e.g. xtb, whose charts are
+// driven by its gnorm criterion) draw no threshold lines rather than a
+// borrowed, meaningless scale.
+var OPT_IS_GAUSSIAN=OPT_SOURCE==='gaussian';
 var NORMAL_MODES=MD.normalModes||null;
 
 function drawConvergenceChart(canvas,steps,field,label,color,threshold){
@@ -2474,10 +3238,10 @@ function buildOptPanel(){
                 drawConvergenceChart(cv,OPT_STEPS,'energy','Energy (Hartree)','#3794ff',null);
             }else if(field==='force'){
                 cv.style.height='110px';
-                drawDualChart(cv,OPT_STEPS,['maxForce','rmsForce'],['Max Force','RMS Force'],['#ff6b6b','#ffa94d'],0.000450,0.000300);
+                drawDualChart(cv,OPT_STEPS,['maxForce','rmsForce'],['Max Force','RMS Force'],['#ff6b6b','#ffa94d'],OPT_IS_GAUSSIAN?0.000450:null,OPT_IS_GAUSSIAN?0.000300:null);
             }else if(field==='disp'){
                 cv.style.height='110px';
-                drawDualChart(cv,OPT_STEPS,['maxDisplacement','rmsDisplacement'],['Max Disp','RMS Disp'],['#51cf66','#74c0fc'],0.001800,0.001200);
+                drawDualChart(cv,OPT_STEPS,['maxDisplacement','rmsDisplacement'],['Max Disp','RMS Disp'],['#51cf66','#74c0fc'],OPT_IS_GAUSSIAN?0.001800:null,OPT_IS_GAUSSIAN?0.001200:null);
             }
         });
     }
@@ -2506,8 +3270,8 @@ function buildOptPanel(){
             cvs.forEach(function(cv){
                 var f=cv.dataset.field;
                 if(f==='energy')drawConvergenceChart(cv,OPT_STEPS,'energy','Energy (Hartree)','#3794ff',null);
-                else if(f==='force')drawDualChart(cv,OPT_STEPS,['maxForce','rmsForce'],['Max Force','RMS Force'],['#ff6b6b','#ffa94d'],0.000450,0.000300);
-                else if(f==='disp')drawDualChart(cv,OPT_STEPS,['maxDisplacement','rmsDisplacement'],['Max Disp','RMS Disp'],['#51cf66','#74c0fc'],0.001800,0.001200);
+                else if(f==='force')drawDualChart(cv,OPT_STEPS,['maxForce','rmsForce'],['Max Force','RMS Force'],['#ff6b6b','#ffa94d'],OPT_IS_GAUSSIAN?0.000450:null,OPT_IS_GAUSSIAN?0.000300:null);
+                else if(f==='disp')drawDualChart(cv,OPT_STEPS,['maxDisplacement','rmsDisplacement'],['Max Disp','RMS Disp'],['#51cf66','#74c0fc'],OPT_IS_GAUSSIAN?0.001800:null,OPT_IS_GAUSSIAN?0.001200:null);
             });
         });
         document.addEventListener('mouseup',function(){if(dragging){dragging=false;document.body.style.cursor='';layoutPanels()}});
@@ -2529,19 +3293,58 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
     var allVals=[];
     steps.forEach(function(s){fields.forEach(function(f){if(s[f]!=null&&!isNaN(s[f]))allVals.push(s[f])})});
     if(allVals.length===0){ctx.fillStyle='#888';ctx.font='10px sans-serif';ctx.fillText('No data',padL,padT+12);return}
-    var vmin=Math.min.apply(null,allVals),vmax=Math.max.apply(null,allVals);
-    if(thresh1!=null){vmin=Math.min(vmin,thresh1);vmax=Math.max(vmax,thresh1)}
-    if(thresh2!=null){vmin=Math.min(vmin,thresh2);vmax=Math.max(vmax,thresh2)}
-    if(vmax-vmin<1e-12)vmax=vmin+1;
+    // Logarithmic Y axis: force/displacement values span decades across an
+    // optimization, so a linear axis squeezes the convergence-threshold lines
+    // against the bottom once early steps dominate the range. Non-positive
+    // values (e.g. a converged step printed as 0.000000) are clamped to a
+    // floor just below the smallest positive value; falls back to linear
+    // only when nothing positive remains or a threshold is non-positive.
+    var posVals=allVals.filter(function(v){return v>0});
+    var useLog=posVals.length>0;
+    [thresh1,thresh2].forEach(function(th){if(th!=null&&th<=0)useLog=false});
+    var vmin,vmax,vFloor=0;
+    if(useLog){
+        vFloor=Math.min.apply(null,posVals)*1e-2;
+        var lv=allVals.map(function(v){return Math.log10(Math.max(v,vFloor))});
+        if(thresh1!=null)lv.push(Math.log10(thresh1));
+        if(thresh2!=null)lv.push(Math.log10(thresh2));
+        vmin=Math.min.apply(null,lv);vmax=Math.max.apply(null,lv);
+        if(vmax-vmin<1e-12)vmax=vmin+1;
+    }else{
+        vmin=Math.min.apply(null,allVals),vmax=Math.max.apply(null,allVals);
+        if(thresh1!=null){vmin=Math.min(vmin,thresh1);vmax=Math.max(vmax,thresh1)}
+        if(thresh2!=null){vmin=Math.min(vmin,thresh2);vmax=Math.max(vmax,thresh2)}
+        if(vmax-vmin<1e-12)vmax=vmin+1;
+    }
+    function yOf(v){
+        if(useLog)return padT+ph*(vmax-Math.log10(Math.max(v,vFloor)))/(vmax-vmin);
+        return padT+ph*(vmax-v)/(vmax-vmin);
+    }
+    function valAtFrac(frac){
+        // Axis value at vertical fraction frac (0=top): inverse of yOf.
+        if(useLog)return Math.pow(10,vmax-(vmax-vmin)*frac);
+        return vmax-(vmax-vmin)*frac;
+    }
     var n=steps.length;
-    // Grid
+    // Grid + axis label. On the log axis the tick values ARE the log10
+    // values (evenly spaced, e.g. -3.35), with a rotated "log₁₀" axis label
+    // on the left; the linear fallback keeps exponential labels.
     ctx.strokeStyle='rgba(255,255,255,0.12)';ctx.lineWidth=1;
     ctx.fillStyle='#888';ctx.font='9px sans-serif';ctx.textAlign='right';ctx.textBaseline='middle';
     for(var g=0;g<=4;g++){
         var y=padT+ph*g/4;
         ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(padL+pw,y);ctx.stroke();
-        var val=vmax-(vmax-vmin)*g/4;
-        ctx.fillText(val.toExponential(2),padL-3,y);
+        if(useLog)ctx.fillText((vmax-(vmax-vmin)*g/4).toFixed(2),padL-3,y);
+        else ctx.fillText(valAtFrac(g/4).toExponential(1),padL-3,y);
+    }
+    if(useLog){
+        ctx.save();
+        ctx.translate(9,padT+ph/2);
+        ctx.rotate(-Math.PI/2);
+        ctx.textAlign='center';ctx.textBaseline='middle';
+        ctx.fillText('log\u2081\u2080',0,0);
+        ctx.restore();
+        ctx.fillStyle='#888';ctx.font='9px sans-serif';ctx.textAlign='right';ctx.textBaseline='middle';
     }
     ctx.textAlign='center';ctx.textBaseline='top';
     for(g=0;g<n;g+=Math.max(1,Math.floor(n/6))){
@@ -2551,7 +3354,7 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
     // Threshold lines
     [thresh1,thresh2].forEach(function(th,idx){
         if(th==null)return;
-        var ty=padT+ph*(vmax-th)/(vmax-vmin);
+        var ty=yOf(th);
         ctx.strokeStyle='rgba(255,180,0,0.5)';ctx.setLineDash([3,3]);
         ctx.beginPath();ctx.moveTo(padL,ty);ctx.lineTo(padL+pw,ty);ctx.stroke();
         ctx.setLineDash([]);
@@ -2571,7 +3374,7 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
             var v=steps[i][fields[fi]];
             if(v==null||isNaN(v))continue;
             x=padL+(n<=1?0:pw*i/(n-1));
-            y=padT+ph*(vmax-v)/(vmax-vmin);
+            y=yOf(v);
             if(!drew){ctx.moveTo(x,y);drew=true}else ctx.lineTo(x,y);
         }
         ctx.stroke();
@@ -2580,7 +3383,7 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
             v=steps[i][fields[fi]];
             if(v==null||isNaN(v))continue;
             x=padL+(n<=1?0:pw*i/(n-1));
-            y=padT+ph*(vmax-v)/(vmax-vmin);
+            y=yOf(v);
             ctx.beginPath();ctx.arc(x,y,2,0,Math.PI*2);ctx.fill();
         }
     }
@@ -2792,12 +3595,46 @@ function buildFreqPanel(){
 optReopenEl.addEventListener('click',function(){buildOptPanel()});
 freqReopenEl.addEventListener('click',function(){buildFreqPanel()});
 
+// ===== Route Keywords Panel (Gaussian log route cards) =====
+var ROUTES=MD.routes||null;
+function rtEsc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function buildRoutePanel(){
+    if(!ROUTES||ROUTES.length===0)return;
+    var multi=ROUTES.length>1;
+    var html='<div class="rt-head"><span class="rt-title">Route Keywords</span><span class="rt-close">×</span></div><div class="rt-body">';
+    ROUTES.forEach(function(sec,si){
+        if(multi)html+='<div class="rt-job">Job '+(si+1)+(sec.hasOpt?'<span class="rt-badge">opt</span>':'')+'</div>';
+        html+='<div class="rt-raw">'+rtEsc(sec.raw)+'</div>';
+        html+=sec.keywords.map(function(k){
+            var opts=(k.options&&k.options.length>0)?'<span class="rt-kopts">= '+rtEsc(k.options.join(', '))+'</span>':'';
+            return '<div class="rt-kw"><span class="rt-kname">'+rtEsc(k.name)+'</span>'+opts+'</div>';
+        }).join('');
+    });
+    html+='</div>';
+    routePanelEl.innerHTML=html;
+    routePanelEl.classList.add('show');
+    routeReopenEl.classList.remove('show');
+    var closeBtn=routePanelEl.querySelector('.rt-close');
+    if(closeBtn){
+        closeBtn.addEventListener('click',function(){
+            routePanelEl.classList.remove('show');
+            routeReopenEl.classList.add('show');
+            layoutPanels();
+        });
+    }
+    layoutPanels();
+}
+routeReopenEl.addEventListener('click',function(){buildRoutePanel()});
+
 // Initial panel display — show reopen buttons only, don't auto-open panels
 if(OPT_STEPS&&OPT_STEPS.length>0){
     optReopenEl.classList.add('show');
 }
 if(NORMAL_MODES&&NORMAL_MODES.length>0){
     freqReopenEl.classList.add('show');
+}
+if(ROUTES&&ROUTES.length>0){
+    routeReopenEl.classList.add('show');
 }
 layoutPanels();
 
@@ -2888,8 +3725,10 @@ function layoutPanels(){
         {id:'diff-label-right',pr:5,anc:'tc',pct:0.75},
         {id:'opt-panel',pr:7,anc:'tl'},
         {id:'freq-panel',pr:8,anc:'tl'},
+        {id:'route-panel',pr:8,anc:'tl'},
         {id:'opt-reopen',pr:9,anc:'tl'},
         {id:'freq-reopen',pr:10,anc:'tl'},
+        {id:'route-reopen',pr:10,anc:'tl'},
         {id:'axes-indicator',pr:6,anc:'bl'}
     ];
     var vis=[];
@@ -3008,7 +3847,7 @@ function selectAtom(idx){
         checkSelectionComplete();
         return;
     }
-    if(currentMode==='selectAtoms'||currentMode==='replaceAtom'||currentMode==='rotateGroup'){
+    if(currentMode==='selectAtoms'||currentMode==='replaceAtom'||currentMode==='rotateGroup'||currentMode==='moveAtoms'){
         var pos=selectedAtoms.indexOf(idx);
         if(pos>=0){
             selectedAtoms.splice(pos,1);
@@ -3261,7 +4100,7 @@ function applyDihedral(targetDeg,fixFirstThree,moveMode){
     updateScenePositions(true);
 }
 
-function showModal(html,cb){if(vibActive||vibPaused)stopVibration();modalEl.innerHTML=html;modalOverlay.classList.add('show');modalCallback=cb}
+function showModal(html,cb){if(vibActive||vibPaused)stopVibration();stopMoveSession();modalEl.innerHTML=html;modalOverlay.classList.add('show');modalCallback=cb}
 function hideModal(){modalOverlay.classList.remove('show');modalCallback=null}
 
 function showBondLengthModal(){
@@ -3530,6 +4369,7 @@ function showDeleteAtomModal(){
 
 function showBatchDeleteModal(){
     if(selectedAtoms.length===0)return;
+    stopMoveSession();
     var names=formatAtomList(selectedAtoms);
     showModal('<h3>Delete Atoms</h3>'+
         '<div class="current-val">Delete '+selectedAtoms.length+' atoms: '+names+'?</div>'+
@@ -3540,7 +4380,8 @@ function showBatchDeleteModal(){
 
 function batchDeleteSelected(){
     // Atom indices become invalid after deletion — close any active rotate
-    // group session so stale originalCoords/rotAxisParams can't be reused.
+    // group session or move session so stale state can't be reused.
+    stopMoveSession();
     if(rotActive){resetRotAxisState();originalCoords=null}
     var delSet={};
     selectedAtoms.forEach(function(idx){delSet[idx]=true});
@@ -3963,12 +4804,64 @@ canvas.addEventListener('mousedown',function(e){
         boxRectEl.style.width='0px';boxRectEl.style.height='0px';
         e.preventDefault();return;
     }
+    if(currentMode==='moveAtoms'&&!diffMode&&selectedAtoms.length>0&&e.ctrlKey&&(e.button===0||e.button===2)){
+        // Ctrl+left-drag: rotate the selected fragment around its center.
+        // Ctrl+right-drag: translate the fragment, cursor-locked onto the
+        // grabbed atom (or the fragment-center plane when clicking space).
+        // One undo snapshot per drag; a click without change drops it again.
+        if(vibActive||vibPaused)stopVibration();
+        moveDragOrig={};
+        var mcx=0,mcy=0,mcz=0,mn=0;
+        selectedAtoms.forEach(function(i){
+            var a=MD.atoms[i];if(!a)return;
+            moveDragOrig[i]={x:a.x,y:a.y,z:a.z};
+            mcx+=a.x;mcy+=a.y;mcz+=a.z;mn++;
+        });
+        if(mn===0)return;
+        mcx/=mn;mcy/=mn;mcz/=mn;
+        pushUndo();
+        if(e.button===0){
+            // Fragment rotation: pivot is the fragment center, kept fixed in
+            // absolute file coordinates for the whole drag.
+            fragRotCx=mcx;fragRotCy=mcy;fragRotCz=mcz;
+            fragRotActive=true;fragRotMoved=false;
+            document.body.style.cursor='move';
+            modeInfoEl.textContent='Rotating '+mn+' atom(s) - release Ctrl or mouse button to finish';
+        }else{
+            // Fragment translation. The movement plane goes through the world
+            // position of the atom under the cursor (if it belongs to the
+            // selection) so that atom stays exactly under the cursor; through
+            // the fragment center otherwise. planeZ is derived from LOCAL
+            // coordinates (atom - molecule center): using absolute file
+            // coordinates can place the plane behind the camera, which mirrors
+            // the ray intersection and inverts the drag direction.
+            var hitIdx=getClickedAtom(e);
+            var planeZ;
+            if(hitIdx>=0&&selectedAtoms.indexOf(hitIdx)>=0&&MD.atoms[hitIdx]){
+                planeZ=atomWorldZ(MD.atoms[hitIdx]);
+            }else{
+                planeZ=new THREE.Vector3(mcx-CX,mcy-CY,mcz-CZ).applyQuaternion(rotQuat).z;
+            }
+            moveDragPlaneZ=planeZ;
+            moveDragStartWorld=screenToPlanePoint(e);
+            if(!moveDragStartWorld)moveDragStartWorld=new THREE.Vector3(mcx-CX,mcy-CY,mcz-CZ).applyQuaternion(rotQuat);
+            moveDragActive=true;moveDragMoved=false;
+            document.body.style.cursor='move';
+            modeInfoEl.textContent='Moving '+mn+' atom(s) - release Ctrl or mouse button to finish';
+        }
+        prevM={x:e.clientX,y:e.clientY};
+        e.preventDefault();return;
+    }
     if(currentMode!=='view'&&e.button===0){
         var idx=getClickedAtom(e);
         if(idx>=0){selectAtom(idx);e.preventDefault();return}
     }
     if(e.button===0)isRot=true;
-    else if(e.button===1||e.button===2)isPan=true;
+    else if(e.button===1||e.button===2){
+        isPan=true;
+        // Cursor-locked panning: the point under the cursor sticks to it.
+        initPanGrab(e);
+    }
     if(diffMode){
         var rect=canvas.getBoundingClientRect();
         var halfW=Math.floor(rect.width/2);
@@ -3986,6 +4879,25 @@ canvas.addEventListener('mousemove',function(e){
         boxRectEl.style.width=bw+'px';boxRectEl.style.height=bh+'px';
         return;
     }
+    if(moveDragActive){
+        if(!e.ctrlKey){endMoveDrag();return}
+        var cur=screenToPlanePoint(e);
+        if(cur){
+            var dw=cur.sub(moveDragStartWorld);
+            if(dw.lengthSq()>1e-10)moveDragMoved=true;
+            applyMoveWorldDelta(dw);
+        }
+        prevM={x:e.clientX,y:e.clientY};
+        return;
+    }
+    if(fragRotActive){
+        if(!e.ctrlKey){endFragRot();return}
+        var rdm={x:e.clientX-prevM.x,y:e.clientY-prevM.y};
+        if(rdm.x!==0||rdm.y!==0)fragRotMoved=true;
+        applyFragRotDelta(rdm.y*0.008,rdm.x*0.008);
+        prevM={x:e.clientX,y:e.clientY};
+        return;
+    }
     var dm={x:e.clientX-prevM.x,y:e.clientY-prevM.y};
     if(diffMode){
         var side=diffTransformSide;
@@ -3997,8 +4909,12 @@ canvas.addEventListener('mousemove',function(e){
             updateTransform()
         }
         if(isPan){
-            if(side==='right'){diffPanX+=dm.x*0.01*(diffCamDist/20);diffPanY-=dm.y*0.01*(diffCamDist/20)}
-            else{panX+=dm.x*0.01*(camDist/20);panY-=dm.y*0.01*(camDist/20)}
+            if(panGrabActive){
+                // Cursor-locked: recompute pan so the grabbed point follows
+                // the cursor 1:1 (same world-z reference plane as at grab).
+                var pc=screenPointOnPlane(e,panRefZ);
+                if(pc){panX=pc.x-panGrabOffset.x;panY=pc.y-panGrabOffset.y}
+            }else{panX+=dm.x*0.01*(camDist/20);panY-=dm.y*0.01*(camDist/20)}
             updateTransform()
         }
     }else{
@@ -4008,7 +4924,15 @@ canvas.addEventListener('mousemove',function(e){
             rotQuat.premultiply(qx);rotQuat.premultiply(qy);rotQuat.normalize();
             updateTransform()
         }
-        if(isPan){panX+=dm.x*0.01*(camDist/20);panY-=dm.y*0.01*(camDist/20);updateTransform()}
+        if(isPan){
+            if(panGrabActive){
+                // Cursor-locked: recompute pan so the grabbed point follows
+                // the cursor 1:1 (same world-z reference plane as at grab).
+                var pc2=screenPointOnPlane(e,panRefZ);
+                if(pc2){panX=pc2.x-panGrabOffset.x;panY=pc2.y-panGrabOffset.y}
+            }else{panX+=dm.x*0.01*(camDist/20);panY-=dm.y*0.01*(camDist/20)}
+            updateTransform()
+        }
     }
     prevM={x:e.clientX,y:e.clientY};
     var rect=canvas.getBoundingClientRect();
@@ -4060,6 +4984,9 @@ canvas.addEventListener('mousemove',function(e){
 });
 
 canvas.addEventListener('mouseup',function(e){
+    if(moveDragActive){endMoveDrag()}
+    if(fragRotActive){endFragRot()}
+    panGrabActive=false;
     if(isBoxSelecting){
         isBoxSelecting=false;boxRectEl.style.display='none';
         var rect=canvas.getBoundingClientRect();
@@ -4101,7 +5028,7 @@ canvas.addEventListener('mouseup',function(e){
     }
     isRot=false;isPan=false;layoutPanels();
 });
-canvas.addEventListener('mouseleave',function(){isRot=false;isPan=false;tooltipEl.style.display='none';if(isBoxSelecting){isBoxSelecting=false;boxRectEl.style.display='none';boxStart=null}});
+canvas.addEventListener('mouseleave',function(){isRot=false;isPan=false;panGrabActive=false;tooltipEl.style.display='none';if(moveDragActive)endMoveDrag();if(fragRotActive)endFragRot();if(isBoxSelecting){isBoxSelecting=false;boxRectEl.style.display='none';boxStart=null}});
 canvas.addEventListener('wheel',function(e){e.preventDefault();
     if(diffMode){
         var rect=canvas.getBoundingClientRect();
@@ -4162,6 +5089,7 @@ canvas.addEventListener('touchend',function(e){isRot=false;if(e.touches.length<2
 
 document.addEventListener('keydown',function(e){
     if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'||e.target.tagName==='SELECT')return;
+    ctrlDown=e.ctrlKey;
     if(e.key in keyState){keyState[e.key]=true;e.preventDefault()}
     if(e.key==='Delete'){
         e.preventDefault();
@@ -4170,7 +5098,17 @@ document.addEventListener('keydown',function(e){
     }
 });
 document.addEventListener('keyup',function(e){
-    if(e.key in keyState){keyState[e.key]=false;e.preventDefault()}
+    ctrlDown=e.ctrlKey;
+    if(e.key in keyState){
+        keyState[e.key]=false;e.preventDefault();
+        // Clear the move-session latches once every arrow key is released, so
+        // fresh sessions may start on the next key press.
+        if(!keyState.ArrowLeft&&!keyState.ArrowRight&&!keyState.ArrowUp&&!keyState.ArrowDown){moveKeyLatch=false;keyRotLatch=false}
+    }
+});
+window.addEventListener('blur',function(){
+    ctrlDown=false;
+    keyState.ArrowLeft=keyState.ArrowRight=keyState.ArrowUp=keyState.ArrowDown=false;
 });
 
 window.addEventListener('resize',function(){var rw=container.clientWidth||window.innerWidth;var rh=container.clientHeight||(window.innerHeight-60);if(rw<1)rw=window.innerWidth;if(rh<1)rh=window.innerHeight-60;camera.aspect=rw/rh;camera.updateProjectionMatrix();renderer.setSize(rw,rh);needsRender=true;layoutPanels()});
@@ -4180,14 +5118,49 @@ function animate(){
     var keyActive=false;
     if(keyState.ArrowLeft||keyState.ArrowRight||keyState.ArrowUp||keyState.ArrowDown){
         keyActive=true;
-        if(!diffMode){
+        if(moveKeyActive&&!ctrlDown){
+            // Ctrl released mid-hold: end the fragment rotation session and
+            // latch view rotation until all arrow keys are released.
+            moveKeyActive=false;
+            keyRotLatch=true;
+            refreshMovedBondsAndMeshes();
+            if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
+        }
+        if(currentMode==='moveAtoms'&&selectedAtoms.length>0&&!diffMode&&!moveKeyLatch&&ctrlDown){
+            // Ctrl+arrow keys rotate the selected fragment instead of the
+            // view. One undo snapshot per key-hold session; releasing all
+            // arrow keys (or Ctrl) ends the session.
+            var fAx=0,fAy=0;
+            if(keyState.ArrowRight)fAy+=keyRotSpeed;
+            if(keyState.ArrowLeft)fAy-=keyRotSpeed;
+            if(keyState.ArrowDown)fAx+=keyRotSpeed;
+            if(keyState.ArrowUp)fAx-=keyRotSpeed;
+            if(fAx!==0||fAy!==0){
+                if(!moveKeyActive){
+                    moveKeyActive=true;
+                    if(vibActive||vibPaused)stopVibration();
+                    pushUndo();
+                    // Rotation pivot = fragment center, fixed for the session.
+                    var fcx=0,fcy=0,fcz=0,fn=0;
+                    selectedAtoms.forEach(function(i){var a=MD.atoms[i];if(!a)return;fcx+=a.x;fcy+=a.y;fcz+=a.z;fn++});
+                    if(fn>0){fcx/=fn;fcy/=fn;fcz/=fn}
+                    fragRotCx=fcx;fragRotCy=fcy;fragRotCz=fcz;
+                    modeInfoEl.textContent='Rotating '+fn+' atom(s) - release Ctrl or arrow keys to finish';
+                }
+                applyFragRotDelta(fAx,fAy);
+            }else if(moveKeyActive){
+                moveKeyActive=false;
+                refreshMovedBondsAndMeshes();
+                if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
+            }
+        }else if(!diffMode&&!keyRotLatch){
             if(keyState.ArrowLeft){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),-keyRotSpeed);rotQuat.premultiply(qx)}
             if(keyState.ArrowRight){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),keyRotSpeed);rotQuat.premultiply(qx)}
             if(keyState.ArrowUp){var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),-keyRotSpeed);rotQuat.premultiply(qy)}
             if(keyState.ArrowDown){var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),keyRotSpeed);rotQuat.premultiply(qy)}
             rotQuat.normalize();
             updateTransform();
-        }else{
+        }else if(diffMode){
             var rq=(diffTransformSide==='right')?diffRotQuat:rotQuat;
             if(keyState.ArrowLeft){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),-keyRotSpeed);rq.premultiply(qx)}
             if(keyState.ArrowRight){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),keyRotSpeed);rq.premultiply(qx)}
@@ -4199,7 +5172,7 @@ function animate(){
     }
     if(!needsRender&&!keyActive)return;
     needsRender=false;
-    if(CRY)updateAxesIndicator();
+    updateAxesIndicator();
     var w=container.clientWidth||window.innerWidth;
     var h=container.clientHeight||(window.innerHeight-60);
     if(w<1)w=window.innerWidth;
@@ -4252,7 +5225,9 @@ class MolecularDocument implements vscode.CustomDocument {
         public readonly data: MolecularData,
         public readonly frames: (LogFrame | OrcaFrame)[] = [],
         public readonly optSteps?: OptStep[],
-        public readonly normalModes?: NormalMode[]
+        public readonly normalModes?: NormalMode[],
+        public readonly logSource?: string,
+        public readonly routes?: RouteSection[]
     ) {}
 
     dispose(): void {}
