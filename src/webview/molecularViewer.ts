@@ -1234,6 +1234,44 @@ function rebuildBondsTouching(selSet){
     needsRender=true;
 }
 
+// Release-time localized bond-mesh rebuild for Move Atoms: recomputeMovedBonds
+// just replaced MD.bonds with a re-derived list, so meshes for bonds in the
+// affected region are stale (bonds may have appeared, vanished or changed
+// order) while every other mesh is still exact (its endpoints never moved).
+// Disposes the meshes whose OLD bond touched the region (by old index — the
+// list has already been re-derived), renumbers the surviving meshes' bondIdx
+// into the new bond array (indices shifted because the removed bonds sat in
+// the middle of the old list — updateVibBondMeshes() dereferences bondIdx
+// into MD.bonds, so stale indices would vibrate the wrong bond), then
+// rebuilds only the new region bonds.
+function rebuildMovedBondMeshes(oldBonds,selSet){
+    var sel={};
+    for(var i=0;i<selSet.length;i++)sel[selSet[i]]=true;
+    var affected={};
+    for(var bi=0;bi<MD.bonds.length;bi++){
+        var b=MD.bonds[bi];
+        if(sel[b.atom1]||sel[b.atom2])affected[bi]=true;
+    }
+    for(var i=bondMeshes.length-1;i>=0;i--){
+        var ob=oldBonds[bondMeshes[i].userData.bondIdx];
+        if(ob&&(sel[ob.atom1]||sel[ob.atom2])){disposeMesh(bondMeshes[i]);moleculeGroup.remove(bondMeshes[i]);bondMeshes.splice(i,1)}
+    }
+    if(oldBonds!==MD.bonds){
+        var key2idx={};
+        for(bi=0;bi<MD.bonds.length;bi++){var b2=MD.bonds[bi];key2idx[Math.min(b2.atom1,b2.atom2)+'-'+Math.max(b2.atom1,b2.atom2)]=bi}
+        for(i=0;i<bondMeshes.length;i++){
+            var ob2=oldBonds[bondMeshes[i].userData.bondIdx];
+            if(!ob2)continue;
+            bondMeshes[i].userData.bondIdx=key2idx[Math.min(ob2.atom1,ob2.atom2)+'-'+Math.max(ob2.atom1,ob2.atom2)];
+        }
+    }
+    for(bi=0;bi<MD.bonds.length;bi++){
+        if(!affected[bi])continue;
+        currentBondIdx=bi;createBond(MD.bonds[bi]);
+    }
+    needsRender=true;
+}
+
 function getPerp(dir){
     var up=Math.abs(dir.y)<0.99?new THREE.Vector3(0,1,0):new THREE.Vector3(1,0,0);
     return new THREE.Vector3().crossVectors(dir,up).normalize();
@@ -1349,11 +1387,278 @@ var panGrabOffset={x:0,y:0};   // grabbed point world xy minus pan offset
 var panRefZ=0;                 // world z of the pan reference plane
 
 function recomputeMovedBonds(){
-    // Bond + bond order re-detection after a fragment move/rotate session
-    // ends (previously ran on every drag frame). Files with explicit bond
-    // blocks (mol2/PDB CONECT) keep their authored bonds.
-    if(MD.hasExplicitBonds)return;
-    MD.bonds=detectBondsFromAtoms(MD.atoms);
+    // Partial bond + bond-order re-detection after a fragment move/rotate
+    // session ends. Only the selected atoms changed position, so bonds with
+    // BOTH endpoints outside the selection cannot have changed (same
+    // distance, hence same gbo verdict — and their stored orders already
+    // carry every fix/repair) and are kept as-is; bonds with at least one
+    // selected endpoint are deleted and re-judged. New bonds can only
+    // involve a moved atom either, so the spatial-grid neighbor sweep runs
+    // for the selected atoms only (over a full-molecule grid, so a contact
+    // dragged onto a previously unrelated atom is still found). The affected
+    // region — selected atoms plus the atoms directly bonded to them, both
+    // pre-move neighbors and atoms that just gained a bond to the selection,
+    // whose bond sets may have changed — then goes through the same C-O/Br
+    // order fix, N special handling and valence-violation repair as the full
+    // detector, with each region atom's complete new bond set (new bonds +
+    // its surviving bonds). Files with explicit bond blocks (GJF connect
+    // section, mol2, PDB CONECT) keep their authored bonds and orders; only
+    // bonds pulled beyond the bonding cutoff are dropped (deletion only).
+    // Returns the final affected-region atom list (selected atoms + bonded
+    // neighborhood, incl. the N closure) so the caller can rebuild only the
+    // region's bond meshes; empty array when nothing was re-derived (explicit
+    // bonds without deletions / empty selection), null when it fell back to
+    // the full detector.
+    if(selectedAtoms.length===0)return [];
+    var sel={};
+    for(var si=0;si<selectedAtoms.length;si++)sel[selectedAtoms[si]]=true;
+    if(MD.hasExplicitBonds){
+        // Authored bonds keep their orders and are never re-derived — but a
+        // bond whose endpoints were pulled beyond the bonding cutoff can no
+        // longer be a bond. Drop such bonds (deletion only: no re-ordering,
+        // no new bonds) so stretched ghosts do not linger after the move.
+        // Only bonds touching the selection can have changed: every other
+        // pair kept its distance.
+        var atomsX=MD.atoms,keptB=[];
+        for(var bx=0;bx<MD.bonds.length;bx++){
+            var xb=MD.bonds[bx];
+            if(sel[xb.atom1]||sel[xb.atom2]){
+                var xu=atomsX[xb.atom1],xv=atomsX[xb.atom2];
+                if(xu&&xv){
+                    var xdx=xu.x-xv.x,xdy=xu.y-xv.y,xdz=xu.z-xv.z;
+                    if(bondGbo(xu.element,xv.element,Math.sqrt(xdx*xdx+xdy*xdy+xdz*xdz))<=0)continue;
+                }
+            }
+            keptB.push(xb);
+        }
+        if(keptB.length===MD.bonds.length)return [];
+        MD.bonds=keptB;
+        var selArr=[];for(var sk in sel)selArr.push(+sk);
+        return selArr;
+    }
+    var surviving=[],affected=[];
+    for(var bi=0;bi<MD.bonds.length;bi++){
+        var b=MD.bonds[bi];
+        if(sel[b.atom1]||sel[b.atom2])affected.push(b);else surviving.push(b);
+    }
+    // Affected region: selected atoms + their current direct neighbors.
+    var inA={};
+    for(si=0;si<selectedAtoms.length;si++)inA[selectedAtoms[si]]=true;
+    for(bi=0;bi<affected.length;bi++){inA[affected[bi].atom1]=true;inA[affected[bi].atom2]=true}
+    var A=[];for(var ki in inA)A.push(+ki);
+    A.sort(function(a,b){return a-b});
+
+    // Full-molecule spatial hash grid — O(N) bucketing; the per-atom
+    // candidate sweep (the expensive part) runs for selected atoms only.
+    // Same cell size, hash and per-element search radii as the full
+    // detector, so each selected atom sees exactly the candidates the full
+    // detection would find for it.
+    var atoms=MD.atoms;var n=atoms.length;var CELL=3;
+    var normEls=new Array(n);var distinct=[];var seenEl={};
+    for(var i=0;i<n;i++){var ne=atoms[i].element.charAt(0).toUpperCase()+atoms[i].element.slice(1).toLowerCase();normEls[i]=ne;
+        if(!seenEl[ne]){seenEl[ne]=1;distinct.push(ne)}}
+    var rangeFor={};
+    for(var di=0;di<distinct.length;di++){var e1=distinct[di];var mc=0;
+        for(var dj=0;dj<distinct.length;dj++){var c2=bondPcut(e1,distinct[dj]);if(c2>mc)mc=c2}
+        rangeFor[e1]=Math.floor(mc/CELL)+1}
+    var grid=new Map();
+    for(i=0;i<n;i++){var cx=Math.floor(atoms[i].x/CELL),cy=Math.floor(atoms[i].y/CELL),cz=Math.floor(atoms[i].z/CELL);
+        // XOR hash collisions only merge buckets (extra candidates are
+        // filtered by the distance test), never lose one.
+        var key=(cx*73856093)^(cy*19349663)^(cz*83492791);
+        var bkt=grid.get(key);if(!bkt){bkt=[];grid.set(key,bkt)}bkt.push(i)}
+
+    // Re-judge every pair involving a selected atom. The sweep looks in BOTH
+    // directions (j<i included): the full detector enumerates each pair from
+    // its lower index, but that atom may be unselected, so the selected side
+    // must find the pair itself. Symmetric bmA entries keep every pass below
+    // identical to the full detector.
+    var bmA=new Map();
+    function bmSet(i,j,o){if(!bmA.has(i))bmA.set(i,new Map());if(!bmA.has(j))bmA.set(j,new Map());bmA.get(i).set(j,o);bmA.get(j).set(i,o)}
+    var cand=[];var newNb={};
+    for(si=0;si<A.length;si++){
+        var s=A[si];
+        if(!sel[s]||!atoms[s])continue;
+        var range=rangeFor[normEls[s]];var csx=Math.floor(atoms[s].x/CELL),csy=Math.floor(atoms[s].y/CELL),csz=Math.floor(atoms[s].z/CELL);
+        cand.length=0;
+        for(var dx=-range;dx<=range;dx++)for(var dy=-range;dy<=range;dy++)for(var dz=-range;dz<=range;dz++){
+            var key2=((csx+dx)*73856093)^((csy+dy)*19349663)^((csz+dz)*83492791);
+            var bkt2=grid.get(key2);if(!bkt2)continue;
+            for(var k2=0;k2<bkt2.length;k2++){var j=bkt2[k2];if(j!==s)cand.push(j)}}
+        if(cand.length===0)continue;
+        cand.sort(function(a,b){return a-b});
+        var prev=-1;
+        for(var ci=0;ci<cand.length;ci++){j=cand[ci];if(j===prev)continue;prev=j;
+            var ddx=atoms[s].x-atoms[j].x,ddy=atoms[s].y-atoms[j].y,ddz=atoms[s].z-atoms[j].z;
+            var d=Math.sqrt(ddx*ddx+ddy*ddy+ddz*ddz);var bo=bondGbo(atoms[s].element,atoms[j].element,d);
+            if(bo>0){bmSet(s,j,bo);if(!inA[j])newNb[j]=1}
+        }
+    }
+    // Atoms that just came within bonding range of a moved atom join the
+    // region as well: their bond sets changed (they gained a bond), so the
+    // N handling and valence repair below must re-derive them from raw input
+    // exactly as the full detector does. The surviving-bond merge below picks
+    // up their remaining bonds automatically now that inA contains them.
+    for(var nk in newNb)inA[nk]=1;
+    // Merge the surviving bonds that touch the region so every region
+    // atom's bond set is complete for the fix/repair passes below. They are
+    // merged with their RAW gbo verdicts (recomputed from the current
+    // coordinates — both endpoints are unmoved, so the verdict is exactly
+    // what a full re-detection computes), NOT with their stored orders:
+    // stored orders carry earlier N-handling / valence-repair results, which
+    // the passes below must re-derive from raw input just like the full
+    // detector does (e.g. a bond degraded by a pre-move valence violation is
+    // restored if the violation is gone after the move).
+    var survKey={};
+    function mergeSurv(){
+        for(var mi=0;mi<surviving.length;mi++){
+            var mb=surviving[mi];
+            if(inA[mb.atom1]||inA[mb.atom2]){
+                var mu=atoms[mb.atom1],mv2=atoms[mb.atom2];
+                if(mu&&mv2){
+                    var mdx=mu.x-mv2.x,mdy=mu.y-mv2.y,mdz=mu.z-mv2.z;
+                    var mraw=bondGbo(mu.element,mv2.element,Math.sqrt(mdx*mdx+mdy*mdy+mdz*mdz));
+                    if(mraw>0)bmSet(mb.atom1,mb.atom2,mraw);
+                }
+                survKey[Math.min(mb.atom1,mb.atom2)+'-'+Math.max(mb.atom1,mb.atom2)]=mb;
+            }
+        }
+    }
+    mergeSurv();
+    // N-closure: an N atom bonded to a region atom must join the region.
+    // Its stored orders are N-handling outputs derived from exactly the
+    // bonds the region re-derives here, so replacing them with raw verdicts
+    // without re-running its N handling would drop the fix (e.g. an amide
+    // C-N kept at 1.5 by the N pass would fall back to the raw single-bond
+    // verdict). The closure runs transitively so coupled N-N chains are
+    // re-derived together, then the region atom list is rebuilt once.
+    for(;;){
+        var addN=null;
+        bmA.forEach(function(nb,i){
+            if(inA[i])return;
+            var e2=atoms[i]?atoms[i].element.toUpperCase():'';
+            if(e2==='N')(addN||(addN=[])).push(i);
+        });
+        if(!addN)break;
+        addN.forEach(function(i2){inA[i2]=1});
+        mergeSurv();
+    }
+    A=[];for(ki in inA)A.push(+ki);
+    A.sort(function(a,b){return a-b});
+    // Canonicalize region atoms' neighbor maps to ascending partner order.
+    // The full detector's per-atom maps end up in exactly this order (pairs
+    // are enumerated by lower index first), and the N handling / valence
+    // repair below break ties by first encounter, so the entry order must
+    // match for bit-identical results.
+    for(si=0;si<A.length;si++){
+        var ri=A[si];var rnb=bmA.get(ri);if(!rnb)continue;
+        var rents=Array.from(rnb.entries()).sort(function(p,q){return p[0]-q[0]});
+        var rnm=new Map();for(var re2=0;re2<rents.length;re2++)rnm.set(rents[re2][0],rents[re2][1]);
+        bmA.set(ri,rnm);
+    }
+    // C-O / Br order fixes — identical to the full detector. For surviving
+    // bonds it just reproduces their stored orders (same raw input).
+    bmA.forEach(function(nb,i){nb.forEach(function(o,j){if(i>j)return;var e1=atoms[i].element.toUpperCase(),e2=atoms[j].element.toUpperCase();var els=new Set([e1,e2]);
+        if(els.has('C')&&els.has('O')&&o!==1&&o!==2){var no=o<1.7?1:2;nb.set(j,no);bmA.get(j).set(i,no)}
+        if(e1==='BR'||e2==='BR'){nb.set(j,1);bmA.get(j).set(i,1)}
+    })});
+    // N special handling, only for N atoms inside the region (including
+    // atoms that just gained a bond to the selection and N atoms pulled in
+    // by the closure above). The full detector processes N atoms in bondMap
+    // creation order — ascending by each atom's smallest touching pair (i,j)
+    // — which matters when two region N atoms are bonded (their fixes read
+    // each other's output), so that exact order is replicated here. N atoms
+    // outside the region keep their exact pre-move bond set, so their stored
+    // result already matches what a full re-detection would produce.
+    var regionN=[];
+    for(si=0;si<A.length;si++){var iN=A[si];if(atoms[iN]&&atoms[iN].element.toUpperCase()==='N')regionN.push(iN)}
+    regionN=regionN.map(function(i){
+        var nb=bmA.get(i),mp=null;
+        if(nb)nb.forEach(function(o,j){var pa=Math.min(i,j),pb=Math.max(i,j);if(mp===null||pa<mp[0]||(pa===mp[0]&&pb<mp[1]))mp=[pa,pb]});
+        return {i:i,mp:mp||[i,i]};
+    }).sort(function(p,q){return p.mp[0]-q.mp[0]||p.mp[1]-q.mp[1]}).map(function(eN){return eN.i});
+    regionN.forEach(function(i){
+        var nb=bmA.get(i);if(!nb)return;var nl=Array.from(nb.entries());var nn=nl.length;
+        if(nn===3){for(var k=0;k<nl.length;k++){nb.set(nl[k][0],1);bmA.get(nl[k][0]).set(i,1)}}
+        else if(nn===2){var n1=nl[0][0],bo1=nl[0][1],n2=nl[1][0],bo2=nl[1][1];var n1H=atoms[n1].element.toUpperCase()==='H',n2H=atoms[n2].element.toUpperCase()==='H';var f1,f2;
+            if(n1H){f1=1;f2=2}else if(n2H){f1=2;f2=1}else{var d1=Math.abs(bo1-1.5)+Math.abs(bo2-1.5),d2=Math.abs(bo1-2)+Math.abs(bo2-1),d3=Math.abs(bo1-1)+Math.abs(bo2-2);var best=Math.min(d1,d2,d3);if(best===d1){f1=1.5;f2=1.5}else if(best===d2){f1=2;f2=1}else{f1=1;f2=2}}
+            nb.set(n1,f1);bmA.get(n1).set(i,f1);nb.set(n2,f2);bmA.get(n2).set(i,f2)}
+    });
+    // Valence-violation repair, iterated over region atoms only: atoms
+    // outside the region keep every bond they had, so their valence — and
+    // thus their validity — is unchanged. Region-atom valences are computed
+    // over their complete new bond sets (new + surviving). A degradation
+    // only lowers orders, so it can never push any atom over its cap; the
+    // loop converges within the region exactly like the full-molecule one.
+    for(var iter=0;iter<10;iter++){var changed=false;var val=new Map();
+        for(si=0;si<A.length;si++)val.set(A[si],0);
+        bmA.forEach(function(nb,i){nb.forEach(function(o){val.set(i,(val.get(i)||0)+o)})});
+        var viols=[];val.forEach(function(v,i){if(!inA[i])return;var el=atoms[i].element.charAt(0).toUpperCase()+atoms[i].element.slice(1).toLowerCase();var mv=BOND_MV[el]||100;if(v>mv+0.1)viols.push(i)});
+        if(viols.length===0)break;
+        for(var vi=0;vi<viols.length;vi++){var i2=viols[vi];var nb2=bmA.get(i2);if(!nb2)continue;var cv=Array.from(nb2.values()).reduce(function(s,v){return s+v},0);var el2=atoms[i2].element.charAt(0).toUpperCase()+atoms[i2].element.slice(1).toLowerCase();var mv2=BOND_MV[el2]||100;if(cv<=mv2+0.1)continue;
+            var bb=null,ml=Infinity;nb2.forEach(function(o,j){if(o<=1)return;var no;if(o===3)no=2;else if(o===2)no=1.5;else if(o===1.5)no=1;else return;
+                var el3=atoms[j].element;var dd=Math.sqrt(Math.pow(atoms[i2].x-atoms[j].x,2)+Math.pow(atoms[i2].y-atoms[j].y,2)+Math.pow(atoms[i2].z-atoms[j].z,2));var sp=BOND_BS[bondSk(atoms[i2].element,el3)];if(!sp)return;
+                var ci2=0,ni2=0,md=Infinity;for(var k=0;k<sp.length;k++){if(sp[k].o===o&&Math.abs(dd-sp[k].l)<md){md=Math.abs(dd-sp[k].l);ci2=sp[k].l}}md=Infinity;for(k=0;k<sp.length;k++){if(sp[k].o===no&&Math.abs(dd-sp[k].l)<md){md=Math.abs(dd-sp[k].l);ni2=sp[k].l}}if(!ci2||!ni2)return;
+                var loss=Math.abs(dd-ni2)-Math.abs(dd-ci2);if(loss<ml){ml=loss;bb=[j,no]}
+            });if(bb){nb2.set(bb[0],bb[1]);bmA.get(bb[0]).set(i2,bb[1]);changed=true}
+        }if(!changed)break;
+    }
+    // Boundary safety check. A non-region atom bonded to the region keeps
+    // its own stored orders, except on the region-touching bonds, whose
+    // values were re-derived from raw gbo above. If the pre-move state had
+    // degraded those bonds through a valence repair, the raw verdicts raise
+    // the boundary atom's valence back over its cap — the full detector
+    // would re-run the valence repair for it, which the region-scoped loop
+    // above cannot. Rather than replicate that global cascade, fall back to
+    // the exact full re-detection (the pre-optimization behavior) whenever
+    // the check trips; sane structures never do.
+    var bnd=[],bset={};
+    bmA.forEach(function(nb,i){if(!inA[i]){bnd.push(i);bset[i]=1}});
+    if(bnd.length){
+        var bstor=new Map();
+        for(var sbi=0;sbi<surviving.length;sbi++){
+            var sb=surviving[sbi],s1=sb.atom1,s2=sb.atom2;
+            if(bset[s1]&&!bmA.get(s1).has(s2))bstor.set(s1,(bstor.get(s1)||0)+sb.order);
+            if(bset[s2]&&!bmA.get(s2).has(s1))bstor.set(s2,(bstor.get(s2)||0)+sb.order);
+        }
+        var fall=false;
+        for(var bi2=0;bi2<bnd.length;bi2++){
+            var bi3=bnd[bi2],vb=0;
+            bmA.get(bi3).forEach(function(o){vb+=o});
+            vb+=(bstor.get(bi3)||0);
+            var elb=atoms[bi3].element.charAt(0).toUpperCase()+atoms[bi3].element.slice(1).toLowerCase();
+            if(vb>(BOND_MV[elb]||100)+0.1){fall=true;break}
+        }
+        if(fall){MD.bonds=detectBondsFromAtoms(atoms);return null}
+    }
+    // Emit: surviving bonds first (original relative order; bonds touching
+    // the region take their possibly-updated order from the map), then the
+    // newly detected pairs.
+    var bonds=[];var seen={};
+    for(bi=0;bi<surviving.length;bi++){
+        b=surviving[bi];
+        var key3=Math.min(b.atom1,b.atom2)+'-'+Math.max(b.atom1,b.atom2);seen[key3]=true;
+        if(survKey[key3]){
+            var m1=bmA.get(b.atom1);
+            var upd=m1?m1.get(b.atom2):undefined;
+            if(upd!==undefined)b.order=upd;
+        }
+        bonds.push(b);
+    }
+    bmA.forEach(function(nb,i){nb.forEach(function(o,j){if(i>j)return;var key4=i+'-'+j;if(!seen[key4]){seen[key4]=true;bonds.push({atom1:i,atom2:j,order:o})}})});
+    MD.bonds=bonds;
+    return A;
+}
+// Shared release path for every Move Atoms session end (mouse drag, fragment
+// rotation drag, arrow-key session, forced termination): re-derive the bonds
+// for the moved region, then rebuild only the affected region's bond meshes.
+// A full scene rebuild runs only when the region-scoped re-detection fell
+// back to the full detector (null region).
+function refreshMovedBondsAndMeshes(){
+    var oldBonds=MD.bonds;
+    var region=recomputeMovedBonds();
+    if(region){if(region.length)rebuildMovedBondMeshes(oldBonds,region)}
+    else updateScenePositions(true);
 }
 function endMoveDrag(){
     if(!moveDragActive)return;
@@ -1362,7 +1667,7 @@ function endMoveDrag(){
     // A Ctrl+click without any displacement pushes a redundant snapshot — drop it.
     if(!moveDragMoved&&undoStack.length>0){undoStack.pop();updateUndoBtn()}
     // Re-detect connectivity once on release (not per frame during the drag).
-    if(moveDragMoved){recomputeMovedBonds();updateScenePositions(true)}
+    if(moveDragMoved)refreshMovedBondsAndMeshes();
     document.body.style.cursor='';
     if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
 }
@@ -1372,7 +1677,7 @@ function endFragRot(){
     // A Ctrl+click without any rotation pushes a redundant snapshot — drop it.
     if(!fragRotMoved&&undoStack.length>0){undoStack.pop();updateUndoBtn()}
     // Re-detect connectivity once on release (not per frame during the drag).
-    if(fragRotMoved){recomputeMovedBonds();updateScenePositions(true)}
+    if(fragRotMoved)refreshMovedBondsAndMeshes();
     document.body.style.cursor='';
     if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
 }
@@ -1385,8 +1690,7 @@ function stopMoveSession(){
         moveKeyLatch=true;
         moveDragOrig=null;
         // Atoms may have moved — re-detect connectivity once.
-        recomputeMovedBonds();
-        updateScenePositions(true);
+        refreshMovedBondsAndMeshes();
         document.body.style.cursor='';
     }
 }
@@ -1868,7 +2172,11 @@ document.getElementById('reset-btn').addEventListener('click',function(){
 });
 var undoStack=[];var MAX_UNDO=50;
 function pushUndo(){
-    var snap={atoms:JSON.parse(JSON.stringify(MD.atoms)),bonds:JSON.parse(JSON.stringify(MD.bonds))};
+    // hasExplicitBonds is part of the restore state: an Import can flip it
+    // false→true, and an undo of that import must restore it, otherwise Move
+    // Atoms would keep using the explicit-bonds (deletion-only) path on what
+    // is an auto-detected structure again.
+    var snap={atoms:JSON.parse(JSON.stringify(MD.atoms)),bonds:JSON.parse(JSON.stringify(MD.bonds)),hasExplicitBonds:!!MD.hasExplicitBonds};
     if(CRY){snap.baseAtoms=JSON.parse(JSON.stringify(CRY.baseAtoms));snap.baseBonds=JSON.parse(JSON.stringify(CRY.baseBonds))}
     undoStack.push(snap);
     if(undoStack.length>MAX_UNDO)undoStack.shift();
@@ -1881,6 +2189,7 @@ function doUndo(){
     if(moveDragActive||moveKeyActive||fragRotActive)stopMoveSession();
     var snap=undoStack.pop();
     MD.atoms=snap.atoms;MD.bonds=snap.bonds;
+    MD.hasExplicitBonds=!!snap.hasExplicitBonds;
     if(CRY&&snap.baseAtoms){CRY.baseAtoms=snap.baseAtoms;CRY.baseBonds=snap.baseBonds}
     if(CRY){rebuildCrystal()}rebuildScene();updateMolInfo();updateUndoBtn();
     if(diffMode)resetSelection();
@@ -2692,21 +3001,28 @@ function switchFrame(idx){
     rebuildScene();
     updateFrameInfo();
 }
+// ===== Shared bond-detection tables and helpers =====
+// Used by both the full-molecule detector (detectBondsFromAtoms) and the
+// partial re-detection in Move Atoms (recomputeMovedBonds). Tables and
+// formulas are identical to the previous inline copies inside the detector.
+var BOND_CR2={H:0.31,He:0.28,Li:1.28,Be:0.96,B:0.85,C:0.76,N:0.71,O:0.66,F:0.57,Ne:0.58,Na:1.66,Mg:1.41,Al:1.21,Si:1.11,P:1.07,S:1.05,Cl:1.02,Ar:1.06,K:2.03,Ca:1.76,Sc:1.70,Ti:1.60,V:1.53,Cr:1.39,Mn:1.39,Fe:1.32,Co:1.26,Ni:1.24,Cu:1.32,Zn:1.22,Ga:1.22,Ge:1.20,As:1.19,Se:1.20,Br:1.20,Kr:1.16,Rb:2.20,Sr:1.95,Y:1.90,Zr:1.75,Nb:1.64,Mo:1.54,Tc:1.47,Ru:1.46,Rh:1.42,Pd:1.39,Ag:1.45,Cd:1.44,In:1.42,Sn:1.39,Sb:1.39,Te:1.38,Xe:1.40,Cs:2.44,Ba:2.15,La:2.07,Ce:2.04,Pr:2.03,Nd:2.01,Pm:1.99,Sm:1.98,Eu:1.98,Gd:1.96,Tb:1.94,Dy:1.92,Ho:1.92,Er:1.89,Tm:1.90,Yb:1.87,Lu:1.87,Hf:1.75,Ta:1.70,W:1.62,Re:1.51,Os:1.44,Ir:1.41,Pt:1.36,Au:1.36,Hg:1.32,Tl:1.45,Pb:1.46,Bi:1.48,Po:1.40,At:1.50,Rn:1.50,I:1.39};
+var BOND_BS={'C+C':[{o:3,l:1.20,t:0.05},{o:1.5,l:1.39,t:0.05},{o:2,l:1.38,t:0.05},{o:1,l:1.51,t:0.10}],'C+N':[{o:2,l:1.26,t:0.05},{o:1.5,l:1.36,t:0.05},{o:1,l:1.43,t:0.10},{o:3,l:1.16,t:0.06}],'C+O':[{o:2,l:1.24,t:0.05},{o:1,l:1.39,t:0.05}],'N+N':[{o:1,l:1.41,t:0.10},{o:2,l:1.25,t:0.06},{o:3,l:1.10,t:0.06}],'N+O':[{o:2,l:1.20,t:0.06},{o:1.5,l:1.30,t:0.06},{o:1,l:1.40,t:0.15}],'O+O':[{o:2,l:1.21,t:0.06},{o:1,l:1.48,t:0.15}],'C+S':[{o:1.5,l:1.73,t:0.06},{o:2,l:1.60,t:0.10},{o:1,l:1.82,t:0.15}],'C+F':[{o:1,l:1.33,t:0.10}],'C+H':[{o:1,l:0.97,t:0.15}],'N+H':[{o:1,l:0.88,t:0.15}],'O+H':[{o:1,l:0.85,t:0.15}]};
+var BOND_BC={HH:0,CH:1.3,HO:1.2,HN:1.3,CC:1.9,CO:1.7,CN:1.7,NN:1.7,NO:1.8,CF:1.6,CS:2.0};
+var BOND_MV={H:1,C:4,N:3,O:2,F:1,S:6,P:5,Cl:1,Br:1,I:1,B:3};
+function bondPk(e1,e2){e1=e1.toUpperCase();e2=e2.toUpperCase();return e1<e2?e1+e2:e2+e1}
+function bondSk(e1,e2){e1=e1.charAt(0).toUpperCase()+e1.slice(1).toLowerCase();e2=e2.charAt(0).toUpperCase()+e2.slice(1).toLowerCase();return e1<e2?e1+'+'+e2:e2+'+'+e1}
+function bondGbo(el1,el2,d){
+    var p=bondPk(el1,el2);var co=BOND_BC[p];
+    if(co!==undefined){if(d>co)return 0}else{var r1=BOND_CR2[el1.charAt(0).toUpperCase()+el1.slice(1).toLowerCase()]||1.5;var r2=BOND_CR2[el2.charAt(0).toUpperCase()+el2.slice(1).toLowerCase()]||1.5;if(d>(r1+r2)+0.5)return 0}
+    var s=bondSk(el1,el2);var sp=BOND_BS[s];
+    if(sp){for(var k=0;k<sp.length;k++){if(Math.abs(d-sp[k].l)<=sp[k].t)return sp[k].o}var bo=1,md=Infinity;for(var k=0;k<sp.length;k++){var df=Math.abs(d-sp[k].l);if(df<md){md=df;bo=sp[k].o}}return bo}
+    var r1=BOND_CR2[el1.charAt(0).toUpperCase()+el1.slice(1).toLowerCase()]||1.5;var r2=BOND_CR2[el2.charAt(0).toUpperCase()+el2.slice(1).toLowerCase()]||1.5;var rs=r1+r2;var ratio=rs?d/rs:1;
+    if(ratio<0.85)return 3;if(ratio<0.90)return 2;return 1;
+}
+function bondPcut(e1,e2){var E1=e1.toUpperCase(),E2=e2.toUpperCase();var co=BOND_BC[E1<E2?E1+E2:E2+E1];
+    if(co!==undefined)return co;
+    var r1=BOND_CR2[e1]||1.5,r2=BOND_CR2[e2]||1.5;return r1+r2+0.5}
 function detectBondsFromAtoms(atoms){
-    var CR2={H:0.31,He:0.28,Li:1.28,Be:0.96,B:0.85,C:0.76,N:0.71,O:0.66,F:0.57,Ne:0.58,Na:1.66,Mg:1.41,Al:1.21,Si:1.11,P:1.07,S:1.05,Cl:1.02,Ar:1.06,K:2.03,Ca:1.76,Sc:1.70,Ti:1.60,V:1.53,Cr:1.39,Mn:1.39,Fe:1.32,Co:1.26,Ni:1.24,Cu:1.32,Zn:1.22,Ga:1.22,Ge:1.20,As:1.19,Se:1.20,Br:1.20,Kr:1.16,Rb:2.20,Sr:1.95,Y:1.90,Zr:1.75,Nb:1.64,Mo:1.54,Tc:1.47,Ru:1.46,Rh:1.42,Pd:1.39,Ag:1.45,Cd:1.44,In:1.42,Sn:1.39,Sb:1.39,Te:1.38,Xe:1.40,Cs:2.44,Ba:2.15,La:2.07,Ce:2.04,Pr:2.03,Nd:2.01,Pm:1.99,Sm:1.98,Eu:1.98,Gd:1.96,Tb:1.94,Dy:1.92,Ho:1.92,Er:1.89,Tm:1.90,Yb:1.87,Lu:1.87,Hf:1.75,Ta:1.70,W:1.62,Re:1.51,Os:1.44,Ir:1.41,Pt:1.36,Au:1.36,Hg:1.32,Tl:1.45,Pb:1.46,Bi:1.48,Po:1.40,At:1.50,Rn:1.50,I:1.39};
-    var BS={'C+C':[{o:3,l:1.20,t:0.05},{o:1.5,l:1.39,t:0.05},{o:2,l:1.38,t:0.05},{o:1,l:1.51,t:0.10}],'C+N':[{o:2,l:1.26,t:0.05},{o:1.5,l:1.36,t:0.05},{o:1,l:1.43,t:0.10},{o:3,l:1.16,t:0.06}],'C+O':[{o:2,l:1.24,t:0.05},{o:1,l:1.39,t:0.05}],'N+N':[{o:1,l:1.41,t:0.10},{o:2,l:1.25,t:0.06},{o:3,l:1.10,t:0.06}],'N+O':[{o:2,l:1.20,t:0.06},{o:1.5,l:1.30,t:0.06},{o:1,l:1.40,t:0.15}],'O+O':[{o:2,l:1.21,t:0.06},{o:1,l:1.48,t:0.15}],'C+S':[{o:1.5,l:1.73,t:0.06},{o:2,l:1.60,t:0.10},{o:1,l:1.82,t:0.15}],'C+F':[{o:1,l:1.33,t:0.10}],'C+H':[{o:1,l:0.97,t:0.15}],'N+H':[{o:1,l:0.88,t:0.15}],'O+H':[{o:1,l:0.85,t:0.15}]};
-    var BC={HH:0,CH:1.3,HO:1.2,HN:1.3,CC:1.9,CO:1.7,CN:1.7,NN:1.7,NO:1.8,CF:1.6,CS:2.0};
-    var MV={H:1,C:4,N:3,O:2,F:1,S:6,P:5,Cl:1,Br:1,I:1,B:3};
-    function pk(e1,e2){e1=e1.toUpperCase();e2=e2.toUpperCase();return e1<e2?e1+e2:e2+e1}
-    function sk(e1,e2){e1=e1.charAt(0).toUpperCase()+e1.slice(1).toLowerCase();e2=e2.charAt(0).toUpperCase()+e2.slice(1).toLowerCase();return e1<e2?e1+'+'+e2:e2+'+'+e1}
-    function gbo(el1,el2,d){
-        var p=pk(el1,el2);var co=BC[p];
-        if(co!==undefined){if(d>co)return 0}else{var r1=CR2[el1.charAt(0).toUpperCase()+el1.slice(1).toLowerCase()]||1.5;var r2=CR2[el2.charAt(0).toUpperCase()+el2.slice(1).toLowerCase()]||1.5;if(d>(r1+r2)+0.5)return 0}
-        var s=sk(el1,el2);var sp=BS[s];
-        if(sp){for(var k=0;k<sp.length;k++){if(Math.abs(d-sp[k].l)<=sp[k].t)return sp[k].o}var bo=1,md=Infinity;for(var k=0;k<sp.length;k++){var df=Math.abs(d-sp[k].l);if(df<md){md=df;bo=sp[k].o}}return bo}
-        var r1=CR2[el1.charAt(0).toUpperCase()+el1.slice(1).toLowerCase()]||1.5;var r2=CR2[el2.charAt(0).toUpperCase()+el2.slice(1).toLowerCase()]||1.5;var rs=r1+r2;var ratio=rs?d/rs:1;
-        if(ratio<0.85)return 3;if(ratio<0.90)return 2;return 1;
-    }
     var n=atoms.length;var bm=new Map();
     // Spatial hash grid (3 A cells) instead of the O(N^2) pair loop. A bond
     // needs d<=cutoff(pair), so per element we take the max cutoff against
@@ -2716,15 +3032,12 @@ function detectBondsFromAtoms(atoms){
     // insertion sequence - and the bond-order fix/refine results - are
     // identical to the previous implementation.
     var CELL=3;
-    function pcut(e1,e2){var E1=e1.toUpperCase(),E2=e2.toUpperCase();var co=BC[E1<E2?E1+E2:E2+E1];
-        if(co!==undefined)return co;
-        var r1=CR2[e1]||1.5,r2=CR2[e2]||1.5;return r1+r2+0.5}
     var normEls=new Array(n);var distinct=[];var seenEl={};
     for(var i=0;i<n;i++){var ne=atoms[i].element.charAt(0).toUpperCase()+atoms[i].element.slice(1).toLowerCase();normEls[i]=ne;
         if(!seenEl[ne]){seenEl[ne]=1;distinct.push(ne)}}
     var rangeFor={};
     for(var di=0;di<distinct.length;di++){var e1=distinct[di];var mc=0;
-        for(var dj=0;dj<distinct.length;dj++){var c2=pcut(e1,distinct[dj]);if(c2>mc)mc=c2}
+        for(var dj=0;dj<distinct.length;dj++){var c2=bondPcut(e1,distinct[dj]);if(c2>mc)mc=c2}
         rangeFor[e1]=Math.floor(mc/CELL)+1}
     var grid=new Map();var cX=new Int32Array(n),cY=new Int32Array(n),cZ=new Int32Array(n);
     for(var i=0;i<n;i++){var cx=Math.floor(atoms[i].x/CELL),cy=Math.floor(atoms[i].y/CELL),cz=Math.floor(atoms[i].z/CELL);
@@ -2745,7 +3058,7 @@ function detectBondsFromAtoms(atoms){
         var prev=-1;
         for(var ci=0;ci<cand.length;ci++){var j=cand[ci];if(j===prev)continue;prev=j;
             var dx2=atoms[i].x-atoms[j].x,dy2=atoms[i].y-atoms[j].y,dz2=atoms[i].z-atoms[j].z;
-            var d=Math.sqrt(dx2*dx2+dy2*dy2+dz2*dz2);var bo=gbo(atoms[i].element,atoms[j].element,d);
+            var d=Math.sqrt(dx2*dx2+dy2*dy2+dz2*dz2);var bo=bondGbo(atoms[i].element,atoms[j].element,d);
             if(bo>0){if(!bm.has(i))bm.set(i,new Map());if(!bm.has(j))bm.set(j,new Map());bm.get(i).set(j,bo);bm.get(j).set(i,bo)}
         }
     }
@@ -2761,11 +3074,11 @@ function detectBondsFromAtoms(atoms){
     });
     for(var iter=0;iter<10;iter++){var changed=false;var val=new Map();for(var i=0;i<n;i++)val.set(i,0);
         bm.forEach(function(nb,i){nb.forEach(function(o){val.set(i,(val.get(i)||0)+o)})});
-        var viols=[];val.forEach(function(v,i){var el=atoms[i].element.charAt(0).toUpperCase()+atoms[i].element.slice(1).toLowerCase();var mv=MV[el]||100;if(v>mv+0.1)viols.push(i)});
+        var viols=[];val.forEach(function(v,i){var el=atoms[i].element.charAt(0).toUpperCase()+atoms[i].element.slice(1).toLowerCase();var mv=BOND_MV[el]||100;if(v>mv+0.1)viols.push(i)});
         if(viols.length===0)break;
-        for(var vi=0;vi<viols.length;vi++){var i=viols[vi];var nb=bm.get(i);if(!nb)continue;var cv=Array.from(nb.values()).reduce(function(s,v){return s+v},0);var el=atoms[i].element.charAt(0).toUpperCase()+atoms[i].element.slice(1).toLowerCase();var mv=MV[el]||100;if(cv<=mv+0.1)continue;
+        for(var vi=0;vi<viols.length;vi++){var i=viols[vi];var nb=bm.get(i);if(!nb)continue;var cv=Array.from(nb.values()).reduce(function(s,v){return s+v},0);var el=atoms[i].element.charAt(0).toUpperCase()+atoms[i].element.slice(1).toLowerCase();var mv=BOND_MV[el]||100;if(cv<=mv+0.1)continue;
             var bb=null,ml=Infinity;nb.forEach(function(o,j){if(o<=1)return;var no;if(o===3)no=2;else if(o===2)no=1.5;else if(o===1.5)no=1;else return;
-                var el2=atoms[j].element;var dd=Math.sqrt(Math.pow(atoms[i].x-atoms[j].x,2)+Math.pow(atoms[i].y-atoms[j].y,2)+Math.pow(atoms[i].z-atoms[j].z,2));var s=sk(atoms[i].element,el2);var sp=BS[s];if(!sp)return;
+                var el2=atoms[j].element;var dd=Math.sqrt(Math.pow(atoms[i].x-atoms[j].x,2)+Math.pow(atoms[i].y-atoms[j].y,2)+Math.pow(atoms[i].z-atoms[j].z,2));var sp=BOND_BS[bondSk(atoms[i].element,el2)];if(!sp)return;
                 var ci=0,ni=0,md=Infinity;for(var k=0;k<sp.length;k++){if(sp[k].o===o&&Math.abs(dd-sp[k].l)<md){md=Math.abs(dd-sp[k].l);ci=sp[k].l}}md=Infinity;for(var k=0;k<sp.length;k++){if(sp[k].o===no&&Math.abs(dd-sp[k].l)<md){md=Math.abs(dd-sp[k].l);ni=sp[k].l}}if(!ci||!ni)return;
                 var loss=Math.abs(dd-ni)-Math.abs(dd-ci);if(loss<ml){ml=loss;bb=[j,no]}
             });if(bb){nb.set(bb[0],bb[1]);bm.get(bb[0]).set(i,bb[1]);changed=true}
@@ -4737,8 +5050,7 @@ function animate(){
             // latch view rotation until all arrow keys are released.
             moveKeyActive=false;
             keyRotLatch=true;
-            recomputeMovedBonds();
-            updateScenePositions(true);
+            refreshMovedBondsAndMeshes();
             if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
         }
         if(currentMode==='moveAtoms'&&selectedAtoms.length>0&&!diffMode&&!moveKeyLatch&&ctrlDown){
@@ -4765,8 +5077,7 @@ function animate(){
                 applyFragRotDelta(fAx,fAy);
             }else if(moveKeyActive){
                 moveKeyActive=false;
-                recomputeMovedBonds();
-                updateScenePositions(true);
+                refreshMovedBondsAndMeshes();
                 if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
             }
         }else if(!diffMode&&!keyRotLatch){
