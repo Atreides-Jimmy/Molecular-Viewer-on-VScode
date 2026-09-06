@@ -63,6 +63,28 @@ export interface RouteSection {
     hasOpt: boolean;         // the section requests an optimization
 }
 
+
+
+/**
+ * Join route lines into a single string.  Handles Gaussian column-80 word
+ * wrapping: if the previous line ends with an alphanumeric character and the
+ * next line starts with one, they are joined without a space (mid-word wrap).
+ */
+function joinRouteLines(lines: string[]): string {
+    if (lines.length === 0) return '';
+    const trimmed = lines.map(l => l.trimStart());
+    let result = trimmed[0];
+    for (let i = 1; i < trimmed.length; i++) {
+        const cur = trimmed[i];
+        if (/\w$/.test(result) && /^\w/.test(cur)) {
+            result += cur;
+        } else {
+            result += ' ' + cur;
+        }
+    }
+    return result.trim();
+}
+
 /**
  * Structured parse of one route section, used both for the optimization gate
  * and for the webview's Route panel. Tokenization is paren- and quote-aware
@@ -129,12 +151,18 @@ function parseRouteSection(routeText: string): RouteSection {
         }
         const pi = t.indexOf('(');
         if (pi > 0 && t.endsWith(')')) {
-            // Keyword with a bare parenthesized option list, e.g. iop(5/17=17)
-            keywords.push({
-                name: t.slice(0, pi),
-                options: t.slice(pi + 1, -1).split(',').map(s => s.trim()).filter(s => s !== '')
-            });
-            continue;
+            // Only split when the part before '(' is a simple alphabetic keyword
+            // (e.g. iop, scrf, TD).  Basis-set names like 6-31G(d,p) or
+            // method/basis combos like B3LYP/6-31G(d,p) contain digits, '-',
+            // '+', or '/' and must be kept as a single token.
+            const namePart = t.slice(0, pi);
+            if (/^[A-Za-z]+$/.test(namePart)) {
+                keywords.push({
+                    name: namePart,
+                    options: t.slice(pi + 1, -1).split(',').map(s => s.trim()).filter(s => s !== '')
+                });
+                continue;
+            }
         }
         keywords.push({ name: t, options: [] });
     }
@@ -339,10 +367,20 @@ export function parseGaussianLog(content: string): GaussianLogResult {
                     let j = routeStart + 1;
                     while (j < lines.length) {
                         const t2 = lines[j].trim();
-                        if (t2 === '' || DASH_RE.test(t2) || ROUTE_START_RE.test(t2)) break;
+                        if (t2 === '' || DASH_RE.test(t2)) break;
+                        if (ROUTE_START_RE.test(t2)) {
+                            // A '#' line after a blank/dash line is a new section;
+                            // a '#' line directly after a collected route line is a
+                            // continuation (Gaussian wraps long route cards and may
+                            // start the continuation with '#p ...' at the next line).
+                            if (j > routeStart + 1) {
+                                const prev = lines[j - 1].trim();
+                                if (prev === '' || DASH_RE.test(prev)) break;
+                            }
+                        }
                         j++;
                     }
-                    const sec = parseRouteSection(lines.slice(routeStart, j).map(l => l.trim()).join(' '));
+                    const sec = parseRouteSection(joinRouteLines(lines.slice(routeStart, j).map(l => l.trim())));
                     routes.push(sec);
                     if (sec.hasOpt) routeHasOpt = true;
                     i = j;

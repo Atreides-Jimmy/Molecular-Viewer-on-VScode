@@ -1,5 +1,12 @@
 # Change Log
 
+## Unreleased
+
+### Fixed
+
+- **Gaussian log route section basis-set parentheses misparsed as keyword options** — Route keywords containing basis set names with parentheses (e.g. `RwB97XD/6-31G(d,p)`, `M06-2X/6-311++G(2df,2p)`, bare `6-31G(d,p)`) were incorrectly split into a keyword and an option list (e.g. `RwB97XD/6-31G` + `d,p`), which the Route panel then rendered as `RwB97XD/6-31G = d, p`. The tokenizer now only treats the text before `(` as a keyword name when it is purely alphabetic (matching real Gaussian keywords like `iop`, `scrf`, `TD`), and keeps the full token intact otherwise
+- **Gaussian log route section line-wrapping keyword reconnection** — When a Gaussian route card spans multiple lines (column-80 wrapping), a keyword could be split across lines (e.g. `force` → `for` / `ce`) and the original `.join(' ')` concatenation inserted a space between the fragments, causing the tokenizer to produce two separate keywords instead of one. The route-line collection now uses a smart `joinRouteLines` function that decides per adjacent line-pair whether to merge without a space: (a) when the merged fragments form a known Gaussian keyword (from a ~120-entry keyword set covering methods, basis sets, options, and common flags), (b) when parentheses are unbalanced across the break (indicating a split option list), or (c) when the previous line ends with `=` or `(` (incomplete token); a guard prevents merging when the previous line is itself a standalone keyword preceded by a space. The route-collection loop also no longer breaks on `#`-prefixed continuation lines — a `#` line after a non-blank/non-dash line is now treated as a continuation rather than a new section start
+
 ## [0.9.6] - 2026-09-05
 
 ### Added
