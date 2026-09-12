@@ -22,6 +22,12 @@ export interface LogFrame {
     stepLabel: string;
     charge?: number;
     multiplicity?: number;
+    /** Single-point energy (Hartree) of the optimization step this frame is the
+     *  geometry of, filled by the parser for opt logs so the webview can both
+     *  label the frame and highlight its point in the convergence charts.
+     *  [2026-09-12 | Atreides-Jimmy] Added for the convergence-chart highlight
+     *  (feature 2) and value tooltip (feature 3). */
+    energy?: number;
 }
 
 export interface GaussianLogResult {
@@ -263,6 +269,35 @@ function parseModesFromHeader(lines: string[], headerIdx: number): { modes: Norm
     return { modes, endIdx: i };
 }
 
+/**
+ * Attach a freshly parsed single-point energy to the geometry frame(s) that
+ * still wait for one, i.e. the frames emitted after the previous energy was
+ * consumed by a convergence table.
+ *
+ * [2026-09-12 | Atreides-Jimmy] Added for the convergence-chart highlight and
+ * value tooltip: the webview can only point at "the step this structure
+ * belongs to" if the parser records which energy a frame's geometry was
+ * computed at.
+ *
+ * - `opt=external` runs (Gaussian + XTB/XO) print the geometry of every cycle
+ *   BEFORE its `Energy= ... NIter=` line, so the energy belongs to the single
+ *   frame printed since the previous energy.
+ * - Standard Gaussian logs print `SCF Done` before the geometry, so the energy
+ *   already in `pendingEnergy` is assigned to the first frame that follows it
+ *   (a second geometry block of the same cycle keeps no energy, matching the
+ *   fact that it has no convergence-table row of its own).
+ *
+ * The backward scan is bounded by `MAX_FRAMES_PER_ENERGY` so a pathological log
+ * can never turn this into a quadratic scan over the whole trajectory. Frames
+ * that already carry an energy are stepped over, never overwritten.
+ */
+const MAX_FRAMES_PER_ENERGY = 8;
+function assignPendingEnergyToFrames(frames: LogFrame[], energy: number): void {
+    for (let k = frames.length - 1; k >= 0 && k >= frames.length - MAX_FRAMES_PER_ENERGY; k--) {
+        if (frames[k].energy == null) frames[k].energy = energy;
+    }
+}
+
 export function parseGaussianLog(content: string): GaussianLogResult {
     const lines = content.split(/\r?\n/);
     const frames: LogFrame[] = [];
@@ -397,7 +432,11 @@ export function parseGaussianLog(content: string): GaussianLogResult {
                     hasExplicitBonds: false,
                     stepLabel: label,
                     charge: logCharge,
-                    multiplicity: logMultiplicity
+                    multiplicity: logMultiplicity,
+                    // A `SCF Done` line prints BEFORE its geometry in standard
+                    // Gaussian output, so the pending energy is the one this
+                    // frame was computed at. [2026-09-12 | Atreides-Jimmy]
+                    energy: pendingEnergy
                 });
                 if (isStandard) stdFrames++;
             }
@@ -449,6 +488,8 @@ export function parseGaussianLog(content: string): GaussianLogResult {
         // SCF Done:  E(RHF) =  -76.0107469158     A.U. after   10 cycles
         const scfMatch = line.match(/SCF Done:\s+E\([^)]+\)\s*=\s*(-?\d+\.\d+)/);
         if (scfMatch) {
+            // The energy is carried into the next geometry frame below, which is
+            // the structure it was computed at. [2026-09-12 | Atreides-Jimmy]
             pendingEnergy = parseFloat(scfMatch[1]);
             i++;
             continue;
@@ -462,6 +503,9 @@ export function parseGaussianLog(content: string): GaussianLogResult {
         const extEnergyMatch = line.match(/^\s*Energy=\s*(-?\d+\.\d+)\s+NIter=/);
         if (extEnergyMatch) {
             pendingEnergy = parseFloat(extEnergyMatch[1]);
+            // [2026-09-12 | Atreides-Jimmy] opt=external logs print the cycle's
+            // geometry BEFORE its energy — bind it here (same purpose as above).
+            assignPendingEnergyToFrames(frames, pendingEnergy);
             i++;
             continue;
         }
