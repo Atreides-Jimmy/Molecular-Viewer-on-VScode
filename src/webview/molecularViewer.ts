@@ -3277,8 +3277,72 @@ function convSelectedStep(steps){
     return currentFrame;
 }
 
+/** Draw the value tooltip of the data point nearest to the cursor (feature 3).
+ *  Points of a different step are ignored so the tooltip never reports a value
+ *  the user is not pointing at. */
+function convDrawTooltip(ctx,canvas){
+    var geom=canvas.__convGeom;
+    if(!geom||!canvas.__convHover||!geom.series.length)return;
+    var mx=canvas.__convHover.x,my=canvas.__convHover.y;
+    var best=null,bestD=289; // 17² px picking radius
+    for(var s=0;s<geom.series.length;s++){
+        var pts=geom.series[s].pts;
+        for(var p=0;p<pts.length;p++){
+            var dx=pts[p].x-mx,dy=pts[p].y-my,d=dx*dx+dy*dy;
+            if(d<=bestD){bestD=d;best={i:pts[p].i,x:pts[p].x,y:pts[p].y,v:pts[p].v,color:geom.series[s].color,name:geom.series[s].label}}
+        }
+    }
+    if(!best)return;
+    var step=steps_get(geom.steps,best.i);
+    var lines=[(geom.xLabel||'Step')+' '+(best.i+1)];
+    lines.push(best.name+' = '+convFullValue(best.v));
+    if(step&&step.energy!=null&&geom.field!=='energy')lines.push('Energy = '+convFullValue(step.energy));
+    ctx.font='9px sans-serif';
+    var wid=0;
+    for(var li=0;li<lines.length;li++)wid=Math.max(wid,ctx.measureText(lines[li]).width);
+    var bw=wid+10,bh=lines.length*11+7;
+    var bx=best.x+10,by=best.y-bh-7;
+    if(bx+bw>geom.padL+geom.pw)bx=best.x-bw-10;
+    if(bx<1)bx=1;
+    if(by<1)by=best.y+10;
+    ctx.fillStyle='rgba(12,14,18,0.94)';
+    ctx.strokeStyle=best.color;ctx.lineWidth=1;
+    ctx.beginPath();
+    if(ctx.roundRect)ctx.roundRect(bx,by,bw,bh,3);else ctx.rect(bx,by,bw,bh);
+    ctx.fill();ctx.stroke();
+    ctx.textAlign='left';ctx.textBaseline='top';
+    var ty=by+3;
+    for(li=0;li<lines.length;li++){
+        ctx.fillStyle=li===lines.length-1&&lines.length>1?'#ccc':best.color;
+        ctx.fillText(lines[li],bx+5,ty);
+        ty+=11;
+    }
+    ctx.strokeStyle=best.color;ctx.lineWidth=1;
+    ctx.beginPath();ctx.arc(best.x,best.y,3,0,Math.PI*2);ctx.stroke();
+}
+
+/** Step object at idx, tolerating a missing steps array. */
+function steps_get(steps,i){return steps&&steps[i]?steps[i]:null}
+
+/** Wire the hover interaction once per canvas (feature 3). */
+function convAttachHover(canvas){
+    if(canvas.__convHoverBound)return;
+    canvas.__convHoverBound=true;
+    canvas.addEventListener('mousemove',function(e){
+        var r=canvas.getBoundingClientRect();
+        canvas.__convHover={x:e.clientX-r.left,y:e.clientY-r.top};
+        var ctx=canvas.getContext('2d');
+        ctx.setTransform(window.devicePixelRatio||1,0,0,window.devicePixelRatio||1,0,0);
+        convDrawTooltip(ctx,canvas);
+    });
+    canvas.addEventListener('mouseleave',function(){
+        canvas.__convHover=null;
+        canvas.__convRedraw();
+    });
+}
+
 /** Highlight the point of the displayed step (feature 2) and re-apply the
- *  chart. */
+ *  tooltip on top of the freshly drawn chart. */
 function convDrawState(ctx,canvas){
     var geom=canvas.__convGeom;
     if(!geom)return;
@@ -3302,11 +3366,13 @@ function convDrawState(ctx,canvas){
         }
         ctx.restore();
     }
+    convDrawTooltip(ctx,canvas);
 }
 
 function drawConvergenceChart(canvas,steps,field,label,color,threshold){
     if(!canvas.__convRedraw){
         canvas.__convRedraw=function(){drawConvergenceChart(canvas,steps,field,label,color,threshold)};
+        convAttachHover(canvas);
     }
     var ctx=canvas.getContext('2d');
     var dpr=window.devicePixelRatio||1;
@@ -3368,7 +3434,7 @@ function drawConvergenceChart(canvas,steps,field,label,color,threshold){
         ctx.beginPath();ctx.moveTo(padL,ty);ctx.lineTo(padL+pw,ty);ctx.stroke();
         ctx.setLineDash([]);
     }
-    // Data line + points (points are kept so the selected one can be marked)
+    // Data line + points
     var pts=[];
     ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.beginPath();
     var drew=false;
@@ -3397,6 +3463,9 @@ function drawConvergenceChart(canvas,steps,field,label,color,threshold){
  *  [2026-09-12 | Atreides-Jimmy] */
 function renderOptCharts(){
     if(!OPT_STEPS||OPT_STEPS.length===0)return;
+    // Nothing to redraw while the panel is closed (its canvases have no layout
+    // then); buildOptPanel draws them again once the panel is shown.
+    if(!optPanelEl.classList.contains('show'))return;
     var canvases=optPanelEl.querySelectorAll('canvas');
     canvases.forEach(function(cv){
         var field=cv.dataset.field;
@@ -3462,6 +3531,7 @@ function buildOptPanel(){
 function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
     if(!canvas.__convRedraw){
         canvas.__convRedraw=function(){drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2)};
+        convAttachHover(canvas);
     }
     var ctx=canvas.getContext('2d');
     var dpr=window.devicePixelRatio||1;
@@ -3560,7 +3630,7 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
         ctx.fillRect(padL+fi*80,padT-12,8,2);
         ctx.fillText(labels[fi],padL+fi*80+10,padT-14);
     }
-    // Data lines + points (kept so the selected step can be marked)
+    // Data lines + points (kept for the hover tooltip / selected-step mark)
     var series=[];
     for(fi=0;fi<fields.length;fi++){
         ctx.strokeStyle=colors[fi];ctx.lineWidth=1.5;ctx.beginPath();
@@ -3581,6 +3651,8 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
         }
         series.push({label:labels[fi],color:colors[fi],pts:pts});
     }
+    // spanVal states how fine the data (not the log axis) is: it drives the
+    // tooltip's decimal resolution, so it must come from the plotted values.
     canvas.__convGeom={padL:padL,padT:padT,pw:pw,ph:ph,n:n,xLabel:'Step',yLabel:labels[0],
         spanVal:Math.max.apply(null,allVals)-Math.min.apply(null,allVals),field:fields[0],steps:steps,
         series:series,selected:sel};
