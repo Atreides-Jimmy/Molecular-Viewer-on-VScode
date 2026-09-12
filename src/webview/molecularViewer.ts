@@ -3277,12 +3277,22 @@ function convSelectedStep(steps){
     return currentFrame;
 }
 
-/** Draw the value tooltip of the data point nearest to the cursor (feature 3).
- *  Points of a different step are ignored so the tooltip never reports a value
- *  the user is not pointing at. */
+/** Draw the value tooltip of the data point nearest to the cursor (feature 3)
+ *  and report whether a point was hit.
+ *
+ *  The tooltip is a pure function of the chart (canvas.__convGeom) plus the last
+ *  pointer position (canvas.__convHover), so a repaint either draws one tooltip
+ *  or none — it can never leave an older tooltip behind on the canvas. Points of
+ *  a different step are ignored so the tooltip never reports a value the user is
+ *  not pointing at.
+ *  [2026-09-12 | Atreides-Jimmy] Changed: returns whether the tooltip was drawn,
+ *  so the pointer handler can tell "still hovering a point" from "just left it"
+ *  and repaint on that transition (it used to be painted from mousemove only
+ *  while a point was in range, which left the last tooltip on screen until the
+ *  pointer left the canvas). */
 function convDrawTooltip(ctx,canvas){
     var geom=canvas.__convGeom;
-    if(!geom||!canvas.__convHover||!geom.series.length)return;
+    if(!geom||!canvas.__convHover||!geom.series.length)return false;
     var mx=canvas.__convHover.x,my=canvas.__convHover.y;
     var best=null,bestD=289; // 17² px picking radius
     for(var s=0;s<geom.series.length;s++){
@@ -3292,7 +3302,7 @@ function convDrawTooltip(ctx,canvas){
             if(d<=bestD){bestD=d;best={i:pts[p].i,x:pts[p].x,y:pts[p].y,v:pts[p].v,color:geom.series[s].color,name:geom.series[s].label}}
         }
     }
-    if(!best)return;
+    if(!best)return false;
     var step=steps_get(geom.steps,best.i);
     var lines=[(geom.xLabel||'Step')+' '+(best.i+1)];
     lines.push(best.name+' = '+convFullValue(best.v));
@@ -3319,30 +3329,45 @@ function convDrawTooltip(ctx,canvas){
     }
     ctx.strokeStyle=best.color;ctx.lineWidth=1;
     ctx.beginPath();ctx.arc(best.x,best.y,3,0,Math.PI*2);ctx.stroke();
+    return true;
 }
 
 /** Step object at idx, tolerating a missing steps array. */
 function steps_get(steps,i){return steps&&steps[i]?steps[i]:null}
 
-/** Wire the hover interaction once per canvas (feature 3). */
+/** Repaint a chart with the current pointer state: the selected-step highlight,
+ *  plus a tooltip when the pointer is close enough to a point. Every repaint
+ *  clears the canvas first (the draw functions do), so the tooltip disappears in
+ *  the same frame the pointer leaves its point.
+ *  [2026-09-12 | Atreides-Jimmy] Added: single repaint entry point for hover. */
+function convApplyHover(canvas,pt){
+    canvas.__convHover=pt||null;
+    if(typeof canvas.__convRedraw==='function')canvas.__convRedraw();
+}
+
+/** Wire the hover interaction once per canvas (feature 3). The repaint is
+ *  throttled to real sub-pixel motion; as soon as the pointer moves off the
+ *  point it was on, that repaint drops the tooltip (previously the tooltip was
+ *  only redrawn when another point was reached, so fast sweeps left several
+ *  tooltip boxes stacked on the canvas until the pointer left the chart). */
 function convAttachHover(canvas){
     if(canvas.__convHoverBound)return;
     canvas.__convHoverBound=true;
     canvas.addEventListener('mousemove',function(e){
         var r=canvas.getBoundingClientRect();
-        canvas.__convHover={x:e.clientX-r.left,y:e.clientY-r.top};
-        var ctx=canvas.getContext('2d');
-        ctx.setTransform(window.devicePixelRatio||1,0,0,window.devicePixelRatio||1,0,0);
-        convDrawTooltip(ctx,canvas);
+        var pt={x:e.clientX-r.left,y:e.clientY-r.top};
+        var prev=canvas.__convHover;
+        if(prev&&Math.abs(prev.x-pt.x)<1&&Math.abs(prev.y-pt.y)<1)return;
+        convApplyHover(canvas,pt);
     });
     canvas.addEventListener('mouseleave',function(){
-        canvas.__convHover=null;
-        canvas.__convRedraw();
+        if(canvas.__convHover)convApplyHover(canvas,null);
     });
 }
 
-/** Highlight the point of the displayed step (feature 2) and re-apply the
- *  tooltip on top of the freshly drawn chart. */
+/** Highlight the point of the displayed step (feature 2), then draw the value
+ *  tooltip of whatever point the pointer is currently on (feature 3). Called at
+ *  the end of every chart repaint. */
 function convDrawState(ctx,canvas){
     var geom=canvas.__convGeom;
     if(!geom)return;
