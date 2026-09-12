@@ -486,7 +486,11 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         const framesData = frames.map(f => ({
             atoms: f.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: atomColors[a.element] || '#FF1493' })),
             bonds: f.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order })),
-            stepLabel: f.stepLabel
+            stepLabel: f.stepLabel,
+            // Single-point energy of this frame's structure (opt logs only), used
+            // by the convergence charts to highlight the selected step and to
+            // report its exact value. [2026-09-12 | Atreides-Jimmy]
+            energy: (f as { energy?: number }).energy
         }));
 
         const atomGroupsData = data.atomGroups ? data.atomGroups.map(g => ({
@@ -3027,6 +3031,10 @@ function switchFrame(idx){
     resetRotAxisState();
     rebuildScene();
     updateFrameInfo();
+    // [2026-09-12 | Atreides-Jimmy] Follow the structure change in the
+    // convergence charts: the point of the step now on screen gets highlighted
+    // (renderOptCharts is a no-op while the panel is closed).
+    if(typeof renderOptCharts==='function')renderOptCharts();
 }
 // ===== Shared bond-detection tables and helpers =====
 // Used by both the full-molecule detector (detectBondsFromAtoms) and the
@@ -3148,7 +3156,249 @@ var OPT_SOURCE=MD.optSource||null;
 var OPT_IS_GAUSSIAN=OPT_SOURCE==='gaussian';
 var NORMAL_MODES=MD.normalModes||null;
 
+// ---------------------------------------------------------------------------
+// Convergence chart value formatting, axis labels, point highlight and hover
+// tooltip.
+// [2026-09-12 | Atreides-Jimmy] Added:
+//   * feature 1 — energy axis in normal decimal notation: the tick range is
+//     derived from the highest/lowest plotted value and the labels keep only the
+//     changing decimals, so a run from -47077.6380 to -47077.6713 reads
+//     .64 .65 .65 .66 .67 (base -47077 in the title) instead of 4.71e+04.
+//   * feature 2 — the point of the optimization step currently on screen is
+//     marked with a ring + vertical guide.
+//   * feature 3 — hovering a point reports its exact value in a tooltip.
+// ---------------------------------------------------------------------------
+
+/** Draw a value in full decimal notation (never scientific), with just enough
+ *  decimals to resolve it: two significant digits of its own magnitude plus one
+ *  guard digit, capped at 12 (e.g. -47077.6482, 0.0000451, 12.16). */
+function convFullValue(v){
+    var mag=Math.abs(v);
+    var dec=mag>0?Math.max(0,2-Math.floor(Math.log10(mag))):6;
+    if(dec>12)dec=12;
+    var str=v.toFixed(dec);
+    if(str.indexOf('.')>=0)str=str.replace(/0+$/,'').replace(/\.$/,'');
+    return str==='-0'?'0':str;
+}
+
+/** Number of decimal places of the last digit that varies over the axis: the
+ *  position of the first decimal at which the two ends differ. For a run from
+ *  -47077.6713 to -47077.6380 the ends share '-47077.6' and first differ at the
+ *  second decimal, so two decimals are kept and the ticks read
+ *  .67 .66 .65 .65 .64; a run that changes in its integer part
+ *  (-23533 … -23532) stays at 0 decimals and the ticks are whole numbers.
+ *
+ *  Digits are read from the fixed-point form of both ends, because scaling a
+ *  double (e.g. -47077.6713 * 100 = -4707767.129999999) and rounding it makes
+ *  the comparison unreliable at exactly the digit that matters here. */
+function convTickDecimals(vmin,vmax){
+    var sa=vmin.toFixed(10),sb=vmax.toFixed(10);
+    var dot=sa.indexOf('.');
+    var ai=sa.substring(0,dot),bi=sb.substring(0,dot);
+    if(ai!==bi)return 0;                       // the integer part itself varies
+    var fa=sa.substring(dot+1),fb=sb.substring(dot+1);
+    for(var i=0;i<10;i++){
+        if(fa.charAt(i)!==fb.charAt(i))return i+1;
+    }
+    return 10;                                  // equal ends: keep full detail
+}
+
+/** Axis tick label: only the part that actually varies over the axis is kept —
+ *  the shared integer part (base) is printed once next to the chart title, so
+ *  ticks read '.67' / '.66' / … for a run around -47077. The base is the
+ *  integer part of the run's lowest value, so the delta stays in [0,1) and its
+ *  absolute value is the tick's fraction (a run that crosses an integer
+ *  boundary, e.g. -76.0107 … -75.9884 around base -76, keeps the leading '1' so
+ *  '.988' stays distinguishable from '.011'). A null base falls back to the
+ *  full value — always as plain decimals, never scientific notation. */
+function convTickLabel(v,base,dec){
+    if(base==null)return v.toFixed(dec);
+    var frac=Math.abs(v-base).toFixed(dec);
+    // Drop the leading zero of a pure fraction so the ticks read '.9 .8 .7'
+    // (the user-visible convention of this panel) rather than '0.9 0.8 0.7'.
+    if(frac.indexOf('0.')===0)frac=frac.substring(1);
+    return frac;
+}
+
+/** Label for the shared integer part of a run, e.g. '  -47077 +' for ticks that
+ *  are printed as '.67' ('' when the run changes in its integer part, in which
+ *  case the ticks carry the full value themselves). */
+function convBaseLabel(fmin,fmax){
+    var base=convAxisBase(fmin,fmax);
+    return base==null?'':'  '+base+' +';
+}
+
+/** Integer part shared by every tick of the run, i.e. its lowest value truncated
+ *  toward zero (-47077.6713 → -47077, so ticks print as '.67' … '.64'), or null
+ *  when the run's span covers more than one integer and the ticks must carry
+ *  their full value. */
+function convAxisBase(vmin,vmax){
+    if(Math.abs(vmax-vmin)>=1)return null;
+    return vmin<0?Math.ceil(vmin):Math.floor(vmin);
+}
+
+/** True when the condensed '.xx' tick labels fit the axis gutter. The shared
+ *  integer part is printed on the title line (full chart width), so the gutter
+ *  only has to hold the fraction: for the narrow spans that use it (base ≠ null
+ *  implies a span < 1) that is a dot plus up to ten decimal digits, well inside
+ *  the 40px gutter. Only the fallback to full values can be wide, which is why
+ *  this check exists at all. */
+function convLabelsFitGutter(ctx,vmin,vmax,dec,padL){
+    if(convAxisBase(vmin,vmax)==null)return false;
+    // Widest possible tick label in the condensed form, e.g. '.0000'.
+    var frac='.'+new Array(dec+1).join('9');
+    ctx.font='9px sans-serif';
+    return Math.ceil(ctx.measureText(frac).width)+3<=padL;
+}
+
+/** [min,max] of one numeric field over the plotted steps (null when empty). */
+function convFieldRange(steps,field){
+    var lo=Infinity,hi=-Infinity,any=false;
+    for(var i=0;i<steps.length;i++){
+        var v=steps[i][field];
+        if(v==null||isNaN(v)||!isFinite(v))continue;
+        if(v<lo)lo=v;
+        if(v>hi)hi=v;
+        any=true;
+    }
+    return any?[lo,hi]:null;
+}
+
+/** Index of the optimization step whose structure is currently displayed, or -1.
+ *  Frames of an opt log are the per-step geometries in step order (the parser
+ *  numbers them "Step k"), so the frame index IS the step index; the frame's
+ *  own single-point energy is only a guard for formats/labels that do not
+ *  follow that numbering. */
+function convSelectedStep(steps){
+    if(typeof currentFrame!=='number'||currentFrame<0||currentFrame>=steps.length)return -1;
+    var f=MD.frames&&MD.frames[currentFrame];
+    var e=f?f.energy:undefined;
+    if(e!=null&&!isNaN(e)&&steps[currentFrame].energy!=null&&Math.abs(steps[currentFrame].energy-e)>1e-9)return -1;
+    return currentFrame;
+}
+
+/** Draw the value tooltip of the data point nearest to the cursor (feature 3)
+ *  and report whether a point was hit.
+ *
+ *  The tooltip is a pure function of the chart (canvas.__convGeom) plus the last
+ *  pointer position (canvas.__convHover), so a repaint either draws one tooltip
+ *  or none — it can never leave an older tooltip behind on the canvas. Points of
+ *  a different step are ignored so the tooltip never reports a value the user is
+ *  not pointing at.
+ *  [2026-09-12 | Atreides-Jimmy] Changed: returns whether the tooltip was drawn,
+ *  so the pointer handler can tell "still hovering a point" from "just left it"
+ *  and repaint on that transition (it used to be painted from mousemove only
+ *  while a point was in range, which left the last tooltip on screen until the
+ *  pointer left the canvas). */
+function convDrawTooltip(ctx,canvas){
+    var geom=canvas.__convGeom;
+    if(!geom||!canvas.__convHover||!geom.series.length)return false;
+    var mx=canvas.__convHover.x,my=canvas.__convHover.y;
+    var best=null,bestD=289; // 17² px picking radius
+    for(var s=0;s<geom.series.length;s++){
+        var pts=geom.series[s].pts;
+        for(var p=0;p<pts.length;p++){
+            var dx=pts[p].x-mx,dy=pts[p].y-my,d=dx*dx+dy*dy;
+            if(d<=bestD){bestD=d;best={i:pts[p].i,x:pts[p].x,y:pts[p].y,v:pts[p].v,color:geom.series[s].color,name:geom.series[s].label}}
+        }
+    }
+    if(!best)return false;
+    var step=steps_get(geom.steps,best.i);
+    var lines=[(geom.xLabel||'Step')+' '+(best.i+1)];
+    lines.push(best.name+' = '+convFullValue(best.v));
+    if(step&&step.energy!=null&&geom.field!=='energy')lines.push('Energy = '+convFullValue(step.energy));
+    ctx.font='9px sans-serif';
+    var wid=0;
+    for(var li=0;li<lines.length;li++)wid=Math.max(wid,ctx.measureText(lines[li]).width);
+    var bw=wid+10,bh=lines.length*11+7;
+    var bx=best.x+10,by=best.y-bh-7;
+    if(bx+bw>geom.padL+geom.pw)bx=best.x-bw-10;
+    if(bx<1)bx=1;
+    if(by<1)by=best.y+10;
+    ctx.fillStyle='rgba(12,14,18,0.94)';
+    ctx.strokeStyle=best.color;ctx.lineWidth=1;
+    ctx.beginPath();
+    if(ctx.roundRect)ctx.roundRect(bx,by,bw,bh,3);else ctx.rect(bx,by,bw,bh);
+    ctx.fill();ctx.stroke();
+    ctx.textAlign='left';ctx.textBaseline='top';
+    var ty=by+3;
+    for(li=0;li<lines.length;li++){
+        ctx.fillStyle=li===lines.length-1&&lines.length>1?'#ccc':best.color;
+        ctx.fillText(lines[li],bx+5,ty);
+        ty+=11;
+    }
+    ctx.strokeStyle=best.color;ctx.lineWidth=1;
+    ctx.beginPath();ctx.arc(best.x,best.y,3,0,Math.PI*2);ctx.stroke();
+    return true;
+}
+
+/** Step object at idx, tolerating a missing steps array. */
+function steps_get(steps,i){return steps&&steps[i]?steps[i]:null}
+
+/** Repaint a chart with the current pointer state: the selected-step highlight,
+ *  plus a tooltip when the pointer is close enough to a point. Every repaint
+ *  clears the canvas first (the draw functions do), so the tooltip disappears in
+ *  the same frame the pointer leaves its point.
+ *  [2026-09-12 | Atreides-Jimmy] Added: single repaint entry point for hover. */
+function convApplyHover(canvas,pt){
+    canvas.__convHover=pt||null;
+    if(typeof canvas.__convRedraw==='function')canvas.__convRedraw();
+}
+
+/** Wire the hover interaction once per canvas (feature 3). The repaint is
+ *  throttled to real sub-pixel motion; as soon as the pointer moves off the
+ *  point it was on, that repaint drops the tooltip (previously the tooltip was
+ *  only redrawn when another point was reached, so fast sweeps left several
+ *  tooltip boxes stacked on the canvas until the pointer left the chart). */
+function convAttachHover(canvas){
+    if(canvas.__convHoverBound)return;
+    canvas.__convHoverBound=true;
+    canvas.addEventListener('mousemove',function(e){
+        var r=canvas.getBoundingClientRect();
+        var pt={x:e.clientX-r.left,y:e.clientY-r.top};
+        var prev=canvas.__convHover;
+        if(prev&&Math.abs(prev.x-pt.x)<1&&Math.abs(prev.y-pt.y)<1)return;
+        convApplyHover(canvas,pt);
+    });
+    canvas.addEventListener('mouseleave',function(){
+        if(canvas.__convHover)convApplyHover(canvas,null);
+    });
+}
+
+/** Highlight the point of the displayed step (feature 2), then draw the value
+ *  tooltip of whatever point the pointer is currently on (feature 3). Called at
+ *  the end of every chart repaint. */
+function convDrawState(ctx,canvas){
+    var geom=canvas.__convGeom;
+    if(!geom)return;
+    var sel=geom.selected;
+    if(sel!=null&&sel>=0){
+        var sx=geom.padL+(geom.n<=1?0:geom.pw*sel/(geom.n-1));
+        ctx.save();
+        ctx.strokeStyle='rgba(255,214,102,0.55)';ctx.lineWidth=1;ctx.setLineDash([2,2]);
+        ctx.beginPath();ctx.moveTo(sx,geom.padT);ctx.lineTo(sx,geom.padT+geom.ph);ctx.stroke();
+        ctx.setLineDash([]);
+        for(var s=0;s<geom.series.length;s++){
+            var pts=geom.series[s].pts;
+            for(var p=0;p<pts.length;p++){
+                if(pts[p].i!==sel)continue;
+                ctx.beginPath();ctx.arc(pts[p].x,pts[p].y,5.5,0,Math.PI*2);
+                ctx.fillStyle='rgba(255,214,102,0.22)';ctx.fill();
+                ctx.beginPath();ctx.arc(pts[p].x,pts[p].y,3.4,0,Math.PI*2);
+                ctx.fillStyle=pts[p].color;ctx.fill();
+                ctx.strokeStyle='#ffd666';ctx.lineWidth=1.4;ctx.stroke();
+            }
+        }
+        ctx.restore();
+    }
+    convDrawTooltip(ctx,canvas);
+}
+
 function drawConvergenceChart(canvas,steps,field,label,color,threshold){
+    if(!canvas.__convRedraw){
+        canvas.__convRedraw=function(){drawConvergenceChart(canvas,steps,field,label,color,threshold)};
+        convAttachHover(canvas);
+    }
     var ctx=canvas.getContext('2d');
     var dpr=window.devicePixelRatio||1;
     var w=(canvas.parentElement&&canvas.parentElement.clientWidth)||canvas.clientWidth||300;
@@ -3157,22 +3407,41 @@ function drawConvergenceChart(canvas,steps,field,label,color,threshold){
     canvas.style.width=w+'px';canvas.style.height=h+'px';canvas.style.maxWidth='100%';canvas.style.display='block';
     ctx.setTransform(dpr,0,0,dpr,0,0);
     ctx.clearRect(0,0,w,h);
-    var padL=40,padR=8,padT=8,padB=18;
+    var padL=40,padR=8,padT=14,padB=18;
     var pw=w-padL-padR,ph=h-padT-padB;
-    var vals=steps.map(function(s){return s[field]}).filter(function(v){return v!=null&&!isNaN(v)});
-    if(vals.length===0){ctx.fillStyle='#888';ctx.font='10px sans-serif';ctx.fillText('No data',padL,padT+12);return}
-    var vmin=Math.min.apply(null,vals),vmax=Math.max.apply(null,vals);
+    var range=convFieldRange(steps,field);
+    if(!range){ctx.fillStyle='#888';ctx.font='10px sans-serif';ctx.fillText('No data',padL,padT+12);return}
+    var dmin=range[0],dmax=range[1];
+    var vmin=dmin,vmax=dmax;
     if(threshold!=null){vmin=Math.min(vmin,threshold);vmax=Math.max(vmax,threshold)}
-    if(vmax-vmin<1e-12)vmax=vmin+1;
+    if(vmax-vmin<1e-12){vmax=vmin+Math.abs(vmin)*1e-6+1e-9}
     var n=steps.length;
-    // Grid + axes
+    var sel=steps.length?convSelectedStep(steps):-1;
+
+    // --- Feature 1: decimal axis labels, integer part shown once -----------
+    // The tick values are stated by the run's own extremes, and the labels keep
+    // only the decimal place at which those extremes differ (the shared integer
+    // part moves next to the chart title).
+    // The decimals come from the plotted values themselves: a threshold far
+    // below the data must not stretch the range and round the labels away.
+    var dec=convTickDecimals(dmin,dmax);
+    var vbase=convAxisBase(dmin,dmax);
+    // Keep labels inside the 40px gutter: fall back to the full value when even
+    // the condensed '.xx' form would not fit next to the shared integer part.
+    if(vbase!=null&&!convLabelsFitGutter(ctx,dmin,dmax,dec,padL))vbase=null;
+    function labelFor(v){return convTickLabel(v,vbase,dec)}
+    // Chart title: series label + the shared integer part of the run (vbase is
+    // exactly that integer, so the two can never disagree).
+    ctx.fillStyle='#ccc';ctx.font='10px sans-serif';ctx.textAlign='left';ctx.textBaseline='top';
+    ctx.fillText(vbase==null?label:label+'  '+vbase+' +',padL,0);
+
+    // Grid + axis labels
     ctx.strokeStyle='rgba(255,255,255,0.12)';ctx.lineWidth=1;
     ctx.fillStyle='#888';ctx.font='9px sans-serif';ctx.textAlign='right';ctx.textBaseline='middle';
     for(var g=0;g<=4;g++){
         var y=padT+ph*g/4;
         ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(padL+pw,y);ctx.stroke();
-        var val=vmax-(vmax-vmin)*g/4;
-        ctx.fillText(val.toExponential(2),padL-3,y);
+        ctx.fillText(labelFor(vmax-(vmax-vmin)*g/4),padL-3,y);
     }
     ctx.textAlign='center';ctx.textBaseline='top';
     for(g=0;g<n;g+=Math.max(1,Math.floor(n/6))){
@@ -3182,11 +3451,16 @@ function drawConvergenceChart(canvas,steps,field,label,color,threshold){
     // Threshold line
     if(threshold!=null){
         var ty=padT+ph*(vmax-threshold)/(vmax-vmin);
+        if(padL-3-ctx.measureText(labelFor(threshold)).width>=0){
+            ctx.fillStyle='#888';ctx.textAlign='right';ctx.textBaseline='middle';
+            ctx.fillText(labelFor(threshold),padL-3,ty);
+        }
         ctx.strokeStyle='rgba(255,180,0,0.6)';ctx.setLineDash([3,3]);
         ctx.beginPath();ctx.moveTo(padL,ty);ctx.lineTo(padL+pw,ty);ctx.stroke();
         ctx.setLineDash([]);
     }
-    // Data line
+    // Data line + points
+    var pts=[];
     ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.beginPath();
     var drew=false;
     for(var i=0;i<n;i++){
@@ -3194,21 +3468,43 @@ function drawConvergenceChart(canvas,steps,field,label,color,threshold){
         if(v==null||isNaN(v))continue;
         x=padL+(n<=1?0:pw*i/(n-1));
         y=padT+ph*(vmax-v)/(vmax-vmin);
+        pts.push({i:i,x:x,y:y,v:v,color:color});
         if(!drew){ctx.moveTo(x,y);drew=true}else ctx.lineTo(x,y);
     }
     ctx.stroke();
-    // Points
     ctx.fillStyle=color;
-    for(i=0;i<n;i++){
-        v=steps[i][field];
-        if(v==null||isNaN(v))continue;
-        x=padL+(n<=1?0:pw*i/(n-1));
-        y=padT+ph*(vmax-v)/(vmax-vmin);
-        ctx.beginPath();ctx.arc(x,y,2,0,Math.PI*2);ctx.fill();
+    for(i=0;i<pts.length;i++){
+        ctx.beginPath();ctx.arc(pts[i].x,pts[i].y,2,0,Math.PI*2);ctx.fill();
     }
-    // Label
-    ctx.fillStyle='#ccc';ctx.font='10px sans-serif';ctx.textAlign='left';ctx.textBaseline='top';
-    ctx.fillText(label,padL,padT-2);
+    canvas.__convGeom={padL:padL,padT:padT,pw:pw,ph:ph,n:n,xLabel:'Step',yLabel:label,
+        spanVal:vmax-vmin,field:field,steps:steps,
+        series:[{label:label,color:color,pts:pts}],selected:sel};
+    convDrawState(ctx,canvas);
+}
+
+/** Redraw every convergence chart of the opt panel. Called after the panel is
+ *  built and whenever the displayed structure changes, so the selected-step
+ *  highlight (feature 2) always follows the 3D view.
+ *  [2026-09-12 | Atreides-Jimmy] */
+function renderOptCharts(){
+    if(!OPT_STEPS||OPT_STEPS.length===0)return;
+    // Nothing to redraw while the panel is closed (its canvases have no layout
+    // then); buildOptPanel draws them again once the panel is shown.
+    if(!optPanelEl.classList.contains('show'))return;
+    var canvases=optPanelEl.querySelectorAll('canvas');
+    canvases.forEach(function(cv){
+        var field=cv.dataset.field;
+        if(field==='energy'){
+            cv.style.height='90px';
+            drawConvergenceChart(cv,OPT_STEPS,'energy','Energy (Hartree)','#3794ff',null);
+        }else if(field==='force'){
+            cv.style.height='110px';
+            drawDualChart(cv,OPT_STEPS,['maxForce','rmsForce'],['Max Force','RMS Force'],['#ff6b6b','#ffa94d'],OPT_IS_GAUSSIAN?0.000450:null,OPT_IS_GAUSSIAN?0.000300:null);
+        }else if(field==='disp'){
+            cv.style.height='110px';
+            drawDualChart(cv,OPT_STEPS,['maxDisplacement','rmsDisplacement'],['Max Disp','RMS Disp'],['#51cf66','#74c0fc'],OPT_IS_GAUSSIAN?0.001800:null,OPT_IS_GAUSSIAN?0.001200:null);
+        }
+    });
 }
 
 function buildOptPanel(){
@@ -3229,23 +3525,7 @@ function buildOptPanel(){
     optReopenEl.classList.remove('show');
 
     // Draw charts (deferred to ensure layout is computed)
-    function renderCharts(){
-        var canvases=optPanelEl.querySelectorAll('canvas');
-        canvases.forEach(function(cv){
-            var field=cv.dataset.field;
-            if(field==='energy'){
-                cv.style.height='90px';
-                drawConvergenceChart(cv,OPT_STEPS,'energy','Energy (Hartree)','#3794ff',null);
-            }else if(field==='force'){
-                cv.style.height='110px';
-                drawDualChart(cv,OPT_STEPS,['maxForce','rmsForce'],['Max Force','RMS Force'],['#ff6b6b','#ffa94d'],OPT_IS_GAUSSIAN?0.000450:null,OPT_IS_GAUSSIAN?0.000300:null);
-            }else if(field==='disp'){
-                cv.style.height='110px';
-                drawDualChart(cv,OPT_STEPS,['maxDisplacement','rmsDisplacement'],['Max Disp','RMS Disp'],['#51cf66','#74c0fc'],OPT_IS_GAUSSIAN?0.001800:null,OPT_IS_GAUSSIAN?0.001200:null);
-            }
-        });
-    }
-    requestAnimationFrame(renderCharts);
+    requestAnimationFrame(renderOptCharts);
 
     // Close handler
     var closeBtn=optPanelEl.querySelector('.opt-close');
@@ -3266,13 +3546,7 @@ function buildOptPanel(){
             var nh=Math.max(120,Math.min(600,startH-(e.clientY-startY)));
             optPanelEl.style.maxHeight=nh+'px';
             // Redraw charts
-            var cvs=optPanelEl.querySelectorAll('canvas');
-            cvs.forEach(function(cv){
-                var f=cv.dataset.field;
-                if(f==='energy')drawConvergenceChart(cv,OPT_STEPS,'energy','Energy (Hartree)','#3794ff',null);
-                else if(f==='force')drawDualChart(cv,OPT_STEPS,['maxForce','rmsForce'],['Max Force','RMS Force'],['#ff6b6b','#ffa94d'],OPT_IS_GAUSSIAN?0.000450:null,OPT_IS_GAUSSIAN?0.000300:null);
-                else if(f==='disp')drawDualChart(cv,OPT_STEPS,['maxDisplacement','rmsDisplacement'],['Max Disp','RMS Disp'],['#51cf66','#74c0fc'],OPT_IS_GAUSSIAN?0.001800:null,OPT_IS_GAUSSIAN?0.001200:null);
-            });
+            renderOptCharts();
         });
         document.addEventListener('mouseup',function(){if(dragging){dragging=false;document.body.style.cursor='';layoutPanels()}});
     }
@@ -3280,6 +3554,10 @@ function buildOptPanel(){
 }
 
 function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
+    if(!canvas.__convRedraw){
+        canvas.__convRedraw=function(){drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2)};
+        convAttachHover(canvas);
+    }
     var ctx=canvas.getContext('2d');
     var dpr=window.devicePixelRatio||1;
     var w=(canvas.parentElement&&canvas.parentElement.clientWidth)||canvas.clientWidth||300;
@@ -3326,16 +3604,27 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
         return vmax-(vmax-vmin)*frac;
     }
     var n=steps.length;
+    var sel=convSelectedStep(steps);
+    // [2026-09-12 | Atreides-Jimmy] The linear fallback now labels its ticks in
+    // the same condensed decimal notation as the energy chart (feature 1); the
+    // log axis keeps its log10 tick values by design.
+    var dmin=Math.min.apply(null,allVals),dmax=Math.max.apply(null,allVals);
+    var decLin=convTickDecimals(dmin,dmax);
+    var vbase=useLog?null:convAxisBase(dmin,dmax);
+    if(vbase!=null&&!convLabelsFitGutter(ctx,dmin,dmax,decLin,padL))vbase=null;
+    function linLabel(v){
+        return vbase!=null?convTickLabel(v,vbase,decLin):convFullValue(v);
+    }
     // Grid + axis label. On the log axis the tick values ARE the log10
     // values (evenly spaced, e.g. -3.35), with a rotated "log₁₀" axis label
-    // on the left; the linear fallback keeps exponential labels.
+    // on the left.
     ctx.strokeStyle='rgba(255,255,255,0.12)';ctx.lineWidth=1;
     ctx.fillStyle='#888';ctx.font='9px sans-serif';ctx.textAlign='right';ctx.textBaseline='middle';
     for(var g=0;g<=4;g++){
         var y=padT+ph*g/4;
         ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(padL+pw,y);ctx.stroke();
         if(useLog)ctx.fillText((vmax-(vmax-vmin)*g/4).toFixed(2),padL-3,y);
-        else ctx.fillText(valAtFrac(g/4).toExponential(1),padL-3,y);
+        else ctx.fillText(linLabel(valAtFrac(g/4)),padL-3,y);
     }
     if(useLog){
         ctx.save();
@@ -3366,27 +3655,33 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
         ctx.fillRect(padL+fi*80,padT-12,8,2);
         ctx.fillText(labels[fi],padL+fi*80+10,padT-14);
     }
-    // Data lines
+    // Data lines + points (kept for the hover tooltip / selected-step mark)
+    var series=[];
     for(fi=0;fi<fields.length;fi++){
         ctx.strokeStyle=colors[fi];ctx.lineWidth=1.5;ctx.beginPath();
         var drew=false;
+        var pts=[];
         for(var i=0;i<n;i++){
             var v=steps[i][fields[fi]];
             if(v==null||isNaN(v))continue;
             x=padL+(n<=1?0:pw*i/(n-1));
             y=yOf(v);
+            pts.push({i:i,x:x,y:y,v:v,color:colors[fi]});
             if(!drew){ctx.moveTo(x,y);drew=true}else ctx.lineTo(x,y);
         }
         ctx.stroke();
         ctx.fillStyle=colors[fi];
-        for(i=0;i<n;i++){
-            v=steps[i][fields[fi]];
-            if(v==null||isNaN(v))continue;
-            x=padL+(n<=1?0:pw*i/(n-1));
-            y=yOf(v);
-            ctx.beginPath();ctx.arc(x,y,2,0,Math.PI*2);ctx.fill();
+        for(i=0;i<pts.length;i++){
+            ctx.beginPath();ctx.arc(pts[i].x,pts[i].y,2,0,Math.PI*2);ctx.fill();
         }
+        series.push({label:labels[fi],color:colors[fi],pts:pts});
     }
+    // spanVal states how fine the data (not the log axis) is: it drives the
+    // tooltip's decimal resolution, so it must come from the plotted values.
+    canvas.__convGeom={padL:padL,padT:padT,pw:pw,ph:ph,n:n,xLabel:'Step',yLabel:labels[0],
+        spanVal:Math.max.apply(null,allVals)-Math.min.apply(null,allVals),field:fields[0],steps:steps,
+        series:series,selected:sel};
+    convDrawState(ctx,canvas);
 }
 
 // Vibration animation
