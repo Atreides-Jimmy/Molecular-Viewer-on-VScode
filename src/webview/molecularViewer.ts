@@ -3264,7 +3264,50 @@ function convFieldRange(steps,field){
     return any?[lo,hi]:null;
 }
 
+/** Index of the optimization step whose structure is currently displayed, or -1.
+ *  Frames of an opt log are the per-step geometries in step order (the parser
+ *  numbers them "Step k"), so the frame index IS the step index; the frame's
+ *  own single-point energy is only a guard for formats/labels that do not
+ *  follow that numbering. */
+function convSelectedStep(steps){
+    if(typeof currentFrame!=='number'||currentFrame<0||currentFrame>=steps.length)return -1;
+    var f=MD.frames&&MD.frames[currentFrame];
+    var e=f?f.energy:undefined;
+    if(e!=null&&!isNaN(e)&&steps[currentFrame].energy!=null&&Math.abs(steps[currentFrame].energy-e)>1e-9)return -1;
+    return currentFrame;
+}
+
+/** Highlight the point of the displayed step (feature 2) and re-apply the
+ *  chart. */
+function convDrawState(ctx,canvas){
+    var geom=canvas.__convGeom;
+    if(!geom)return;
+    var sel=geom.selected;
+    if(sel!=null&&sel>=0){
+        var sx=geom.padL+(geom.n<=1?0:geom.pw*sel/(geom.n-1));
+        ctx.save();
+        ctx.strokeStyle='rgba(255,214,102,0.55)';ctx.lineWidth=1;ctx.setLineDash([2,2]);
+        ctx.beginPath();ctx.moveTo(sx,geom.padT);ctx.lineTo(sx,geom.padT+geom.ph);ctx.stroke();
+        ctx.setLineDash([]);
+        for(var s=0;s<geom.series.length;s++){
+            var pts=geom.series[s].pts;
+            for(var p=0;p<pts.length;p++){
+                if(pts[p].i!==sel)continue;
+                ctx.beginPath();ctx.arc(pts[p].x,pts[p].y,5.5,0,Math.PI*2);
+                ctx.fillStyle='rgba(255,214,102,0.22)';ctx.fill();
+                ctx.beginPath();ctx.arc(pts[p].x,pts[p].y,3.4,0,Math.PI*2);
+                ctx.fillStyle=pts[p].color;ctx.fill();
+                ctx.strokeStyle='#ffd666';ctx.lineWidth=1.4;ctx.stroke();
+            }
+        }
+        ctx.restore();
+    }
+}
+
 function drawConvergenceChart(canvas,steps,field,label,color,threshold){
+    if(!canvas.__convRedraw){
+        canvas.__convRedraw=function(){drawConvergenceChart(canvas,steps,field,label,color,threshold)};
+    }
     var ctx=canvas.getContext('2d');
     var dpr=window.devicePixelRatio||1;
     var w=(canvas.parentElement&&canvas.parentElement.clientWidth)||canvas.clientWidth||300;
@@ -3282,6 +3325,7 @@ function drawConvergenceChart(canvas,steps,field,label,color,threshold){
     if(threshold!=null){vmin=Math.min(vmin,threshold);vmax=Math.max(vmax,threshold)}
     if(vmax-vmin<1e-12){vmax=vmin+Math.abs(vmin)*1e-6+1e-9}
     var n=steps.length;
+    var sel=steps.length?convSelectedStep(steps):-1;
 
     // --- Feature 1: decimal axis labels, integer part shown once -----------
     // The tick values are stated by the run's own extremes, and the labels keep
@@ -3324,7 +3368,8 @@ function drawConvergenceChart(canvas,steps,field,label,color,threshold){
         ctx.beginPath();ctx.moveTo(padL,ty);ctx.lineTo(padL+pw,ty);ctx.stroke();
         ctx.setLineDash([]);
     }
-    // Data line
+    // Data line + points (points are kept so the selected one can be marked)
+    var pts=[];
     ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.beginPath();
     var drew=false;
     for(var i=0;i<n;i++){
@@ -3332,18 +3377,18 @@ function drawConvergenceChart(canvas,steps,field,label,color,threshold){
         if(v==null||isNaN(v))continue;
         x=padL+(n<=1?0:pw*i/(n-1));
         y=padT+ph*(vmax-v)/(vmax-vmin);
+        pts.push({i:i,x:x,y:y,v:v,color:color});
         if(!drew){ctx.moveTo(x,y);drew=true}else ctx.lineTo(x,y);
     }
     ctx.stroke();
-    // Points
     ctx.fillStyle=color;
-    for(i=0;i<n;i++){
-        v=steps[i][field];
-        if(v==null||isNaN(v))continue;
-        x=padL+(n<=1?0:pw*i/(n-1));
-        y=padT+ph*(vmax-v)/(vmax-vmin);
-        ctx.beginPath();ctx.arc(x,y,2,0,Math.PI*2);ctx.fill();
+    for(i=0;i<pts.length;i++){
+        ctx.beginPath();ctx.arc(pts[i].x,pts[i].y,2,0,Math.PI*2);ctx.fill();
     }
+    canvas.__convGeom={padL:padL,padT:padT,pw:pw,ph:ph,n:n,xLabel:'Step',yLabel:label,
+        spanVal:vmax-vmin,field:field,steps:steps,
+        series:[{label:label,color:color,pts:pts}],selected:sel};
+    convDrawState(ctx,canvas);
 }
 
 /** Redraw every convergence chart of the opt panel. Called after the panel is
@@ -3415,6 +3460,9 @@ function buildOptPanel(){
 }
 
 function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
+    if(!canvas.__convRedraw){
+        canvas.__convRedraw=function(){drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2)};
+    }
     var ctx=canvas.getContext('2d');
     var dpr=window.devicePixelRatio||1;
     var w=(canvas.parentElement&&canvas.parentElement.clientWidth)||canvas.clientWidth||300;
@@ -3461,6 +3509,7 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
         return vmax-(vmax-vmin)*frac;
     }
     var n=steps.length;
+    var sel=convSelectedStep(steps);
     // [2026-09-12 | Atreides-Jimmy] The linear fallback now labels its ticks in
     // the same condensed decimal notation as the energy chart (feature 1); the
     // log axis keeps its log10 tick values by design.
@@ -3511,27 +3560,31 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
         ctx.fillRect(padL+fi*80,padT-12,8,2);
         ctx.fillText(labels[fi],padL+fi*80+10,padT-14);
     }
-    // Data lines
+    // Data lines + points (kept so the selected step can be marked)
+    var series=[];
     for(fi=0;fi<fields.length;fi++){
         ctx.strokeStyle=colors[fi];ctx.lineWidth=1.5;ctx.beginPath();
         var drew=false;
+        var pts=[];
         for(var i=0;i<n;i++){
             var v=steps[i][fields[fi]];
             if(v==null||isNaN(v))continue;
             x=padL+(n<=1?0:pw*i/(n-1));
             y=yOf(v);
+            pts.push({i:i,x:x,y:y,v:v,color:colors[fi]});
             if(!drew){ctx.moveTo(x,y);drew=true}else ctx.lineTo(x,y);
         }
         ctx.stroke();
         ctx.fillStyle=colors[fi];
-        for(i=0;i<n;i++){
-            v=steps[i][fields[fi]];
-            if(v==null||isNaN(v))continue;
-            x=padL+(n<=1?0:pw*i/(n-1));
-            y=yOf(v);
-            ctx.beginPath();ctx.arc(x,y,2,0,Math.PI*2);ctx.fill();
+        for(i=0;i<pts.length;i++){
+            ctx.beginPath();ctx.arc(pts[i].x,pts[i].y,2,0,Math.PI*2);ctx.fill();
         }
+        series.push({label:labels[fi],color:colors[fi],pts:pts});
     }
+    canvas.__convGeom={padL:padL,padT:padT,pw:pw,ph:ph,n:n,xLabel:'Step',yLabel:labels[0],
+        spanVal:Math.max.apply(null,allVals)-Math.min.apply(null,allVals),field:fields[0],steps:steps,
+        series:series,selected:sel};
+    convDrawState(ctx,canvas);
 }
 
 // Vibration animation
