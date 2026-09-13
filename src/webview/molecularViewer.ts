@@ -3234,86 +3234,109 @@ var NORMAL_MODES=MD.normalModes||null;
 //   * feature 3 — hovering a point reports its exact value in a tooltip.
 // ---------------------------------------------------------------------------
 
-/** Draw a value in full decimal notation (never scientific), with just enough
- *  decimals to resolve it: two significant digits of its own magnitude plus one
- *  guard digit, capped at 12 (e.g. -47077.6482, 0.0000451, 12.16). */
-function convFullValue(v){
+/** Decimal places that resolve a value on its own: two significant digits of
+ *  its magnitude plus one guard digit, capped at 12 (12.16 -> 2, 0.0000451 -> 7,
+ *  a value around 6912 -> 0). Used as a floor for the hover tooltip, which must
+ *  stay readable even for a single-point series with no span to measure. */
+function convValueDecimals(v){
     var mag=Math.abs(v);
     var dec=mag>0?Math.max(0,2-Math.floor(Math.log10(mag))):6;
     if(dec>12)dec=12;
-    var str=v.toFixed(dec);
-    if(str.indexOf('.')>=0)str=str.replace(/0+$/,'').replace(/\.$/,'');
-    return str==='-0'?'0':str;
+    return dec;
 }
 
-/** Number of decimal places of the last digit that varies over the axis: the
- *  position of the first decimal at which the two ends differ. For a run from
- *  -47077.6713 to -47077.6380 the ends share '-47077.6' and first differ at the
- *  second decimal, so two decimals are kept and the ticks read
- *  .67 .66 .65 .65 .64; a run that changes in its integer part
- *  (-23533 … -23532) stays at 0 decimals and the ticks are whole numbers.
- *
- *  Digits are read from the fixed-point form of both ends, because scaling a
- *  double (e.g. -47077.6713 * 100 = -4707767.129999999) and rounding it makes
- *  the comparison unreliable at exactly the digit that matters here. */
-function convTickDecimals(vmin,vmax){
-    var sa=vmin.toFixed(10),sb=vmax.toFixed(10);
-    var dot=sa.indexOf('.');
-    var ai=sa.substring(0,dot),bi=sb.substring(0,dot);
-    if(ai!==bi)return 0;                       // the integer part itself varies
-    var fa=sa.substring(dot+1),fb=sb.substring(dot+1);
-    for(var i=0;i<10;i++){
-        if(fa.charAt(i)!==fb.charAt(i))return i+1;
-    }
-    return 10;                                  // equal ends: keep full detail
+/** Format v with an explicit number of decimals, trimming trailing zeros so the
+ *  tooltip reads '-6912.8' rather than '-6912.80', and never using scientific
+ *  notation. A null dec falls back to the value's own magnitude. */
+function convFormat(v,dec){
+    if(v==null||isNaN(v))return String(v);
+    if(dec==null)dec=convValueDecimals(v);
+    var str=v.toFixed(dec);
+    if(str.indexOf('.')>=0)str=str.replace(/0+$/,'').replace(/\.$/,'');
+    if(str==='-0')str='0';
+    return str;
 }
+
+/** A value in plain decimal notation with just enough decimals to resolve its
+ *  own magnitude (kept under its historical name for the linear-axis fallback). */
+function convFullValue(v){return convFormat(v,convValueDecimals(v))}
+
+/** Decimal places needed so that two numbers one tick-step apart never print
+ *  the same label: with dec decimals the finest difference a label can show
+ *  is 10^-dec, so we keep two significant digits of the STEP. The step is
+ *  span/4 (five gridlines) and is taken from the plotted range, NOT from whether
+ *  the run's two ends share an integer part — a wide sub-integer run that
+ *  crosses an integer boundary (e.g. -6911.977 … -6912.806) used to be forced
+ *  to 0 decimals and collapsed the axis to '0 0 0 1 1'.
+ *  [2026-09-13 | Atreides-Jimmy] Replaced the "first differing decimal of the
+ *  two ends" rule with this step-based one. */
+function convStepDecimals(span){
+    span=Math.abs(span);
+    if(!(span>0)||!isFinite(span))return 6;
+    var step=span/4;
+    var d=1-Math.floor(Math.log10(step));
+    if(d<0)d=0;
+    if(d>12)d=12;
+    return d;
+}
+
+/** Number of decimals for an axis spanning [vmin,vmax] (see convStepDecimals). */
+function convTickDecimals(vmin,vmax){return convStepDecimals(vmax-vmin)}
 
 /** Axis tick label: only the part that actually varies over the axis is kept —
  *  the shared integer part (base) is printed once next to the chart title, so
- *  ticks read '.67' / '.66' / … for a run around -47077. The base is the
- *  integer part of the run's lowest value, so the delta stays in [0,1) and its
- *  absolute value is the tick's fraction (a run that crosses an integer
- *  boundary, e.g. -76.0107 … -75.9884 around base -76, keeps the leading '1' so
- *  '.988' stays distinguishable from '.011'). A null base falls back to the
- *  full value — always as plain decimals, never scientific notation. */
+ *  ticks read '.67' / '.66' / … for a run around -47077. A null base falls back
+ *  to the full value — always as plain decimals, never scientific notation.
+ *  [2026-09-13 | Atreides-Jimmy] A tick landing exactly on the base now prints
+ *  '0' (the old code stripped '0.000' down to a bare '000'). */
 function convTickLabel(v,base,dec){
     if(base==null)return v.toFixed(dec);
     var frac=Math.abs(v-base).toFixed(dec);
+    if(/^0(\.0+)?$/.test(frac))return '0';
     // Drop the leading zero of a pure fraction so the ticks read '.9 .8 .7'
     // (the user-visible convention of this panel) rather than '0.9 0.8 0.7'.
     if(frac.indexOf('0.')===0)frac=frac.substring(1);
     return frac;
 }
 
-/** Label for the shared integer part of a run, e.g. '  -47077 +' for ticks that
- *  are printed as '.67' ('' when the run changes in its integer part, in which
- *  case the ticks carry the full value themselves). */
-function convBaseLabel(fmin,fmax){
-    var base=convAxisBase(fmin,fmax);
-    return base==null?'':'  '+base+' +';
-}
-
-/** Integer part shared by every tick of the run, i.e. its lowest value truncated
- *  toward zero (-47077.6713 → -47077, so ticks print as '.67' … '.64'), or null
- *  when the run's span covers more than one integer and the ticks must carry
- *  their full value. */
+/** Base (the integer whose fraction the axis prints) chosen so that every tick
+ *  lies on ONE side of it, which keeps the printed fraction monotonic from top
+ *  to bottom:
+ *    - span ≥ 1        → null (the ticks carry their full value),
+ *    - all values ≤ 0  → ceil(vmax)  (base at/above the data),
+ *    - all values ≥ 0  → floor(vmin) (base at/below the data),
+ *    - straddling 0    → null (signed values are already short enough).
+ *  For a run that does NOT cross an integer this is exactly the integer part of
+ *  the run (ceil(vmin) == ceil(vmax) for negatives, floor likewise for
+ *  positives), so the familiar '.67 … .64' tick style is preserved.
+ *  [2026-09-13 | Atreides-Jimmy] Changed from "integer part of vmin" to this
+ *  side-picking base. For a run that did cross an integer (e.g. -6911.977 …
+ *  -6912.806) the old base (-6912) put ticks on both sides and the absolute
+ *  fraction folded into a non-monotonic '0 0 0 1 1'. */
 function convAxisBase(vmin,vmax){
     if(Math.abs(vmax-vmin)>=1)return null;
-    return vmin<0?Math.ceil(vmin):Math.floor(vmin);
+    if(vmin<0&&vmax>0)return null;
+    return vmax<=0?Math.ceil(vmax):Math.floor(vmin);
 }
 
-/** True when the condensed '.xx' tick labels fit the axis gutter. The shared
- *  integer part is printed on the title line (full chart width), so the gutter
- *  only has to hold the fraction: for the narrow spans that use it (base ≠ null
- *  implies a span < 1) that is a dot plus up to ten decimal digits, well inside
- *  the 40px gutter. Only the fallback to full values can be wide, which is why
- *  this check exists at all. */
-function convLabelsFitGutter(ctx,vmin,vmax,dec,padL){
-    if(convAxisBase(vmin,vmax)==null)return false;
-    // Widest possible tick label in the condensed form, e.g. '.0000'.
-    var frac='.'+new Array(dec+1).join('9');
+/** Widen the left gutter so the widest of the five tick labels fits. The labels
+ *  are no longer assumed to be short — the decimal count now follows the data,
+ *  so a very fine span can want more digits than the old fixed 40px gutter held.
+ *  Returns padL between minPad and 45% of the canvas width.
+ *  [2026-09-13 | Atreides-Jimmy] Replaces the old pass/fail gutter check, which
+ *  reacted to an overflow by dropping the base and printing even wider values. */
+function convFitGutter(ctx,labelFor,vmin,vmax,minPad,w){
     ctx.font='9px sans-serif';
-    return Math.ceil(ctx.measureText(frac).width)+3<=padL;
+    var widest=0;
+    for(var g=0;g<=4;g++){
+        var t=ctx.measureText(labelFor(vmax-(vmax-vmin)*g/4)).width;
+        if(t>widest)widest=t;
+    }
+    var pad=Math.ceil(widest)+6;
+    if(pad<minPad)pad=minPad;
+    var cap=Math.floor(w*0.45);
+    if(pad>cap)pad=cap;
+    return pad;
 }
 
 /** [min,max] of one numeric field over the plotted steps (null when empty). */
@@ -3327,6 +3350,29 @@ function convFieldRange(steps,field){
         any=true;
     }
     return any?[lo,hi]:null;
+}
+
+/** Decimal places that resolve one plotted series over the steps (its own span,
+ *  via convStepDecimals), used by the hover tooltip. A total energy around
+ *  -6912 with a sub-unit spread used to fall back to 0 decimals and print as a
+ *  bare integer; this keeps the decimals that actually separate the steps.
+ *  [2026-09-13 | Atreides-Jimmy] */
+function convSeriesDecimals(steps,field){
+    var r=convFieldRange(steps,field);
+    return r?convStepDecimals(r[1]-r[0]):6;
+}
+
+/** Tooltip number: enough decimals to (a) resolve the value's own magnitude,
+ *  (b) resolve the series' span so successive steps stay distinguishable, and
+ *  (c) never drop below millihartree-level detail (3 decimals). Capped at 10 so
+ *  a near-degenerate span cannot produce an absurdly wide tooltip.
+ *  [2026-09-13 | Atreides-Jimmy] */
+function convTooltipValue(v,spanDec){
+    var d=convValueDecimals(v);
+    if(spanDec!=null&&spanDec>d)d=spanDec;
+    if(d<3)d=3;
+    if(d>10)d=10;
+    return convFormat(v,d);
 }
 
 /** Index of the optimization step whose structure is currently displayed, or -1.
@@ -3364,14 +3410,14 @@ function convDrawTooltip(ctx,canvas){
         var pts=geom.series[s].pts;
         for(var p=0;p<pts.length;p++){
             var dx=pts[p].x-mx,dy=pts[p].y-my,d=dx*dx+dy*dy;
-            if(d<=bestD){bestD=d;best={i:pts[p].i,x:pts[p].x,y:pts[p].y,v:pts[p].v,color:geom.series[s].color,name:geom.series[s].label}}
+            if(d<=bestD){bestD=d;best={i:pts[p].i,x:pts[p].x,y:pts[p].y,v:pts[p].v,color:geom.series[s].color,name:geom.series[s].label,dec:geom.series[s].dec}}
         }
     }
     if(!best)return false;
     var step=steps_get(geom.steps,best.i);
     var lines=[(geom.xLabel||'Step')+' '+(best.i+1)];
-    lines.push(best.name+' = '+convFullValue(best.v));
-    if(step&&step.energy!=null&&geom.field!=='energy')lines.push('Energy = '+convFullValue(step.energy));
+    lines.push(best.name+' = '+convTooltipValue(best.v,best.dec));
+    if(step&&step.energy!=null&&geom.field!=='energy')lines.push('Energy = '+convTooltipValue(step.energy,geom.energyDec));
     ctx.font='9px sans-serif';
     var wid=0;
     for(var li=0;li<lines.length;li++)wid=Math.max(wid,ctx.measureText(lines[li]).width);
@@ -3484,17 +3530,15 @@ function drawConvergenceChart(canvas,steps,field,label,color,threshold){
     var sel=steps.length?convSelectedStep(steps):-1;
 
     // --- Feature 1: decimal axis labels, integer part shown once -----------
-    // The tick values are stated by the run's own extremes, and the labels keep
-    // only the decimal place at which those extremes differ (the shared integer
-    // part moves next to the chart title).
-    // The decimals come from the plotted values themselves: a threshold far
-    // below the data must not stretch the range and round the labels away.
-    var dec=convTickDecimals(dmin,dmax);
-    var vbase=convAxisBase(dmin,dmax);
-    // Keep labels inside the 40px gutter: fall back to the full value when even
-    // the condensed '.xx' form would not fit next to the shared integer part.
-    if(vbase!=null&&!convLabelsFitGutter(ctx,dmin,dmax,dec,padL))vbase=null;
+    // Decimals come from the gridline step (span / 4) and the base is picked on
+    // ONE side of the plotted range, so every gridline gets a distinct,
+    // monotonic label even when the run crosses an integer boundary.
+    var dec=convTickDecimals(vmin,vmax);
+    var vbase=convAxisBase(vmin,vmax);
     function labelFor(v){return convTickLabel(v,vbase,dec)}
+    // Widen the gutter to hold the labels; the plot width then follows.
+    padL=convFitGutter(ctx,labelFor,vmin,vmax,40,w);
+    pw=w-padL-padR;
     // Chart title: series label + the shared integer part of the run (vbase is
     // exactly that integer, so the two can never disagree).
     ctx.fillStyle='#ccc';ctx.font='10px sans-serif';ctx.textAlign='left';ctx.textBaseline='top';
@@ -3543,7 +3587,7 @@ function drawConvergenceChart(canvas,steps,field,label,color,threshold){
     }
     canvas.__convGeom={padL:padL,padT:padT,pw:pw,ph:ph,n:n,xLabel:'Step',yLabel:label,
         spanVal:vmax-vmin,field:field,steps:steps,
-        series:[{label:label,color:color,pts:pts}],selected:sel};
+        series:[{label:label,color:color,pts:pts,dec:convSeriesDecimals(steps,field)}],selected:sel};
     convDrawState(ctx,canvas);
 }
 
@@ -3673,12 +3717,18 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
     // [2026-09-12 | Atreides-Jimmy] The linear fallback now labels its ticks in
     // the same condensed decimal notation as the energy chart (feature 1); the
     // log axis keeps its log10 tick values by design.
+    // [2026-09-13 | Atreides-Jimmy] The linear labels use the true linear axis
+    // extremes (which may include a threshold), so base/decimals match the ticks
+    // that are actually drawn; the gutter is widened to fit them.
     var dmin=Math.min.apply(null,allVals),dmax=Math.max.apply(null,allVals);
-    var decLin=convTickDecimals(dmin,dmax);
-    var vbase=useLog?null:convAxisBase(dmin,dmax);
-    if(vbase!=null&&!convLabelsFitGutter(ctx,dmin,dmax,decLin,padL))vbase=null;
+    var decLin=useLog?0:convTickDecimals(vmin,vmax);
+    var vbase=useLog?null:convAxisBase(vmin,vmax);
     function linLabel(v){
-        return vbase!=null?convTickLabel(v,vbase,decLin):convFullValue(v);
+        return vbase!=null?convTickLabel(v,vbase,decLin):v.toFixed(decLin);
+    }
+    if(!useLog){
+        padL=convFitGutter(ctx,linLabel,vmin,vmax,40,w);
+        pw=w-padL-padR;
     }
     // Grid + axis label. On the log axis the tick values ARE the log10
     // values (evenly spaced, e.g. -3.35), with a rotated "log₁₀" axis label
@@ -3739,13 +3789,13 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
         for(i=0;i<pts.length;i++){
             ctx.beginPath();ctx.arc(pts[i].x,pts[i].y,2,0,Math.PI*2);ctx.fill();
         }
-        series.push({label:labels[fi],color:colors[fi],pts:pts});
+        series.push({label:labels[fi],color:colors[fi],pts:pts,dec:convSeriesDecimals(steps,fields[fi])});
     }
     // spanVal states how fine the data (not the log axis) is: it drives the
     // tooltip's decimal resolution, so it must come from the plotted values.
     canvas.__convGeom={padL:padL,padT:padT,pw:pw,ph:ph,n:n,xLabel:'Step',yLabel:labels[0],
         spanVal:Math.max.apply(null,allVals)-Math.min.apply(null,allVals),field:fields[0],steps:steps,
-        series:series,selected:sel};
+        series:series,selected:sel,energyDec:convSeriesDecimals(steps,'energy')};
     convDrawState(ctx,canvas);
 }
 
