@@ -54,7 +54,7 @@ A VS Code / Trae extension for visualizing and editing molecular structures in 3
 - **Diff Button** — Compare the current structure against another molecular file (any supported format, no need for matching formats)
 - **Frame Selection** — If the comparison file is an optimization LOG/OUT, a QuickPick lets you choose which frame to compare
 - **Skeleton Check** — Graph isomorphism via recursive backtracking atom matching (element + degree + neighbor signature with most-constrained-variable heuristic); uses the plugin's own bond detection algorithm (not the file's original bond orders) to ensure consistent skeleton comparison even when files specify different bond orders for the same connectivity; matching considers **connectivity only** (bonded or not), not bond order — a single bond in one molecule and a double bond in the other at the same position does not prevent skeleton matching
-- **Side-by-Side View** — Left viewport shows the original molecule, right shows the comparison; each side has **independent** rotation, pan, and zoom controls
+- **Side-by-Side View** — Left viewport shows the original molecule, right shows the comparison; each side has **independent** rotation, pan, and zoom controls. Left-drag rotates, scroll zooms and middle/right-drag pans **the half you grabbed** — panning is cursor-locked (the grabbed point stays exactly under the cursor) and is scoped to that viewport, so dragging the right structure never moves the left one and vice versa
 - **Correct Aspect Ratio** — Each viewport uses its own camera aspect ratio matching the half-width, preventing horizontal distortion
 - **Conformation Diff** — When skeletons match, highlights bond length, bond angle, and dihedral differences in orange on both sides; full list of all differences displayed (no truncation); each difference shows the percentage change relative to the average value
 - **Adjustable Threshold** — A percentage slider (0–20%) in the diff results panel lets you interactively adjust the sensitivity for what counts as a "difference"; all three types use the same relative difference formula (Δ/avg × 100%); for dihedrals near 0° where the average is very small, a fallback ensures robustness; the 3D highlights and difference list update in real-time as you drag the slider
@@ -152,7 +152,7 @@ Add to your `settings.json`:
 |--------|--------|
 | Left mouse drag | Rotate molecule around its center |
 | Mouse scroll | Zoom in / out |
-| Middle / Right mouse drag | Pan view |
+| Middle / Right mouse drag | Pan view (cursor-locked; in Diff mode pans the structure on the grabbed half only) |
 | Hover over atom | Show element + coordinates tooltip |
 | Arrow keys | Rotate molecule (←/→ around Y, ↑/↓ around X) |
 | Reset View button | Return to default view |
@@ -237,14 +237,6 @@ npm run lint
 # Package as .vsix
 npm run package
 ```
-
-## Roadmap
-
-- [ ] MOL/SDF full parser with explicit bond info
-- [ ] Multiple display styles (wireframe, space-filling, licorice)
-- [ ] Vibration animation from frequency calculations
-- [ ] Export as PNG/SVG
-- [ ] Undo/redo history for edits
 
 ## Contributing
 

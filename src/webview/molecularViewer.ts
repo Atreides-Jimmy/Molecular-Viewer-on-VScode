@@ -1416,6 +1416,12 @@ var ctrlDown=false;            // live Ctrl modifier state
 var panGrabActive=false;       // view pan uses cursor locking
 var panGrabOffset={x:0,y:0};   // grabbed point world xy minus pan offset
 var panRefZ=0;                 // world z of the pan reference plane
+// Diff mode pans each viewport independently, so the right side needs its own
+// grab bookkeeping. panGrabSide records which viewport the active grab belongs
+// to (matters because the two sides use different cameras and pan offsets).
+var panGrabSide='left';
+var diffPanGrabOffset={x:0,y:0};
+var diffPanRefZ=0;
 
 function recomputeMovedBonds(){
     // Partial bond + bond-order re-detection after a fragment move/rotate
@@ -1783,12 +1789,70 @@ function atomWorldZ(a){
     // pan offsets only shift x/y, so z is unaffected by panning.
     return new THREE.Vector3(a.x-CX,a.y-CY,a.z-CZ).applyQuaternion(rotQuat).z;
 }
+function diffAtomWorldZ(a){
+    // Same as atomWorldZ, but for the right (comparison) structure, which has
+    // its own center and its own rotation quaternion.
+    return new THREE.Vector3(a.x-diffCX,a.y-diffCY,a.z-diffCZ).applyQuaternion(diffRotQuat).z;
+}
+function diffViewportSide(e){
+    // Which half of the canvas the pointer is over: 'left' | 'right'.
+    var rect=canvas.getBoundingClientRect();
+    return (e.clientX-rect.left)<Math.floor(rect.width/2)?'left':'right';
+}
+function configureDiffCamera(side,dist){
+    // Point the shared camera at one diff viewport with the exact aspect and
+    // distance used by the render pass for that side, so raycasting from the
+    // cursor matches what the user sees on that half of the canvas.
+    var rect=canvas.getBoundingClientRect();
+    var w=rect.width,h=rect.height,halfW=Math.floor(w/2);
+    camera.aspect=(side==='right'?(w-halfW):halfW)/h;
+    camera.updateProjectionMatrix();
+    camera.position.set(0,0,dist);
+    camera.updateMatrixWorld();
+}
+function sideScreenToPlanePoint(e,side,planeZ){
+    // Like screenPointOnPlane, but maps the cursor into the NDC of the given
+    // diff viewport instead of the whole canvas, and configures the camera to
+    // match. planeZ must stay in front of the camera.
+    var rect=canvas.getBoundingClientRect();
+    var w=rect.width,h=rect.height,halfW=Math.floor(w/2);
+    var localX=e.clientX-rect.left;
+    mouse.x=(side==='right'?((localX-halfW)/(w-halfW)):(localX/halfW))*2-1;
+    mouse.y=-((e.clientY-rect.top)/h)*2+1;
+    configureDiffCamera(side,side==='right'?diffCamDist:camDist);
+    raycaster.setFromCamera(mouse,camera);
+    var dz=raycaster.ray.direction.z;
+    if(Math.abs(dz)<1e-6)return null;
+    var t=(planeZ-raycaster.ray.origin.z)/dz;
+    return raycaster.ray.origin.clone().add(raycaster.ray.direction.clone().multiplyScalar(t));
+}
 function initPanGrab(e){
     // Cursor-locked view panning: grab the atom under the cursor (or the
     // molecule-center plane when clicking empty space) so the grabbed point
     // sticks to the cursor while panning — 1:1 cursor speed.
+    // In diff mode each viewport pans independently, so the grab is scoped to
+    // the side the pointer is over and applied to that side's pan offset.
     panGrabActive=false;
-    if(diffMode)return;
+    if(diffMode){
+        var side=diffViewportSide(e);
+        panGrabSide=side;
+        var idxD=getClickedAtom(e); // also sets diffActiveSide + camera for that side
+        if(side==='right'){
+            var refZR=(idxD>=0&&diffData&&diffData.atoms&&diffData.atoms[idxD])?diffAtomWorldZ(diffData.atoms[idxD]):0;
+            var hitR=sideScreenToPlanePoint(e,'right',refZR);
+            if(!hitR)return;
+            diffPanGrabOffset={x:hitR.x-diffPanX,y:hitR.y-diffPanY};
+            diffPanRefZ=refZR;
+        }else{
+            var refZL=(idxD>=0&&MD.atoms[idxD])?atomWorldZ(MD.atoms[idxD]):0;
+            var hitL=sideScreenToPlanePoint(e,'left',refZL);
+            if(!hitL)return;
+            panGrabOffset={x:hitL.x-panX,y:hitL.y-panY};
+            panRefZ=refZL;
+        }
+        panGrabActive=true;
+        return;
+    }
     var idx=getClickedAtom(e);
     var refZ=0;
     if(idx>=0&&MD.atoms[idx])refZ=atomWorldZ(MD.atoms[idx]);
@@ -1796,6 +1860,7 @@ function initPanGrab(e){
     if(!hit)return;
     panGrabOffset={x:hit.x-panX,y:hit.y-panY};
     panRefZ=refZ;
+    panGrabSide='left';
     panGrabActive=true;
 }
 
@@ -5204,12 +5269,24 @@ canvas.addEventListener('mousemove',function(e){
             updateTransform()
         }
         if(isPan){
+            // Pan the viewport that was actually grabbed. In diff mode the two
+            // sides keep separate pan offsets, so a right-drag on the right
+            // half must move the comparison structure, not the original.
             if(panGrabActive){
-                // Cursor-locked: recompute pan so the grabbed point follows
-                // the cursor 1:1 (same world-z reference plane as at grab).
-                var pc=screenPointOnPlane(e,panRefZ);
-                if(pc){panX=pc.x-panGrabOffset.x;panY=pc.y-panGrabOffset.y}
-            }else{panX+=dm.x*0.01*(camDist/20);panY-=dm.y*0.01*(camDist/20)}
+                // Cursor-locked: recompute this side's pan so the grabbed point
+                // follows the cursor 1:1 (same world-z reference plane as at grab).
+                if(panGrabSide==='right'){
+                    var pcr=sideScreenToPlanePoint(e,'right',diffPanRefZ);
+                    if(pcr){diffPanX=pcr.x-diffPanGrabOffset.x;diffPanY=pcr.y-diffPanGrabOffset.y}
+                }else{
+                    var pcl=sideScreenToPlanePoint(e,'left',panRefZ);
+                    if(pcl){panX=pcl.x-panGrabOffset.x;panY=pcl.y-panGrabOffset.y}
+                }
+            }else{
+                var pk=0.01*((panGrabSide==='right'?diffCamDist:camDist)/20);
+                if(panGrabSide==='right'){diffPanX+=dm.x*pk;diffPanY-=dm.y*pk}
+                else{panX+=dm.x*pk;panY-=dm.y*pk}
+            }
             updateTransform()
         }
     }else{
