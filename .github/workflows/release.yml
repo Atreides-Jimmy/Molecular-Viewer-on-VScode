@@ -1,0 +1,140 @@
+name: Build & Release
+
+# 触发分支 → 发布类型：
+#   developing → 预发行 (pre-release)
+#   main       → 正式版 (release，并标记为 Latest)
+#
+# 产物命名规则（两个分支一致）：<name>-<版本号>-<commit 前 7 位>.vsix，例如
+#   Molecular-Viewer-0.9.6-abc1234.vsix
+#
+# 关于 package.json 的 version —— 日常推送不需要手动改：
+#   仓库里的 version 始终是干净的基线号（如 0.9.6），commit 哈希由本工作流在
+#   构建时自动读取并拼接。只有在开启新一轮版本开发时才需要手动抬一次基线号，
+#   例如把 0.9.6 改成 0.9.7，之后所有构建都会是 0.9.7-<hash>。
+on:
+  push:
+    branches:
+      - developing
+      - main
+  # 允许在 Actions 页面手动触发（便于重跑或补发）
+  workflow_dispatch:
+
+# 同一个分支上连推多次时，取消尚未跑完的旧任务，避免重复发布
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+# 创建 Release / 上传附件需要写权限
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build VSIX & publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # gh release --generate-notes 需要完整提交历史
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # 分支决定发布类型，后续步骤统一读这里的结果
+      - name: Resolve release channel
+        id: channel
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_NAME}" = "main" ]; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "label=正式版" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "label=预发行" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 只在 runner 的临时工作区里改写 package.json（哈希取自 GitHub 自动注入的
+      # GITHUB_SHA），不会、也无需提交回仓库。
+      - name: Stamp version with commit hash
+        id: meta
+        run: node .github/scripts/ci-version.js
+
+      - name: Compile TypeScript
+        run: npm run compile
+
+      - name: Package VSIX
+        run: |
+          set -euo pipefail
+          args=(
+            package
+            --no-dependencies
+            --out "${{ steps.meta.outputs.vsix }}"
+          )
+          if [ "${{ steps.channel.outputs.prerelease }}" = "true" ]; then
+            args+=(--pre-release)
+          fi
+          npx --yes @vscode/vsce@3.9.2 "${args[@]}"
+
+      - name: Upload VSIX as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.vsix }}
+          path: ${{ steps.meta.outputs.vsix }}
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          VSIX="${{ steps.meta.outputs.vsix }}"
+          TITLE="Molecular Viewer ${{ steps.meta.outputs.version }}"
+          PRERELEASE="${{ steps.channel.outputs.prerelease }}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # 同一 commit 已被另一分支发布过（例如 developing 合并进 main）：
+            # 只替换附件，并把发布类型修正成本次分支应有的类型
+            gh release upload "$TAG" "$VSIX" --clobber
+            if [ "$PRERELEASE" = "true" ]; then
+              gh release edit "$TAG" --prerelease=true
+            else
+              gh release edit "$TAG" --prerelease=false --latest
+            fi
+          else
+            args=(
+              release create "$TAG" "$VSIX"
+              --target "$GITHUB_SHA"
+              --title "$TITLE"
+              --generate-notes
+            )
+            if [ "$PRERELEASE" = "true" ]; then
+              args+=(--prerelease)
+            else
+              args+=(--latest)
+            fi
+            gh "${args[@]}"
+          fi
+
+      - name: Summary
+        run: |
+          {
+            echo "### Molecular Viewer ${{ steps.channel.outputs.label }}"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "| --- | --- |"
+            echo "| 类型 | ${{ steps.channel.outputs.label }} |"
+            echo "| 版本 | \`${{ steps.meta.outputs.version }}\` |"
+            echo "| Tag | \`${{ steps.meta.outputs.tag }}\` |"
+            echo "| VSIX | \`${{ steps.meta.outputs.vsix }}\` |"
+            echo "| 分支 | \`${GITHUB_REF_NAME}\` |"
+            echo "| Commit | \`${{ steps.meta.outputs.sha7 }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
