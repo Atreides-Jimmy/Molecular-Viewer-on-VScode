@@ -2757,6 +2757,310 @@ function enforceDihedralTargets(mol: Mol, coords: Vec3[],
     return fixed;
 }
 
+/**
+ * 让稠合在一起的环与参考平面共面 (或尽可能贴合)。返回被摆正的环数。
+ *
+ * 为什么需要单独一步: 环平面投影是逐个环独立做的, 于是每个环各自都变平了, 却
+ * 可以整体绕两个环的公共键相互翘起 —— 两个环的投影彼此拉锯, 松弛只能停在某个
+ * 折中角度上。实测萘的两个环翘起 15.7 度、咖啡因嘌呤并环翘起 41.9 度, 稠合碳
+ * 明显偏离另一个环的平面 (而芳香稠环应当共面)。同理, 芳香环与饱和环稠合时
+ * (茚满、四氢萘), 稠合碳那根连向饱和环的键也必须落在芳环平面内, 实测偏出
+ * 0.5~1.0 Å。这类角度偏差都不体现在任何距离量上, 所以距离约束既纠正不了、
+ * 也不会报警。
+ *
+ * 做法: 把每个与"已定平面的环"共享一根键的环, 其不含公共键原子的那部分 (连同
+ * 挂在上的取代基) 绕公共键刚性旋转, 使它与公共键相连的两个原子的面外分量同时
+ * 尽量归零 —— 面外分量对转角是同一频率的正弦函数, 最小二乘解有闭式
+ * (θ = ½·atan2(-2Σpq, Σp²-Σq²)); 对本身是平面的环, 该解恰好让整个环精确落到
+ * 参考平面上。转角有两个相差 180 度的解 (转过去与翻过来都能共面), 取"旋转前后
+ * 面内方向点积为正"的那个, 否则环会翻到参考环那一侧与之重叠。刚性旋转不改变
+ * 任何键长键角, 因此不会破坏已经收敛的局部几何, 也无需重新松弛。
+ */
+function enforceFusedRingPlanarity(mol: Mol, coords: Vec3[], rings: number[][],
+                                   planarRings: number[][]): number {
+    let fixed = 0;
+    const placed: number[][] = [];               // 已经定好平面的参考环 (只可能是平面环)
+    for (let i = 0; i < planarRings.length; i++) {
+        const ring = planarRings[i];
+        if (placed.length > 0) {
+            fixed += alignRingToReferencePlane(mol, coords, placed, ring);
+        }
+        placed.push(ring);
+    }
+    // 芳环与饱和环稠合: 饱和环自身没有平面, 但公共键上的两个连接原子仍必须落到
+    // 芳环平面内 (最小二乘解即取折中角度, 让两者各分一半偏差)。
+    for (let i = 0; i < rings.length; i++) {
+        const ring = rings[i];
+        if (inRingList(planarRings, ring)) {
+            continue;                            // 平面环已在上面处理过
+        }
+        fixed += alignRingToReferencePlane(mol, coords, placed, ring);
+    }
+    return fixed;
+}
+
+/** ring 是否为 planarRings 中的同一个环 (由同一批数组对象构成, 比较引用即可)。 */
+function inRingList(list: number[][], ring: number[]): boolean {
+    for (let i = 0; i < list.length; i++) {
+        if (list[i] === ring) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * 把 ring 转到参考环所在的平面上。返回 1 表示确实转了, 0 表示无需转或放弃。
+ *
+ * 参考平面由参考环确定; 旋转轴为两环共享的那根键, 旋转对象为 ring 上不属于
+ * 公共键的部分及其挂着的原子 (从公共键原子切断, 参考环一侧不会被带动)。
+ */
+function alignRingToReferencePlane(mol: Mol, coords: Vec3[], placed: number[][],
+                                   ring: number[]): number {
+    // 找一个参考环, 取两者共享的一根键 (稠合边)
+    let refRing: number[] | null = null;
+    let axisA = -1;
+    let axisB = -1;
+    for (let a = 0; a < placed.length && refRing === null; a++) {
+        const candidate = placed[a];
+        for (let i = 0; i < ring.length; i++) {
+            const u = ring[i];
+            const v = ring[(i + 1) % ring.length];
+            if (inRing(candidate, u) && inRing(candidate, v)) {
+                axisA = u;
+                axisB = v;
+                refRing = candidate;
+                break;
+            }
+        }
+    }
+    if (refRing === null) {
+        return 0;
+    }
+    const o = coords[axisA];
+    const e = vNorm(vSub(coords[axisB], o));
+    // 参考平面内的一个方向: 参考环上不在公共键上的原子, 其到轴的垂直分量既在
+    // 参考平面内、又垂直于轴。法向由两者叉乘得到。
+    let inPlane: Vec3 | null = null;
+    for (let i = 0; i < refRing.length && inPlane === null; i++) {
+        const idx = refRing[i];
+        if (idx === axisA || idx === axisB) {
+            continue;
+        }
+        const d = vSub(coords[idx], o);
+        const perp = vSub(d, vScale(e, vDot(d, e)));
+        if (vLen(perp) > 1e-6) {
+            inPlane = vNorm(perp);
+        }
+    }
+    if (inPlane === null) {
+        return 0;
+    }
+    const normal = vCross(e, inPlane);
+    // 需要落到平面上的原子: 本环上与公共键原子相连、且自身不在公共键上的环原子
+    const blocked: { [key: number]: boolean } = {};
+    blocked[axisA] = true;
+    blocked[axisB] = true;
+    const targets: number[] = [];
+    for (let i = 0; i < ring.length; i++) {
+        const idx = ring[i];
+        if (blocked[idx] === true) {
+            continue;
+        }
+        const partners = neighborAtoms(mol, idx);
+        for (let t = 0; t < partners.length; t++) {
+            if (blocked[partners[t]] === true) {
+                targets.push(idx);
+                break;
+            }
+        }
+    }
+    if (targets.length === 0) {
+        return 0;
+    }
+    // 旋转集合: 从 targets 出发、不经过公共键原子能到达的全部原子 (含取代基)
+    const seen: { [key: number]: boolean } = {};
+    const group: number[] = [];
+    const queue: number[] = [];
+    for (let i = 0; i < targets.length; i++) {
+        if (seen[targets[i]] === true) {
+            continue;
+        }
+        seen[targets[i]] = true;
+        group.push(targets[i]);
+        queue.push(targets[i]);
+    }
+    let head = 0;
+    while (head < queue.length) {
+        const cur = queue[head];
+        head += 1;
+        const list = mol.adj[cur];
+        for (let t = 0; t < list.length; t++) {
+            const bond = mol.bonds[list[t]];
+            const nxt = bond.b === cur ? bond.a : bond.b;
+            if (blocked[nxt] === true || seen[nxt] === true) {
+                continue;
+            }
+            seen[nxt] = true;
+            group.push(nxt);
+            queue.push(nxt);
+        }
+    }
+    // 旋转集合里若混进了参考环自己的原子, 本次旋转会破坏参考环的平面性 —— 放弃
+    for (let i = 0; i < group.length; i++) {
+        for (let a = 0; a < placed.length; a++) {
+            if (inRing(placed[a], group[i])) {
+                return 0;
+            }
+        }
+    }
+    // 最小二乘转角: 目标原子的面外分量 p sinθ + q cosθ 平方和最小
+    let pp = 0.0;
+    let qq = 0.0;
+    let pq = 0.0;
+    const ps: number[] = [];
+    const qs: number[] = [];
+    for (let i = 0; i < targets.length; i++) {
+        const d = vSub(coords[targets[i]], o);
+        const perp = vSub(d, vScale(e, vDot(d, e)));
+        const p = vDot(perp, inPlane);
+        const q = vDot(perp, normal);
+        ps.push(p);
+        qs.push(q);
+        pp += p * p;
+        qq += q * q;
+        pq += p * q;
+    }
+    let angle = 0.5 * Math.atan2(-2.0 * pq, pp - qq) * 180.0 / Math.PI;
+    if (pp < 1e-12) {
+        return 0;                                // 目标原子都落在轴上: 转角无意义
+    }
+    // 面外分量对 θ 与 θ±180 同时归零: 取旋转前后"面内方向"点积为正的解,
+    // 否则环会被翻到参考环那一侧、与参考环整体重叠 (键长依然正确, 只有原子
+    // 间距能暴露)。判据用 Σ p·(p cosθ - q sinθ) > 0。
+    let cosA = Math.cos(angle * Math.PI / 180.0);
+    let sinA = Math.sin(angle * Math.PI / 180.0);
+    if (pp * cosA - pq * sinA < 0.0) {
+        angle += angle > 0.0 ? -180.0 : 180.0;
+        cosA = -cosA;
+        sinA = -sinA;
+    }
+    // 收益过小就不动: 避免为看不见的改善整体搬动取代基或稠环
+    let beforeMax = 0.0;
+    let afterMax = 0.0;
+    for (let i = 0; i < targets.length; i++) {
+        const before = Math.abs(qs[i]);
+        if (before > beforeMax) {
+            beforeMax = before;
+        }
+        const after = Math.abs(ps[i] * sinA + qs[i] * cosA);
+        if (after > afterMax) {
+            afterMax = after;
+        }
+    }
+    if (beforeMax - afterMax < 0.02) {
+        return 0;
+    }
+    // 绕公共键把整支刚性转过去
+    for (let gi = 0; gi < group.length; gi++) {
+        const index = group[gi];
+        coords[index] = rotateAboutAxis(coords[index], e, angle, o);
+    }
+    return 1;
+}
+
+/** 判断原子是否属于某个环 (环原子数很小, 顺序扫描即可)。 */
+function inRing(ring: number[], index: number): boolean {
+    for (let i = 0; i < ring.length; i++) {
+        if (ring[i] === index) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * 把平面环上每个 sp2 环碳的取代基摆回环平面。返回被摆正的取代基个数。
+ *
+ * 为什么需要单独一步: 环上取代基的方向只由"二面角"决定, 而共面位置对任何
+ * 距离量都是极值 —— 一阶导为零, 距离偏差里看不到角度偏差。于是"键长 + 键角"
+ * 的距离约束既压不进平面, 也不会报错: 键长键角那点 0.002 Å 量级的残差被整体
+ * 放大成"出平面位移" (实测苯环的氢偏出 0.24 Å, 二面角偏 14.5 度; 取代基是
+ * 重原子时键更长, 可偏出 0.8 Å), 而且各取代基偏在平面两侧、看起来像环被拧皱。
+ * 环平面投影只动环上的原子, 够不到取代基, 所以必须单独处理。这里刻意不去对
+ * 环原子做局部 sp2 投影: 那个平面与环平面定义不同, 两者互相拉锯会把环拧变形。
+ *
+ * 做法: 对每个"两个环内邻居 + 一个取代基"的环碳, 取两根环内键的外向角平分线
+ * 作为目标方向 (sp2 的第三个 σ 方向: 六元环上与两根环键各成 120 度), 再把取代基
+ * 所在的整支绕"当前方向 x 目标方向"这根轴刚性旋转到该方向。刚性旋转不改变任何
+ * 键长与键角, 因此不会给环带来应力, 也不会破坏取代基内部已经确定的构型。
+ * 稠合环的公共键原子不在此列: 它的第三个邻居是另一个环上的原子, 方向由那个环
+ * 的几何决定, 不属于可以自由摆动的 sp2 取代基方向 (见下方判据)。
+ */
+function enforceRingSubstituentPlanarity(mol: Mol, coords: Vec3[], planarRings: number[][],
+                                         ringEdge: { [key: string]: number }): number {
+    let fixed = 0;
+    for (let ri = 0; ri < planarRings.length; ri++) {
+        const ring = planarRings[ri];
+        const count = ring.length;
+        for (let pos = 0; pos < count; pos++) {
+            const center = ring[pos];
+            const nb1 = ring[(pos + count - 1) % count];
+            const nb2 = ring[(pos + 1) % count];
+            const neighbors = neighborAtoms(mol, center);
+            // 只处理恰好三个邻居的环碳; 稠合碳 (三个邻居都在环上) 没有取代基
+            if (neighbors.length !== 3) {
+                continue;
+            }
+            let sub = -1;
+            for (let t = 0; t < neighbors.length; t++) {
+                const index = neighbors[t];
+                if (index !== nb1 && index !== nb2) {
+                    sub = index;
+                    break;
+                }
+            }
+            // 该邻居必须由一根非环键连着: 稠合碳的第三个邻居是"另一个环"的原子,
+            // 它到本环的方向由那个环自己的几何决定, 不是可以自由摆动的 sp2 方向
+            // (强行按外向角平分线摆会把稠环系统拧错位)。
+            if (sub < 0 || ringEdge[ringKey(center, sub)] !== undefined) {
+                continue;
+            }
+            const c = coords[center];
+            const u1 = vNorm(vSub(coords[nb1], c));
+            const u2 = vNorm(vSub(coords[nb2], c));
+            const bisector = vAdd(u1, u2);
+            if (vLen(bisector) < 1e-6) {
+                continue;                      // 环内角接近 180 度, 第三个方向无定义
+            }
+            // 外向角平分线: 指向环外, 与两根环键的夹角相等
+            const target = vScale(vNorm(bisector), -1.0);
+            const current = vNorm(vSub(coords[sub], c));
+            const rotAxis = vCross(current, target);
+            const sinPart = vLen(rotAxis);
+            const cosPart = vDot(current, target);
+            let angle = Math.atan2(sinPart, cosPart) * 180.0 / Math.PI;
+            if (angle < 0.5) {
+                continue;                      // 已在平面内 (阈值远小于可观测偏差)
+            }
+            let axis = rotAxis;
+            if (sinPart < 1e-9) {
+                // 当前方向与目标方向正好相反: 旋转轴退化, 任取一根垂直轴转 180 度
+                const aux = Math.abs(current[2]) < 0.9 ? [0.0, 0.0, 1.0] : [1.0, 0.0, 0.0];
+                axis = vCross(current, aux);
+                angle = 180.0;
+            }
+            const group = collectBranch(mol, center, sub);
+            for (let gi = 0; gi < group.length; gi++) {
+                const index = group[gi];
+                coords[index] = rotateAboutAxis(coords[index], axis, angle, c);
+            }
+            fixed += 1;
+        }
+    }
+    return fixed;
+}
+
 /** 把分子平移到几何中心位于原点 */
 function centerCoordinates(coords: Vec3[]): void {
     const n = coords.length;
@@ -3081,6 +3385,14 @@ export function analyzeSmiles(smiles: unknown, options?: Partial<SmilesOptions>)
                 enforceDihedralTargets(mol, coords, targets, ringEdge);
             }
         }
+        // 平面环上的取代基最后统一摆回环平面: 只做刚性旋转、不改变键长键角,
+        // 放在松弛与手性修正之后执行就不会再被距离约束推开。之后的扭转落位轴
+        // 总穿过取代基首原子 (它落在轴上或不在被旋转的分支里), 因此不会把取代基
+        // 重新提出平面。
+        // 顺序: 先把稠合环彼此摆平 (拓扑级平面性), 再让取代基进入这个共同平面;
+        // 两步都是刚性旋转, 因此不会破坏已收敛的键长键角, 也不需要再松弛一次。
+        enforceFusedRingPlanarity(mol, coords, rings, planarRings);
+        enforceRingSubstituentPlanarity(mol, coords, planarRings, ringEdge);
     }
 
     if (opts.center) {
