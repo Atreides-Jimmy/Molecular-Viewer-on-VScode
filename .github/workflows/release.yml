@@ -90,6 +90,22 @@ jobs:
           path: ${{ steps.meta.outputs.vsix }}
           if-no-files-found: error
 
+      # GitHub 自动生成的发布说明只统计「已合并的 Pull Request」，直接推送到
+      # 分支的提交不会出现。这里补一份区间内全部提交的清单，稍后前置到自动说明之前。
+      - name: Build commit list for release notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          NOTES_FILE="$RUNNER_TEMP/release-notes.md"
+          node .github/scripts/ci-notes.js "${{ steps.meta.outputs.tag }}" > "$NOTES_FILE" || true
+          if [ -s "$NOTES_FILE" ]; then
+            echo "----- 提交清单 -----"
+            cat "$NOTES_FILE"
+          else
+            echo "::warning::提交清单为空，本次发布说明只含自动生成的 PR 清单"
+          fi
+
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -99,6 +115,7 @@ jobs:
           VSIX="${{ steps.meta.outputs.vsix }}"
           TITLE="Molecular Viewer ${{ steps.meta.outputs.version }}"
           PRERELEASE="${{ steps.channel.outputs.prerelease }}"
+          NOTES_FILE="$RUNNER_TEMP/release-notes.md"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             # 同一 commit 已被另一分支发布过（例如 developing 合并进 main）：
@@ -116,6 +133,10 @@ jobs:
               --title "$TITLE"
               --generate-notes
             )
+            # --notes 的内容会被前置到自动生成的说明之前，两者并存
+            if [ -s "$NOTES_FILE" ]; then
+              args+=(--notes "$(cat "$NOTES_FILE")")
+            fi
             if [ "$PRERELEASE" = "true" ]; then
               args+=(--prerelease)
             else
