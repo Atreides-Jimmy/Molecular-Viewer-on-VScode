@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { parseFile, parseLogFile, LogFrame, OrcaFrame, parseTcl, RouteSection } from '../parsers/index';
 import { ensureBonds } from '../parsers/bondDetector';
+import { smilesTo3dSafe, validateSmiles } from '../parsers/smilesTo3d';
 import { MolecularData, AtomGroup, OptStep, NormalMode } from '../types';
 
 const ATOM_COLORS: { [key: string]: string } = {
@@ -346,6 +347,83 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                     break;
                 case 'importFile':
                     try {
+                        // Step 0 — choose the import source (file picker or SMILES input).
+                        // Dismissing the quick pick cancels the import, restoring the
+                        // webview status text like every other cancel path. [2026-09-14]
+                        const source = await vscode.window.showQuickPick([
+                            { label: 'From File', description: 'Pick a structure file (.xyz, .gjf, .mol2, .log, ...)' },
+                            { label: 'From SMILES', description: 'Type a SMILES string; 3D coordinates are generated locally' }
+                        ], { placeHolder: 'Import structure from file or SMILES' });
+                        if (!source) {
+                            webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                            break;
+                        }
+
+                        if (source.label === 'From SMILES') {
+                            // SMILES import: an input box validates the string on every
+                            // keystroke (parse + implicit hydrogens + valence — the same
+                            // lightweight check the engine runs, without the geometry
+                            // stage, so it stays instant); Enter builds the 3D structure
+                            // with the full SMILES -> 3D engine and feeds it into the
+                            // regular importResult path (same message shape as a file
+                            // import, so placement / undo / bond merging are unchanged).
+                            const smiles = await vscode.window.showInputBox({
+                                prompt: 'SMILES string (e.g. CCO, c1ccccc1, CC(=O)Oc1ccccc1C(=O)O)',
+                                placeHolder: 'CC(=O)Oc1ccccc1C(=O)O',
+                                ignoreFocusOut: true,
+                                validateInput: (value: string): string | undefined => {
+                                    const trimmed = value.trim();
+                                    if (!trimmed) {
+                                        return 'Enter a SMILES string';
+                                    }
+                                    const check = validateSmiles(trimmed);
+                                    if (!check.ok) {
+                                        return check.errorText;
+                                    }
+                                    return undefined;
+                                }
+                            });
+                            if (smiles === undefined || smiles.trim() === '') {
+                                webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                                break;
+                            }
+                            const trimmed = smiles.trim();
+                            const gen = smilesTo3dSafe(trimmed);
+                            if (!gen.ok || !gen.info) {
+                                // Cannot normally happen (validateInput already rejected
+                                // bad input); kept as a guard so the view never hangs.
+                                vscode.window.showErrorMessage('SMILES import failed: ' + gen.errorText);
+                                webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                                break;
+                            }
+                            const info = gen.info;
+                            const impAtoms = info.atoms.map((pair) => ({
+                                element: pair[1],
+                                x: info.coordinates[pair[0]][0],
+                                y: info.coordinates[pair[0]][1],
+                                z: info.coordinates[pair[0]][2],
+                                color: ATOM_COLORS[pair[1]] || '#FF1493'
+                            }));
+                            // Aromatic bonds carry order 1.5 — the same convention the
+                            // MOL2 parser uses for 'ar' bonds — so they render as
+                            // 1 solid + 1 dashed line and export as aromatic in MOL2/mol.
+                            const impBonds = info.bondDetails.map((b) => ({
+                                atom1: b.a,
+                                atom2: b.b,
+                                order: b.aromatic ? 1.5 : b.order
+                            }));
+                            const shown = trimmed.length > 48 ? trimmed.substring(0, 45) + '...' : trimmed;
+                            webviewPanel.webview.postMessage({
+                                command: 'importResult',
+                                cancelled: false,
+                                fileName: 'SMILES: ' + shown,
+                                atoms: impAtoms,
+                                bonds: impBonds,
+                                hasExplicitBonds: true
+                            });
+                            break;
+                        }
+
                         const result = await vscode.window.showOpenDialog({
                             canSelectMany: false,
                             openLabel: 'Select Structure to Import',
@@ -2315,7 +2393,7 @@ document.getElementById('import-btn').addEventListener('click',function(){
     if(diffMode){modeInfoEl.textContent='Import is not available in diff mode';return}
     if(CRY){modeInfoEl.textContent='Import is not available for crystal structures';return}
     if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
-    modeInfoEl.textContent='Import: selecting file...';
+    modeInfoEl.textContent='Import: choose source...';
     vscodeApi.postMessage({command:'importFile'});
 });
 document.getElementById('diff-btn').addEventListener('click',function(){
