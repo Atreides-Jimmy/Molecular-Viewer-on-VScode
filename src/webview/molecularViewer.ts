@@ -30,6 +30,22 @@ const ATOM_COLORS: { [key: string]: string } = {
     Sg: '#E00045', Bh: '#E6002E', Hs: '#EB0026'
 };
 
+/** 导入消息里的原子载荷 (客户端 importStructure 逐项写入 MD.atoms)。 */
+interface ImportAtomPayload {
+    element: string;
+    x: number;
+    y: number;
+    z: number;
+    color: string;
+}
+
+/** 导入消息里的键载荷 (索引相对本次导入的原子数组)。 */
+interface ImportBondPayload {
+    atom1: number;
+    atom2: number;
+    order: number;
+}
+
 export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvider<MolecularDocument> {
     constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -347,19 +363,19 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                     break;
                 case 'importFile':
                     try {
-                        // Step 0 — choose the import source (file picker or SMILES input).
-                        // Dismissing the quick pick cancels the import, restoring the
-                        // webview status text like every other cancel path. [2026-09-14]
-                        const source = await vscode.window.showQuickPick([
-                            { label: 'From File', description: 'Pick a structure file (.xyz, .gjf, .mol2, .log, ...)' },
-                            { label: 'From SMILES', description: 'Type a SMILES string; 3D coordinates are generated locally' }
-                        ], { placeHolder: 'Import structure from file or SMILES' });
-                        if (!source) {
+                        // Step 0 — one dialog collects both the number of copies and the
+                        // source: its input box (which a quick pick renders anyway) takes
+                        // the copy count, and the two entries below it pick the source, so
+                        // the count is settled before the structure. Dismissing the dialog
+                        // cancels the import, restoring the webview status text like every
+                        // other cancel path. [2026-09-16]
+                        const choice = await askImportChoice();
+                        if (!choice) {
                             webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
                             break;
                         }
 
-                        if (source.label === 'From SMILES') {
+                        if (choice.source === 'smiles') {
                             // SMILES import: an input box validates the string on every
                             // keystroke (parse + implicit hydrogens + valence — the same
                             // lightweight check the engine runs, without the geometry
@@ -413,14 +429,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                 order: b.aromatic ? 1.5 : b.order
                             }));
                             const shown = trimmed.length > 48 ? trimmed.substring(0, 45) + '...' : trimmed;
-                            webviewPanel.webview.postMessage({
-                                command: 'importResult',
-                                cancelled: false,
-                                fileName: 'SMILES: ' + shown,
-                                atoms: impAtoms,
-                                bonds: impBonds,
-                                hasExplicitBonds: true
-                            });
+                            postImportCopies(webviewPanel.webview, 'SMILES: ' + shown,
+                                             impAtoms, impBonds, true, choice.copies);
                             break;
                         }
 
@@ -499,14 +509,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
 
                         const impAtoms = impData.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: ATOM_COLORS[a.element] || '#FF1493' }));
                         const impBonds = impData.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order }));
-                        webviewPanel.webview.postMessage({
-                            command: 'importResult',
-                            cancelled: false,
-                            fileName: impFileName,
-                            atoms: impAtoms,
-                            bonds: impBonds,
-                            hasExplicitBonds: !!impData.hasExplicitBonds
-                        });
+                        postImportCopies(webviewPanel.webview, impFileName,
+                                         impAtoms, impBonds, !!impData.hasExplicitBonds, choice.copies);
                     } catch (e: any) {
                         vscode.window.showErrorMessage('Import failed: ' + (e.message || e));
                         webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
@@ -5740,4 +5744,122 @@ function getNonce(): string {
         text += possible.charAt(Math.floor(Math.random() * possible.length));
     }
     return text;
+}
+
+// ---------------------------------------------------------------------------
+// Import helpers
+// ---------------------------------------------------------------------------
+
+/** 一次导入的份数上限, 与新增原子总数上限同时生效。 */
+const IMPORT_COPY_LIMIT = 50;
+const IMPORT_ATOM_LIMIT = 20000;
+
+/** 对话框里的来源选项: 用自己的字段而不是标签文本做判定。 */
+interface ImportSourceItem extends vscode.QuickPickItem {
+    source: 'file' | 'smiles';
+}
+
+/** 用户选定的来源与份数。 */
+interface ImportChoice {
+    source: 'file' | 'smiles';
+    copies: number;
+}
+
+/** 解析对话框输入框里的份数; 非法返回 null (空、非数字、0、负数、超上限)。 */
+function parseCopyCount(text: string): number | null {
+    const trimmed = text.trim();
+    if (!/^[0-9]+$/.test(trimmed)) {
+        return null;
+    }
+    const count = parseInt(trimmed, 10);
+    if (count < 1 || count > IMPORT_COPY_LIMIT) {
+        return null;
+    }
+    return count;
+}
+
+/**
+ * 弹出导入对话框: **输入框填份数, 列表里点来源** —— 先定份数, 再定结构。
+ *
+ * 输入框是这个对话框本来就有的那个 (快速选择总会在列表上方渲染一个输入框);
+ * 两个来源选项都带 alwaysShow, 因此往里打数字不会把选项过滤掉, 它就从"没有用
+ * 的筛选框"变成了"份数输入框"。
+ *
+ * 份数不合法时带着原输入重新弹出, 原因写在标题里 —— 不弹模态提示, 免得打断,
+ * 用户也可以直接把数字改掉。返回 undefined 表示取消。
+ */
+async function askImportChoice(): Promise<ImportChoice | undefined> {
+    let preset = '1';
+    let complaint = '';
+    for (;;) {
+        const items: ImportSourceItem[] = [
+            { label: 'From File', description: 'pick a structure file (.xyz, .gjf, .mol2, .log, ...)', source: 'file', alwaysShow: true },
+            { label: 'From SMILES', description: 'type a SMILES string; coordinates are generated locally', source: 'smiles', alwaysShow: true }
+        ];
+        const quickPick = vscode.window.createQuickPick<ImportSourceItem>();
+        quickPick.title = complaint === '' ? 'Import structure' : 'Import structure — ' + complaint;
+        quickPick.placeholder = 'Copies to import (1-' + IMPORT_COPY_LIMIT + '), then pick a source';
+        quickPick.value = preset;
+        quickPick.ignoreFocusOut = true;
+        quickPick.matchOnDescription = false;
+        quickPick.items = items;
+        quickPick.activeItems = [items[0]];
+        const picked = await new Promise<{ item: ImportSourceItem; text: string } | undefined>((resolve) => {
+            let accepted = false;
+            quickPick.onDidAccept(() => {
+                accepted = true;
+                const chosen = quickPick.selectedItems.length > 0
+                    ? quickPick.selectedItems[0]
+                    : (quickPick.activeItems.length > 0 ? quickPick.activeItems[0] : items[0]);
+                resolve({ item: chosen, text: quickPick.value });
+                quickPick.hide();
+            });
+            quickPick.onDidHide(() => {
+                quickPick.dispose();
+                if (!accepted) {
+                    resolve(undefined);          // Esc / 被其它界面挤掉 = 取消
+                }
+            });
+            quickPick.show();
+        });
+        if (picked === undefined) {
+            return undefined;
+        }
+        const copies = parseCopyCount(picked.text);
+        if (copies !== null) {
+            return { source: picked.item.source, copies: copies };
+        }
+        preset = picked.text;                    // 保留原输入, 直接改数字即可
+        complaint = 'copies must be a whole number from 1 to ' + IMPORT_COPY_LIMIT;
+    }
+}
+
+/**
+ * 按份数逐条发出导入消息。每条消息对客户端就是一次完整导入 —— 重新计算包围球
+ * 避让位置、压一个撤销快照、自适应缩放 —— 因此 N 份与连续手工导入 N 次完全等价:
+ * 沿 +X 依次排开、两两不重叠, 客户端不需要任何改动。
+ * 份数已在对话框里校验; 这里再按"新增原子总数"上限截断 (此时才知道结构有多大)
+ * 并告知用户, 免得一次导入把视图撑到无法交互。
+ */
+function postImportCopies(webview: vscode.Webview, fileName: string,
+                          atoms: ImportAtomPayload[], bonds: ImportBondPayload[],
+                          hasExplicitBonds: boolean, copies: number): void {
+    const affordable = Math.max(1, Math.floor(IMPORT_ATOM_LIMIT / Math.max(1, atoms.length)));
+    let count = copies;
+    if (count > affordable) {
+        count = affordable;
+        vscode.window.showWarningMessage('Import: ' + copies + ' copies of a ' + atoms.length +
+            '-atom structure would add ' + (copies * atoms.length) + ' atoms, so this import is limited to ' +
+            count + ' copies.');
+    }
+    for (let i = 0; i < count; i++) {
+        webview.postMessage({
+            command: 'importResult',
+            cancelled: false,
+            fileName: count > 1 ? fileName + ' (' + (i + 1) + '/' + count + ')' : fileName,
+            atoms: atoms,
+            bonds: bonds,
+            hasExplicitBonds: hasExplicitBonds
+        });
+    }
 }
