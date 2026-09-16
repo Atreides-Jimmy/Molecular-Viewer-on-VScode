@@ -5834,10 +5834,69 @@ async function askImportChoice(): Promise<ImportChoice | undefined> {
     }
 }
 
+/** 相邻两份之间的间隔参数: 与客户端摆放使用的缓冲/间隙保持一致。 */
+const IMPORT_PLACEMENT_BUFFER = 2.5;
+const IMPORT_PLACEMENT_GAP = 2.0;
+
 /**
- * 按份数逐条发出导入消息。每条消息对客户端就是一次完整导入 —— 重新计算包围球
- * 避让位置、压一个撤销快照、自适应缩放 —— 因此 N 份与连续手工导入 N 次完全等价:
- * 沿 +X 依次排开、两两不重叠, 客户端不需要任何改动。
+ * 把 N 份拷贝拼成一个整体。份与份之间用**同一个**间距 (
+ * 两份各自的包围球半径 + 缓冲 + 间隙), 以共同质心为中心均匀排开 —— 于是每两份
+ * 之间的最小距离都与"单独导入两次"所保证的一样, 不会重叠。
+ *
+ * 单份时原样返回 (不复制数组), 保证"只导入一份"的行为与以前逐位相同。
+ */
+function buildImportBlock(atoms: ImportAtomPayload[], bonds: ImportBondPayload[],
+                          copies: number): { atoms: ImportAtomPayload[]; bonds: ImportBondPayload[] } {
+    if (copies <= 1 || atoms.length === 0) {
+        return { atoms: atoms, bonds: bonds };
+    }
+    // 单份的包围球 (与客户端摆放判定用的是同一个量)
+    let cx = 0.0;
+    let cy = 0.0;
+    let cz = 0.0;
+    for (let i = 0; i < atoms.length; i++) {
+        cx += atoms[i].x;
+        cy += atoms[i].y;
+        cz += atoms[i].z;
+    }
+    cx /= atoms.length;
+    cy /= atoms.length;
+    cz /= atoms.length;
+    let radius = 0.0;
+    for (let i = 0; i < atoms.length; i++) {
+        const dx = atoms[i].x - cx;
+        const dy = atoms[i].y - cy;
+        const dz = atoms[i].z - cz;
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (d > radius) {
+            radius = d;
+        }
+    }
+    const stride = 2.0 * (radius + IMPORT_PLACEMENT_BUFFER) + IMPORT_PLACEMENT_GAP;
+    const outAtoms: ImportAtomPayload[] = [];
+    const outBonds: ImportBondPayload[] = [];
+    for (let c = 0; c < copies; c++) {
+        const shift = (c - (copies - 1) / 2.0) * stride;
+        const base = c * atoms.length;
+        for (let i = 0; i < atoms.length; i++) {
+            const a = atoms[i];
+            outAtoms.push({ element: a.element, x: a.x + shift, y: a.y, z: a.z, color: a.color });
+        }
+        for (let k = 0; k < bonds.length; k++) {
+            const b = bonds[k];
+            outBonds.push({ atom1: base + b.atom1, atom2: base + b.atom2, order: b.order });
+        }
+    }
+    return { atoms: outAtoms, bonds: outBonds };
+}
+
+/**
+ * 按份数拼好后**一次性**发出 (只发一条导入消息)。
+ *
+ * 位置计算因此只发生一次: 客户端对"整个块"做一次包围球避让摆放 (第 1 份的位置
+ * 由这次计算确定), 份与份之间则是上面那个等间距, 客户端还会一次成键、一次场景
+ * 重建, 撤销也只要一步 —— 逐份重算位置、逐份重建场景的开销全部省掉。
+ *
  * 份数已在对话框里校验; 这里再按"新增原子总数"上限截断 (此时才知道结构有多大)
  * 并告知用户, 免得一次导入把视图撑到无法交互。
  */
@@ -5852,14 +5911,13 @@ function postImportCopies(webview: vscode.Webview, fileName: string,
             '-atom structure would add ' + (copies * atoms.length) + ' atoms, so this import is limited to ' +
             count + ' copies.');
     }
-    for (let i = 0; i < count; i++) {
-        webview.postMessage({
-            command: 'importResult',
-            cancelled: false,
-            fileName: count > 1 ? fileName + ' (' + (i + 1) + '/' + count + ')' : fileName,
-            atoms: atoms,
-            bonds: bonds,
-            hasExplicitBonds: hasExplicitBonds
-        });
-    }
+    const block = buildImportBlock(atoms, bonds, count);
+    webview.postMessage({
+        command: 'importResult',
+        cancelled: false,
+        fileName: count > 1 ? fileName + ' x ' + count : fileName,
+        atoms: block.atoms,
+        bonds: block.bonds,
+        hasExplicitBonds: hasExplicitBonds
+    });
 }
