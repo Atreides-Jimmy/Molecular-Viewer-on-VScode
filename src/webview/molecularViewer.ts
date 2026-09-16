@@ -1322,6 +1322,36 @@ function updateAtomMeshPositions(){
     highlightSelected();
 }
 
+// 网格位置都是"相对旋转中心"存放的 (a - C), 所以中心一变, 所有网格只需整体
+// 平移 -Δ 就能保持与原子坐标一致 —— 不用重建任何几何。
+function shiftAllMeshesForCenter(dx,dy,dz){
+    if(!dx&&!dy&&!dz)return;
+    var i;
+    for(i=0;i<atomMeshes.length;i++){
+        atomMeshes[i].position.x-=dx;atomMeshes[i].position.y-=dy;atomMeshes[i].position.z-=dz;
+    }
+    for(i=0;i<bondMeshes.length;i++){
+        bondMeshes[i].position.x-=dx;bondMeshes[i].position.y-=dy;bondMeshes[i].position.z-=dz;
+    }
+}
+// 重新确定旋转中心 (全部原子的质心)。增删原子、移动/旋转原子、导入结构等凡改变
+// 几何的操作在收尾时都要调用它 —— 否则旋转会绕着一个已经不是结构中心的点转,
+// 分子看起来就会"绕着圈外的某点在打转"。空结构时中心回到原点。
+// 已有的网格按中心位移整体平移 (O(原子数+键数) 次赋值), 不重建几何; 拖拽/预览
+// 期间中心保持不变, 只在收尾时重算。
+function updateRotationCenter(){
+    var oldX=CX,oldY=CY,oldZ=CZ;
+    var n=MD.atoms.length;
+    CX=0;CY=0;CZ=0;
+    if(n>0){
+        for(var i=0;i<n;i++){CX+=MD.atoms[i].x;CY+=MD.atoms[i].y;CZ+=MD.atoms[i].z}
+        CX/=n;CY/=n;CZ/=n;
+    }
+    shiftAllMeshesForCenter(CX-oldX,CY-oldY,CZ-oldZ);
+    if(rotAxisLineMesh)showRotAxisLine();   // 轴指示线也是相对中心画的
+    needsRender=true;
+}
+
 // Incremental bond-mesh rebuild for Move Atoms drags: only bonds with at
 // least one endpoint in the moving selection are rebuilt; every other bond
 // mesh is left untouched (its endpoints did not move, so it is still exact).
@@ -1778,6 +1808,9 @@ function refreshMovedBondsAndMeshes(){
     var region=recomputeMovedBonds();
     if(region){if(region.length)rebuildMovedBondMeshes(oldBonds,region)}
     else updateScenePositions(true);
+    // 原子被移动过, 质心随之改变 —— 放在区域刷新之后: 上面的网格都还是按旧中心
+    // 摆放的, 这里再整体平移一次, 随后旋转就绕新的结构中心进行。
+    updateRotationCenter();
 }
 function endMoveDrag(){
     if(!moveDragActive)return;
@@ -2061,6 +2094,8 @@ function setMode(m){
     }
     if(oldMode==='rotateGroup'&&m!=='rotateGroup'){
         removeRotAxisLine();
+        // 分组旋转可能已经改变了质心: 离开该模式时重定旋转中心
+        updateRotationCenter();
     }
     layoutPanels();
 }
@@ -2122,6 +2157,9 @@ function resetRotAxisState(){
     var slider=document.getElementById('rp-slider');if(slider)slider.value=0;
     var ain=document.getElementById('rp-angle-input');if(ain)ain.value='0';
     var av=document.getElementById('rp-angle-val');if(av)av.textContent='0°';
+    // 分组旋转会改变质心, 而这里是每个旋转会话的收尾点 (Done / Clear / 换模式 /
+    // 撤销 / 换帧 …), 所以统一在这里重定旋转中心。
+    updateRotationCenter();
 }
 function syncRotatePanelGroupField(){
     if(currentMode!=='rotateGroup')return;
@@ -2226,6 +2264,9 @@ function commitRotAngle(newAngle){
         restoreOriginal();
         applyGroupRotation(newAngle);
         rotCommittedAngle=newAngle;
+        // 一次角度调整落定后质心可能变了, 立刻重定旋转中心 (与滑块拖动中的
+        // 实时预览不同: 预览期间中心保持不变, 免得整屏跟着跳)。
+        updateRotationCenter();
     }
     var slider=document.getElementById('rp-slider');
     if(slider)slider.value=newAngle;
