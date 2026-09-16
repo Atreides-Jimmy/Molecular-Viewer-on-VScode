@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { parseFile, parseLogFile, LogFrame, OrcaFrame, parseTcl, RouteSection } from '../parsers/index';
 import { ensureBonds } from '../parsers/bondDetector';
+import { smilesTo3dSafe, validateSmiles } from '../parsers/smilesTo3d';
 import { MolecularData, AtomGroup, OptStep, NormalMode } from '../types';
 
 const ATOM_COLORS: { [key: string]: string } = {
@@ -28,6 +29,22 @@ const ATOM_COLORS: { [key: string]: string } = {
     Md: '#B30DA6', No: '#BD0D87', Lr: '#C70066', Rf: '#CC0059', Db: '#D9004F',
     Sg: '#E00045', Bh: '#E6002E', Hs: '#EB0026'
 };
+
+/** 导入消息里的原子载荷 (客户端 importStructure 逐项写入 MD.atoms)。 */
+interface ImportAtomPayload {
+    element: string;
+    x: number;
+    y: number;
+    z: number;
+    color: string;
+}
+
+/** 导入消息里的键载荷 (索引相对本次导入的原子数组)。 */
+interface ImportBondPayload {
+    atom1: number;
+    atom2: number;
+    order: number;
+}
 
 export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvider<MolecularDocument> {
     constructor(private readonly context: vscode.ExtensionContext) {}
@@ -346,6 +363,77 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                     break;
                 case 'importFile':
                     try {
+                        // Step 0 — one dialog collects both the number of copies and the
+                        // source: its input box (which a quick pick renders anyway) takes
+                        // the copy count, and the two entries below it pick the source, so
+                        // the count is settled before the structure. Dismissing the dialog
+                        // cancels the import, restoring the webview status text like every
+                        // other cancel path. [2026-09-16]
+                        const choice = await askImportChoice();
+                        if (!choice) {
+                            webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                            break;
+                        }
+
+                        if (choice.source === 'smiles') {
+                            // SMILES import: an input box validates the string on every
+                            // keystroke (parse + implicit hydrogens + valence — the same
+                            // lightweight check the engine runs, without the geometry
+                            // stage, so it stays instant); Enter builds the 3D structure
+                            // with the full SMILES -> 3D engine and feeds it into the
+                            // regular importResult path (same message shape as a file
+                            // import, so placement / undo / bond merging are unchanged).
+                            const smiles = await vscode.window.showInputBox({
+                                prompt: 'SMILES string (e.g. CCO, c1ccccc1, CC(=O)Oc1ccccc1C(=O)O)',
+                                placeHolder: 'CC(=O)Oc1ccccc1C(=O)O',
+                                ignoreFocusOut: true,
+                                validateInput: (value: string): string | undefined => {
+                                    const trimmed = value.trim();
+                                    if (!trimmed) {
+                                        return 'Enter a SMILES string';
+                                    }
+                                    const check = validateSmiles(trimmed);
+                                    if (!check.ok) {
+                                        return check.errorText;
+                                    }
+                                    return undefined;
+                                }
+                            });
+                            if (smiles === undefined || smiles.trim() === '') {
+                                webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                                break;
+                            }
+                            const trimmed = smiles.trim();
+                            const gen = smilesTo3dSafe(trimmed);
+                            if (!gen.ok || !gen.info) {
+                                // Cannot normally happen (validateInput already rejected
+                                // bad input); kept as a guard so the view never hangs.
+                                vscode.window.showErrorMessage('SMILES import failed: ' + gen.errorText);
+                                webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                                break;
+                            }
+                            const info = gen.info;
+                            const impAtoms = info.atoms.map((pair) => ({
+                                element: pair[1],
+                                x: info.coordinates[pair[0]][0],
+                                y: info.coordinates[pair[0]][1],
+                                z: info.coordinates[pair[0]][2],
+                                color: ATOM_COLORS[pair[1]] || '#FF1493'
+                            }));
+                            // Aromatic bonds carry order 1.5 — the same convention the
+                            // MOL2 parser uses for 'ar' bonds — so they render as
+                            // 1 solid + 1 dashed line and export as aromatic in MOL2/mol.
+                            const impBonds = info.bondDetails.map((b) => ({
+                                atom1: b.a,
+                                atom2: b.b,
+                                order: b.aromatic ? 1.5 : b.order
+                            }));
+                            const shown = trimmed.length > 48 ? trimmed.substring(0, 45) + '...' : trimmed;
+                            postImportCopies(webviewPanel.webview, 'SMILES: ' + shown,
+                                             impAtoms, impBonds, true, choice.copies);
+                            break;
+                        }
+
                         const result = await vscode.window.showOpenDialog({
                             canSelectMany: false,
                             openLabel: 'Select Structure to Import',
@@ -421,14 +509,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
 
                         const impAtoms = impData.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: ATOM_COLORS[a.element] || '#FF1493' }));
                         const impBonds = impData.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order }));
-                        webviewPanel.webview.postMessage({
-                            command: 'importResult',
-                            cancelled: false,
-                            fileName: impFileName,
-                            atoms: impAtoms,
-                            bonds: impBonds,
-                            hasExplicitBonds: !!impData.hasExplicitBonds
-                        });
+                        postImportCopies(webviewPanel.webview, impFileName,
+                                         impAtoms, impBonds, !!impData.hasExplicitBonds, choice.copies);
                     } catch (e: any) {
                         vscode.window.showErrorMessage('Import failed: ' + (e.message || e));
                         webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
@@ -1240,6 +1322,36 @@ function updateAtomMeshPositions(){
     highlightSelected();
 }
 
+// 网格位置都是"相对旋转中心"存放的 (a - C), 所以中心一变, 所有网格只需整体
+// 平移 -Δ 就能保持与原子坐标一致 —— 不用重建任何几何。
+function shiftAllMeshesForCenter(dx,dy,dz){
+    if(!dx&&!dy&&!dz)return;
+    var i;
+    for(i=0;i<atomMeshes.length;i++){
+        atomMeshes[i].position.x-=dx;atomMeshes[i].position.y-=dy;atomMeshes[i].position.z-=dz;
+    }
+    for(i=0;i<bondMeshes.length;i++){
+        bondMeshes[i].position.x-=dx;bondMeshes[i].position.y-=dy;bondMeshes[i].position.z-=dz;
+    }
+}
+// 重新确定旋转中心 (全部原子的质心)。增删原子、移动/旋转原子、导入结构等凡改变
+// 几何的操作在收尾时都要调用它 —— 否则旋转会绕着一个已经不是结构中心的点转,
+// 分子看起来就会"绕着圈外的某点在打转"。空结构时中心回到原点。
+// 已有的网格按中心位移整体平移 (O(原子数+键数) 次赋值), 不重建几何; 拖拽/预览
+// 期间中心保持不变, 只在收尾时重算。
+function updateRotationCenter(){
+    var oldX=CX,oldY=CY,oldZ=CZ;
+    var n=MD.atoms.length;
+    CX=0;CY=0;CZ=0;
+    if(n>0){
+        for(var i=0;i<n;i++){CX+=MD.atoms[i].x;CY+=MD.atoms[i].y;CZ+=MD.atoms[i].z}
+        CX/=n;CY/=n;CZ/=n;
+    }
+    shiftAllMeshesForCenter(CX-oldX,CY-oldY,CZ-oldZ);
+    if(rotAxisLineMesh)showRotAxisLine();   // 轴指示线也是相对中心画的
+    needsRender=true;
+}
+
 // Incremental bond-mesh rebuild for Move Atoms drags: only bonds with at
 // least one endpoint in the moving selection are rebuilt; every other bond
 // mesh is left untouched (its endpoints did not move, so it is still exact).
@@ -1696,6 +1808,9 @@ function refreshMovedBondsAndMeshes(){
     var region=recomputeMovedBonds();
     if(region){if(region.length)rebuildMovedBondMeshes(oldBonds,region)}
     else updateScenePositions(true);
+    // 原子被移动过, 质心随之改变 —— 放在区域刷新之后: 上面的网格都还是按旧中心
+    // 摆放的, 这里再整体平移一次, 随后旋转就绕新的结构中心进行。
+    updateRotationCenter();
 }
 function endMoveDrag(){
     if(!moveDragActive)return;
@@ -1979,6 +2094,8 @@ function setMode(m){
     }
     if(oldMode==='rotateGroup'&&m!=='rotateGroup'){
         removeRotAxisLine();
+        // 分组旋转可能已经改变了质心: 离开该模式时重定旋转中心
+        updateRotationCenter();
     }
     layoutPanels();
 }
@@ -2040,6 +2157,9 @@ function resetRotAxisState(){
     var slider=document.getElementById('rp-slider');if(slider)slider.value=0;
     var ain=document.getElementById('rp-angle-input');if(ain)ain.value='0';
     var av=document.getElementById('rp-angle-val');if(av)av.textContent='0°';
+    // 分组旋转会改变质心, 而这里是每个旋转会话的收尾点 (Done / Clear / 换模式 /
+    // 撤销 / 换帧 …), 所以统一在这里重定旋转中心。
+    updateRotationCenter();
 }
 function syncRotatePanelGroupField(){
     if(currentMode!=='rotateGroup')return;
@@ -2144,6 +2264,9 @@ function commitRotAngle(newAngle){
         restoreOriginal();
         applyGroupRotation(newAngle);
         rotCommittedAngle=newAngle;
+        // 一次角度调整落定后质心可能变了, 立刻重定旋转中心 (与滑块拖动中的
+        // 实时预览不同: 预览期间中心保持不变, 免得整屏跟着跳)。
+        updateRotationCenter();
     }
     var slider=document.getElementById('rp-slider');
     if(slider)slider.value=newAngle;
@@ -2315,7 +2438,7 @@ document.getElementById('import-btn').addEventListener('click',function(){
     if(diffMode){modeInfoEl.textContent='Import is not available in diff mode';return}
     if(CRY){modeInfoEl.textContent='Import is not available for crystal structures';return}
     if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
-    modeInfoEl.textContent='Import: selecting file...';
+    modeInfoEl.textContent='Import: choose source...';
     vscodeApi.postMessage({command:'importFile'});
 });
 document.getElementById('diff-btn').addEventListener('click',function(){
@@ -5662,4 +5785,180 @@ function getNonce(): string {
         text += possible.charAt(Math.floor(Math.random() * possible.length));
     }
     return text;
+}
+
+// ---------------------------------------------------------------------------
+// Import helpers
+// ---------------------------------------------------------------------------
+
+/** 一次导入的份数上限, 与新增原子总数上限同时生效。 */
+const IMPORT_COPY_LIMIT = 50;
+const IMPORT_ATOM_LIMIT = 20000;
+
+/** 对话框里的来源选项: 用自己的字段而不是标签文本做判定。 */
+interface ImportSourceItem extends vscode.QuickPickItem {
+    source: 'file' | 'smiles';
+}
+
+/** 用户选定的来源与份数。 */
+interface ImportChoice {
+    source: 'file' | 'smiles';
+    copies: number;
+}
+
+/** 解析对话框输入框里的份数; 非法返回 null (空、非数字、0、负数、超上限)。 */
+function parseCopyCount(text: string): number | null {
+    const trimmed = text.trim();
+    if (!/^[0-9]+$/.test(trimmed)) {
+        return null;
+    }
+    const count = parseInt(trimmed, 10);
+    if (count < 1 || count > IMPORT_COPY_LIMIT) {
+        return null;
+    }
+    return count;
+}
+
+/**
+ * 弹出导入对话框: **输入框填份数, 列表里点来源** —— 先定份数, 再定结构。
+ *
+ * 输入框是这个对话框本来就有的那个 (快速选择总会在列表上方渲染一个输入框);
+ * 两个来源选项都带 alwaysShow, 因此往里打数字不会把选项过滤掉, 它就从"没有用
+ * 的筛选框"变成了"份数输入框"。
+ *
+ * 份数不合法时带着原输入重新弹出, 原因写在标题里 —— 不弹模态提示, 免得打断,
+ * 用户也可以直接把数字改掉。返回 undefined 表示取消。
+ */
+async function askImportChoice(): Promise<ImportChoice | undefined> {
+    let preset = '1';
+    let complaint = '';
+    for (;;) {
+        const items: ImportSourceItem[] = [
+            { label: 'From File', description: 'pick a structure file (.xyz, .gjf, .mol2, .log, ...)', source: 'file', alwaysShow: true },
+            { label: 'From SMILES', description: 'type a SMILES string; coordinates are generated locally', source: 'smiles', alwaysShow: true }
+        ];
+        const quickPick = vscode.window.createQuickPick<ImportSourceItem>();
+        quickPick.title = complaint === '' ? 'Import structure' : 'Import structure — ' + complaint;
+        quickPick.placeholder = 'Copies to import (1-' + IMPORT_COPY_LIMIT + '), then pick a source';
+        quickPick.value = preset;
+        quickPick.ignoreFocusOut = true;
+        quickPick.matchOnDescription = false;
+        quickPick.items = items;
+        quickPick.activeItems = [items[0]];
+        const picked = await new Promise<{ item: ImportSourceItem; text: string } | undefined>((resolve) => {
+            let accepted = false;
+            quickPick.onDidAccept(() => {
+                accepted = true;
+                const chosen = quickPick.selectedItems.length > 0
+                    ? quickPick.selectedItems[0]
+                    : (quickPick.activeItems.length > 0 ? quickPick.activeItems[0] : items[0]);
+                resolve({ item: chosen, text: quickPick.value });
+                quickPick.hide();
+            });
+            quickPick.onDidHide(() => {
+                quickPick.dispose();
+                if (!accepted) {
+                    resolve(undefined);          // Esc / 被其它界面挤掉 = 取消
+                }
+            });
+            quickPick.show();
+        });
+        if (picked === undefined) {
+            return undefined;
+        }
+        const copies = parseCopyCount(picked.text);
+        if (copies !== null) {
+            return { source: picked.item.source, copies: copies };
+        }
+        preset = picked.text;                    // 保留原输入, 直接改数字即可
+        complaint = 'copies must be a whole number from 1 to ' + IMPORT_COPY_LIMIT;
+    }
+}
+
+/** 相邻两份之间的间隔参数: 与客户端摆放使用的缓冲/间隙保持一致。 */
+const IMPORT_PLACEMENT_BUFFER = 2.5;
+const IMPORT_PLACEMENT_GAP = 2.0;
+
+/**
+ * 把 N 份拷贝拼成一个整体。份与份之间用**同一个**间距 (
+ * 两份各自的包围球半径 + 缓冲 + 间隙), 以共同质心为中心均匀排开 —— 于是每两份
+ * 之间的最小距离都与"单独导入两次"所保证的一样, 不会重叠。
+ *
+ * 单份时原样返回 (不复制数组), 保证"只导入一份"的行为与以前逐位相同。
+ */
+function buildImportBlock(atoms: ImportAtomPayload[], bonds: ImportBondPayload[],
+                          copies: number): { atoms: ImportAtomPayload[]; bonds: ImportBondPayload[] } {
+    if (copies <= 1 || atoms.length === 0) {
+        return { atoms: atoms, bonds: bonds };
+    }
+    // 单份的包围球 (与客户端摆放判定用的是同一个量)
+    let cx = 0.0;
+    let cy = 0.0;
+    let cz = 0.0;
+    for (let i = 0; i < atoms.length; i++) {
+        cx += atoms[i].x;
+        cy += atoms[i].y;
+        cz += atoms[i].z;
+    }
+    cx /= atoms.length;
+    cy /= atoms.length;
+    cz /= atoms.length;
+    let radius = 0.0;
+    for (let i = 0; i < atoms.length; i++) {
+        const dx = atoms[i].x - cx;
+        const dy = atoms[i].y - cy;
+        const dz = atoms[i].z - cz;
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (d > radius) {
+            radius = d;
+        }
+    }
+    const stride = 2.0 * (radius + IMPORT_PLACEMENT_BUFFER) + IMPORT_PLACEMENT_GAP;
+    const outAtoms: ImportAtomPayload[] = [];
+    const outBonds: ImportBondPayload[] = [];
+    for (let c = 0; c < copies; c++) {
+        const shift = (c - (copies - 1) / 2.0) * stride;
+        const base = c * atoms.length;
+        for (let i = 0; i < atoms.length; i++) {
+            const a = atoms[i];
+            outAtoms.push({ element: a.element, x: a.x + shift, y: a.y, z: a.z, color: a.color });
+        }
+        for (let k = 0; k < bonds.length; k++) {
+            const b = bonds[k];
+            outBonds.push({ atom1: base + b.atom1, atom2: base + b.atom2, order: b.order });
+        }
+    }
+    return { atoms: outAtoms, bonds: outBonds };
+}
+
+/**
+ * 按份数拼好后**一次性**发出 (只发一条导入消息)。
+ *
+ * 位置计算因此只发生一次: 客户端对"整个块"做一次包围球避让摆放 (第 1 份的位置
+ * 由这次计算确定), 份与份之间则是上面那个等间距, 客户端还会一次成键、一次场景
+ * 重建, 撤销也只要一步 —— 逐份重算位置、逐份重建场景的开销全部省掉。
+ *
+ * 份数已在对话框里校验; 这里再按"新增原子总数"上限截断 (此时才知道结构有多大)
+ * 并告知用户, 免得一次导入把视图撑到无法交互。
+ */
+function postImportCopies(webview: vscode.Webview, fileName: string,
+                          atoms: ImportAtomPayload[], bonds: ImportBondPayload[],
+                          hasExplicitBonds: boolean, copies: number): void {
+    const affordable = Math.max(1, Math.floor(IMPORT_ATOM_LIMIT / Math.max(1, atoms.length)));
+    let count = copies;
+    if (count > affordable) {
+        count = affordable;
+        vscode.window.showWarningMessage('Import: ' + copies + ' copies of a ' + atoms.length +
+            '-atom structure would add ' + (copies * atoms.length) + ' atoms, so this import is limited to ' +
+            count + ' copies.');
+    }
+    const block = buildImportBlock(atoms, bonds, count);
+    webview.postMessage({
+        command: 'importResult',
+        cancelled: false,
+        fileName: count > 1 ? fileName + ' x ' + count : fileName,
+        atoms: block.atoms,
+        bonds: block.bonds,
+        hasExplicitBonds: hasExplicitBonds
+    });
 }
