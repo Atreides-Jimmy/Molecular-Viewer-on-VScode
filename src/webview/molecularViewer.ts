@@ -1299,6 +1299,10 @@ function rebuildScene(){
     highlightSelected();
     needsRender=true;
     if(diffMode)refreshDiff();
+    // 分子组成可能变了 (增删/替换原子、导入、换帧、去无序…), 左上角的
+    // 分子式/原子数/电子数面板在这里统一刷新 —— 所有改组成的操作收尾都走
+    // rebuildScene, 因此不会漏。
+    updateMolInfo();
 }
 function updateScenePositions(keepCenter){
     if(!keepCenter){
@@ -2410,7 +2414,7 @@ function doUndo(){
     MD.atoms=snap.atoms;MD.bonds=snap.bonds;
     MD.hasExplicitBonds=!!snap.hasExplicitBonds;
     if(CRY&&snap.baseAtoms){CRY.baseAtoms=snap.baseAtoms;CRY.baseBonds=snap.baseBonds}
-    if(CRY){rebuildCrystal()}rebuildScene();updateMolInfo();updateUndoBtn();
+    if(CRY){rebuildCrystal()}rebuildScene();updateUndoBtn();
     if(diffMode)resetSelection();
     if(currentMode==='rotateGroup'&&rotActive){
         if(snap.rotAngle!=null){
@@ -2557,7 +2561,6 @@ function importStructure(msg){
         }
     }
     rebuildScene();
-    updateMolInfo();
     // Zoom out if the combined structure no longer fits the current view.
     var maxD=0;
     MD.atoms.forEach(function(a){var dx=a.x-CX,dy=a.y-CY,dz=a.z-CZ,dd=Math.sqrt(dx*dx+dy*dy+dz*dz);if(dd>maxD)maxD=dd});
