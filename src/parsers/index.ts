@@ -8,22 +8,27 @@ import { parseOrcainp } from './orcaInpParser';
 import { parseOrcaOut, OrcaFrame } from './orcaOutParser';
 import { parsePdb } from './pdbParser';
 import { parseMopac } from './mopacParser';
-import { parseTcl, TclParseResult } from './tclParser';
 import { parseCif } from './cifParser';
 import { parseVasp } from './vaspParser';
 import { parseCube } from './cubeParser';
 import { parseVesta } from './vestaParser';
 import { parseXtbLog, isXtbLog, XtbLogResult } from './xtbParser';
+import { parseTcl, TclParseResult, resolveVmdScene, VmdResolvedScene, hasScalarChannel, resolveSelection, vdwRadius } from './vmdVisualization';
 
 export { parseGaussianLog, LogFrame, GaussianLogResult };
 export { RouteSection, RouteKeyword };
 export { parseOrcaOut, OrcaFrame };
-export { parseTcl, TclParseResult };
 export { parseCif };
 export { parseVasp };
 export { parseCube };
 export { parseVesta };
 export { parseXtbLog, isXtbLog, XtbLogResult };
+// Visualization files: the VMD scripts and the bare scalar-carrying coordinate
+// files they describe (see src/parsers/vmdVisualization.ts).
+export { parseTcl, TclParseResult };
+export { resolveVmdScene, VmdResolvedScene };
+export { hasScalarChannel };
+export { resolveSelection, vdwRadius };
 
 export interface LogFileResult {
     frames: LogFrame[] | OrcaFrame[];

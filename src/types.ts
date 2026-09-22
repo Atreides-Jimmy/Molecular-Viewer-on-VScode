@@ -5,6 +5,10 @@ export interface Atom {
     z: number;
     index: number;
     occupancy?: number;
+    // PDB columns 61-66. Not a B-factor: the visualization toolchain writes an
+    // arbitrary per-atom scalar (unit index, force error, …) into that column,
+    // so it is kept as a plain number the viewer can colour by.
+    beta?: number;
     baseIdx?: number;
     cellI?: number;
     cellJ?: number;
@@ -47,6 +51,47 @@ export interface AtomGroup {
     indices: number[];
 }
 
+/** One `mol addrep` block of a VMD visualization script. */
+export interface VmdRep {
+    /** `mol representation <style>` — CPK, Surf, Licorice, VDW, Lines, … */
+    style: string;
+    /** Numeric arguments of the representation (sphere scale, bond radius, …). */
+    styleArgs: number[];
+    /** `mol color <mode>` — Beta, ColorID, Name, Element, … */
+    colorMode: string;
+    /** Argument of the color mode (the ColorID index when colorMode is ColorID). */
+    colorArg?: number;
+    /** Raw `mol selection` expression. */
+    selection: string;
+    /** `mol material` — Opaque, Transparent, … */
+    material: string;
+    /** `mol scaleminmax <mol> <rep> <min> <max>` colour-scale range, if written. */
+    scaleMin?: number;
+    scaleMax?: number;
+}
+
+/** One `mol new` molecule of a VMD visualization script. */
+export interface VmdMolecule {
+    /** File the script loads (`mol new <file>`). */
+    sourceFile: string;
+    /** `mol new … type <t>`, empty when the script relies on the extension. */
+    sourceType: string;
+    /** Display label (source file name, plus the molecule ordinal). */
+    label: string;
+    reps: VmdRep[];
+}
+
+/** Everything a VMD visualization script says about how to draw the structure. */
+export interface VmdScene {
+    molecules: VmdMolecule[];
+    /** `color Display Background <name>` — a colour name or #rrggbb. */
+    background?: string;
+    /** `color scale method <name>` — RGB is the only one implemented. */
+    colorScaleMethod: string;
+    /** `color change rgb <id> <r> <g> <b>` overrides, keyed by colour id. */
+    colorOverrides?: { [id: number]: string };
+}
+
 export interface OptStep {
     step: number;
     energy?: number;
@@ -76,5 +121,7 @@ export interface MolecularData {
     charge?: number;
     multiplicity?: number;
     atomGroups?: AtomGroup[];
+    /** Present when the structure was loaded through a VMD visualization script. */
+    vmd?: VmdScene;
     crystal?: CrystalData;
 }
