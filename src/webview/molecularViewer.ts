@@ -1753,13 +1753,15 @@ function rebuildScene(){
         var r=atomRadius(a);
         var drawn=r>0.0005;
         var g=new THREE.SphereGeometry(drawn?r:0.001,segs[0],segs[1]);
+        // 标量配色是视图状态: 在这里按原子现算, a.color 保持元素颜色不变。
+        var col=betaColorOf(a)||a.color;
         var occ=a.occupancy!=null?a.occupancy:1;
         var m;
         if(occ<0.999){
-            var tex=getOccupancyTexture(a.color,occ);
+            var tex=getOccupancyTexture(col,occ);
             m=new THREE.MeshPhongMaterial({color:0xffffff,map:tex,shininess:80,specular:0x444444});
         }else{
-            m=new THREE.MeshPhongMaterial({color:new THREE.Color(a.color),shininess:80,specular:0x444444});
+            m=new THREE.MeshPhongMaterial({color:new THREE.Color(col),shininess:80,specular:0x444444});
         }
         var mesh=new THREE.Mesh(g,m);
         mesh.position.set(a.x-CX,a.y-CY,a.z-CZ);
@@ -2910,9 +2912,6 @@ function doUndo(){
     var snap=undoStack.pop();
     MD.atoms=snap.atoms;MD.bonds=snap.bonds;
     MD.hasExplicitBonds=!!snap.hasExplicitBonds;
-    // The restored atoms carry whatever colours the snapshot had; the Beta
-    // toggle's own backup no longer matches them.
-    resetBetaColoring();
     if(CRY&&snap.baseAtoms){CRY.baseAtoms=snap.baseAtoms;CRY.baseBonds=snap.baseBonds}
     if(CRY){rebuildCrystal()}rebuildScene();updateUndoBtn();
     if(diffMode)resetSelection();
@@ -3726,7 +3725,10 @@ function scalarColor(v,vmin,vmax){
     return '#'+hex(r)+hex(g)+hex(b);
 }
 var betaColorOn=false;
-var betaBackup=null;
+// 配色使用的范围: 按钮开启时取数据自身的范围。重建场景 (编辑、撤销、导入、
+// 换帧、换分子) 时按原子现算颜色, 所以它是纯视图状态 —— 没有需要备份/还原
+// 的东西, 组成怎么变都不会错位。
+var betaRangeUsed=null;
 function betaRange(){
     var lo=Infinity,hi=-Infinity,any=false;
     MD.atoms.forEach(function(a){
@@ -3741,32 +3743,25 @@ function updateBetaButton(){
     var ok=!VMD&&!CRY&&betaRange()!==null;
     btn.style.display=ok?'':'none';
 }
-function resetBetaColoring(){
-    betaColorOn=false;
-    betaBackup=null;
-    var btn=document.getElementById('beta-btn');
-    if(btn)btn.classList.remove('active');
-    updateBetaButton();
+// 开启配色时某个原子的标量颜色; 不带标量的原子返回 null (保留元素颜色)。
+// 在重建场景时读取, 而不是把颜色写进 a.color —— a.color 始终是元素颜色。
+function betaColorOf(a){
+    if(!betaColorOn||!betaRangeUsed)return null;
+    var b=a.beta;
+    return (typeof b==='number'&&isFinite(b))?scalarColor(b,betaRangeUsed.lo,betaRangeUsed.hi):null;
 }
 function applyBetaColoring(on){
-    var range=betaRange();
-    if(on&&!range)return;
     if(on){
-        if(!betaBackup)betaBackup=MD.atoms.map(function(a){return a.color});
-        MD.atoms.forEach(function(a){
-            var b=a.beta;
-            if(typeof b==='number'&&isFinite(b))a.color=scalarColor(b,range.lo,range.hi);
-        });
-    }else if(betaBackup){
-        MD.atoms.forEach(function(a,i){if(betaBackup[i])a.color=betaBackup[i]});
-        betaBackup=null;
+        var range=betaRange();
+        if(!range)return;
+        betaRangeUsed=range;
     }
-    betaColorOn=on;
+    betaColorOn=on&&!!betaRangeUsed;
     var btn=document.getElementById('beta-btn');
-    if(btn)btn.classList.toggle('active',on);
+    if(btn)btn.classList.toggle('active',betaColorOn);
     rebuildScene();
-    modeInfoEl.textContent=on
-        ?('Beta colouring: '+range.lo.toFixed(3)+' – '+range.hi.toFixed(3))
+    modeInfoEl.textContent=betaColorOn
+        ?('Beta colouring: '+betaRangeUsed.lo.toFixed(3)+' – '+betaRangeUsed.hi.toFixed(3))
         :(MODE_INFO[currentMode]||currentMode);
 }
 (function(){
@@ -3830,7 +3825,6 @@ function switchFrame(idx){
         VMD.activeSegments=[];
         setVmdNavEnabled(false);
     }
-    resetBetaColoring();
     undoStack.length=0;updateUndoBtn();
     if(diffMode)resetSelection();
     resetRotAxisState();
@@ -3863,7 +3857,6 @@ function switchMolecule(idx){
     if(diffMode){modeInfoEl.textContent='Molecule switching is not available in diff mode';return}
     if(CRY){modeInfoEl.textContent='Molecule switching is not available for crystal structures';return}
     stopMoveSession();
-    resetBetaColoring();
     vmdMolIdx=idx;
     var m=VMD.molecules[idx];
     MD.atoms=m.atoms;
