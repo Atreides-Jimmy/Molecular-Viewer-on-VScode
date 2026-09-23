@@ -1,9 +1,9 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { parseFile, parseLogFile, LogFrame, OrcaFrame, parseTcl, RouteSection } from '../parsers/index';
+import { parseFile, parseLogFile, LogFrame, OrcaFrame, RouteSection, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg } from '../parsers/index';
 import { ensureBonds } from '../parsers/bondDetector';
 import { smilesTo3dSafe, validateSmiles } from '../parsers/smilesTo3d';
-import { MolecularData, AtomGroup, OptStep, NormalMode } from '../types';
+import { MolecularData, AtomGroup, OptStep, NormalMode, VmdScene, VmdMolecule } from '../types';
 
 const ATOM_COLORS: { [key: string]: string } = {
     H: '#FFFFFF', He: '#D9FFFF', Li: '#CC80FF', Be: '#C2FF00', B: '#FFB5B5',
@@ -46,6 +46,245 @@ interface ImportBondPayload {
     order: number;
 }
 
+/**
+ * Payload of one molecule of a VMD visualization script: the structure the
+ * script loads plus every drawing property the script's representations imply.
+ * Everything a representation decides is resolved host-side (colours, sphere
+ * radii, bond radii, surface patches) so the webview only has to draw it.
+ */
+interface VmdAtomPayload {
+    element: string;
+    x: number;
+    y: number;
+    z: number;
+    color: string;
+    beta?: number;
+    occupancy?: number;
+    /** Sphere size as a multiplier on the viewer's own radius; 0 = not drawn. */
+    vmdScale?: number;
+    /** van der Waals radius in Å — the reference length a `Surf` probe adds to. */
+    vdw: number;
+}
+
+interface VmdBondPayload {
+    atom1: number;
+    atom2: number;
+    order: number;
+    /** Cylinder radius in Å from the script; undefined = the viewer's own. */
+    vmdR?: number;
+}
+
+/** One translucent surface patch (a `Surf` representation). */
+interface VmdSegmentPayload {
+    color: string;
+    indices: number[];
+    probe: number;
+    /** The egg this patch draws, when the structure sits next to an egg/unit file. */
+    egg?: { name: string; units: number[]; level?: string };
+}
+
+interface VmdRepPayload {
+    style: string;
+    colorMode: string;
+    colorArg?: number;
+    scaleMin?: number;
+    scaleMax?: number;
+    material: string;
+    selection: string;
+    /** Number of atoms this representation selects. */
+    atoms: number;
+}
+
+interface VmdMoleculePayload {
+    label: string;
+    /** Resolved absolute path of the structure file the script loads. */
+    sourceFile: string;
+    atoms: VmdAtomPayload[];
+    bonds: VmdBondPayload[];
+    segments: VmdSegmentPayload[];
+    reps: VmdRepPayload[];
+    warnings: string[];
+}
+
+interface VmdPayload {
+    molecules: VmdMoleculePayload[];
+    colorScaleMethod: string;
+    warnings: string[];
+}
+
+/** Everything one structure file contributes, whichever way it was reached. */
+interface LoadedStructure {
+    data: MolecularData;
+    frames: (LogFrame | OrcaFrame)[];
+    optSteps?: OptStep[];
+    normalModes?: NormalMode[];
+    routes?: RouteSection[];
+    logSource?: string;
+    error?: string;
+}
+
+const EMPTY_STRUCTURE: MolecularData = { atoms: [], bonds: [], title: 'Empty', hasExplicitBonds: false };
+
+/** Load and parse one structure file (any supported format). */
+async function loadStructureFile(uri: vscode.Uri): Promise<LoadedStructure> {
+    const content = await vscode.workspace.fs.readFile(uri);
+    const text = new TextDecoder().decode(content);
+    const fileName = uri.path.split('/').pop() || 'unknown.xyz';
+    const ext = fileName.toLowerCase().split('.').pop() || '';
+
+    if (ext === 'log' || ext === 'out') {
+        const logResult = parseLogFile(text, fileName);
+        if (logResult.frames.length === 0) {
+            return { data: { atoms: [], bonds: [], title: 'No structures found', hasExplicitBonds: false },
+                     frames: [], error: 'no structure found' };
+        }
+        const f = logResult.frames[0];
+        return {
+            data: ensureBonds({
+                atoms: f.atoms, bonds: f.bonds, title: f.title,
+                hasExplicitBonds: f.hasExplicitBonds, charge: f.charge, multiplicity: f.multiplicity
+            }),
+            frames: logResult.frames,
+            optSteps: logResult.optSteps,
+            normalModes: logResult.normalModes,
+            routes: logResult.routes,
+            logSource: logResult.source
+        };
+    }
+
+    const parsed = parseFile(text, fileName);
+    let data: MolecularData;
+    if (parsed.crystal) {
+        parsed.bonds = [];
+        parsed.crystal.baseBonds = [];
+        data = parsed;
+    } else {
+        data = ensureBonds(parsed);
+    }
+    data.filePath = uri.fsPath;
+    return { data: data, frames: [] };
+}
+
+/**
+ * Read the toolchain's egg metadata from the directory of a structure file: a
+ * `unitfile` (every unit's atoms) and an `eggFile*` (the eggs and the unit
+ * numbers they wrap). Either file is optional; anything unreadable or absent
+ * yields undefined, which just leaves the surface patches unlabelled.
+ */
+async function readEggMetadata(sourceUri: vscode.Uri | undefined): Promise<{ eggFile?: string; unitFile?: string } | undefined> {
+    if (!sourceUri) return undefined;
+    try {
+        const dir = vscode.Uri.file(path.dirname(sourceUri.fsPath));
+        const entries = await vscode.workspace.fs.readDirectory(dir);
+        let eggName: string | undefined;
+        let unitName: string | undefined;
+        for (const [name, type] of entries) {
+            if (type !== vscode.FileType.File) continue;
+            if (/^unitfile$/i.test(name)) unitName = name;
+            else if (/^eggfile/i.test(name) && eggName === undefined) eggName = name;
+        }
+        if (!eggName && !unitName) return undefined;
+        const readText = async (name: string): Promise<string | undefined> => {
+            try {
+                return new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dir, name)));
+            } catch {
+                return undefined;
+            }
+        };
+        const meta: { eggFile?: string; unitFile?: string } = {};
+        if (eggName) meta.eggFile = await readText(eggName);
+        if (unitName) meta.unitFile = await readText(unitName);
+        return meta;
+    } catch {
+        return undefined;
+    }
+}
+
+/**
+ * Resolve one molecule of a VMD script into a drawable payload. The source file
+ * path is relative to the script unless it is absolute, exactly as in VMD.
+ */
+function resolveVmdSource(scriptUri: vscode.Uri, sourceFile: string): vscode.Uri | undefined {
+    if (!sourceFile) return undefined;
+    if (path.isAbsolute(sourceFile)) return vscode.Uri.file(sourceFile);
+    return vscode.Uri.file(path.resolve(path.dirname(scriptUri.fsPath), sourceFile));
+}
+
+/** Build the webview payload for one already-loaded VMD molecule. */function buildVmdMoleculePayload(
+    molecule: VmdMolecule,
+    data: MolecularData,
+    scene: VmdScene,
+    colorOf: (element: string) => string,
+    eggMeta?: { eggFile?: string; unitFile?: string }
+): VmdMoleculePayload {
+    const resolved = resolveVmdScene(data.atoms, data.bonds, molecule, scene);
+
+    // A script that draws eggs usually sits next to the toolchain's egg/unit
+    // files; matching atom sets attaches each egg's name and unit numbers to
+    // the patch that draws it. Files that are missing or malformed simply
+    // leave the patches unlabelled.
+    let eggs: (VmdEgg | null)[] | null = null;
+    if (eggMeta && resolved.segments.length > 0) {
+        eggs = matchEggsToSegments(resolved.segments,
+            eggMeta.eggFile ? parseEggFile(eggMeta.eggFile) : null,
+            eggMeta.unitFile ? parseUnitFile(eggMeta.unitFile) : null);
+    }
+
+    const atoms: VmdAtomPayload[] = data.atoms.map(function (a, i) {
+        const item: VmdAtomPayload = {
+            element: a.element, x: a.x, y: a.y, z: a.z,
+            color: resolved.atomColors[i] || colorOf(a.element),
+            vdw: vdwRadius(a.element)
+        };
+        if (typeof a.beta === 'number') item.beta = a.beta;
+        if (typeof a.occupancy === 'number') item.occupancy = a.occupancy;
+        if (typeof resolved.atomScales[i] === 'number') item.vmdScale = resolved.atomScales[i] as number;
+        return item;
+    });
+
+    const bonds: VmdBondPayload[] = data.bonds.map(function (b, i) {
+        const item: VmdBondPayload = { atom1: b.atom1, atom2: b.atom2, order: b.order };
+        if (typeof resolved.bondRadii[i] === 'number') item.vmdR = resolved.bondRadii[i] as number;
+        return item;
+    });
+
+    const segments: VmdSegmentPayload[] = resolved.segments.map(function (s, i) {
+        const item: VmdSegmentPayload = { color: s.color, indices: s.indices.slice(), probe: s.probe };
+        const egg = eggs ? eggs[i] : null;
+        if (egg) {
+            item.egg = { name: egg.name, units: egg.units.slice() };
+            if (egg.level !== undefined) item.egg.level = egg.level;
+        }
+        return item;
+    });
+
+    const total = data.atoms.length;
+    const reps: VmdRepPayload[] = molecule.reps.map(function (rep) {
+        const selection = resolveSelection(rep.selection, data.atoms);
+        const item: VmdRepPayload = {
+            style: rep.style,
+            colorMode: rep.colorMode,
+            material: rep.material,
+            selection: rep.selection,
+            atoms: selection.indices === null ? total : selection.indices.length
+        };
+        if (typeof rep.colorArg === 'number') item.colorArg = rep.colorArg;
+        if (typeof rep.scaleMin === 'number') item.scaleMin = rep.scaleMin;
+        if (typeof rep.scaleMax === 'number') item.scaleMax = rep.scaleMax;
+        return item;
+    });
+
+    return {
+        label: molecule.label || molecule.sourceFile,
+        sourceFile: data.filePath || molecule.sourceFile,
+        atoms: atoms,
+        bonds: bonds,
+        segments: segments,
+        reps: reps,
+        warnings: resolved.warnings
+    };
+}
+
 export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvider<MolecularDocument> {
     constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -66,64 +305,30 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         let normalModes: NormalMode[] | undefined;
         let routes: RouteSection[] | undefined;
         let logSource: string | undefined;
+        let vmdPayload: VmdPayload | undefined;
+        let autoBeta = false;
 
         try {
         if (ext === 'tcl') {
+            // A script is a display recipe: every `mol new` it performs becomes
+            // one selectable molecule in the viewer, and the first one that
+            // loads is also the document's structure so Save As, Diff and the
+            // editing tools keep working on a real coordinate file.
             const tclResult = parseTcl(textContent);
-            let sourceUri: vscode.Uri | undefined;
-            if (tclResult.sourceFile) {
-                if (path.isAbsolute(tclResult.sourceFile)) {
-                    sourceUri = vscode.Uri.file(tclResult.sourceFile);
-                } else {
-                    const tclDir = path.dirname(uri.fsPath);
-                    const resolvedPath = path.resolve(tclDir, tclResult.sourceFile);
-                    sourceUri = vscode.Uri.file(resolvedPath);
-                }
+            const loaded = await this.loadTclScene(tclResult.scene, uri);
+            vmdPayload = loaded.payload && loaded.payload.molecules.length > 0 ? loaded.payload : undefined;
+            data = loaded.data;
+            frames = loaded.frames;
+            optSteps = loaded.optSteps;
+            normalModes = loaded.normalModes;
+            routes = loaded.routes;
+            logSource = loaded.logSource;
+            if (!vmdPayload) {
+                // Legacy path only: with a resolved scene the payload carries the
+                // colours, and it is the one that decides them.
+                atomGroups = tclResult.groups.length > 0 ? tclResult.groups : undefined;
+                data.atomGroups = atomGroups;
             }
-            if (sourceUri) {
-                try {
-                    const sourceContent = await vscode.workspace.fs.readFile(sourceUri);
-                    const sourceText = new TextDecoder().decode(sourceContent);
-                    const sourceFileName = sourceUri.path.split('/').pop() || 'unknown.xyz';
-                    const sourceExt = sourceFileName.toLowerCase().split('.').pop() || '';
-
-                    if (sourceExt === 'log' || sourceExt === 'out') {
-                        const logResult = parseLogFile(sourceText, sourceFileName);
-                        frames = logResult.frames;
-                        optSteps = logResult.optSteps;
-                        normalModes = logResult.normalModes;
-                        routes = logResult.routes;
-                        logSource = logResult.source;
-                        if (frames.length > 0) {
-                            data = ensureBonds({
-                                atoms: frames[0].atoms,
-                                bonds: frames[0].bonds,
-                                title: frames[0].title,
-                                hasExplicitBonds: frames[0].hasExplicitBonds,
-                                charge: frames[0].charge,
-                                multiplicity: frames[0].multiplicity
-                            });
-                        } else {
-                            data = { atoms: [], bonds: [], title: 'No structures found', hasExplicitBonds: false };
-                        }
-                    } else {
-                        data = parseFile(sourceText, sourceFileName);
-                        if (data.crystal) {
-                            data.bonds = [];
-                            data.crystal.baseBonds = [];
-                        } else {
-                            data = ensureBonds(data);
-                        }
-                    }
-                    data.filePath = sourceUri.fsPath;
-                } catch {
-                    data = { atoms: [], bonds: [], title: 'Failed to load source file: ' + tclResult.sourceFile, hasExplicitBonds: false };
-                }
-            } else {
-                data = { atoms: [], bonds: [], title: 'No source file specified in TCL', hasExplicitBonds: false };
-            }
-            atomGroups = tclResult.groups.length > 0 ? tclResult.groups : undefined;
-            data.atomGroups = atomGroups;
         } else if (ext === 'log' || ext === 'out') {
             const logResult = parseLogFile(textContent, fileName);
             frames = logResult.frames;
@@ -151,6 +356,12 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             } else {
                 data = ensureBonds(data);
             }
+            // Some visualizations ship as a bare PDB instead of a script: the
+            // per-atom scalar itself *is* the visualization, so it is painted
+            // straight away (the toolbar toggle turns it off again).
+            if (ext === 'pdb' || ext === 'ent') {
+                autoBeta = hasScalarChannel(textContent, data.atoms);
+            }
         }
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -164,7 +375,77 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             data.filePath = uri.fsPath;
         }
 
-        return new MolecularDocument(uri, data, frames, optSteps, normalModes, logSource, routes);
+        return new MolecularDocument(uri, data, frames, optSteps, normalModes, logSource, routes, vmdPayload, autoBeta);
+    }
+
+    /**
+     * Load every structure a VMD script refers to and resolve each one's
+     * representations into drawable properties. Molecules that cannot be loaded
+     * are skipped with a warning instead of failing the whole script, and the
+     * first one that does load becomes the document's structure.
+     */
+    private async loadTclScene(scene: VmdScene, scriptUri: vscode.Uri): Promise<{
+        payload: VmdPayload;
+        data: MolecularData;
+        frames: (LogFrame | OrcaFrame)[];
+        optSteps?: OptStep[];
+        normalModes?: NormalMode[];
+        routes?: RouteSection[];
+        logSource?: string;
+    }> {
+        const payload: VmdPayload = {
+            molecules: [],
+            colorScaleMethod: scene.colorScaleMethod || 'RGB',
+            warnings: []
+        };
+
+        let first: LoadedStructure | undefined;
+
+        for (let i = 0; i < scene.molecules.length; i++) {
+            const molecule = scene.molecules[i];
+            const sourceUri = resolveVmdSource(scriptUri, molecule.sourceFile);
+            if (!sourceUri) {
+                payload.warnings.push('mol new without a structure file was skipped');
+                continue;
+            }
+            let loaded: LoadedStructure;
+            try {
+                loaded = await loadStructureFile(sourceUri);
+            } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                payload.warnings.push('could not read ' + molecule.sourceFile + ': ' + msg);
+                continue;
+            }
+            if (loaded.error || loaded.data.atoms.length === 0) {
+                payload.warnings.push('no structure found in ' + molecule.sourceFile);
+                continue;
+            }
+            if (!first) first = loaded;
+            // 只有画 egg 的脚本才需要去找 eggFile/unitfile。
+            const wantsEggs = molecule.reps.some(function (r) { return /^surf/i.test(r.style); });
+            const eggMeta = wantsEggs ? await readEggMetadata(sourceUri) : undefined;
+            payload.molecules.push(buildVmdMoleculePayload(molecule, loaded.data, scene, function (element) {
+                return ATOM_COLORS[element] || '#FF1493';
+            }, eggMeta));
+        }
+
+        if (!first) {
+            const reference = scene.molecules.length > 0 ? scene.molecules[0].sourceFile : '';
+            const title = reference
+                ? 'Failed to load source file: ' + reference
+                : 'No source file specified in TCL';
+            return { payload: payload, data: { atoms: [], bonds: [], title: title, hasExplicitBonds: false }, frames: [] };
+        }
+
+        return {
+            payload: payload,
+            data: first.data,
+            frames: first.frames,
+            optSteps: first.optSteps,
+            normalModes: first.normalModes,
+            routes: first.routes,
+            logSource: first.logSource
+        };
     }
 
     async resolveCustomEditor(
@@ -176,7 +457,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             enableScripts: true,
         };
 
-        webviewPanel.webview.html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes);
+        webviewPanel.webview.html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes, document.vmdPayload, document.autoBeta);
 
         webviewPanel.webview.onDidReceiveMessage(async (message) => {
             switch (message.command) {
@@ -234,49 +515,33 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
 
                         let diffData: MolecularData;
                         let diffFrames: (LogFrame | OrcaFrame)[] = [];
+                        let diffVmdColors: string[] | null = null;
 
                         if (diffExt === 'tcl') {
                             const tclResult = parseTcl(diffText);
-                            let sourceUri: vscode.Uri | undefined;
-                            if (tclResult.sourceFile) {
-                                if (path.isAbsolute(tclResult.sourceFile)) {
-                                    sourceUri = vscode.Uri.file(tclResult.sourceFile);
-                                } else {
-                                    const tclDir = path.dirname(diffUri.fsPath);
-                                    sourceUri = vscode.Uri.file(path.resolve(tclDir, tclResult.sourceFile));
-                                }
-                            }
-                            if (sourceUri) {
-                                const srcContent = await vscode.workspace.fs.readFile(sourceUri);
-                                const srcText = new TextDecoder().decode(srcContent);
-                                const srcFileName = sourceUri.path.split('/').pop() || 'unknown.xyz';
-                                const srcExt = srcFileName.toLowerCase().split('.').pop() || '';
-                                if (srcExt === 'log' || srcExt === 'out') {
-                                    const logResult = parseLogFile(srcText, srcFileName);
-                                    diffFrames = logResult.frames;
-                                    if (diffFrames.length > 0) {
-                                        diffData = ensureBonds({
-                                            atoms: diffFrames[0].atoms, bonds: diffFrames[0].bonds,
-                                            title: diffFrames[0].title, hasExplicitBonds: diffFrames[0].hasExplicitBonds,
-                                            charge: diffFrames[0].charge, multiplicity: diffFrames[0].multiplicity
-                                        });
-                                    } else {
-                                        diffData = { atoms: [], bonds: [], title: 'No structures', hasExplicitBonds: false };
-                                    }
-                                } else {
-                                    diffData = parseFile(srcText, srcFileName);
-                                    if (diffData.crystal) {
-                                        diffData.bonds = [];
-                                        diffData.crystal.baseBonds = [];
-                                    } else {
-                                        diffData = ensureBonds(diffData);
-                                    }
-                                }
-                                diffData.filePath = sourceUri.fsPath;
+                            const loaded = await this.loadTclScene(tclResult.scene, diffUri);
+                            diffData = loaded.data;
+                            diffFrames = loaded.frames;
+                            if (loaded.payload.molecules.length > 0) {
+                                // The comparison side shows the molecules the
+                                // script draws, coloured the way the script
+                                // colours them.
+                                const molecule = loaded.payload.molecules[0];
+                                diffData = {
+                                    atoms: molecule.atoms.map(function (a, i) {
+                                        return { element: a.element, x: a.x, y: a.y, z: a.z, index: i, beta: a.beta, occupancy: a.occupancy };
+                                    }),
+                                    bonds: molecule.bonds.map(function (b) {
+                                        return { atom1: b.atom1, atom2: b.atom2, order: b.order };
+                                    }),
+                                    title: loaded.data.title,
+                                    hasExplicitBonds: loaded.data.hasExplicitBonds,
+                                    filePath: loaded.data.filePath
+                                };
+                                diffVmdColors = molecule.atoms.map(function (a) { return a.color; });
                             } else {
                                 diffData = { atoms: [], bonds: [], title: 'No source', hasExplicitBonds: false };
                             }
-                            diffData.atomGroups = tclResult.groups.length > 0 ? tclResult.groups : undefined;
                         } else if (diffExt === 'log' || diffExt === 'out') {
                             const logResult = parseLogFile(diffText, diffFileName);
                             diffFrames = logResult.frames;
@@ -321,6 +586,9 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                 atoms: sf.atoms, bonds: sf.bonds, title: sf.title,
                                 hasExplicitBonds: sf.hasExplicitBonds, charge: sf.charge, multiplicity: sf.multiplicity
                             });
+                            // Frames come from the loaded file, so the script's
+                            // own colour recipe no longer describes them.
+                            diffVmdColors = null;
                         }
 
                         const diffAtomColors: { [key: string]: string } = {
@@ -330,9 +598,9 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             Cu: '#C88033', Zn: '#7D80B0', Ag: '#C0C0C0', Au: '#FFD123', Si: '#F0C8A0',
                             B: '#FFB5B5', Li: '#CC80FF', Be: '#C2FF00', Al: '#BFA6A6'
                         };
-                        const diffAtoms = diffData.atoms.map(a => ({
+                        const diffAtoms = diffData.atoms.map((a, i) => ({
                             element: a.element, x: a.x, y: a.y, z: a.z,
-                            color: diffAtomColors[a.element] || '#FF1493'
+                            color: (diffVmdColors && diffVmdColors[i]) || diffAtomColors[a.element] || '#FF1493'
                         }));
                         if (diffData.atomGroups && diffData.atomGroups.length > 0) {
                             const override: { [key: number]: string } = {};
@@ -526,7 +794,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         });
     }
 
-    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[], logSource?: string, routes?: RouteSection[]): Promise<string> {
+    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[], logSource?: string, routes?: RouteSection[], vmdPayload?: VmdPayload, autoBeta: boolean = false): Promise<string> {
         const nonce = getNonce();
 
         const threeJsBytes = await vscode.workspace.fs.readFile(
@@ -541,6 +809,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             return {
                 element: a.element, x: a.x, y: a.y, z: a.z,
                 color: color,
+                beta: a.beta,
                 occupancy: a.occupancy,
                 baseIdx: a.baseIdx,
                 cellI: a.cellI, cellJ: a.cellJ, cellK: a.cellK
@@ -610,7 +879,9 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             keywords: r.keywords.map(k => ({ name: k.name, options: k.options }))
         })) : null;
 
-        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, routes: routesData });
+        const vmdData = vmdPayload && vmdPayload.molecules.length > 0 ? vmdPayload : null;
+
+        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, routes: routesData, vmd: vmdData, autoBeta: !!(autoBeta && !vmdData) });
 
         return `<!DOCTYPE html>
 <html lang="en">
@@ -645,6 +916,20 @@ body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;b
 #crystal-panel .bnd-row input{width:48px;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;padding:1px 3px;font-size:11px;text-align:center}
 #crystal-panel .bnd-btn{margin-top:6px;width:100%;background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff);border:none;border-radius:3px;padding:4px 6px;font-size:11px;cursor:pointer}
 #crystal-panel .bnd-btn:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
+#egg-panel{position:absolute;top:8px;right:8px;background:rgba(0,0,0,0.6);border:1px solid var(--vscode-panel-border,#444);border-radius:4px;padding:8px 10px;font-size:11px;color:var(--vscode-editor-foreground,#ccc);z-index:25;display:none;min-width:200px;max-width:calc(100% - 16px);max-height:calc(100% - 70px);overflow-y:auto}
+#egg-panel.show{display:block}
+#egg-panel .ep-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:5px;font-weight:600}
+#egg-panel .ep-head .ep-actions{display:flex;gap:4px;align-items:center}
+#egg-panel .ep-head button{background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#fff);border:1px solid var(--vscode-panel-border,#444);border-radius:3px;padding:1px 6px;font-size:10px;cursor:pointer}
+#egg-panel .ep-head button:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
+#egg-panel .ep-close{cursor:pointer;opacity:0.7;padding:0 2px}
+#egg-panel .ep-close:hover{opacity:1}
+#egg-panel .ep-row{display:flex;align-items:center;gap:6px;margin:3px 0;padding:3px 6px 3px 5px;cursor:pointer;white-space:nowrap;border-left:3px solid var(--vscode-descriptionForeground,#888);border-radius:2px}
+#egg-panel .ep-row:hover{background:rgba(255,255,255,0.06)}
+#egg-panel .ep-row input{margin:0;cursor:pointer}
+#egg-panel .ep-row.ep-hidden .ep-name,#egg-panel .ep-row.ep-hidden .ep-units{opacity:0.45;text-decoration:line-through}
+#egg-panel .ep-name{font-weight:600}
+#egg-panel .ep-units{color:var(--vscode-descriptionForeground,#999)}
 #select-panel{display:none;position:absolute;bottom:40px;left:8px;z-index:50;background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:4px;padding:8px;width:280px;max-width:calc(100% - 16px);box-shadow:0 2px 8px rgba(0,0,0,0.3)}
 #select-panel .sp-title{font-size:12px;font-weight:bold;margin-bottom:4px}
 #select-panel input[type=text]{width:100%;padding:6px 8px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:12px;box-sizing:border-box}
@@ -693,6 +978,10 @@ canvas{display:block}
 #frame-num{width:40px;padding:2px 4px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:11px;text-align:center}
 #frame-info{color:var(--vscode-statusBar-foreground,#fff);font-size:11px;padding:0 4px;white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis}
 #auto-play.playing{background:var(--vscode-button-background,#0e639c);border-color:var(--vscode-button-background,#0e639c)}
+#mol-nav{display:none;align-items:center;gap:2px;flex-shrink:0}
+#mol-nav.show{display:flex}
+#mol-label{color:var(--vscode-statusBar-foreground,#fff);font-size:11px;padding:0 4px;white-space:nowrap;max-width:180px;overflow:hidden;text-overflow:ellipsis}
+#beta-btn.active{background:var(--vscode-button-background,#0e639c);border-color:var(--vscode-button-background,#0e639c)}
 #diff-panel{display:none;position:absolute;bottom:40px;right:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.65);padding:8px 12px;border-radius:4px;z-index:25;max-width:40%;max-height:60%;overflow-y:auto;pointer-events:auto;line-height:1.5}
 #diff-panel.show{display:block}
 #diff-panel h4{font-size:12px;margin-bottom:4px;color:var(--vscode-textLink-foreground,#3794ff)}
@@ -775,6 +1064,8 @@ canvas{display:block}
 <button class="tbtn" data-mode="selectAtoms">Select Atoms</button>
 <button class="tbtn" data-mode="boxSelect">Box Select</button>
 <div class="tsep"></div>
+<button class="tbtn" id="beta-btn" style="display:none">Color by Beta</button>
+<button class="tbtn" id="egg-btn" style="display:none">Eggs</button>
 <button class="tbtn" id="diff-btn">Diff</button>
 <button class="tbtn" id="undo-btn" disabled>Undo</button>
 <button class="tbtn" id="save-btn">Save As</button>
@@ -787,9 +1078,15 @@ canvas{display:block}
 <button class="tbtn" id="next-frame">▶</button>
 <button class="tbtn" id="auto-play">⏵ Play</button>
 </div>
+<div class="tsep hidden" id="mol-sep"></div>
+<div id="mol-nav">
+<button class="tbtn" id="prev-mol">◀</button>
+<span id="mol-label">1/1</span>
+<button class="tbtn" id="next-mol">▶</button>
+</div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="box-select-rect"></div>
@@ -803,6 +1100,27 @@ try{
 var MD=${jsonData};
 var AN={H:1,He:2,Li:3,Be:4,B:5,C:6,N:7,O:8,F:9,Ne:10,Na:11,Mg:12,Al:13,Si:14,P:15,S:16,Cl:17,Ar:18,K:19,Ca:20,Sc:21,Ti:22,V:23,Cr:24,Mn:25,Fe:26,Co:27,Ni:28,Cu:29,Zn:30,Ga:31,Ge:32,As:33,Se:34,Br:35,Kr:36,Rb:37,Sr:38,Y:39,Zr:40,Nb:41,Mo:42,Tc:43,Ru:44,Rh:45,Pd:46,Ag:47,Cd:48,In:49,Sn:50,Sb:51,Te:52,I:53,Xe:54,Cs:55,Ba:56,La:57,Ce:58,Pr:59,Nd:60,Pm:61,Sm:62,Eu:63,Gd:64,Tb:65,Dy:66,Ho:67,Er:68,Tm:69,Yb:70,Lu:71,Hf:72,Ta:73,W:74,Re:75,Os:76,Ir:77,Pt:78,Au:79,Hg:80,Tl:81,Pb:82,Bi:83,Po:84,At:85,Rn:86};
 var CRY=MD.crystal||null;
+// ===== VMD visualization script =====
+// Present when the document is a .tcl script: every molecule the script
+// creates, with the drawing properties its representations resolve to. The
+// script's first molecule becomes the structure on screen (so editing, Save As
+// and Diff operate on a real coordinate file); the toolbar's molecule selector
+// switches between them.
+var VMD=MD.vmd||null;
+var vmdMolIdx=0;
+var vmdSurfaceGroup=null;
+var vmdSurfaceMeshes=[];
+// Which Surf patches the egg panel has hidden, keyed by the patch's segment
+// index (the patch order of the script). Declared here, above the first
+// rebuildScene: a var further down would still be undefined there.
+var vmdHiddenSegments={};
+if(VMD){
+    VMD.activeSegments=(VMD.molecules[0]&&VMD.molecules[0].segments)||[];
+    MD.atoms=VMD.molecules[0].atoms;
+    MD.bonds=VMD.molecules[0].bonds;
+    MD.atoms.forEach(function(a,i){a.index=i});
+    MD.bonds.forEach(function(b,i){b.index=i});
+}
 var boundary={aMin:0,aMax:1,bMin:0,bMax:1,cMin:0,cMax:1};
 var occTextureCache={};
 var CRY_INV=null;
@@ -855,6 +1173,17 @@ function updateMolInfo(){
         if(CRY.spaceGroup)html+='<br>SG: '+CRY.spaceGroup;
         html+='<br>Supercell: '+sa.toFixed(2)+'×'+sb.toFixed(2)+'×'+sc.toFixed(2);
     }
+    if(VMD&&VMD.molecules[vmdMolIdx]){
+        var vm=VMD.molecules[vmdMolIdx];
+        var styles={};
+        vm.reps.forEach(function(r){styles[r.style]=(styles[r.style]||0)+1});
+        var styleText=Object.keys(styles).map(function(k){return k+'×'+styles[k]}).join(', ');
+        html+='<br>VMD script: '+vm.reps.length+' rep'+(vm.reps.length===1?'':'s')+(styleText?' ('+styleText+')':'');
+        html+='<br>Colour: '+VMD.colorScaleMethod;
+        if(vm.segments.length)html+='<br>Surfaces: '+vm.segments.length;
+        var warns=(VMD.warnings||[]).concat(vm.warnings||[]);
+        if(warns.length)html+='<br><span style="color:#e8a33d">⚠ '+warns.length+' script warning'+(warns.length===1?'':'s')+'</span>';
+    }
     infoEl.innerHTML=html;
 }
 updateMolInfo();
@@ -879,6 +1208,9 @@ if(ch<1)ch=window.innerHeight-60;
 if(cw<1)cw=window.innerWidth;
 
 var scene=new THREE.Scene();
+// The viewer keeps its own background: a script's "color Display Background"
+// is a rendering setting of the reference renderer, and a white background here
+// would clash with the editor theme and wash out white atoms.
 scene.background=new THREE.Color(0x1e1e1e);
 var camera=new THREE.PerspectiveCamera(60,cw/ch,0.1,1000);
 var renderer=new THREE.WebGLRenderer({antialias:true});
@@ -893,6 +1225,12 @@ var dl2=new THREE.DirectionalLight(0xffffff,0.4);dl2.position.set(-5,-3,-5);scen
 
 var pivotGroup=new THREE.Group();scene.add(pivotGroup);
 var moleculeGroup=new THREE.Group();pivotGroup.add(moleculeGroup);
+// Surface patches of a VMD script live *inside* the molecule group, so they
+// inherit every view transform the atoms get (rotation, panning) instead of
+// standing still while the structure turns. rebuildScene keeps this group
+// across its clear and rebuilds the meshes inside it.
+vmdSurfaceGroup=new THREE.Group();
+moleculeGroup.add(vmdSurfaceGroup);
 
 var CX=0,CY=0,CZ=0;
 MD.atoms.forEach(function(a){CX+=a.x;CY+=a.y;CZ+=a.z});
@@ -900,6 +1238,13 @@ CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length;
 
 var CR={H:0.31,He:0.28,Li:1.28,Be:0.96,B:0.84,C:0.76,N:0.71,O:0.66,F:0.57,Na:1.66,Mg:1.41,Al:1.21,Si:1.11,P:1.07,S:1.05,Cl:1.02,K:2.03,Ca:1.76,Fe:1.32,Cu:1.32,Zn:1.22,Br:1.20,I:1.39};
 function getR(el){return(CR[el]||1.50)*0.5}
+// Sphere radius of one atom. A VMD script scales the viewer's own radius (so a
+// structure always keeps its ball-and-stick look, and 0 means "not drawn");
+// without a script the plain default applies.
+function atomRadius(a){
+    var r=getR(a.element);
+    return typeof a.vmdScale==='number'?r*a.vmdScale:r;
+}
 
 function getOccupancyTexture(color,occupancy){
     var key=color+'_'+occupancy.toFixed(3);
@@ -1265,9 +1610,343 @@ function sphereSegs(n){
     if(n<=1000)return [20,16];
     return [12,10];
 }
+
+// ===== VMD Surf patches =====
+// A "mol representation Surf <probe> <isovalue>" patch is the isosurface of
+// f(p) = min_i(|p - c_i| - (R_vdw,i + probe)) over the atoms that
+// representation selects, i.e. the solvent-accessible surface of that group of
+// atoms. It is extracted here as a real mesh by marching tetrahedra (each grid
+// cube is split into six tetrahedra, which needs no ambiguous-case table), and
+// drawn translucent: a script stacks many patches, and opaque ones would hide
+// everything but the outermost.
+var VMD_SURF_CELL=0.45;
+var VMD_SURF_MAX_DIV=64;
+var VMD_SURF_OPACITY=0.38;
+// The six tetrahedra of a cube, all sharing the 0-7 diagonal.
+var VMD_TETRA=[[0,1,3,7],[0,3,2,7],[0,2,6,7],[0,6,4,7],[0,4,5,7],[0,5,1,7]];
+var VMD_CORNER_X=[0,1,0,1,0,1,0,1];
+var VMD_CORNER_Y=[0,0,1,1,0,0,1,1];
+var VMD_CORNER_Z=[0,0,0,0,1,1,1,1];
+var vmdSurfaceSignature='';
+
+var VMD_TET_IDX=new Int32Array(4);
+var VMD_TET_IN=new Int32Array(4);
+var VMD_TET_OUT=new Int32Array(4);
+// Scratch state, so that extracting a patch allocates nothing per tetrahedron.
+function vmdEmitTet(pos,px,py,pz,v,a,b,c,d){
+    var t,i,ins=0,out=0;
+    VMD_TET_IDX[0]=a;VMD_TET_IDX[1]=b;VMD_TET_IDX[2]=c;VMD_TET_IDX[3]=d;
+    for(i=0;i<4;i++){t=VMD_TET_IDX[i];if(v[t]<0)VMD_TET_IN[ins++]=t;else VMD_TET_OUT[out++]=t}
+    if(ins===0||ins===4)return;
+    var p,q,r;
+    if(ins===1){
+        var i0=VMD_TET_IN[0];
+        p=VMD_TET_OUT[0];q=VMD_TET_OUT[1];r=VMD_TET_OUT[2];
+        var t0=v[i0]/(v[i0]-v[p]),t1=v[i0]/(v[i0]-v[q]),t2=v[i0]/(v[i0]-v[r]);
+        pos.push(px[i0]+(px[p]-px[i0])*t0,py[i0]+(py[p]-py[i0])*t0,pz[i0]+(pz[p]-pz[i0])*t0,
+                 px[i0]+(px[q]-px[i0])*t1,py[i0]+(py[q]-py[i0])*t1,pz[i0]+(pz[q]-pz[i0])*t1,
+                 px[i0]+(px[r]-px[i0])*t2,py[i0]+(py[r]-py[i0])*t2,pz[i0]+(pz[r]-pz[i0])*t2);
+    }else if(ins===3){
+        p=VMD_TET_IN[0];q=VMD_TET_IN[1];r=VMD_TET_IN[2];
+        var o0=VMD_TET_OUT[0];
+        var u0=v[p]/(v[p]-v[o0]),u1=v[q]/(v[q]-v[o0]),u2=v[r]/(v[r]-v[o0]);
+        pos.push(px[p]+(px[o0]-px[p])*u0,py[p]+(py[o0]-py[p])*u0,pz[p]+(pz[o0]-pz[p])*u0,
+                 px[q]+(px[o0]-px[q])*u1,py[q]+(py[o0]-py[q])*u1,pz[q]+(pz[o0]-pz[q])*u1,
+                 px[r]+(px[o0]-px[r])*u2,py[r]+(py[o0]-py[r])*u2,pz[r]+(pz[o0]-pz[r])*u2);
+    }else{
+        var i1=VMD_TET_IN[0],i2=VMD_TET_IN[1],o1=VMD_TET_OUT[0],o2=VMD_TET_OUT[1];
+        var c0=v[i1]/(v[i1]-v[o1]),c1=v[i1]/(v[i1]-v[o2]);
+        var c2=v[i2]/(v[i2]-v[o2]),c3=v[i2]/(v[i2]-v[o1]);
+        var ax=px[i1]+(px[o1]-px[i1])*c0,ay=py[i1]+(py[o1]-py[i1])*c0,az=pz[i1]+(pz[o1]-pz[i1])*c0;
+        var bx=px[i1]+(px[o2]-px[i1])*c1,by=py[i1]+(py[o2]-py[i1])*c1,bz=pz[i1]+(pz[o2]-pz[i1])*c1;
+        var gx=px[i2]+(px[o2]-px[i2])*c2,gy=py[i2]+(py[o2]-py[i2])*c2,gz=pz[i2]+(pz[o2]-pz[i2])*c2;
+        var hx=px[i2]+(px[o1]-px[i2])*c3,hy=py[i2]+(py[o1]-py[i2])*c3,hz=pz[i2]+(pz[o1]-pz[i2])*c3;
+        pos.push(ax,ay,az,bx,by,bz,gx,gy,gz);
+        pos.push(ax,ay,az,gx,gy,gz,hx,hy,hz);
+    }
+}
+
+function buildVmdSurfaceGeometry(indices,probe){
+    var i,k,a;
+    var cx=[],cy=[],cz=[],cr=[];
+    var minx=Infinity,miny=Infinity,minz=Infinity,maxx=-Infinity,maxy=-Infinity,maxz=-Infinity;
+    for(i=0;i<indices.length;i++){
+        a=MD.atoms[indices[i]];
+        if(!a)continue;
+        var r=(typeof a.vdw==='number'?a.vdw:1.5)+probe;
+        if(!(r>0))continue;
+        cx.push(a.x);cy.push(a.y);cz.push(a.z);cr.push(r);
+        if(a.x-r<minx)minx=a.x-r;
+        if(a.x+r>maxx)maxx=a.x+r;
+        if(a.y-r<miny)miny=a.y-r;
+        if(a.y+r>maxy)maxy=a.y+r;
+        if(a.z-r<minz)minz=a.z-r;
+        if(a.z+r>maxz)maxz=a.z+r;
+    }
+    var count=cx.length;
+    if(count===0)return null;
+    var spanX=maxx-minx,spanY=maxy-miny,spanZ=maxz-minz;
+    var span=Math.max(spanX,spanY,spanZ);
+    if(!(span>0))return null;
+    var cell=VMD_SURF_CELL;
+    var div=Math.ceil(span/cell);
+    if(div>VMD_SURF_MAX_DIV){div=VMD_SURF_MAX_DIV;cell=span/div}
+    var nx=Math.max(2,Math.ceil(spanX/cell)+1);
+    var ny=Math.max(2,Math.ceil(spanY/cell)+1);
+    var nz=Math.max(2,Math.ceil(spanZ/cell)+1);
+    var field=new Float32Array(nx*ny*nz);
+    for(var kz=0;kz<nz;kz++){
+        var z=minz+kz*cell;
+        for(var ky=0;ky<ny;ky++){
+            var y=miny+ky*cell;
+            var row=(kz*ny+ky)*nx;
+            for(var kx=0;kx<nx;kx++){
+                var x=minx+kx*cell;
+                var best=Infinity;
+                for(k=0;k<count;k++){
+                    var dx=x-cx[k],dy=y-cy[k],dz=z-cz[k];
+                    var d=Math.sqrt(dx*dx+dy*dy+dz*dz)-cr[k];
+                    if(d<best)best=d;
+                }
+                // A sample of exactly zero would be classified as "outside", and
+                // a crossing towards it would land exactly on the grid corner:
+                // every crossing of that tetrahedron would collapse onto the
+                // same point and produce zero-area triangles. Nudging it keeps
+                // every crossing strictly inside its edge — the surface moves by
+                // far less than the grid spacing, and the mesh stays closed.
+                if(best===0)best=1e-9;
+                field[row+kx]=best;
+            }
+        }
+    }
+    var pos=[];
+    var v=new Array(8),px=new Array(8),py=new Array(8),pz=new Array(8);
+    // The field changes by at most the cell diagonal across a cell, so a cell
+    // whose smallest corner value exceeds that cannot hold any part of the
+    // surface and is skipped.
+    var cellDiag=cell*1.7320508;
+    for(kz=0;kz<nz-1;kz++){
+        for(ky=0;ky<ny-1;ky++){
+            for(kx=0;kx<nx-1;kx++){
+                var base=(kz*ny+ky)*nx+kx;
+                var vx0=minx+kx*cell,vy0=miny+ky*cell,vz0=minz+kz*cell;
+                var nearest=Infinity;
+                for(k=0;k<8;k++){
+                    px[k]=vx0+VMD_CORNER_X[k]*cell;
+                    py[k]=vy0+VMD_CORNER_Y[k]*cell;
+                    pz[k]=vz0+VMD_CORNER_Z[k]*cell;
+                    var gx=kx+VMD_CORNER_X[k],gy=ky+VMD_CORNER_Y[k],gz=kz+VMD_CORNER_Z[k];
+                    v[k]=field[(gz*ny+gy)*nx+gx];
+                    if(v[k]<nearest)nearest=v[k];
+                }
+                if(nearest>cellDiag)continue;
+                for(k=0;k<6;k++){
+                    var q=VMD_TETRA[k];
+                    vmdEmitTet(pos,px,py,pz,v,q[0],q[1],q[2],q[3]);
+                }
+            }
+        }
+    }
+    if(pos.length===0)return null;
+    var geo=new THREE.BufferGeometry();
+    geo.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+    geo.computeVertexNormals();
+    return geo;
+}
+
+// Rebuild the surface patches so they match the current geometry. Cheap when
+// nothing moved (the atom coordinates the patches are built from are compared
+// with the ones they were built from).
+function clearVmdSurfaceMeshes(){
+    for(var i=vmdSurfaceMeshes.length-1;i>=0;i--){
+        disposeMesh(vmdSurfaceMeshes[i]);
+        if(vmdSurfaceGroup)vmdSurfaceGroup.remove(vmdSurfaceMeshes[i]);
+    }
+    vmdSurfaceMeshes.length=0;
+}
+function refreshVmdSurfaces(){
+    if(!vmdSurfaceGroup)return;
+    var segs=(VMD&&VMD.activeSegments)||[];
+    var sig='';
+    for(var s=0;s<segs.length;s++){
+        sig+=segs[s].probe+';';
+        var idx=segs[s].indices;
+        for(var k=0;k<idx.length;k++){
+            var a=MD.atoms[idx[k]];
+            if(!a)continue;
+            sig+=a.x.toFixed(3)+','+a.y.toFixed(3)+','+a.z.toFixed(3)+';';
+        }
+    }
+    sig+='|'+CX.toFixed(3)+','+CY.toFixed(3)+','+CZ.toFixed(3);
+    if(sig===vmdSurfaceSignature&&vmdSurfaceMeshes.length>0){
+        vmdSurfaceGroup.visible=true;
+        return;
+    }
+    vmdSurfaceSignature=sig;
+    clearVmdSurfaceMeshes();
+    for(s=0;s<segs.length;s++){
+        var geo=null;
+        try{geo=buildVmdSurfaceGeometry(segs[s].indices,segs[s].probe)}catch(e){geo=null}
+        if(!geo)continue;
+        geo.translate(-CX,-CY,-CZ);
+        var mat=new THREE.MeshPhongMaterial({color:new THREE.Color(segs[s].color),transparent:true,opacity:VMD_SURF_OPACITY,depthWrite:false,side:THREE.DoubleSide,shininess:30,specular:0x222222});
+        var mesh=new THREE.Mesh(geo,mat);
+        mesh.renderOrder=4;
+        mesh.userData.vmdSurface=true;
+        mesh.userData.segmentIndex=s;
+        vmdSurfaceGroup.add(mesh);
+        vmdSurfaceMeshes.push(mesh);
+    }
+    vmdSurfaceGroup.visible=vmdSurfaceMeshes.length>0;
+    // The egg panel mirrors the patches: rebuild its rows for the new segment
+    // list, then put the panel's shown/hidden choices on the fresh meshes.
+    rebuildEggPanel();
+    applyVmdSegmentVisibility();
+    needsRender=true;
+}
+
+// Patches are hidden while a preview moves the atoms (a drag or a slider),
+// because rebuilding them on every preview frame would not stay interactive;
+// they are brought back by the next refreshVmdSurfaces() at the commit.
+function hideVmdSurfaces(){
+    if(vmdSurfaceMeshes.length>0&&vmdSurfaceGroup)vmdSurfaceGroup.visible=false;
+}
+
+// ===== Egg list =====
+// The toolchain writes an eggFile next to the structure ("U12F1 : 1,10-15" =
+// the egg named U12F1 wraps units 1 and 10..15) plus a unitfile with every
+// unit's atoms; the extension matches each Surf patch to its egg by atom set
+// and sends the names along with the payload. The panel lists the eggs and
+// toggles the patches; all of them are shown initially.
+function escapeHtml(s){
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+// "1, 10-15" style: compress consecutive unit numbers into ranges.
+function formatUnitList(units){
+    var u=units.slice().sort(function(a,b){return a-b});
+    var parts=[],i=0;
+    while(i<u.length){
+        var j=i;
+        while(j+1<u.length&&u[j+1]===u[j]+1)j++;
+        if(j-i>=2)parts.push(u[i]+'\u2013'+u[j]);        else{for(var k=i;k<=j;k++)parts.push(String(u[k]))}
+        i=j+1;
+    }
+    return parts.join(', ');
+}
+function eggSegments(){
+    var list=[];
+    var segs=(VMD&&VMD.activeSegments)||[];
+    for(var i=0;i<segs.length;i++){if(segs[i]&&segs[i].egg)list.push({idx:i,seg:segs[i]})}
+    return list;
+}
+function eggShownCount(list){
+    var n=0;
+    for(var i=0;i<list.length;i++){if(!vmdHiddenSegments[list[i].idx])n++}
+    return n;
+}
+function eggAllHidden(list){
+    return list.length>0&&eggShownCount(list)===0;
+}
+// Apply the panel's choices to the built patches. Called after a rebuild (the
+// meshes are new) and on every toggle.
+function applyVmdSegmentVisibility(){
+    for(var i=0;i<vmdSurfaceMeshes.length;i++){
+        var m=vmdSurfaceMeshes[i];
+        if(m&&m.userData&&typeof m.userData.segmentIndex==='number')m.visible=!vmdHiddenSegments[m.userData.segmentIndex];
+    }
+    needsRender=true;
+}
+function updateEggButton(){
+    var btn=document.getElementById('egg-btn');
+    if(!btn)return;
+    wireEggPanelButton();
+    btn.style.display=eggSegments().length>0?'':'none';
+}
+function updateEggPanelState(list){
+    var panel=document.getElementById('egg-panel');
+    if(!panel)return;
+    var rows=panel.querySelectorAll('.ep-row');
+    for(var i=0;i<rows.length;i++){
+        var idx=rows[i].getAttribute('data-seg');
+        var hidden=!!vmdHiddenSegments[idx];
+        rows[i].classList.toggle('ep-hidden',hidden);
+        var cb=rows[i].querySelector('input[type=checkbox]');
+        if(cb)cb.checked=!hidden;
+    }
+    var head=document.getElementById('egg-count');
+    if(head)head.textContent=eggShownCount(list)+'/'+list.length+' shown';
+    var toggleAll=document.getElementById('egg-toggle-all');
+    if(toggleAll)toggleAll.textContent=eggAllHidden(list)?'Show all':'Hide all';
+}
+function rebuildEggPanel(){
+    var panel=document.getElementById('egg-panel');
+    var btn=document.getElementById('egg-btn');
+    if(!panel||!btn)return;
+    var list=eggSegments();
+    updateEggButton();
+    if(list.length===0){
+        // The current molecule draws no eggs: no panel, choices forgotten.
+        panel.classList.remove('show');
+        vmdHiddenSegments={};
+        return;
+    }
+    var html='<div class="ep-head"><span>Eggs <span id="egg-count">'+eggShownCount(list)+'/'+list.length+' shown</span></span>'+
+             '<span class="ep-actions"><button id="egg-toggle-all">'+(eggAllHidden(list)?'Show all':'Hide all')+'</button><span id="egg-close" class="ep-close" title="Hide list">\u00d7</span></span></div>';
+    for(var i=0;i<list.length;i++){
+        var e=list[i].seg.egg;
+        var hidden=!!vmdHiddenSegments[list[i].idx];
+        html+='<label class="ep-row'+(hidden?' ep-hidden':'')+'" data-seg="'+list[i].idx+'" title="'+escapeHtml(e.name)+'" style="border-left-color:'+list[i].seg.color+'">'+
+              '<input type="checkbox" data-seg="'+list[i].idx+'"'+(hidden?'':' checked')+'>'+
+              '<span class="ep-name">'+escapeHtml(e.name)+'</span>'+
+              '<span class="ep-units">units '+formatUnitList(e.units)+'</span></label>';
+    }
+    panel.innerHTML=html;
+    panel.classList.add('show');
+    var boxes=panel.querySelectorAll('input[type=checkbox]');
+    for(var b=0;b<boxes.length;b++){
+        boxes[b].addEventListener('change',function(){
+            var idx=this.getAttribute('data-seg');
+            vmdHiddenSegments[idx]=!this.checked;
+            applyVmdSegmentVisibility();
+            updateEggPanelState(list);
+        });
+    }
+    var toggleAll=document.getElementById('egg-toggle-all');
+    if(toggleAll){
+        // 标签在点击处理器里也直接刷新一次, 不只依赖后面的对账函数。
+        toggleAll.addEventListener('click',function(){
+            // 一键全部显示/全部隐藏: 有 egg 显示着就全部隐藏, 全隐藏时全部显示。
+            var hide=!eggAllHidden(list);
+            for(var i=0;i<list.length;i++)vmdHiddenSegments[list[i].idx]=hide;
+            applyVmdSegmentVisibility();
+            this.textContent=hide?'Show all':'Hide all';
+            updateEggPanelState(list);
+        });
+    }
+    var close=document.getElementById('egg-close');
+    // 关闭只隐藏面板; 工具栏的 Eggs 按钮随时可以再打开。
+    if(close)close.addEventListener('click',function(){panel.classList.remove('show')});
+}
+var eggBtnWired=false;
+function wireEggPanelButton(){
+    if(eggBtnWired)return;
+    var btn=document.getElementById('egg-btn');
+    if(!btn)return;
+    eggBtnWired=true;
+    // 工具栏按钮永远"打开"面板 (幂等): 关闭只由面板内的 × 负责, 这样任何
+    // 时候都有地方可以再打开。重复点击只是刷新面板内容。
+    btn.addEventListener('click',function(){rebuildEggPanel()});
+}
+
 function rebuildScene(){
+    // The surface group rides inside the molecule group (so that it keeps
+    // following the view transform); lift it out before the clear, drop its
+    // meshes here, and put it back — refreshVmdSurfaces rebuilds them below.
+    if(vmdSurfaceGroup&&vmdSurfaceGroup.parent===moleculeGroup)moleculeGroup.remove(vmdSurfaceGroup);
+    clearVmdSurfaceMeshes();
     var oldChildren=moleculeGroup.children.slice();
     oldChildren.forEach(function(ch){disposeMesh(ch);moleculeGroup.remove(ch)});
+    if(vmdSurfaceGroup)moleculeGroup.add(vmdSurfaceGroup);
     atomMeshes.length=0;
     bondMeshes.length=0;
     cellWireframe=null;
@@ -1278,19 +1957,23 @@ function rebuildScene(){
     var segs=sphereSegs();
     MD.atoms.forEach(function(a,i){
         a.index=i;
-        var r=getR(a.element);
-        var g=new THREE.SphereGeometry(r,segs[0],segs[1]);
+        var r=atomRadius(a);
+        var drawn=r>0.0005;
+        var g=new THREE.SphereGeometry(drawn?r:0.001,segs[0],segs[1]);
+        // 标量配色是视图状态: 在这里按原子现算, a.color 保持元素颜色不变。
+        var col=betaColorOf(a)||a.color;
         var occ=a.occupancy!=null?a.occupancy:1;
         var m;
         if(occ<0.999){
-            var tex=getOccupancyTexture(a.color,occ);
+            var tex=getOccupancyTexture(col,occ);
             m=new THREE.MeshPhongMaterial({color:0xffffff,map:tex,shininess:80,specular:0x444444});
         }else{
-            m=new THREE.MeshPhongMaterial({color:new THREE.Color(a.color),shininess:80,specular:0x444444});
+            m=new THREE.MeshPhongMaterial({color:new THREE.Color(col),shininess:80,specular:0x444444});
         }
         var mesh=new THREE.Mesh(g,m);
         mesh.position.set(a.x-CX,a.y-CY,a.z-CZ);
         mesh.userData={element:a.element,index:i};
+        mesh.visible=drawn;
         moleculeGroup.add(mesh);
         atomMeshes.push(mesh);
     });
@@ -1303,6 +1986,8 @@ function rebuildScene(){
     // 分子式/原子数/电子数面板在这里统一刷新 —— 所有改组成的操作收尾都走
     // rebuildScene, 因此不会漏。
     updateMolInfo();
+    // 脚本的表面片 (Surf) 也要跟着新的几何重建; 中心刚算好, 放在最后。
+    refreshVmdSurfaces();
 }
 function updateScenePositions(keepCenter){
     if(!keepCenter){
@@ -1316,6 +2001,7 @@ function updateScenePositions(keepCenter){
     for(var bi=0;bi<MD.bonds.length;bi++){currentBondIdx=bi;createBond(MD.bonds[bi])}
     if(CRY)buildCellWireframe();
     highlightSelected();
+    hideVmdSurfaces();
     needsRender=true;
 }
 
@@ -1324,6 +2010,7 @@ function updateAtomMeshPositions(){
     // sphere positions + selection highlights only (no bond mesh rebuild).
     atomMeshes.forEach(function(m,i){var a=MD.atoms[i];if(a)m.position.set(a.x-CX,a.y-CY,a.z-CZ)});
     highlightSelected();
+    hideVmdSurfaces();
 }
 
 // 网格位置都是"相对旋转中心"存放的 (a - C), 所以中心一变, 所有网格只需整体
@@ -1337,6 +2024,8 @@ function shiftAllMeshesForCenter(dx,dy,dz){
     for(i=0;i<bondMeshes.length;i++){
         bondMeshes[i].position.x-=dx;bondMeshes[i].position.y-=dy;bondMeshes[i].position.z-=dz;
     }
+    // Surface meshes need no shift: their geometry is written relative to the
+    // centre, and refreshVmdSurfaces rebuilds them for the new one.
 }
 // 重新确定旋转中心 (全部原子的质心)。增删原子、移动/旋转原子、导入结构等凡改变
 // 几何的操作在收尾时都要调用它 —— 否则旋转会绕着一个已经不是结构中心的点转,
@@ -1353,6 +2042,8 @@ function updateRotationCenter(){
     }
     shiftAllMeshesForCenter(CX-oldX,CY-oldY,CZ-oldZ);
     if(rotAxisLineMesh)showRotAxisLine();   // 轴指示线也是相对中心画的
+    // 中心变了, 表面片也要按新中心重摆 (签名里含中心, 没变时是空操作)。
+    refreshVmdSurfaces();
     needsRender=true;
 }
 
@@ -1427,6 +2118,10 @@ function getPerp(dir){
 function createBond(b){
     var a1=MD.atoms[b.atom1],a2=MD.atoms[b.atom2];
     if(!a1||!a2)return;
+    // A VMD script sets the bond radius per bond (the representation that
+    // covers both endpoints); 0 means the script does not draw it at all.
+    var br=typeof b.vmdR==='number'?b.vmdR:0.12;
+    if(br<=0.0005)return;
     var a2x=a2.x,a2y=a2.y,a2z=a2.z;
     if(b.shift&&CRY){
         var lv=CRY.latticeVectors;
@@ -1439,16 +2134,18 @@ function createBond(b){
     var d=new THREE.Vector3().subVectors(e,s);
     var l=d.length();
     var mp=new THREE.Vector3().addVectors(s,e).multiplyScalar(0.5);
-    var br=0.12,ord=b.order||1;
+    var ord=b.order||1;
+    // Multiple-bond line offsets keep their proportions to the bond radius.
+    var offK=br/0.12;
     var c1=new THREE.Color(a1.color),c2=new THREE.Color(a2.color);
     if(ord<1.25){hBond(s,mp,d,l/2,br,c1,{half:0});hBond(mp,e,d,l/2,br,c2,{half:1})}
-    else if(ord<1.75){var off=0.10,p=getPerp(d).multiplyScalar(off);
+    else if(ord<1.75){var off=0.10*offK,p=getPerp(d).multiplyScalar(off);
         hBond(s,mp,d,l/2,br,c1,{half:0});hBond(mp,e,d,l/2,br,c2,{half:1});
         hDashedBond(s.clone().add(p),e.clone().add(p),d,l,br*0.7,c1,6,1,off);
-    }else if(ord<2.5){var off=0.12,p=getPerp(d).multiplyScalar(off);
+    }else if(ord<2.5){var off=0.12*offK,p=getPerp(d).multiplyScalar(off);
         hBond(s.clone().add(p),mp.clone().add(p),d,l/2,br*0.6,c1,{half:0,perpSign:1,perpMag:off});hBond(mp.clone().add(p),e.clone().add(p),d,l/2,br*0.6,c2,{half:1,perpSign:1,perpMag:off});
         hBond(s.clone().sub(p),mp.clone().sub(p),d,l/2,br*0.6,c1,{half:0,perpSign:-1,perpMag:off});hBond(mp.clone().sub(p),e.clone().sub(p),d,l/2,br*0.6,c2,{half:1,perpSign:-1,perpMag:off});
-    }else if(ord<3.5){var off=0.15,p=getPerp(d).multiplyScalar(off);
+    }else if(ord<3.5){var off=0.15*offK,p=getPerp(d).multiplyScalar(off);
         hBond(s,mp,d,l/2,br*0.45,c1,{half:0});hBond(mp,e,d,l/2,br*0.45,c2,{half:1});
         hBond(s.clone().add(p),mp.clone().add(p),d,l/2,br*0.45,c1,{half:0,perpSign:1,perpMag:off});hBond(mp.clone().add(p),e.clone().add(p),d,l/2,br*0.45,c2,{half:1,perpSign:1,perpMag:off});
         hBond(s.clone().sub(p),mp.clone().sub(p),d,l/2,br*0.45,c1,{half:0,perpSign:-1,perpMag:off});hBond(mp.clone().sub(p),e.clone().sub(p),d,l/2,br*0.45,c2,{half:1,perpSign:-1,perpMag:off});
@@ -1824,6 +2521,7 @@ function endMoveDrag(){
     if(!moveDragMoved&&undoStack.length>0){undoStack.pop();updateUndoBtn()}
     // Re-detect connectivity once on release (not per frame during the drag).
     if(moveDragMoved)refreshMovedBondsAndMeshes();
+    else refreshVmdSurfaces();
     document.body.style.cursor='';
     if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
 }
@@ -1834,6 +2532,7 @@ function endFragRot(){
     if(!fragRotMoved&&undoStack.length>0){undoStack.pop();updateUndoBtn()}
     // Re-detect connectivity once on release (not per frame during the drag).
     if(fragRotMoved)refreshMovedBondsAndMeshes();
+    else refreshVmdSurfaces();
     document.body.style.cursor='';
     if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
 }
@@ -2047,9 +2746,14 @@ var axesInitEl=document.getElementById('axes-indicator');
 if(axesInitEl)axesInitEl.style.display='block';
 updateAxesIndicator();
 
-var maxD=0;
-MD.atoms.forEach(function(a){var dx=a.x-CX,dy=a.y-CY,dz=a.z-CZ,dd=Math.sqrt(dx*dx+dy*dy+dz*dz);if(dd>maxD)maxD=dd});
-var initCam=maxD*2.5+5;
+// Camera distance that frames the current structure: the farthest atom from the
+// rotation centre, with margin. Recomputed when the structure is swapped.
+function computeInitialCamDist(){
+    var maxD=0;
+    MD.atoms.forEach(function(a){var dx=a.x-CX,dy=a.y-CY,dz=a.z-CZ,dd=Math.sqrt(dx*dx+dy*dy+dz*dz);if(dd>maxD)maxD=dd});
+    return maxD*2.5+5;
+}
+var initCam=computeInitialCamDist();
 camera.position.set(0,0,initCam);camera.lookAt(0,0,0);
 camDist=initCam;
 
@@ -2278,6 +2982,8 @@ function commitRotAngle(newAngle){
     if(av)av.textContent=newAngle.toFixed(1)+'°';
     var ain=document.getElementById('rp-angle-input');
     if(ain)ain.value=newAngle;
+    // 表面片在预览期间被隐藏, 提交后立刻恢复 (签名没变时是空操作)。
+    refreshVmdSurfaces();
 }
 (function(){
     var gi=document.getElementById('rp-group-input');
@@ -3187,6 +3893,93 @@ function camDiffInit(){
     return maxD*2.5+5;
 }
 
+// ===== Scalar (Beta) colouring =====
+// PDB column 61-66 is not a B-factor in this toolchain: it carries an arbitrary
+// per-atom scalar (unit index, per-atom force error, …). Any structure that has
+// one can be painted by it, which is how the force-error and unit-index files
+// are meant to be looked at. Must stay identical to vmdVisualization.scalarColor.
+// The gradient is not a plain red-green-blue ramp: the two passive channels sit
+// on a 15/255 floor and the active channel ramps at twice the nominal rate,
+// which is what a rendered sphere really shows in the reference renderer.
+// These two constants must stay above the startup code that colours a bare
+// scalar file at load — declared further down they would still be undefined at
+// that point, and every atom would come out black.
+var GRADIENT_BASE=15/255;
+var GRADIENT_RATE=2.0;
+function clamp01(v){
+    if(!isFinite(v))return 0;
+    return v<0?0:v>1?1:v;
+}
+function scalarColor(v,vmin,vmax){
+    var t;
+    if(!isFinite(vmin)||!isFinite(vmax)||vmax===vmin){t=0}
+    else{
+        t=(v-vmin)/(vmax-vmin);
+        if(!isFinite(t))t=0;
+        t=clamp01(t);
+    }
+    var r,g,b;
+    if(t<=0.5){
+        r=clamp01(GRADIENT_BASE+GRADIENT_RATE*(0.5-t));
+        g=clamp01(GRADIENT_BASE+GRADIENT_RATE*t);
+        b=GRADIENT_BASE;
+    }else{
+        r=GRADIENT_BASE;
+        g=clamp01(GRADIENT_BASE+GRADIENT_RATE*(1-t));
+        b=clamp01(GRADIENT_BASE+GRADIENT_RATE*(t-0.5));
+    }
+    var hex=function(x){var n=Math.round(x*255);if(!isFinite(n))n=0;if(n<0)n=0;if(n>255)n=255;var s=n.toString(16).toUpperCase();return s.length<2?'0'+s:s};
+    return '#'+hex(r)+hex(g)+hex(b);
+}
+var betaColorOn=false;
+// 配色使用的范围: 按钮开启时取数据自身的范围。重建场景 (编辑、撤销、导入、
+// 换帧、换分子) 时按原子现算颜色, 所以它是纯视图状态 —— 没有需要备份/还原
+// 的东西, 组成怎么变都不会错位。
+var betaRangeUsed=null;
+function betaRange(){
+    var lo=Infinity,hi=-Infinity,any=false;
+    MD.atoms.forEach(function(a){
+        var b=a.beta;
+        if(typeof b==='number'&&isFinite(b)){any=true;if(b<lo)lo=b;if(b>hi)hi=b}
+    });
+    return any&&hi>lo?{lo:lo,hi:hi}:null;
+}
+function updateBetaButton(){
+    var btn=document.getElementById('beta-btn');
+    if(!btn)return;
+    var ok=!VMD&&!CRY&&betaRange()!==null;
+    btn.style.display=ok?'':'none';
+}
+// 开启配色时某个原子的标量颜色; 不带标量的原子返回 null (保留元素颜色)。
+// 在重建场景时读取, 而不是把颜色写进 a.color —— a.color 始终是元素颜色。
+function betaColorOf(a){
+    if(!betaColorOn||!betaRangeUsed)return null;
+    var b=a.beta;
+    return (typeof b==='number'&&isFinite(b))?scalarColor(b,betaRangeUsed.lo,betaRangeUsed.hi):null;
+}
+function applyBetaColoring(on){
+    if(on){
+        var range=betaRange();
+        if(!range)return;
+        betaRangeUsed=range;
+    }
+    betaColorOn=on&&!!betaRangeUsed;
+    var btn=document.getElementById('beta-btn');
+    if(btn)btn.classList.toggle('active',betaColorOn);
+    rebuildScene();
+    modeInfoEl.textContent=betaColorOn
+        ?('Beta colouring: '+betaRangeUsed.lo.toFixed(3)+' – '+betaRangeUsed.hi.toFixed(3))
+        :(MODE_INFO[currentMode]||currentMode);
+}
+(function(){
+    var btn=document.getElementById('beta-btn');
+    if(btn)btn.addEventListener('click',function(){applyBetaColoring(!betaColorOn)});
+    var prev=document.getElementById('prev-mol');
+    var next=document.getElementById('next-mol');
+    if(prev)prev.addEventListener('click',function(){switchMolecule(vmdMolIdx-1)});
+    if(next)next.addEventListener('click',function(){switchMolecule(vmdMolIdx+1)});
+})();
+
 var currentFrame=0;
 var totalFrames=MD.frames?MD.frames.length:0;
 var autoPlayTimer=null;
@@ -3201,6 +3994,21 @@ if(totalFrames>1){
     frameNavEl.classList.remove('show');
     frameSepEl.classList.add('hidden');
 }
+// Molecule selector of a VMD script (one entry per "mol new"), and the Beta
+// colouring toggle for structures that carry a per-atom scalar.
+if(VMD){
+    setVmdNavEnabled(VMD.molecules.length>1&&!CRY);
+    updateMolLabel();
+    var vmdWarn=(VMD.warnings||[]).concat((VMD.molecules[vmdMolIdx]&&VMD.molecules[vmdMolIdx].warnings)||[]);
+    if(vmdWarn.length>0){
+        modeInfoEl.textContent='TCL: '+vmdWarn[0]+(vmdWarn.length>1?' (+'+(vmdWarn.length-1)+' more)':'');
+    }
+}
+updateBetaButton();
+// A visualization that ships as a bare PDB rather than a script: paint its
+// per-atom scalar straight away, so opening the file shows the picture it was
+// written for. The toolbar button stays active and turns it back off.
+if(MD.autoBeta)applyBetaColoring(true);
 function updateFrameInfo(){
     var el=document.getElementById('frame-info');
     var numEl=document.getElementById('frame-num');
@@ -3217,6 +4025,13 @@ function switchFrame(idx){
     if(MD.bonds.length===0){
         MD.bonds=detectBondsFromAtoms(MD.atoms);
     }
+    if(VMD){
+        // A frame is a structure of its own; the script's recipe was resolved
+        // against the coordinates it was loaded from, so its surfaces and its
+        // molecule list no longer describe what is on screen.
+        VMD.activeSegments=[];
+        setVmdNavEnabled(false);
+    }
     undoStack.length=0;updateUndoBtn();
     if(diffMode)resetSelection();
     resetRotAxisState();
@@ -3227,6 +4042,51 @@ function switchFrame(idx){
     // (renderOptCharts is a no-op while the panel is closed).
     if(typeof renderOptCharts==='function')renderOptCharts();
 }
+
+// ===== VMD molecules =====
+// A script may create several molecules ("mol new" repeated). They are shown one
+// at a time rather than superimposed, because that is what makes them
+// comparable — the coordinates are of the same system at different stages.
+function setVmdNavEnabled(on){
+    var sep=document.getElementById('mol-sep');
+    var nav=document.getElementById('mol-nav');
+    if(sep)sep.classList.toggle('hidden',!on);
+    if(nav)nav.classList.toggle('show',!!on);
+}
+function updateMolLabel(){
+    var el=document.getElementById('mol-label');
+    if(!el)return;
+    var m=VMD.molecules[vmdMolIdx];
+    el.textContent=(vmdMolIdx+1)+'/'+VMD.molecules.length+' '+(m?(m.label||''):'');
+}
+function switchMolecule(idx){
+    if(!VMD||idx<0||idx>=VMD.molecules.length||idx===vmdMolIdx)return;
+    if(diffMode){modeInfoEl.textContent='Molecule switching is not available in diff mode';return}
+    if(CRY){modeInfoEl.textContent='Molecule switching is not available for crystal structures';return}
+    stopMoveSession();
+    vmdMolIdx=idx;
+    var m=VMD.molecules[idx];
+    MD.atoms=m.atoms;
+    MD.bonds=m.bonds;
+    MD.atoms.forEach(function(a,i){a.index=i});
+    MD.bonds.forEach(function(b,i){b.index=i});
+    VMD.activeSegments=m.segments||[];
+    // 新分子的新补丁列表: 面板选择全部复位 (初始时所有 egg 都显示)。
+    vmdHiddenSegments={};
+    vmdSurfaceSignature='';
+    undoStack.length=0;updateUndoBtn();
+    resetRotAxisState();
+    rebuildScene();
+    updateMolLabel();
+    // Frame the new structure: it may sit at a very different position or size.
+    var d=computeInitialCamDist();
+    initCam=d;camDist=d;
+    camera.position.set(0,0,d);
+    rotQuat.identity();panX=0;panY=0;
+    updateTransform();
+    modeInfoEl.textContent=MODE_INFO[currentMode]||currentMode;
+}
+
 // ===== Shared bond-detection tables and helpers =====
 // Used by both the full-molecule detector (detectBondsFromAtoms) and the
 // partial re-detection in Move Atoms (recomputeMovedBonds). Tables and
@@ -5775,7 +6635,9 @@ class MolecularDocument implements vscode.CustomDocument {
         public readonly optSteps?: OptStep[],
         public readonly normalModes?: NormalMode[],
         public readonly logSource?: string,
-        public readonly routes?: RouteSection[]
+        public readonly routes?: RouteSection[],
+        public readonly vmdPayload?: VmdPayload,
+        public readonly autoBeta: boolean = false
     ) {}
 
     dispose(): void {}
