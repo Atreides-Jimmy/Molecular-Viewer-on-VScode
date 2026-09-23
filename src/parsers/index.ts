@@ -13,7 +13,7 @@ import { parseVasp } from './vaspParser';
 import { parseCube } from './cubeParser';
 import { parseVesta } from './vestaParser';
 import { parseXtbLog, isXtbLog, XtbLogResult } from './xtbParser';
-import { parseTcl, TclParseResult, resolveVmdScene, VmdResolvedScene, hasScalarChannel, resolveSelection, vdwRadius } from './vmdVisualization';
+import { parseTcl, TclParseResult, resolveVmdScene, VmdResolvedScene, hasScalarChannel, resolveSelection, vdwRadius, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg } from './vmdVisualization';
 
 export { parseGaussianLog, LogFrame, GaussianLogResult };
 export { RouteSection, RouteKeyword };
@@ -29,6 +29,7 @@ export { parseTcl, TclParseResult };
 export { resolveVmdScene, VmdResolvedScene };
 export { hasScalarChannel };
 export { resolveSelection, vdwRadius };
+export { parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg };
 
 export interface LogFileResult {
     frames: LogFrame[] | OrcaFrame[];

@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { parseFile, parseLogFile, LogFrame, OrcaFrame, RouteSection, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel } from '../parsers/index';
+import { parseFile, parseLogFile, LogFrame, OrcaFrame, RouteSection, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg } from '../parsers/index';
 import { ensureBonds } from '../parsers/bondDetector';
 import { smilesTo3dSafe, validateSmiles } from '../parsers/smilesTo3d';
 import { MolecularData, AtomGroup, OptStep, NormalMode, VmdScene, VmdMolecule } from '../types';
@@ -79,6 +79,8 @@ interface VmdSegmentPayload {
     color: string;
     indices: number[];
     probe: number;
+    /** The egg this patch draws, when the structure sits next to an egg/unit file. */
+    egg?: { name: string; units: number[]; level?: string };
 }
 
 interface VmdRepPayload {
@@ -164,6 +166,41 @@ async function loadStructureFile(uri: vscode.Uri): Promise<LoadedStructure> {
 }
 
 /**
+ * Read the toolchain's egg metadata from the directory of a structure file: a
+ * `unitfile` (every unit's atoms) and an `eggFile*` (the eggs and the unit
+ * numbers they wrap). Either file is optional; anything unreadable or absent
+ * yields undefined, which just leaves the surface patches unlabelled.
+ */
+async function readEggMetadata(sourceUri: vscode.Uri | undefined): Promise<{ eggFile?: string; unitFile?: string } | undefined> {
+    if (!sourceUri) return undefined;
+    try {
+        const dir = vscode.Uri.file(path.dirname(sourceUri.fsPath));
+        const entries = await vscode.workspace.fs.readDirectory(dir);
+        let eggName: string | undefined;
+        let unitName: string | undefined;
+        for (const [name, type] of entries) {
+            if (type !== vscode.FileType.File) continue;
+            if (/^unitfile$/i.test(name)) unitName = name;
+            else if (/^eggfile/i.test(name) && eggName === undefined) eggName = name;
+        }
+        if (!eggName && !unitName) return undefined;
+        const readText = async (name: string): Promise<string | undefined> => {
+            try {
+                return new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dir, name)));
+            } catch {
+                return undefined;
+            }
+        };
+        const meta: { eggFile?: string; unitFile?: string } = {};
+        if (eggName) meta.eggFile = await readText(eggName);
+        if (unitName) meta.unitFile = await readText(unitName);
+        return meta;
+    } catch {
+        return undefined;
+    }
+}
+
+/**
  * Resolve one molecule of a VMD script into a drawable payload. The source file
  * path is relative to the script unless it is absolute, exactly as in VMD.
  */
@@ -173,14 +210,25 @@ function resolveVmdSource(scriptUri: vscode.Uri, sourceFile: string): vscode.Uri
     return vscode.Uri.file(path.resolve(path.dirname(scriptUri.fsPath), sourceFile));
 }
 
-/** Build the webview payload for one already-loaded VMD molecule. */
-function buildVmdMoleculePayload(
+/** Build the webview payload for one already-loaded VMD molecule. */function buildVmdMoleculePayload(
     molecule: VmdMolecule,
     data: MolecularData,
     scene: VmdScene,
-    colorOf: (element: string) => string
+    colorOf: (element: string) => string,
+    eggMeta?: { eggFile?: string; unitFile?: string }
 ): VmdMoleculePayload {
     const resolved = resolveVmdScene(data.atoms, data.bonds, molecule, scene);
+
+    // A script that draws eggs usually sits next to the toolchain's egg/unit
+    // files; matching atom sets attaches each egg's name and unit numbers to
+    // the patch that draws it. Files that are missing or malformed simply
+    // leave the patches unlabelled.
+    let eggs: (VmdEgg | null)[] | null = null;
+    if (eggMeta && resolved.segments.length > 0) {
+        eggs = matchEggsToSegments(resolved.segments,
+            eggMeta.eggFile ? parseEggFile(eggMeta.eggFile) : null,
+            eggMeta.unitFile ? parseUnitFile(eggMeta.unitFile) : null);
+    }
 
     const atoms: VmdAtomPayload[] = data.atoms.map(function (a, i) {
         const item: VmdAtomPayload = {
@@ -200,8 +248,14 @@ function buildVmdMoleculePayload(
         return item;
     });
 
-    const segments: VmdSegmentPayload[] = resolved.segments.map(function (s) {
-        return { color: s.color, indices: s.indices.slice(), probe: s.probe };
+    const segments: VmdSegmentPayload[] = resolved.segments.map(function (s, i) {
+        const item: VmdSegmentPayload = { color: s.color, indices: s.indices.slice(), probe: s.probe };
+        const egg = eggs ? eggs[i] : null;
+        if (egg) {
+            item.egg = { name: egg.name, units: egg.units.slice() };
+            if (egg.level !== undefined) item.egg.level = egg.level;
+        }
+        return item;
     });
 
     const total = data.atoms.length;
@@ -367,9 +421,12 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                 continue;
             }
             if (!first) first = loaded;
+            // 只有画 egg 的脚本才需要去找 eggFile/unitfile。
+            const wantsEggs = molecule.reps.some(function (r) { return /^surf/i.test(r.style); });
+            const eggMeta = wantsEggs ? await readEggMetadata(sourceUri) : undefined;
             payload.molecules.push(buildVmdMoleculePayload(molecule, loaded.data, scene, function (element) {
                 return ATOM_COLORS[element] || '#FF1493';
-            }));
+            }, eggMeta));
         }
 
         if (!first) {
@@ -859,6 +916,20 @@ body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;b
 #crystal-panel .bnd-row input{width:48px;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;padding:1px 3px;font-size:11px;text-align:center}
 #crystal-panel .bnd-btn{margin-top:6px;width:100%;background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff);border:none;border-radius:3px;padding:4px 6px;font-size:11px;cursor:pointer}
 #crystal-panel .bnd-btn:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
+#egg-panel{position:absolute;top:8px;right:8px;background:rgba(0,0,0,0.6);border:1px solid var(--vscode-panel-border,#444);border-radius:4px;padding:8px 10px;font-size:11px;color:var(--vscode-editor-foreground,#ccc);z-index:25;display:none;min-width:200px;max-width:calc(100% - 16px);max-height:calc(100% - 70px);overflow-y:auto}
+#egg-panel.show{display:block}
+#egg-panel .ep-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:5px;font-weight:600}
+#egg-panel .ep-head .ep-actions{display:flex;gap:4px;align-items:center}
+#egg-panel .ep-head button{background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#fff);border:1px solid var(--vscode-panel-border,#444);border-radius:3px;padding:1px 6px;font-size:10px;cursor:pointer}
+#egg-panel .ep-head button:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
+#egg-panel .ep-close{cursor:pointer;opacity:0.7;padding:0 2px}
+#egg-panel .ep-close:hover{opacity:1}
+#egg-panel .ep-row{display:flex;align-items:center;gap:6px;margin:3px 0;padding:3px 6px 3px 5px;cursor:pointer;white-space:nowrap;border-left:3px solid var(--vscode-descriptionForeground,#888);border-radius:2px}
+#egg-panel .ep-row:hover{background:rgba(255,255,255,0.06)}
+#egg-panel .ep-row input{margin:0;cursor:pointer}
+#egg-panel .ep-row.ep-hidden .ep-name,#egg-panel .ep-row.ep-hidden .ep-units{opacity:0.45;text-decoration:line-through}
+#egg-panel .ep-name{font-weight:600}
+#egg-panel .ep-units{color:var(--vscode-descriptionForeground,#999)}
 #select-panel{display:none;position:absolute;bottom:40px;left:8px;z-index:50;background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:4px;padding:8px;width:280px;max-width:calc(100% - 16px);box-shadow:0 2px 8px rgba(0,0,0,0.3)}
 #select-panel .sp-title{font-size:12px;font-weight:bold;margin-bottom:4px}
 #select-panel input[type=text]{width:100%;padding:6px 8px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:12px;box-sizing:border-box}
@@ -994,6 +1065,7 @@ canvas{display:block}
 <button class="tbtn" data-mode="boxSelect">Box Select</button>
 <div class="tsep"></div>
 <button class="tbtn" id="beta-btn" style="display:none">Color by Beta</button>
+<button class="tbtn" id="egg-btn" style="display:none">Eggs</button>
 <button class="tbtn" id="diff-btn">Diff</button>
 <button class="tbtn" id="undo-btn" disabled>Undo</button>
 <button class="tbtn" id="save-btn">Save As</button>
@@ -1014,7 +1086,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="box-select-rect"></div>
@@ -1038,6 +1110,10 @@ var VMD=MD.vmd||null;
 var vmdMolIdx=0;
 var vmdSurfaceGroup=null;
 var vmdSurfaceMeshes=[];
+// Which Surf patches the egg panel has hidden, keyed by the patch's segment
+// index (the patch order of the script). Declared here, above the first
+// rebuildScene: a var further down would still be undefined there.
+var vmdHiddenSegments={};
 if(VMD){
     VMD.activeSegments=(VMD.molecules[0]&&VMD.molecules[0].segments)||[];
     MD.atoms=VMD.molecules[0].atoms;
@@ -1717,10 +1793,15 @@ function refreshVmdSurfaces(){
         var mesh=new THREE.Mesh(geo,mat);
         mesh.renderOrder=4;
         mesh.userData.vmdSurface=true;
+        mesh.userData.segmentIndex=s;
         vmdSurfaceGroup.add(mesh);
         vmdSurfaceMeshes.push(mesh);
     }
     vmdSurfaceGroup.visible=vmdSurfaceMeshes.length>0;
+    // The egg panel mirrors the patches: rebuild its rows for the new segment
+    // list, then put the panel's shown/hidden choices on the fresh meshes.
+    rebuildEggPanel();
+    applyVmdSegmentVisibility();
     needsRender=true;
 }
 
@@ -1729,6 +1810,132 @@ function refreshVmdSurfaces(){
 // they are brought back by the next refreshVmdSurfaces() at the commit.
 function hideVmdSurfaces(){
     if(vmdSurfaceMeshes.length>0&&vmdSurfaceGroup)vmdSurfaceGroup.visible=false;
+}
+
+// ===== Egg list =====
+// The toolchain writes an eggFile next to the structure ("U12F1 : 1,10-15" =
+// the egg named U12F1 wraps units 1 and 10..15) plus a unitfile with every
+// unit's atoms; the extension matches each Surf patch to its egg by atom set
+// and sends the names along with the payload. The panel lists the eggs and
+// toggles the patches; all of them are shown initially.
+function escapeHtml(s){
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+// "1, 10-15" style: compress consecutive unit numbers into ranges.
+function formatUnitList(units){
+    var u=units.slice().sort(function(a,b){return a-b});
+    var parts=[],i=0;
+    while(i<u.length){
+        var j=i;
+        while(j+1<u.length&&u[j+1]===u[j]+1)j++;
+        if(j-i>=2)parts.push(u[i]+'\u2013'+u[j]);        else{for(var k=i;k<=j;k++)parts.push(String(u[k]))}
+        i=j+1;
+    }
+    return parts.join(', ');
+}
+function eggSegments(){
+    var list=[];
+    var segs=(VMD&&VMD.activeSegments)||[];
+    for(var i=0;i<segs.length;i++){if(segs[i]&&segs[i].egg)list.push({idx:i,seg:segs[i]})}
+    return list;
+}
+function eggShownCount(list){
+    var n=0;
+    for(var i=0;i<list.length;i++){if(!vmdHiddenSegments[list[i].idx])n++}
+    return n;
+}
+function eggAllHidden(list){
+    return list.length>0&&eggShownCount(list)===0;
+}
+// Apply the panel's choices to the built patches. Called after a rebuild (the
+// meshes are new) and on every toggle.
+function applyVmdSegmentVisibility(){
+    for(var i=0;i<vmdSurfaceMeshes.length;i++){
+        var m=vmdSurfaceMeshes[i];
+        if(m&&m.userData&&typeof m.userData.segmentIndex==='number')m.visible=!vmdHiddenSegments[m.userData.segmentIndex];
+    }
+    needsRender=true;
+}
+function updateEggButton(){
+    var btn=document.getElementById('egg-btn');
+    if(!btn)return;
+    wireEggPanelButton();
+    btn.style.display=eggSegments().length>0?'':'none';
+}
+function updateEggPanelState(list){
+    var panel=document.getElementById('egg-panel');
+    if(!panel)return;
+    var rows=panel.querySelectorAll('.ep-row');
+    for(var i=0;i<rows.length;i++){
+        var idx=rows[i].getAttribute('data-seg');
+        var hidden=!!vmdHiddenSegments[idx];
+        rows[i].classList.toggle('ep-hidden',hidden);
+        var cb=rows[i].querySelector('input[type=checkbox]');
+        if(cb)cb.checked=!hidden;
+    }
+    var head=document.getElementById('egg-count');
+    if(head)head.textContent=eggShownCount(list)+'/'+list.length+' shown';
+    var toggleAll=document.getElementById('egg-toggle-all');
+    if(toggleAll)toggleAll.textContent=eggAllHidden(list)?'Show all':'Hide all';
+}
+function rebuildEggPanel(){
+    var panel=document.getElementById('egg-panel');
+    var btn=document.getElementById('egg-btn');
+    if(!panel||!btn)return;
+    var list=eggSegments();
+    updateEggButton();
+    if(list.length===0){
+        // The current molecule draws no eggs: no panel, choices forgotten.
+        panel.classList.remove('show');
+        vmdHiddenSegments={};
+        return;
+    }
+    var html='<div class="ep-head"><span>Eggs <span id="egg-count">'+eggShownCount(list)+'/'+list.length+' shown</span></span>'+
+             '<span class="ep-actions"><button id="egg-toggle-all">'+(eggAllHidden(list)?'Show all':'Hide all')+'</button><span id="egg-close" class="ep-close" title="Hide list">\u00d7</span></span></div>';
+    for(var i=0;i<list.length;i++){
+        var e=list[i].seg.egg;
+        var hidden=!!vmdHiddenSegments[list[i].idx];
+        html+='<label class="ep-row'+(hidden?' ep-hidden':'')+'" data-seg="'+list[i].idx+'" title="'+escapeHtml(e.name)+'" style="border-left-color:'+list[i].seg.color+'">'+
+              '<input type="checkbox" data-seg="'+list[i].idx+'"'+(hidden?'':' checked')+'>'+
+              '<span class="ep-name">'+escapeHtml(e.name)+'</span>'+
+              '<span class="ep-units">units '+formatUnitList(e.units)+'</span></label>';
+    }
+    panel.innerHTML=html;
+    panel.classList.add('show');
+    var boxes=panel.querySelectorAll('input[type=checkbox]');
+    for(var b=0;b<boxes.length;b++){
+        boxes[b].addEventListener('change',function(){
+            var idx=this.getAttribute('data-seg');
+            vmdHiddenSegments[idx]=!this.checked;
+            applyVmdSegmentVisibility();
+            updateEggPanelState(list);
+        });
+    }
+    var toggleAll=document.getElementById('egg-toggle-all');
+    if(toggleAll){
+        // 标签在点击处理器里也直接刷新一次, 不只依赖后面的对账函数。
+        toggleAll.addEventListener('click',function(){
+            // 一键全部显示/全部隐藏: 有 egg 显示着就全部隐藏, 全隐藏时全部显示。
+            var hide=!eggAllHidden(list);
+            for(var i=0;i<list.length;i++)vmdHiddenSegments[list[i].idx]=hide;
+            applyVmdSegmentVisibility();
+            this.textContent=hide?'Show all':'Hide all';
+            updateEggPanelState(list);
+        });
+    }
+    var close=document.getElementById('egg-close');
+    // 关闭只隐藏面板; 工具栏的 Eggs 按钮随时可以再打开。
+    if(close)close.addEventListener('click',function(){panel.classList.remove('show')});
+}
+var eggBtnWired=false;
+function wireEggPanelButton(){
+    if(eggBtnWired)return;
+    var btn=document.getElementById('egg-btn');
+    if(!btn)return;
+    eggBtnWired=true;
+    // 工具栏按钮永远"打开"面板 (幂等): 关闭只由面板内的 × 负责, 这样任何
+    // 时候都有地方可以再打开。重复点击只是刷新面板内容。
+    btn.addEventListener('click',function(){rebuildEggPanel()});
 }
 
 function rebuildScene(){
@@ -3864,6 +4071,8 @@ function switchMolecule(idx){
     MD.atoms.forEach(function(a,i){a.index=i});
     MD.bonds.forEach(function(b,i){b.index=i});
     VMD.activeSegments=m.segments||[];
+    // 新分子的新补丁列表: 面板选择全部复位 (初始时所有 egg 都显示)。
+    vmdHiddenSegments={};
     vmdSurfaceSignature='';
     undoStack.length=0;updateUndoBtn();
     resetRotAxisState();

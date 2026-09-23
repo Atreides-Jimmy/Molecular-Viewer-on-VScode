@@ -968,3 +968,116 @@ export function hasScalarChannel(content: string, atoms: { beta?: number }[]): b
     }
     return count >= 2 && max > min;
 }
+
+// ============================================================ egg / unit files
+// The toolchain writes two metadata files next to a structure it draws eggs
+// for: a `unitfile` listing the atoms of every unit (one line per unit, after
+// a first line holding the atom count; the unit's atoms are the last
+// `:`-separated field, 1-based), and an `eggFile*` whose [eggs] section names
+// each egg and the unit numbers it wraps ("U12F1 : 1,10-15") and whose
+// [levels] section tags each one. A script's Surf representations select the
+// atoms of one egg each, so matching atom sets attaches the names to the
+// drawn patches.
+
+/** One egg of an egg file. */
+export interface VmdEgg {
+    name: string;
+    /** The unit numbers the egg wraps, 1-based, in file order. */
+    units: number[];
+    /** The egg's [levels] tag, when the file carries one. */
+    level?: string;
+}
+
+/** Parse a `unitfile` into the atoms of every unit (index k = unit k+1,
+ *  0-based atom indices), or null when the file holds no units. */
+export function parseUnitFile(content: string): number[][] | null {
+    const lines = content.split(/\r?\n/);
+    const units: number[][] = [];
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (line === '') continue;
+        const colon = line.lastIndexOf(':');
+        if (colon < 0) continue;                       // the leading atom-count line
+        const atoms: number[] = [];
+        line.substring(colon + 1).split(',').forEach(function (t) {
+            const n = parseInt(t.trim(), 10);
+            if (!isNaN(n) && n >= 1) atoms.push(n - 1);
+        });
+        if (atoms.length > 0) units.push(atoms);
+    }
+    return units.length > 0 ? units : null;
+}
+
+/** Parse an `eggFile` ([eggs] names each egg and the unit numbers it wraps as
+ *  single indices or inclusive ranges; [levels] tags each egg), or null when
+ *  the file has no [eggs] section. */
+export function parseEggFile(content: string): VmdEgg[] | null {
+    const lines = content.split(/\r?\n/);
+    const eggs: VmdEgg[] = [];
+    const levels: { [name: string]: string } = {};
+    let section = '';
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (line === '') continue;
+        const head = line.match(/^\[(\w+)\]$/);
+        if (head) { section = head[1].toLowerCase(); continue; }
+        const sep = line.indexOf(':');
+        if (sep < 0) continue;
+        const name = line.substring(0, sep).trim();
+        const value = line.substring(sep + 1).trim();
+        if (!name) continue;
+        if (section === 'eggs') {
+            const units: number[] = [];
+            value.split(',').forEach(function (part) {
+                const range = part.trim().match(/^(\d+)\s*-\s*(\d+)$/);
+                if (range) {
+                    const lo = Math.min(+range[1], +range[2]), hi = Math.max(+range[1], +range[2]);
+                    for (let k = lo; k <= hi; k++) units.push(k);
+                } else if (/^\d+$/.test(part.trim())) {
+                    units.push(parseInt(part.trim(), 10));
+                }
+            });
+            if (units.length > 0) eggs.push({ name: name, units: units });
+        } else if (section === 'levels') {
+            levels[name] = value;
+        }
+    }
+    if (eggs.length === 0) return null;
+    for (let i = 0; i < eggs.length; i++) {
+        if (levels[eggs[i].name] !== undefined) eggs[i].level = levels[eggs[i].name];
+    }
+    return eggs;
+}
+
+/**
+ * Attach the egg each surface patch draws to that patch, by atom set: an egg's
+ * atoms are the union of its units' atoms, and a script's Surf representation
+ * selects exactly one egg's atoms. Returns one entry per segment — the matched
+ * egg, or null when the patch matches no egg (an egg the script does not draw,
+ * such as a whole-structure "full" surface, or no metadata at all).
+ */
+export function matchEggsToSegments(segments: { indices: number[] }[], eggs: VmdEgg[] | null, units: number[][] | null): (VmdEgg | null)[] {
+    const result: (VmdEgg | null)[] = new Array(segments.length).fill(null);
+    if (!eggs || !units || eggs.length === 0) return result;
+    const eggAtoms: (Set<number> | null)[] = eggs.map(function (e) {
+        const set = new Set<number>();
+        for (let i = 0; i < e.units.length; i++) {
+            const unit = units[e.units[i] - 1];
+            if (!unit) return null;                    // a unit number the unitfile does not define
+            for (let k = 0; k < unit.length; k++) set.add(unit[k]);
+        }
+        return set;
+    });
+    const used: boolean[] = new Array(eggs.length).fill(false);
+    for (let s = 0; s < segments.length; s++) {
+        const set = new Set<number>(segments[s].indices);
+        for (let e = 0; e < eggs.length; e++) {
+            const ea = eggAtoms[e];
+            if (used[e] || !ea || ea.size !== set.size) continue;
+            let same = true;
+            ea.forEach(function (a) { if (!set.has(a)) same = false; });
+            if (same) { result[s] = eggs[e]; used[e] = true; break; }
+        }
+    }
+    return result;
+}
