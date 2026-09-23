@@ -995,6 +995,20 @@ canvas{display:block}
 #diff-label.show,#diff-label-right.show{display:block}
 #diff-label{left:25%;transform:translateX(-50%)}
 #diff-label-right{left:75%;transform:translateX(-50%)}
+#diff-panel .diff-stats{margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.18)}
+#diff-panel .diff-stats-head{cursor:pointer;font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff);user-select:none;-webkit-user-select:none}
+#diff-panel .diff-stats-head:hover{text-decoration:underline}
+#diff-panel .diff-stats-arrow{display:inline-block;width:11px}
+#diff-panel .diff-stats-body{margin-top:5px}
+#diff-panel .diff-stats.collapsed .diff-stats-body{display:none}
+#diff-panel .diff-stat-note{font-size:10px;line-height:1.35;color:var(--vscode-descriptionForeground,#999);margin-bottom:5px}
+#diff-panel .diff-stat-title{font-size:11px;color:#f0c674;margin:7px 0 2px}
+#diff-panel .diff-stat-scroll{overflow-x:auto;overflow-y:hidden}
+#diff-panel .diff-stat-table{border-collapse:collapse;font-size:10px;white-space:nowrap;min-width:100%}
+#diff-panel .diff-stat-table th,#diff-panel .diff-stat-table td{padding:1px 7px;text-align:right;font-weight:normal}
+#diff-panel .diff-stat-table th:first-child,#diff-panel .diff-stat-table td:first-child{text-align:left}
+#diff-panel .diff-stat-table th{color:var(--vscode-descriptionForeground,#999);border-bottom:1px solid rgba(255,255,255,0.18)}
+#diff-panel .diff-stat-table tr.diff-stat-total td{border-top:1px solid rgba(255,255,255,0.18);font-weight:bold}
 #opt-panel{display:none;position:absolute;top:36px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.78);padding:8px 10px;border-radius:4px;z-index:25;width:340px;max-width:calc(100% - 16px);max-height:70%;overflow:hidden;pointer-events:auto;line-height:1.4}
 #opt-panel.show{display:flex;flex-direction:column}
 #opt-panel .opt-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.15)}
@@ -3182,6 +3196,7 @@ var diffPanelEl=document.getElementById('diff-panel');
 var diffReopenEl=document.getElementById('diff-reopen');
 var diffPanelHTML='';
 var diffResultsHTML='';
+var diffStatsExpanded=true;
 var diffLabelLeft=document.getElementById('diff-label');
 var diffLabelRight=document.getElementById('diff-label-right');
 
@@ -3416,9 +3431,83 @@ function dihedral3d(a,b,c,d){
     return sign<0?-ang:ang;
 }
 
+// --- Group statistics for internal-coordinate differences -----------------
+// Every compared bond / angle / dihedral - not just those above the display
+// threshold - feeds an accumulator, so the reported rms / maxd / mean / std
+// describe the whole compared set. Values are signed differences
+// (left - right); a torsion's difference is folded into [-180, 180] so a
+// chain and its reverse never disagree, while bond and angle differences
+// cannot leave that range in the first place. rms is the root mean square of
+// the raw differences, maxd the largest absolute difference, mean the signed
+// average and std the population standard deviation. Entries are grouped by
+// element composition key (e.g. C-C, C-C-H, C-C-C-H) - bonds by their two
+// elements, angles by the two outer elements around the centre, torsions by
+// the four elements along the chain, each canonicalised so that one internal
+// coordinate always falls in the same group - and reported per group plus one
+// combined "All" row.
+
+function diffWrap180(v){
+    while(v>180)v-=360;
+    while(v<-180)v+=360;
+    return v;
+}
+
+function newDiffStatAcc(){return{n:0,sum:0,sumSq:0,maxAbs:0}}
+
+function collectDiffStat(map,key,delta){
+    if(!isFinite(delta))return;
+    var acc=map[key];
+    if(!acc){acc=newDiffStatAcc();map[key]=acc}
+    acc.n++;
+    acc.sum+=delta;
+    acc.sumSq+=delta*delta;
+    var abs=delta<0?-delta:delta;
+    if(abs>acc.maxAbs)acc.maxAbs=abs;
+}
+
+function finishDiffStat(acc){
+    if(!acc||acc.n<=0)return{n:0,rms:0,maxd:0,mean:0,std:0};
+    var n=acc.n;
+    var mean=acc.sum/n;
+    var msq=acc.sumSq/n;
+    var variance=msq-mean*mean;
+    return{n:n,rms:Math.sqrt(msq>0?msq:0),maxd:acc.maxAbs,mean:mean,std:Math.sqrt(variance>0?variance:0)};
+}
+
+function summarizeDiffStats(groupMap){
+    var keys=Object.keys(groupMap).sort();
+    var groups=[];
+    var total=newDiffStatAcc();
+    for(var i=0;i<keys.length;i++){
+        var acc=groupMap[keys[i]];
+        var g=finishDiffStat(acc);
+        g.key=keys[i];
+        groups.push(g);
+        total.n+=acc.n;total.sum+=acc.sum;total.sumSq+=acc.sumSq;
+        if(acc.maxAbs>total.maxAbs)total.maxAbs=acc.maxAbs;
+    }
+    return{groups:groups,total:finishDiffStat(total)};
+}
+
+function diffPairKey(e1,e2){return e1<=e2?e1+'-'+e2:e2+'-'+e1}
+
+function diffTripletKey(e1,eCenter,e2){
+    return e1<=e2?(e1+'-'+eCenter+'-'+e2):(e2+'-'+eCenter+'-'+e1);
+}
+
+// Canonical group key for a torsion. The two central elements keep the order
+// they have along the chain and the whole quadruplet is reversed when the
+// tail element sorts before the head (a torsion and its reverse are the same
+// angle), so one torsion always lands in one group - e.g. C-C-C-H - no matter
+// from which end the enumeration happened to reach it.
+function diffQuadKey(e1,eCenter1,eCenter2,e4){
+    return e1<=e4?(e1+'-'+eCenter1+'-'+eCenter2+'-'+e4):(e4+'-'+eCenter2+'-'+eCenter1+'-'+e1);
+}
+
 function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct){
     var diffs={bonds:[],angles:[],dihedrals:[]};
     var tp=threshPct||2;
+    var statAcc={bonds:{},angles:{},dihedrals:{}};
 
     var bondSet2={};
     bonds2.forEach(function(b){bondSet2[Math.min(b.atom1,b.atom2)+'-'+Math.max(b.atom1,b.atom2)]=b.order});
@@ -3429,6 +3518,7 @@ function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct)
         if(bondSet2[key]!==undefined){
             var d1=dist3d(atoms1[b.atom1],atoms1[b.atom2]);
             var d2=dist3d(atoms2[mapping[b.atom1]],atoms2[mapping[b.atom2]]);
+            collectDiffStat(statAcc.bonds,diffPairKey(atoms1[b.atom1].element,atoms1[b.atom2].element),d1-d2);
             var dd=Math.abs(d1-d2);
             var avg=(d1+d2)/2;
             var pct=avg>0.01?dd/avg*100:0;
@@ -3445,11 +3535,18 @@ function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct)
         for(var k=0;k<nbs.length;k++){
             for(var m=k+1;m<nbs.length;m++){
                 var i1=nbs[k],i3=nbs[m];
-                var key=Math.min(i1,j)+'-'+j+'-'+Math.max(i3,j);
+                // Dedup key over the three atom indices, order-insensitive:
+                // the pair is already visited once per centre, this only stops
+                // a repeated neighbour entry from counting the same angle twice.
+                // (A min/max key over the two outer atoms collides for two
+                // different angles sharing the higher atom, silently dropping
+                // angles whose centre has a smaller index than its neighbours.)
+                var key=[i1,j,i3].sort().join('-');
                 if(angleSeen[key])continue;
                 angleSeen[key]=true;
                 var a1=angle3d(atoms1[i1],atoms1[j],atoms1[i3]);
                 var a2=angle3d(atoms2[mapping[i1]],atoms2[mapping[j]],atoms2[mapping[i3]]);
+                collectDiffStat(statAcc.angles,diffTripletKey(atoms1[i1].element,atoms1[j].element,atoms1[i3].element),a1-a2);
                 var da=Math.abs(a1-a2);
                 var avgA=(a1+a2)/2;
                 var pctA=avgA>1.0?da/avgA*100:da*100;
@@ -3476,6 +3573,9 @@ function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct)
                     dihedralSeen[key]=true;
                     var d1=dihedral3d(atoms1[s0],atoms1[start],atoms1[mid],atoms1[end]);
                     var d2=dihedral3d(atoms2[mapping[s0]],atoms2[mapping[start]],atoms2[mapping[mid]],atoms2[mapping[end]]);
+                    collectDiffStat(statAcc.dihedrals,
+                        diffQuadKey(atoms1[s0].element,atoms1[start].element,atoms1[mid].element,atoms1[end].element),
+                        diffWrap180(d1-d2));
                     var dd=Math.abs(d1-d2);
                     if(dd>180)dd=360-dd;
                     var avgD=(Math.abs(d1)+Math.abs(d2))/2;
@@ -3487,6 +3587,12 @@ function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct)
             });
         });
     });
+
+    diffs.stats={
+        bonds:summarizeDiffStats(statAcc.bonds),
+        angles:summarizeDiffStats(statAcc.angles),
+        dihedrals:summarizeDiffStats(statAcc.dihedrals)
+    };
 
     return diffs;
 }
@@ -3562,6 +3668,9 @@ function buildDiffListHTML(diffs,totalDiff){
         html+='<div class="diff-row" style="color:#4ec9b0">Structures are identical (same conformation within thresholds).</div>';
     }else{
         html+='<div class="diff-row">Mapping: '+MD.atoms.length+' atoms matched. '+totalDiff+' differences found.</div>';
+    }
+    html+=buildDiffStatsHTML(diffs.stats);
+    if(totalDiff>0){
         if(diffs.bonds.length>0){
             html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Bond Length Differences ('+diffs.bonds.length+')</b></div>';
             diffs.bonds.sort(function(a,b){return b.pct-a.pct});
@@ -3590,6 +3699,66 @@ function buildDiffListHTML(diffs,totalDiff){
     return html;
 }
 
+function diffStatNum(v,decimals){
+    if(!isFinite(v))return '-';
+    return v.toFixed(decimals);
+}
+
+function buildDiffStatsHTML(stats){
+    if(!stats)return '';
+    var html='<div class="diff-stats">';
+    html+='<div class="diff-stats-head"><span class="diff-stats-arrow">'+(diffStatsExpanded?'▼':'▶')+'</span> Internal Coordinate Statistics</div>';
+    html+='<div class="diff-stats-body">';
+    html+='<div class="diff-stat-note">All compared internal coordinates (signed Δ = left − right), independent of the threshold. rms = √mean(Δ²), maxd = max|Δ|, mean = mean(Δ), std = population standard deviation.</div>';
+    html+=buildDiffStatTableHTML('Bond Lengths',stats.bonds,'Å',4);
+    html+=buildDiffStatTableHTML('Bond Angles',stats.angles,'°',3);
+    html+=buildDiffStatTableHTML('Dihedrals',stats.dihedrals,'°',3);
+    html+='</div></div>';
+    return html;
+}
+
+function buildDiffStatTableHTML(title,report,unit,decimals){
+    if(!report||!report.groups||!report.total)return '';
+    if(report.total.n===0){
+        return '<div class="diff-stat-title">'+title+': no comparable coordinates</div>';
+    }
+    var html='<div class="diff-stat-title">'+title+' ('+unit+') — n='+report.total.n+'</div>';
+    html+='<div class="diff-stat-scroll"><table class="diff-stat-table">';
+    html+='<tr><th>Group</th><th>n</th><th>rms</th><th>maxd</th><th>mean</th><th>std</th></tr>';
+    for(var i=0;i<report.groups.length;i++){
+        var g=report.groups[i];
+        html+='<tr><td>'+g.key+'</td><td>'+g.n+'</td><td>'+diffStatNum(g.rms,decimals)+'</td><td>'+diffStatNum(g.maxd,decimals)+
+            '</td><td>'+diffStatNum(g.mean,decimals)+'</td><td>'+diffStatNum(g.std,decimals)+'</td></tr>';
+    }
+    var t=report.total;
+    html+='<tr class="diff-stat-total"><td>All</td><td>'+t.n+'</td><td>'+diffStatNum(t.rms,decimals)+'</td><td>'+diffStatNum(t.maxd,decimals)+
+        '</td><td>'+diffStatNum(t.mean,decimals)+'</td><td>'+diffStatNum(t.std,decimals)+'</td></tr>';
+    html+='</table></div>';
+    return html;
+}
+
+// The statistics block is collapsible: the panel can hold both the detailed
+// difference list and the grouped statistics without one hiding the other.
+// The expanded/collapsed choice is kept in diffStatsExpanded, so it survives
+// the list re-render that every threshold-slider move triggers.
+function wireDiffStatsToggle(rootEl){
+    if(!rootEl)return;
+    var wrap=rootEl.querySelector('.diff-stats');
+    if(!wrap)return;
+    var head=wrap.querySelector('.diff-stats-head');
+    var arrow=wrap.querySelector('.diff-stats-arrow');
+    if(diffStatsExpanded)wrap.classList.remove('collapsed');
+    else wrap.classList.add('collapsed');
+    if(!head)return;
+    head.addEventListener('click',function(){
+        diffStatsExpanded=!diffStatsExpanded;
+        if(diffStatsExpanded)wrap.classList.remove('collapsed');
+        else wrap.classList.add('collapsed');
+        if(arrow)arrow.textContent=diffStatsExpanded?'▼':'▶';
+        layoutPanels();
+    });
+}
+
 function wireDiffSlider(){
     var slider=diffPanelEl.querySelector('#thresh-slider');
     if(slider){
@@ -3609,6 +3778,7 @@ function recomputeDiff(){
     var listEl=diffPanelEl.querySelector('#diff-results-list');
     if(listEl){
         listEl.innerHTML=buildDiffListHTML(diffs,totalDiff);
+        wireDiffStatsToggle(listEl);
     }
     var fullHTML=buildDiffResultsHTML(diffs,totalDiff);
     diffPanelHTML=fullHTML;
@@ -3699,6 +3869,7 @@ function showDiffPanel(html,isResults){
         });
     }
     wireDiffSlider();
+    wireDiffStatsToggle(diffPanelEl);
     layoutPanels();
 }
 
@@ -3716,6 +3887,7 @@ diffReopenEl.addEventListener('click',function(){
         });
     }
     wireDiffSlider();
+    wireDiffStatsToggle(diffPanelEl);
     layoutPanels();
 });
 
