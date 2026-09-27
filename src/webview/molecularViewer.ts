@@ -165,25 +165,60 @@ async function loadStructureFile(uri: vscode.Uri): Promise<LoadedStructure> {
     return { data: data, frames: [] };
 }
 
+/** Egg metadata read from the directory next to a structure file. */
+interface EggMeta { eggFile?: string; unitFile?: string }
+
+/** What the eggFile chooser needs to score each candidate against the structure. */
+interface EggMatchContext {
+    atoms: MolecularData['atoms'];
+    bonds: MolecularData['bonds'];
+    molecule: VmdMolecule;
+    scene: VmdScene;
+}
+
 /**
  * Read the toolchain's egg metadata from the directory of a structure file: a
  * `unitfile` (every unit's atoms) and an `eggFile*` (the eggs and the unit
  * numbers they wrap). Either file is optional; anything unreadable or absent
  * yields undefined, which just leaves the surface patches unlabelled.
+ * When several eggFile* candidates sit next to the structure, usually only one
+ * of them describes it, so the user is asked which one to use — each candidate
+ * is scored against the structure's surface segments first and the match count
+ * is shown as the hint. Cancelling just leaves the patches unlabelled. The
+ * (directory, structure) pair is cached by the caller so a multi-molecule
+ * script asks once instead of once per molecule.
  */
-async function readEggMetadata(sourceUri: vscode.Uri | undefined): Promise<{ eggFile?: string; unitFile?: string } | undefined> {
+async function readEggMetadata(
+    sourceUri: vscode.Uri | undefined,
+    cache?: Map<string, Promise<EggMeta | undefined>>,
+    matchContext?: EggMatchContext
+): Promise<EggMeta | undefined> {
     if (!sourceUri) return undefined;
+    const dirPath = path.dirname(sourceUri.fsPath);
+    if (cache) {
+        const key = dirPath + '|' + sourceUri.fsPath;
+        let pending = cache.get(key);
+        if (!pending) {
+            pending = readEggMetadataFromDir(dirPath, matchContext);
+            cache.set(key, pending);
+        }
+        return pending;
+    }
+    return readEggMetadataFromDir(dirPath, matchContext);
+}
+
+async function readEggMetadataFromDir(dirPath: string, matchContext?: EggMatchContext): Promise<EggMeta | undefined> {
     try {
-        const dir = vscode.Uri.file(path.dirname(sourceUri.fsPath));
+        const dir = vscode.Uri.file(dirPath);
         const entries = await vscode.workspace.fs.readDirectory(dir);
-        let eggName: string | undefined;
         let unitName: string | undefined;
+        const eggNames: string[] = [];
         for (const [name, type] of entries) {
             if (type !== vscode.FileType.File) continue;
             if (/^unitfile$/i.test(name)) unitName = name;
-            else if (/^eggfile/i.test(name) && eggName === undefined) eggName = name;
+            else if (/^eggfile/i.test(name)) eggNames.push(name);
         }
-        if (!eggName && !unitName) return undefined;
+        if (!unitName && eggNames.length === 0) return undefined;
         const readText = async (name: string): Promise<string | undefined> => {
             try {
                 return new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dir, name)));
@@ -191,7 +226,38 @@ async function readEggMetadata(sourceUri: vscode.Uri | undefined): Promise<{ egg
                 return undefined;
             }
         };
-        const meta: { eggFile?: string; unitFile?: string } = {};
+        let eggName: string | undefined;
+        if (eggNames.length === 1) {
+            eggName = eggNames[0];
+        } else if (eggNames.length > 1) {
+            eggNames.sort();
+            const unitText = unitName ? await readText(unitName) : undefined;
+            const units = unitText !== undefined ? parseUnitFile(unitText) : null;
+            const segments = matchContext
+                ? resolveVmdScene(matchContext.atoms, matchContext.bonds, matchContext.molecule, matchContext.scene).segments
+                : null;
+            const items: vscode.QuickPickItem[] = [];
+            for (const name of eggNames) {
+                let description = '';
+                if (segments) {
+                    const text = await readText(name);
+                    const eggs = text !== undefined ? parseEggFile(text) : null;
+                    const matched = eggs && units
+                        ? matchEggsToSegments(segments, eggs, units).filter(function (e) { return e; }).length
+                        : 0;
+                    description = (units ? '' : 'no unitfile, ')
+                        + matched + '/' + segments.length + ' patches match';
+                }
+                items.push({ label: name, description: description });
+            }
+            const picked = await vscode.window.showQuickPick(items, {
+                placeHolder: 'Several eggFile* files sit next to ' + path.basename(dirPath)
+                    + ' - pick the one describing this structure',
+                canPickMany: false
+            });
+            eggName = picked ? picked.label : undefined;
+        }
+        const meta: EggMeta = {};
         if (eggName) meta.eggFile = await readText(eggName);
         if (unitName) meta.unitFile = await readText(unitName);
         return meta;
@@ -401,6 +467,10 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
 
         let first: LoadedStructure | undefined;
 
+        // eggFile candidates are scored and picked once per (directory, structure)
+        // pair, so a multi-molecule script sharing one structure asks a single time.
+        const eggMetaCache = new Map<string, Promise<EggMeta | undefined>>();
+
         for (let i = 0; i < scene.molecules.length; i++) {
             const molecule = scene.molecules[i];
             const sourceUri = resolveVmdSource(scriptUri, molecule.sourceFile);
@@ -423,7 +493,12 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             if (!first) first = loaded;
             // 只有画 egg 的脚本才需要去找 eggFile/unitfile。
             const wantsEggs = molecule.reps.some(function (r) { return /^surf/i.test(r.style); });
-            const eggMeta = wantsEggs ? await readEggMetadata(sourceUri) : undefined;
+            const eggMeta = wantsEggs ? await readEggMetadata(sourceUri, eggMetaCache, {
+                atoms: loaded.data.atoms,
+                bonds: loaded.data.bonds,
+                molecule: molecule,
+                scene: scene
+            }) : undefined;
             payload.molecules.push(buildVmdMoleculePayload(molecule, loaded.data, scene, function (element) {
                 return ATOM_COLORS[element] || '#FF1493';
             }, eggMeta));
