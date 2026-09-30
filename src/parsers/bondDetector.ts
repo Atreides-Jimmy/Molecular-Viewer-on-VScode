@@ -21,6 +21,19 @@ interface BondSpec {
     tolerance: number;
 }
 
+// Elements that carry exactly one bond and therefore have no bond order left
+// to reassign. A valence fix must never touch the bond these atoms make: a
+// hydrogen's single sigma bond IS its chemistry, so "lowering" it produces a
+// hydrogen drawn with an empty valence shell instead of a plain single bond.
+const TERMINAL_ELEMENTS = new Set([
+    'H', 'F', 'Cl', 'Br', 'I',
+    'He', 'Ne', 'Ar', 'Kr', 'Xe', 'Rn'
+]);
+
+function isTerminalElement(el: string): boolean {
+    return TERMINAL_ELEMENTS.has(el.charAt(0).toUpperCase() + el.slice(1).toLowerCase());
+}
+
 function pairKey(el1: string, el2: string): string {
     const e1 = el1.toUpperCase();
     const e2 = el2.toUpperCase();
@@ -87,6 +100,14 @@ const MAX_VALENCE: { [key: string]: number } = {
     H: 1, C: 4, N: 3, O: 2, F: 1, S: 6, P: 5, Cl: 1, Br: 1, I: 1, B: 3
 };
 
+// Above this many atoms the valence relaxation is skipped. It is an interface
+// polish, not a correctness requirement: the bond table and the geometric
+// fallback already produced a usable bond list. Structures this large are
+// trajectories and protein-scale assemblies, where the extra pass costs more
+// than the drawing is worth — a multi-hundred-thousand-atom log would otherwise
+// stall the editor while the user waits for a picture.
+const MAX_RELAX_ATOMS = 20000;
+
 function distance(a1: Atom, a2: Atom): number {
     const dx = a1.x - a2.x;
     const dy = a1.y - a2.y;
@@ -134,85 +155,301 @@ function getBondOrder(el1: string, el2: string, dist: number): number {
     return 1.0;
 }
 
+// Constraint-based bond-order assignment for a single atom.
+//
+// A valence ceiling alone is not enough: a multivalent atom (O, N) carrying one
+// extra near neighbour — the common case is a hydroxyl oxygen that also accepts
+// a hydrogen bond — starts one unit over its ceiling. The previous version
+// treated that as "remove one unit of bond order" and walked every neighbour
+// DOWN one step, which is lossy: nothing ever raised an order again, so the
+// deficit stayed behind as an over-tight neighbour bond (a hydroxyl oxygen came
+// out with a double bond to hydrogen).
+//
+// The correct question is not "which neighbour do I downgrade" but "which of
+// the allowed order combinations puts every neighbour closest to the length it
+// was actually measured at". Choosing that combination restores the neighbours
+// whose real geometry says single bond (a normal O-H) and pushes the excess
+// onto the neighbour whose geometry argues for it (the long contact). Both
+// directions of change are available, so the result is stable: re-running it
+// leaves the assignment exactly as it is.
+//
+// Local optimum over the neighbours of ONE centre. The search contributes no
+// score of its own, only relative differences, which is what makes it
+// reversible.
+//
+// The cost model is linear rather than a Cartesian sweep. A plan is described
+// by how many units of order each free neighbour gains or loses relative to its
+// current value; the centre's valence conservation makes the gains and losses
+// balance, so the search is over small integer "give one unit to neighbour k"
+// moves. Two phases cover it: single transfers, then a balanced pair swap. At
+// most a handful of neighbours, so the candidate count stays tiny.
+function relaxCenterValence(
+    bondMap: Map<number, Map<number, number>>,
+    atoms: Atom[],
+    i: number,
+    entries: Array<[number, number]>,
+    curDev: number,
+    curSum: number
+): boolean {
+    const el = atoms[i].element;
+    const maxV = MAX_VALENCE[el.charAt(0).toUpperCase() + el.slice(1).toLowerCase()] || 100;
+
+    // Non-terminal neighbours whose order may be reassigned. A terminal
+    // neighbour (hydrogen, halogen) stays a plain single bond: it has nowhere
+    // to put extra order and nothing to give away.
+    const free: number[] = [];
+    let terminalSum = 0;
+    for (let k = 0; k < entries.length; k++) {
+        const j = entries[k][0];
+        if (isTerminalElement(atoms[j].element)) terminalSum += 1.0;
+        else free.push(k);
+    }
+    if (free.length === 0) return false;
+
+    const nf = free.length;
+
+    // Candidate orders per free neighbour, and the deviation each value implies
+    // at the measured distance. Everything below is a lookup, so the sweep does
+    // no distance maths.
+    //
+    // A candidate is only admitted when the measured length actually supports
+    // it: either the distance lands inside that spec's tolerance, or the spec is
+    // the pair's closest fit. Without that filter the search would happily
+    // invent multiple bonds from arbitrary long contacts, because a stretching
+    // bond's deviation grows monotonically and "any order is an improvement" is
+    // false for a distance that is simply too long for a bond.
+    const cand: number[][] = [];
+    const devs: number[][] = [];
+    const curIdx: number[] = [];
+    for (let fi = 0; fi < nf; fi++) {
+        const j = entries[free[fi]][0];
+        const dist = distance(atoms[i], atoms[j]);
+        const specs = BOND_SPECS[specKey(el, atoms[j].element)];
+        const ladder: number[] = [];
+        const add = (o: number) => {
+            if (o > 0 && ladder.indexOf(o) < 0) ladder.push(o);
+        };
+        const devOf: number[] = [];
+
+        if (specs) {
+            // Closest-fitting order, then only those orders whose tolerance
+            // actually brackets the measured distance.
+            let closest = specs[0].order;
+            let closestDiff = Infinity;
+            for (const s of specs) {
+                const diff = Math.abs(dist - s.length);
+                if (diff < closestDiff) {
+                    closestDiff = diff;
+                    closest = s.order;
+                }
+            }
+            add(closest);
+            for (const s of specs) {
+                if (Math.abs(dist - s.length) <= s.tolerance) add(s.order);
+            }
+            const cur = entries[free[fi]][1];
+            if (ladder.indexOf(cur) < 0) add(cur);
+            for (let k = 0; k < ladder.length; k++) {
+                let ideal = dist;
+                let minD = Infinity;
+                for (const s of specs) {
+                    if (s.order === ladder[k] && Math.abs(dist - s.length) < minD) {
+                        minD = Math.abs(dist - s.length);
+                        ideal = s.length;
+                    }
+                }
+                devOf.push(Math.abs(dist - ideal));
+            }
+        } else {
+            // No spec for the pair: the initial geometric fallback is all the
+            // evidence there is, so it stays put.
+            add(entries[free[fi]][1]);
+            devOf.push(0);
+        }
+        cand.push(ladder);
+        devs.push(devOf);
+        const ci = ladder.indexOf(entries[free[fi]][1]);
+        curIdx.push(ci >= 0 ? ci : 0);
+    }
+
+    // Room each neighbour has under its own ceiling, so a promotion is never
+    // allowed to push a different atom over its limit. This is what keeps the
+    // pass from trading one violation for another.
+    const headroom: number[] = [];
+    for (let fi = 0; fi < nf; fi++) {
+        const j = entries[free[fi]][0];
+        const el2 = atoms[j].element.charAt(0).toUpperCase() + atoms[j].element.slice(1).toLowerCase();
+        const cap = MAX_VALENCE[el2] || 100;
+        const neighbors = bondMap.get(j);
+        let own = 0;
+        if (neighbors) neighbors.forEach((o, k) => { if (k !== i) own += o; });
+        headroom.push(cap - own);
+    }
+
+    const chosen = curIdx.slice();
+    let bestSigned = 0;
+    let bestAbs = 0;
+    let found = false;
+
+    // Change neighbour fi to candidate value i1 and fj to i2, then keep the plan
+    // if the centre still fits its ceiling, no neighbour is pushed over its own,
+    // and the neighbours sit closer to their measured lengths. A deficit at the
+    // centre is rejected outright: that is what stops the pass from trading a
+    // positive violation for a negative one.
+    const consider = (fi: number, i1: number, fj: number, i2: number): void => {
+        let sum = terminalSum;
+        for (let k = 0; k < nf; k++) sum += (k === fi ? cand[k][i1] : k === fj ? cand[k][i2] : cand[k][curIdx[k]]);
+        if (sum < curSum - 0.001) return;
+        if (sum > maxV + 0.1) return;
+
+        let signed = 0;
+        let abs = 0;
+        for (let k = 0; k < nf; k++) {
+            const v = k === fi ? cand[k][i1] : k === fj ? cand[k][i2] : cand[k][curIdx[k]];
+            const d = k === fi ? devs[k][i1] : k === fj ? devs[k][i2] : devs[k][curIdx[k]];
+            const delta = v - cand[k][curIdx[k]];
+            if (delta > headroom[k] + 0.001) return;
+            signed += d - devs[k][curIdx[k]];
+            abs += d;
+        }
+        // Prefer the plan the geometry argues for; break ties on the total
+        // deviation so equal-improvement plans stay deterministic.
+        if (!found || signed < bestSigned - 1e-9 || (Math.abs(signed - bestSigned) <= 1e-9 && abs < bestAbs - 1e-9)) {
+            bestSigned = signed;
+            bestAbs = abs;
+            for (let k = 0; k < nf; k++) {
+                chosen[k] = k === fi ? i1 : k === fj ? i2 : curIdx[k];
+            }
+            found = true;
+        }
+    };
+
+    // Phase 1 — transfer one unit of order from one free neighbour to another.
+    for (let fi = 0; fi < nf; fi++) {
+        for (let i1 = 0; i1 < cand[fi].length; i1++) {
+            const delta = cand[fi][i1] - cand[fi][curIdx[fi]];
+            if (delta === 0) continue;
+            for (let fj = 0; fj < nf; fj++) {
+                if (fj === fi) continue;
+                for (let i2 = 0; i2 < cand[fj].length; i2++) {
+                    if (Math.abs((cand[fj][i2] - cand[fj][curIdx[fj]]) + delta) > 0.001) continue;
+                    consider(fi, i1, fj, i2);
+                }
+            }
+        }
+    }
+
+    // Phase 2 — two neighbours move together by the same amount (e.g. two
+    // bonds both settling to 1.5), which single transfers cannot express.
+    for (let fi = 0; fi < nf; fi++) {
+        for (let i1 = 0; i1 < cand[fi].length; i1++) {
+            const delta = cand[fi][i1] - cand[fi][curIdx[fi]];
+            if (delta === 0) continue;
+            for (let fj = fi + 1; fj < nf; fj++) {
+                for (let i2 = 0; i2 < cand[fj].length; i2++) {
+                    if (Math.abs((cand[fj][i2] - cand[fj][curIdx[fj]]) + delta) > 0.001) continue;
+                    consider(fi, i1, fj, i2);
+                }
+            }
+        }
+    }
+
+    // The unchanged plan, so a centre that cannot be improved reports false and
+    // the outer loop terminates instead of spinning.
+    //
+    // Rejecting a plan that is not actually better than leaving the atom alone
+    // is what makes the pass idempotent.
+    if (!found || bestSigned > -1e-9) return false;
+
+    let improved = false;
+    for (let fi = 0; fi < nf; fi++) {
+        const k = free[fi];
+        const next = cand[fi][chosen[fi]];
+        if (next === entries[k][1]) continue;
+        const j = entries[k][0];
+        bondMap.get(i)?.set(j, next);
+        bondMap.get(j)?.set(i, next);
+        improved = true;
+    }
+    return improved;
+}
+
+// Relax every atom whose valence drifts away from its ceiling. The pass runs to
+// a fixed point: each accepted plan can move a neighbour away from its own
+// ceiling, so the affected neighbourhoods are re-queued until nothing changes.
+// The deviation terms are relative, so no absolute score is accumulated and no
+// convergence tolerance has to be guessed.
+//
+// The iteration cap scales with the worst over-coordination in the structure
+// rather than being a fixed constant: a molecule whose oxygen accepts three
+// hydrogen bonds needs more rounds than a clean one, and capping at a flat
+// number silently left those atoms unresolved. Real structures settle in one or
+// two rounds; the bound only exists so a pathological input cannot loop.
 function refineBondOrders(
     bondMap: Map<number, Map<number, number>>,
     atoms: Atom[]
 ): void {
-    const maxIter = 10;
+    let worstOver = 0;
+    const valencies = new Map<number, number>();
+    for (let i = 0; i < atoms.length; i++) valencies.set(i, 0);
+    bondMap.forEach((neighbors, i) => {
+        neighbors.forEach((order) => {
+            valencies.set(i, (valencies.get(i) || 0) + order);
+        });
+    });
+    valencies.forEach((val, i) => {
+        const el = atoms[i].element.charAt(0).toUpperCase() + atoms[i].element.slice(1).toLowerCase();
+        const maxV = MAX_VALENCE[el] || 100;
+        const over = val - maxV;
+        if (over > worstOver) worstOver = over;
+    });
+
+    const maxIter = Math.min(64, 4 + Math.ceil(worstOver) * 2);
     for (let iter = 0; iter < maxIter; iter++) {
         let changed = false;
-        const valencies = new Map<number, number>();
-        for (let i = 0; i < atoms.length; i++) valencies.set(i, 0);
+
+        const current = new Map<number, number>();
+        for (let i = 0; i < atoms.length; i++) current.set(i, 0);
         bondMap.forEach((neighbors, i) => {
-            neighbors.forEach((order, _j) => {
-                valencies.set(i, (valencies.get(i) || 0) + order);
+            neighbors.forEach((order) => {
+                current.set(i, (current.get(i) || 0) + order);
             });
         });
 
         const violations: number[] = [];
-        valencies.forEach((val, i) => {
+        current.forEach((val, i) => {
             const el = atoms[i].element.charAt(0).toUpperCase() + atoms[i].element.slice(1).toLowerCase();
             const maxV = MAX_VALENCE[el] || 100;
             if (val > maxV + 0.1) violations.push(i);
         });
-
         if (violations.length === 0) break;
 
         for (const i of violations) {
             const neighbors = bondMap.get(i);
             if (!neighbors) continue;
-            const currentValency = Array.from(neighbors.values()).reduce((s, v) => s + v, 0);
-            const el = atoms[i].element.charAt(0).toUpperCase() + atoms[i].element.slice(1).toLowerCase();
-            const maxV = MAX_VALENCE[el] || 100;
-            if (currentValency <= maxV + 0.1) continue;
+            const entries = Array.from(neighbors.entries());
+            if (entries.length === 0) continue;
 
-            let bestBond: [number, number] | null = null;
-            let minLoss = Infinity;
-            const el1 = atoms[i].element;
-
-            neighbors.forEach((order, j) => {
-                if (order <= 1.0) return;
-                let nextOrder: number;
-                if (order === 3.0) nextOrder = 2.0;
-                else if (order === 2.0) nextOrder = 1.5;
-                else if (order === 1.5) nextOrder = 1.0;
-                else return;
-
-                const el2 = atoms[j].element;
+            let curSum = 0;
+            let curDev = 0;
+            for (const [j, order] of entries) {
+                curSum += order;
                 const dist = distance(atoms[i], atoms[j]);
-                const sk = specKey(el1, el2);
-                const specs = BOND_SPECS[sk];
-                if (!specs) return;
-
-                let currentIdeal = 0, nextIdeal = 0;
-                let minD = Infinity;
-                for (const s of specs) {
-                    if (s.order === order && Math.abs(dist - s.length) < minD) {
-                        minD = Math.abs(dist - s.length);
-                        currentIdeal = s.length;
+                const specs = BOND_SPECS[specKey(atoms[i].element, atoms[j].element)];
+                let ideal = dist;
+                if (specs) {
+                    let minD = Infinity;
+                    for (const s of specs) {
+                        if (s.order === order && Math.abs(dist - s.length) < minD) {
+                            minD = Math.abs(dist - s.length);
+                            ideal = s.length;
+                        }
                     }
                 }
-                minD = Infinity;
-                for (const s of specs) {
-                    if (s.order === nextOrder && Math.abs(dist - s.length) < minD) {
-                        minD = Math.abs(dist - s.length);
-                        nextIdeal = s.length;
-                    }
-                }
-                if (currentIdeal === 0 || nextIdeal === 0) return;
+                curDev += Math.abs(dist - ideal);
+            }
 
-                const loss = Math.abs(dist - nextIdeal) - Math.abs(dist - currentIdeal);
-                if (loss < minLoss) {
-                    minLoss = loss;
-                    bestBond = [j, nextOrder];
-                }
-            });
-
-            if (bestBond) {
-                const bj = bestBond[0];
-                const bOrder = bestBond[1];
-                neighbors.set(bj, bOrder);
-                bondMap.get(bj)?.set(i, bOrder);
+            if (relaxCenterValence(bondMap, atoms, i, entries, curDev, curSum)) {
                 changed = true;
             }
         }
@@ -221,6 +458,35 @@ function refineBondOrders(
     }
 }
 
+// Every spec order a given element pair is allowed to carry, read straight out
+// of BOND_SPECS so the set can never drift away from the geometry table.
+function allowedOrders(el1: string, el2: string): number[] {
+    const specs = BOND_SPECS[specKey(el1, el2)];
+    if (!specs) return [1.0];
+    const orders: number[] = [];
+    for (const s of specs) {
+        if (orders.indexOf(s.order) < 0) orders.push(s.order);
+    }
+    return orders;
+}
+
+function nearestAllowedOrder(allowed: number[], order: number): number {
+    let best = allowed[0];
+    let bestDiff = Infinity;
+    for (const a of allowed) {
+        const diff = Math.abs(order - a);
+        if (diff < bestDiff) {
+            bestDiff = diff;
+            best = a;
+        }
+    }
+    return best;
+}
+
+// Snap every bond onto an order its element pair actually supports. This is a
+// table-driven generalisation of the rule that used to be spelled out for a
+// handful of pairs by hand: an order the table does not list for that pair is
+// meaningless, so it collapses onto the closest listed one.
 function fixBondOrders(
     bondMap: Map<number, Map<number, number>>,
     atoms: Atom[]
@@ -228,61 +494,12 @@ function fixBondOrders(
     bondMap.forEach((neighbors, i) => {
         neighbors.forEach((order, j) => {
             if (i > j) return;
-            const el1 = atoms[i].element.toUpperCase();
-            const el2 = atoms[j].element.toUpperCase();
-            const elements = new Set([el1, el2]);
-
-            if (elements.has('C') && elements.has('O')) {
-                if (order !== 1.0 && order !== 2.0) {
-                    const newOrder = order < 1.7 ? 1.0 : 2.0;
-                    neighbors.set(j, newOrder);
-                    bondMap.get(j)?.set(i, newOrder);
-                }
-            }
-
-            if (el1 === 'BR' || el2 === 'BR') {
-                neighbors.set(j, 1.0);
-                bondMap.get(j)?.set(i, 1.0);
-            }
+            const allowed = allowedOrders(atoms[i].element, atoms[j].element);
+            if (allowed.indexOf(order) >= 0) return;
+            const snapped = nearestAllowedOrder(allowed, order);
+            neighbors.set(j, snapped);
+            bondMap.get(j)?.set(i, snapped);
         });
-    });
-
-    bondMap.forEach((neighbors, i) => {
-        const el = atoms[i].element.toUpperCase();
-        if (el !== 'N') return;
-        const neighborList = Array.from(neighbors.entries());
-        const numNeighbors = neighborList.length;
-
-        if (numNeighbors === 3) {
-            for (const [j, _order] of neighborList) {
-                neighbors.set(j, 1.0);
-                bondMap.get(j)?.set(i, 1.0);
-            }
-        } else if (numNeighbors === 2) {
-            const [n1, bo1] = neighborList[0];
-            const [n2, bo2] = neighborList[1];
-            const n1IsH = atoms[n1].element.toUpperCase() === 'H';
-            const n2IsH = atoms[n2].element.toUpperCase() === 'H';
-
-            let f1: number, f2: number;
-            if (n1IsH) {
-                f1 = 1.0; f2 = 2.0;
-            } else if (n2IsH) {
-                f1 = 2.0; f2 = 1.0;
-            } else {
-                const d1 = Math.abs(bo1 - 1.5) + Math.abs(bo2 - 1.5);
-                const d2 = Math.abs(bo1 - 2.0) + Math.abs(bo2 - 1.0);
-                const d3 = Math.abs(bo1 - 1.0) + Math.abs(bo2 - 2.0);
-                const best = Math.min(d1, d2, d3);
-                if (best === d1) { f1 = 1.5; f2 = 1.5; }
-                else if (best === d2) { f1 = 2.0; f2 = 1.0; }
-                else { f1 = 1.0; f2 = 2.0; }
-            }
-            neighbors.set(n1, f1);
-            bondMap.get(n1)?.set(i, f1);
-            neighbors.set(n2, f2);
-            bondMap.get(n2)?.set(i, f2);
-        }
     });
 }
 
@@ -375,7 +592,7 @@ export function detectBonds(atoms: Atom[]): Bond[] {
     }
 
     fixBondOrders(bondMap, atoms);
-    refineBondOrders(bondMap, atoms);
+    if (n <= MAX_RELAX_ATOMS) refineBondOrders(bondMap, atoms);
 
     const bonds: Bond[] = [];
     const seen = new Set<string>();

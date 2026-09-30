@@ -4355,6 +4355,16 @@ function bondGbo(el1,el2,d){
 function bondPcut(e1,e2){var E1=e1.toUpperCase(),E2=e2.toUpperCase();var co=BOND_BC[E1<E2?E1+E2:E2+E1];
     if(co!==undefined)return co;
     var r1=BOND_CR2[e1]||1.5,r2=BOND_CR2[e2]||1.5;return r1+r2+0.5}
+// Elements whose valence ceiling is a hard chemical fact rather than a
+// heuristic: they are pinned to a single bond and never take part in the
+// re-assignment budget of a neighbouring centre.
+var BOND_TERM={H:1,F:1,Cl:1,Br:1,I:1,He:1,Ne:1,Ar:1,Kr:1,Xe:1,Rn:1};
+function bondNorm(e){return e.charAt(0).toUpperCase()+e.slice(1).toLowerCase()}
+function bondIsTerm(e){return BOND_TERM[bondNorm(e)]===1}
+function bondAllowedOrders(e1,e2){var sp=BOND_BS[bondSk(e1,e2)];if(!sp)return [1];
+    var l=[],seen={};for(var k=0;k<sp.length;k++){if(!seen[sp[k].o]){seen[sp[k].o]=1;l.push(sp[k].o)}}return l}
+function bondNearestAllowed(allowed,o){var b=allowed[0],bd=Infinity;
+    for(var k=0;k<allowed.length;k++){var df=Math.abs(allowed[k]-o);if(df<bd){bd=df;b=allowed[k]}}return b}
 function detectBondsFromAtoms(atoms){
     var n=atoms.length;var bm=new Map();
     // Spatial hash grid (3 A cells) instead of the O(N^2) pair loop. A bond
@@ -4395,30 +4405,153 @@ function detectBondsFromAtoms(atoms){
             if(bo>0){if(!bm.has(i))bm.set(i,new Map());if(!bm.has(j))bm.set(j,new Map());bm.get(i).set(j,bo);bm.get(j).set(i,bo)}
         }
     }
-    bm.forEach(function(nb,i){nb.forEach(function(o,j){if(i>j)return;var e1=atoms[i].element.toUpperCase(),e2=atoms[j].element.toUpperCase();var els=new Set([e1,e2]);
-        if(els.has('C')&&els.has('O')&&o!==1&&o!==2){var no=o<1.7?1:2;nb.set(j,no);bm.get(j).set(i,no)}
-        if(e1==='BR'||e2==='BR'){nb.set(j,1);bm.get(j).set(i,1)}
+    // Snap every order onto the value the element-pair table actually allows.
+    // The table is the single source of truth here, so the previous hardcoded
+    // whitelists (C+O / Br / N) are no longer needed and no pair is left out.
+    bm.forEach(function(nb,i){nb.forEach(function(o,j){if(i>j)return;
+        var allowed=bondAllowedOrders(atoms[i].element,atoms[j].element);
+        if(allowed.indexOf(o)>=0)return;
+        var no=bondNearestAllowed(allowed,o);
+        if(no!==o){nb.set(j,no);bm.get(j).set(i,no)}
     })});
-    bm.forEach(function(nb,i){var el=atoms[i].element.toUpperCase();if(el!=='N')return;var nl=Array.from(nb.entries());var nn=nl.length;
-        if(nn===3){for(var k=0;k<nl.length;k++){nb.set(nl[k][0],1);bm.get(nl[k][0]).set(i,1)}}
-        else if(nn===2){var n1=nl[0][0],bo1=nl[0][1],n2=nl[1][0],bo2=nl[1][1];var n1H=atoms[n1].element.toUpperCase()==='H',n2H=atoms[n2].element.toUpperCase()==='H';var f1,f2;
-            if(n1H){f1=1;f2=2}else if(n2H){f1=2;f2=1}else{var d1=Math.abs(bo1-1.5)+Math.abs(bo2-1.5),d2=Math.abs(bo1-2)+Math.abs(bo2-1),d3=Math.abs(bo1-1)+Math.abs(bo2-2);var best=Math.min(d1,d2,d3);if(best===d1){f1=1.5;f2=1.5}else if(best===d2){f1=2;f2=1}else{f1=1;f2=2}}
-            nb.set(n1,f1);bm.get(n1).set(i,f1);nb.set(n2,f2);bm.get(n2).set(i,f2)}
-    });
-    for(var iter=0;iter<10;iter++){var changed=false;var val=new Map();for(var i=0;i<n;i++)val.set(i,0);
-        bm.forEach(function(nb,i){nb.forEach(function(o){val.set(i,(val.get(i)||0)+o)})});
-        var viols=[];val.forEach(function(v,i){var el=atoms[i].element.charAt(0).toUpperCase()+atoms[i].element.slice(1).toLowerCase();var mv=BOND_MV[el]||100;if(v>mv+0.1)viols.push(i)});
-        if(viols.length===0)break;
-        for(var vi=0;vi<viols.length;vi++){var i=viols[vi];var nb=bm.get(i);if(!nb)continue;var cv=Array.from(nb.values()).reduce(function(s,v){return s+v},0);var el=atoms[i].element.charAt(0).toUpperCase()+atoms[i].element.slice(1).toLowerCase();var mv=BOND_MV[el]||100;if(cv<=mv+0.1)continue;
-            var bb=null,ml=Infinity;nb.forEach(function(o,j){if(o<=1)return;var no;if(o===3)no=2;else if(o===2)no=1.5;else if(o===1.5)no=1;else return;
-                var el2=atoms[j].element;var dd=Math.sqrt(Math.pow(atoms[i].x-atoms[j].x,2)+Math.pow(atoms[i].y-atoms[j].y,2)+Math.pow(atoms[i].z-atoms[j].z,2));var sp=BOND_BS[bondSk(atoms[i].element,el2)];if(!sp)return;
-                var ci=0,ni=0,md=Infinity;for(var k=0;k<sp.length;k++){if(sp[k].o===o&&Math.abs(dd-sp[k].l)<md){md=Math.abs(dd-sp[k].l);ci=sp[k].l}}md=Infinity;for(var k=0;k<sp.length;k++){if(sp[k].o===no&&Math.abs(dd-sp[k].l)<md){md=Math.abs(dd-sp[k].l);ni=sp[k].l}}if(!ci||!ni)return;
-                var loss=Math.abs(dd-ni)-Math.abs(dd-ci);if(loss<ml){ml=loss;bb=[j,no]}
-            });if(bb){nb.set(bb[0],bb[1]);bm.get(bb[0]).set(i,bb[1]);changed=true}
-        }if(!changed)break;
-    }
+    if(n<=BOND_MAX_RELAX)relaxBondValence(bm,atoms,n);
     var bonds=[];var seen=new Set();bm.forEach(function(nb,i){nb.forEach(function(o,j){var key=Math.min(i,j)+'-'+Math.max(i,j);if(!seen.has(key)){seen.add(key);bonds.push({atom1:Math.min(i,j),atom2:Math.max(i,j),order:o})}})});
     return bonds;
+}
+// Above this atom count the re-assignment sweep is skipped: trajectory-scale
+// inputs (thousands of frames concatenated) cost more than the result is worth
+// and the per-frame geometry is what matters anyway.
+var BOND_MAX_RELAX=20000;
+// Reversible, table-driven re-assignment of local bond orders.
+//
+// The old refinement could only move an order DOWN and had no entry at all for
+// pairs missing from the element-pair table, so a hydroxyl oxygen carrying an
+// extra hydrogen-bond contact (O-C, O-H, O...H inside the HO cutoff) was stuck
+// above its ceiling: the O-H candidate was skipped silently and the surplus was
+// charged to the O-C bond instead, turning it into a double or triple bond.
+//
+// Here every over-coordinated centre is re-planned from scratch. Candidate
+// orders are limited to the values the measured distance actually supports
+// (inside the table tolerance, or the closest fit), so a long non-bonded
+// contact can never be promoted into a multiple bond. A plan is only accepted
+// if it strictly lowers the total distance deviation from the table ideal, so
+// re-running over an already-correct structure changes nothing - that is what
+// makes the sweep idempotent. Promotions must also respect the headroom of the
+// partner atom, so fixing one centre can never over-coordinate its neighbour.
+// Terminal elements are pinned to order 1 and excluded from the budget.
+function relaxBondValence(bm,atoms,n){
+    var rEl=new Array(n);
+    for(var i=0;i<n;i++)rEl[i]=bondNorm(atoms[i].element);
+    var worst=0;
+    for(var i=0;i<n;i++){var nb=bm.get(i);if(!nb)continue;var s=0;
+        nb.forEach(function(o){s+=o});var mv=BOND_MV[rEl[i]]||100;
+        if(s-mv>worst)worst=s-mv}
+    if(worst<=0.1)return;
+    var maxIter=Math.min(64,4+Math.ceil(worst)*2);
+    for(var t=0;t<maxIter;t++){
+        var improved=false;
+        for(var i=0;i<n;i++){
+            if(bondIsTerm(rEl[i]))continue;
+            var nb=bm.get(i);if(!nb||nb.size===0)continue;
+            var cur=0;nb.forEach(function(o){cur+=o});
+            var ceiling=BOND_MV[rEl[i]]||100;
+            if(cur<=ceiling+0.1)continue;
+            if(relaxCenter(bm,atoms,rEl,i,nb,cur,ceiling))improved=true;
+        }
+        if(!improved)break;
+    }
+}
+// Candidate orders for the bond j-i that the measured distance supports.
+// Returns the entry indices into the pair table plus the deviation cost.
+function relaxLadder(el1,el2,d){
+    var sp=BOND_BS[bondSk(el1,el2)];
+    var out=[];
+    if(!sp)return out;
+    var best=-1,bd=Infinity;
+    for(var k=0;k<sp.length;k++){var df=Math.abs(d-sp[k].l);
+        if(df<=sp[k].t){out.push(k)}
+        if(df<bd){bd=df;best=k}}
+    if(best>=0&&out.indexOf(best)<0)out.push(best);
+    return out;
+}
+function relaxCenter(bm,atoms,rEl,i,nb,curSum,ceiling){
+    var list=[];nb.forEach(function(o,idx){list.push([idx,o])});
+    var m=list.length;if(m===0)return false;
+    // Terminal neighbours stay plain single bonds: they have nowhere to put
+    // extra order and nothing to give away. Their contribution is fixed.
+    var termSum=0,free=[];
+    for(var k=0;k<m;k++){if(bondIsTerm(rEl[list[k][0]]))termSum+=1;else free.push(k)}
+    var nf=free.length;if(nf===0)return false;
+    // Candidate orders per free neighbour, plus the deviation each implies at
+    // the measured distance. A candidate is only admitted when the length
+    // really supports it - inside that spec's tolerance, or the pair's closest
+    // fit - so a long non-bonded contact can never be promoted.
+    var cand=[],devs=[],curIdx=[];
+    for(var fi=0;fi<nf;fi++){var j=list[free[fi]][0];var cur=list[free[fi]][1];
+        var dd=Math.sqrt(Math.pow(atoms[i].x-atoms[j].x,2)+Math.pow(atoms[i].y-atoms[j].y,2)+Math.pow(atoms[i].z-atoms[j].z,2));
+        var sp=BOND_BS[bondSk(atoms[i].element,atoms[j].element)];
+        var lad=[],dev=[];
+        if(sp){
+            var ladIdx=relaxLadder(atoms[i].element,atoms[j].element,dd);
+            for(var q=0;q<ladIdx.length;q++){lad.push(sp[ladIdx[q]].o);dev.push(Math.abs(dd-sp[ladIdx[q]].l))}
+            if(lad.indexOf(cur)<0){var cI=-1,cd=Infinity;
+                for(var q=0;q<sp.length;q++){var df=Math.abs(dd-sp[q].l);if(df<cd){cd=df;cI=q}}
+                lad.push(cur);dev.push(Math.abs(dd-sp[cI].l))}
+        }else{lad=[cur];dev=[0]}
+        cand.push(lad);devs.push(dev);
+        var ci=lad.indexOf(cur);curIdx.push(ci>=0?ci:0);
+    }
+    // Room each neighbour has under its own ceiling, so a promotion never
+    // pushes a different atom over its limit.
+    var head=[];
+    for(var fi=0;fi<nf;fi++){var j=list[free[fi]][0];var cap=BOND_MV[rEl[j]]||100;var own=bm.get(j);var used=0;
+        if(own)own.forEach(function(o2,k){if(k!==i)used+=o2});
+        head.push(cap-used)}
+    var chosen=curIdx.slice();var bestSigned=0,bestAbs=0,found=false;
+    // Change neighbour fi to candidate a and fj to candidate b, then keep the
+    // plan if the centre still fits its ceiling, no neighbour is pushed over
+    // its own, and the neighbours sit closer to their measured lengths. A
+    // deficit at the centre is rejected outright, which is what stops the pass
+    // from trading a positive violation for a negative one.
+    function consider(fi,ai,fj,bi){
+        var sum=termSum;
+        for(var k=0;k<nf;k++)sum+=(k===fi?cand[k][ai]:k===fj?cand[k][bi]:cand[k][curIdx[k]]);
+        if(sum<curSum-0.001)return;
+        if(sum>ceiling+0.1)return;
+        var signed=0,abs=0;
+        for(var k=0;k<nf;k++){
+            var v=(k===fi?cand[k][ai]:k===fj?cand[k][bi]:cand[k][curIdx[k]]);
+            var d=(k===fi?devs[k][ai]:k===fj?devs[k][bi]:devs[k][curIdx[k]]);
+            var dl=v-cand[k][curIdx[k]];
+            if(dl>head[k]+0.001)return;
+            signed+=d-devs[k][curIdx[k]];abs+=d}
+        if(!found||signed<bestSigned-1e-9||(Math.abs(signed-bestSigned)<=1e-9&&abs<bestAbs-1e-9)){
+            bestSigned=signed;bestAbs=abs;
+            for(var k=0;k<nf;k++)chosen[k]=(k===fi?ai:k===fj?bi:curIdx[k]);
+            found=true}
+    }
+    // Phase 1: transfer one unit of order from one free neighbour to another.
+    for(var fi=0;fi<nf;fi++){for(var ai=0;ai<cand[fi].length;ai++){
+        var da=cand[fi][ai]-cand[fi][curIdx[fi]];if(da===0)continue;
+        for(var fj=0;fj<nf;fj++){if(fj===fi)continue;
+            for(var bi=0;bi<cand[fj].length;bi++){
+                if(Math.abs((cand[fj][bi]-cand[fj][curIdx[fj]])+da)>0.001)continue;
+                consider(fi,ai,fj,bi)}}}}
+    // Phase 2: two neighbours move together by the same amount (e.g. two bonds
+    // both settling to 1.5), which single transfers cannot express.
+    for(var fi=0;fi<nf;fi++){for(var ai=0;ai<cand[fi].length;ai++){
+        var da=cand[fi][ai]-cand[fi][curIdx[fi]];if(da===0)continue;
+        for(var fj=fi+1;fj<nf;fj++){
+            for(var bi=0;bi<cand[fj].length;bi++){
+                if(Math.abs((cand[fj][bi]-cand[fj][curIdx[fj]])+da)>0.001)continue;
+                consider(fi,ai,fj,bi)}}}}
+    // Reject a plan that is not actually better than leaving the atom alone:
+    // that is what makes the pass idempotent, so re-running changes nothing.
+    if(!found||bestSigned>-1e-9)return false;
+    var improved=false;
+    for(var fi=0;fi<nf;fi++){var no=cand[fi][chosen[fi]];if(no===list[free[fi]][1])continue;
+        var jj=list[free[fi]][0];nb.set(jj,no);bm.get(jj).set(i,no);improved=true}
+    return improved;
 }
 document.getElementById('prev-frame').addEventListener('click',function(){if(currentFrame>0)switchFrame(currentFrame-1)});
 document.getElementById('next-frame').addEventListener('click',function(){if(currentFrame<totalFrames-1)switchFrame(currentFrame+1)});
