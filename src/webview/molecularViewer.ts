@@ -3,6 +3,7 @@ import * as path from 'path';
 import { parseFile, parseLogFile, LogFrame, OrcaFrame, RouteSection, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg } from '../parsers/index';
 import { ensureBonds } from '../parsers/bondDetector';
 import { BOND_PERCEPTION_SOURCE } from '../parsers/bondPerception';
+import { addHydrogens } from '../parsers/addHydrogens';
 import { smilesTo3dSafe, validateSmiles } from '../parsers/smilesTo3d';
 import { MolecularData, AtomGroup, OptStep, NormalMode, VmdScene, VmdMolecule } from '../types';
 
@@ -864,6 +865,31 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
                     }
                     break;
+                case 'addHydrogens':
+                    // Completion runs here, where the SMILES -> 3D engine's
+                    // experience tables live, so an added X-H bond has the same
+                    // length, and an added H-X-Y angle the same value, that a
+                    // generated structure would carry. The structure is read
+                    // only: the answer is the new hydrogens, never a moved atom.
+                    try {
+                        const hResult = addHydrogens(message.atoms, message.bonds, message.selected);
+                        webviewPanel.webview.postMessage({
+                            command: 'hydrogenResult',
+                            ok: true,
+                            atomCount: Array.isArray(message.atoms) ? message.atoms.length : 0,
+                            atoms: hResult.atoms,
+                            bonds: hResult.bonds,
+                            centres: hResult.centres,
+                            message: hResult.message
+                        });
+                    } catch (e: any) {
+                        webviewPanel.webview.postMessage({
+                            command: 'hydrogenResult',
+                            ok: false,
+                            message: 'Add H failed: ' + (e && e.message ? e.message : e)
+                        });
+                    }
+                    break;
                 case 'info':
                     vscode.window.showInformationMessage(message.text);
                     break;
@@ -1159,6 +1185,7 @@ canvas{display:block}
 <button class="tbtn" data-mode="addAtom">Add Atom</button>
 <button class="tbtn" data-mode="deleteAtom">Delete Atom</button>
 <button class="tbtn" data-mode="replaceAtom">Replace Atom</button>
+<button class="tbtn" data-mode="addH">Add H</button>
 <button class="tbtn" id="import-btn">Import Structure</button>
 <div class="tsep"></div>
 <button class="tbtn" data-mode="selectAtoms">Select Atoms</button>
@@ -2758,13 +2785,20 @@ var initCam=computeInitialCamDist();
 camera.position.set(0,0,initCam);camera.lookAt(0,0,0);
 camDist=initCam;
 
-var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',replaceAtom:'Replace Atom - Click atom(s) to select, click button again to confirm',selectAtoms:'Select Atoms - Input indices or element symbols',boxSelect:'Box Select - Drag a rectangle to select atoms',rotateGroup:'Rotate Group - Select group + axis atoms, then adjust angle',moveAtoms:'Move Atoms - Select atoms; drag/arrows rotate view, right-drag pans; Ctrl+drag or Ctrl+arrows rotates group, Ctrl+right-drag moves group'};
+var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',replaceAtom:'Replace Atom - Click atom(s) to select, click button again to confirm',addH:'Add H - Click atom(s) to select, click the button again to complete their hydrogens',selectAtoms:'Select Atoms - Input indices or element symbols',boxSelect:'Box Select - Drag a rectangle to select atoms',rotateGroup:'Rotate Group - Select group + axis atoms, then adjust angle',moveAtoms:'Move Atoms - Select atoms; drag/arrows rotate view, right-drag pans; Ctrl+drag or Ctrl+arrows rotates group, Ctrl+right-drag moves group'};
 
 function setMode(m){
     if(m==='moveAtoms'&&CRY){
         // Moving atoms in a periodic supercell breaks image consistency;
         // the mode is only offered for molecular structures.
         modeInfoEl.textContent='Move Atoms is not available for crystal structures';
+        return;
+    }
+    if(m==='addH'&&(CRY||diffMode)){
+        // Completing hydrogens writes new atoms into the structure on screen,
+        // which a periodic cell and a two-structure comparison do not have a
+        // place for.
+        modeInfoEl.textContent='Add H is not available '+(CRY?'for crystal structures':'in diff mode');
         return;
     }
     if(currentMode===m){
@@ -2779,12 +2813,15 @@ function setMode(m){
         if(m==='replaceAtom'){
             if(selectedAtoms.length>0){showReplaceAtomModal();return}
         }
+        if(m==='addH'){
+            if(selectedAtoms.length>0){startAddHydrogens();return}
+        }
         layoutPanels();
         return;
     }
     var oldMode=currentMode;
     currentMode=m;
-    var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect'||oldMode==='replaceAtom'||oldMode==='rotateGroup'||oldMode==='moveAtoms')&&(m==='selectAtoms'||m==='boxSelect'||m==='replaceAtom'||m==='rotateGroup'||m==='moveAtoms'));
+    var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect'||oldMode==='replaceAtom'||oldMode==='addH'||oldMode==='rotateGroup'||oldMode==='moveAtoms')&&(m==='selectAtoms'||m==='boxSelect'||m==='replaceAtom'||m==='addH'||m==='rotateGroup'||m==='moveAtoms'));
     if(oldMode==='moveAtoms'&&m!=='moveAtoms')stopMoveSession();
     if(!preserveSel){
         selectedAtoms=[];diffSelectedAtoms=[];originalCoords=null;
@@ -3201,6 +3238,8 @@ window.addEventListener('message',function(event){
             return;
         }
         importStructure(msg);
+    }else if(msg.command==='hydrogenResult'){
+        applyHydrogenResult(msg);
     }
 });
 
@@ -3276,6 +3315,63 @@ function importStructure(msg){
     if(camDist<need){camDist=need;camera.position.set(0,0,camDist);camera.lookAt(0,0,0)}
     needsRender=true;
     modeInfoEl.textContent='Imported '+newAtoms.length+' atoms from '+(msg.fileName||'file')+' - placed beside the existing structure';
+}
+
+// ===== Add H (hydrogen completion) =====
+// The geometry is computed in the extension host, by the SMILES -> 3D engine's
+// own experience tables (X-H lengths, theoretical angles) with every atom that
+// was already in the structure frozen — a hydrogen is placed, an existing bond
+// is never moved. The request carries the structure as it stands in the view
+// (edits included) and the answer carries only the new hydrogens.
+var addHPending=false;
+function startAddHydrogens(){
+    if(addHPending)return;
+    if(diffMode){modeInfoEl.textContent='Add H is not available in diff mode';return}
+    if(CRY){modeInfoEl.textContent='Add H is not available for crystal structures';return}
+    if(selectedAtoms.length===0){
+        modeInfoEl.textContent='Add H - select atoms first: click atoms here, or use Select Atoms / Box Select';
+        return;
+    }
+    if(vibActive||vibPaused)stopVibration();
+    if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
+    addHPending=true;
+    modeInfoEl.textContent='Add H: completing '+selectedAtoms.length+' selected atom(s)...';
+    vscodeApi.postMessage({
+        command:'addHydrogens',
+        atoms:MD.atoms.map(function(a){return{element:a.element,x:a.x,y:a.y,z:a.z}}),
+        bonds:MD.bonds.map(function(b){return{atom1:b.atom1,atom2:b.atom2,order:b.order}}),
+        selected:selectedAtoms.slice()
+    });
+}
+function applyHydrogenResult(msg){
+    addHPending=false;
+    if(!msg||!msg.ok){modeInfoEl.textContent=(msg&&msg.message)||'Add H failed';return}
+    var newAtoms=Array.isArray(msg.atoms)?msg.atoms:[];
+    var newBonds=Array.isArray(msg.bonds)?msg.bonds:[];
+    if(newAtoms.length===0){modeInfoEl.textContent=msg.message||'Add H: nothing to add';return}
+    if(typeof msg.atomCount==='number'&&msg.atomCount!==MD.atoms.length){
+        // The answer names atom indices of the structure it was computed from;
+        // if the structure changed while it was in flight, the bonds address
+        // atoms that are no longer there.
+        modeInfoEl.textContent='Add H: the structure changed while computing - nothing was added';
+        return;
+    }
+    pushUndo();
+    var N0=MD.atoms.length;
+    newAtoms.forEach(function(a){
+        MD.atoms.push({element:'H',x:a.x,y:a.y,z:a.z,color:(MD.atomColors&&MD.atomColors.H)||'#FFFFFF'});
+    });
+    // The bonds arrive with their indices already resolved against the extended
+    // atom list; an entry pointing anywhere but at a new hydrogen is dropped
+    // rather than stored.
+    newBonds.forEach(function(b){
+        if(typeof b.atom1!=='number'||typeof b.atom2!=='number')return;
+        if(b.atom1<0||b.atom1>=N0)return;
+        if(b.atom2<N0||b.atom2>=MD.atoms.length)return;
+        MD.bonds.push({atom1:b.atom1,atom2:b.atom2,order:b.order==null?1:b.order});
+    });
+    rebuildScene();
+    modeInfoEl.textContent=msg.message||('Add H: added '+newAtoms.length+' hydrogens');
 }
 
 function buildAdjacency(atoms,bonds){
@@ -5330,7 +5426,7 @@ function selectAtom(idx){
         checkSelectionComplete();
         return;
     }
-    if(currentMode==='selectAtoms'||currentMode==='replaceAtom'||currentMode==='rotateGroup'||currentMode==='moveAtoms'){
+    if(currentMode==='selectAtoms'||currentMode==='replaceAtom'||currentMode==='addH'||currentMode==='rotateGroup'||currentMode==='moveAtoms'){
         var pos=selectedAtoms.indexOf(idx);
         if(pos>=0){
             selectedAtoms.splice(pos,1);
@@ -5394,6 +5490,10 @@ function checkSelectionComplete(){
     else if(currentMode==='replaceAtom'){
         var rnames=formatAtomList(selectedAtoms);
         selInfoEl.textContent='Selected to replace: '+rnames+' (click Replace Atom button to confirm)';
+    }
+    else if(currentMode==='addH'){
+        var hnames=formatAtomList(selectedAtoms);
+        selInfoEl.textContent='Selected for Add H: '+hnames+' (click Add H button to complete)';
     }
 }
 

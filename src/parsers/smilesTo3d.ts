@@ -3682,3 +3682,31 @@ export function toXyz(info: SmilesInfo, comment?: string): string {
     }
     return lines.join('\n') + '\n';
 }
+
+// ---------------------------------------------------------------------
+// 经验几何参数的对外窗口
+// ---------------------------------------------------------------------
+// 引擎内部的元素表就是本插件的经验化学参数, 氢补全等功能直接取这里的数值,
+// 不另存一份, 因此"补氢用的键长/键角"与"生成三维坐标用的键长/键角"永远一致。
+
+/** 经验价态 (元素在常见中性化合物中的成键数); 未收录元素返回 0 = 不按经验补氢。 */
+export function empiricalValence(symbol: string): number {
+    return baseValence(symbol);
+}
+
+/** 经验键长 (Å): 显式表优先, 未收录时用共价半径和; order 0/省略 = 芳香键。 */
+export function empiricalBondLength(a: string, b: string, order?: number): number {
+    return bondLength(a, b, order);
+}
+
+/** 元素的理论杂化键角 (度): hybridization 0 = sp3, 1 = sp2, 2 = sp, 其余按下标越界处理为 sp3。 */
+export function empiricalBondAngle(symbol: string, hybridization: number): number {
+    const table = bondAnglesFor(symbol);
+    const h = (hybridization >= 0 && hybridization <= 2) ? hybridization : 0;
+    return table[h];
+}
+
+/** 元素范德华半径 (Å), 未收录元素用 1.80 兜底; 非键接触判据用它。 */
+export function empiricalVdwRadius(symbol: string): number {
+    return vdwRadius(symbol);
+}
