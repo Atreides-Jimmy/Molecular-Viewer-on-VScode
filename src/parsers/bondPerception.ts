@@ -304,6 +304,43 @@ function bpGeometricOrder(el1: string, el2: string, d: number): number {
 }
 
 /**
+ * The order whose tolerance brackets this length with the smallest deviation,
+ * or 0 when the length falls inside no tolerance band of the pair.
+ *
+ * Unlike bpGeometricOrder this never falls back to a nearest fit, so the answer
+ * says whether the length is *inside* a band rather than merely closest to one.
+ * That distinction is what lets a caller compare a bond's situation before and
+ * after a move and decide whether re-deriving it could change anything.
+ */
+function bpSupportedOrder(el1: string, el2: string, d: number): number {
+    const specs = SPECS[bpSpecKey(el1, el2)];
+    if (!specs) return 0;
+    let order = 0;
+    let best = Infinity;
+    for (let i = 0; i < specs.length; i++) {
+        const dev = Math.abs(d - specs[i].l);
+        if (dev <= specs[i].t && dev < best) {
+            best = dev;
+            order = specs[i].o;
+        }
+    }
+    return order;
+}
+
+/** How far an assigned order sits from the length the table expects for it. */
+function bpSpecDev(el1: string, el2: string, order: number, d: number): number {
+    const specs = SPECS[bpSpecKey(el1, el2)];
+    if (!specs) return 0;
+    let best = Infinity;
+    for (let i = 0; i < specs.length; i++) {
+        if (Math.abs(specs[i].o - order) > 1e-9) continue;
+        const dev = Math.abs(d - specs[i].l);
+        if (dev < best) best = dev;
+    }
+    return best;
+}
+
+/**
  * Every bond the coordinates imply, as a symmetric index map of bond orders.
  *
  * A spatial hash grid (3 Å cells) replaces the all-pairs loop: a bond needs
@@ -1358,6 +1395,212 @@ function bpRestoreAromatic(bondMap: Map<number, Map<number, number>>, atoms: Ato
     return restored;
 }
 
+/**
+ * A last look at valence, once the orders are settled.
+ *
+ * For every atom whose valence is not a value its element may take, try
+ * adjusting the orders of the bonds around it, and keep the adjustment only
+ * when the whole neighbourhood comes out strictly better.
+ *
+ * The measure is the one the diagnostic reports and the safety valve compares:
+ * the total distance of an atom's valence from the values its element may take.
+ * What differs is the target. The local relaxation removes excess and stops
+ * there, because raising an order to fill an under-filled centre would push the
+ * half unit onto a neighbour and leave that one wrong in turn. Here the
+ * neighbourhood is scored as a whole, and a move is kept only when the score
+ * improves — so a repair that costs a neighbour more than it gains is rejected
+ * on the spot rather than trusted. That is what makes it safe to run by
+ * default: it cannot make a structure worse, because "worse" is the thing it
+ * refuses.
+ *
+ * Two rules keep it small:
+ *
+ *   - **Hydrogen is pinned.** A hydrogen has one bond and its order is 1, so
+ *     every bond to a hydrogen is held fixed. That removes the largest source
+ *     of pointless churn — a large share of the bonds in a typical structure —
+ *     and it means the pass never reconsiders a valence that was never in
+ *     question.
+ *   - **One neighbourhood at a time.** A centre and the atoms it bonds to are
+ *     scored together and never beyond. The corrections this looks for are
+ *     local, and a wider search would cost more than it returns.
+ *
+ * A bond may only take a value its own length supports (or keep the value it
+ * has), so an order is never invented out of a distance that argues against it.
+ *
+ * Returns how many bonds it moved.
+ */
+function bpRefineValences(bondMap: Map<number, Map<number, number>>, atoms: Atom[]): number {
+    const n = atoms.length;
+    let moved = 0;
+    // Examinations are capped, so a structure where nothing can be improved
+    // costs a bounded amount and then stops.
+    const budget = Math.min(4000, 8 * n + 200);
+    let spent = 0;
+    // Which atoms are hydrogen, decided once instead of per bond examined.
+    const isH: boolean[] = new Array(n);
+    for (let i0 = 0; i0 < n; i0++) isH[i0] = bpNorm(atoms[i0].element) === 'H';
+
+    const gapOf = function (i: number): number {
+        return bpValenceGap(bpZOf(atoms[i].element), bpValenceOf(bondMap, i), bpCeiling(atoms[i].element));
+    };
+    const scoreOf = function (i: number, around: number[]): number {
+        let s = gapOf(i);
+        for (let k = 0; k < around.length; k++) s += gapOf(around[k]);
+        return s;
+    };
+    // How far the centre's own bonds sit from the lengths the table expects.
+    // A move that fixes a valence but drags a bond well off its length is not
+    // a gain, so the neighbourhood is only allowed to trade one for the other
+    // when the length fit does not get worse.
+    const devOf = function (i: number, around: number[]): number {
+        const nb = bondMap.get(i);
+        if (!nb) return 0;
+        let s = 0;
+        const a = atoms[i];
+        for (let k = 0; k < around.length; k++) {
+            const j = around[k];
+            const o = nb.get(j);
+            if (o === undefined) continue;
+            s += bpSpecDev(a.element, atoms[j].element, o, bpDist(a, atoms[j]));
+        }
+        return s;
+    };
+    const setOrder = function (i: number, j: number, v: number): void {
+        const ni = bondMap.get(i);
+        if (ni) ni.set(j, v);
+        const nj = bondMap.get(j);
+        if (nj) nj.set(i, v);
+    };
+
+    for (let round = 0; round < 4; round++) {
+        let any = false;
+        for (let i = 0; i < n && spent < budget; i++) {
+            if (isH[i]) continue;
+            const nb = bondMap.get(i);
+            if (!nb || nb.size < 2) continue;
+            if (gapOf(i) <= 1e-6) continue;
+            spent++;
+
+            // Cheap probe before anything is allocated: count how many ways
+            // the movable bonds could be arranged. When every one of them has
+            // exactly one candidate — its current order, and nothing else its
+            // length is at least as happy with — there is nothing to try, and
+            // that is the common case for a centre that is off its valence for
+            // a reason no re-arrangement can fix. Skipping here is what stops
+            // such a structure from paying for the enumeration below.
+            let choices = 1;
+            nb.forEach(function (o, j) {
+                if (choices > 4096) return;
+                if (isH[j]) return;
+                const d = bpDist(atoms[i], atoms[j]);
+                const s = bpSupportedOrder(atoms[i].element, atoms[j].element, d);
+                const curDev = bpSpecDev(atoms[i].element, atoms[j].element, o, d);
+                let c = 1;
+                if (s > 0 && Math.abs(s - o) > 1e-9) c++;
+                for (let t = 0; t < 2; t++) {
+                    const v = o + (t === 0 ? -0.5 : 0.5);
+                    if (v < 1 || v > 3) continue;
+                    if (Math.abs(v - s) < 1e-9) continue;
+                    if (bpSpecDev(atoms[i].element, atoms[j].element, v, d) <= curDev + 1e-9) c++;
+                }
+                choices *= c;
+            });
+            if (choices <= 1) continue;
+
+            const around: number[] = [];
+            const movable: number[] = [];
+            nb.forEach(function (o, j) {
+                around.push(j);
+                if (!isH[j]) movable.push(j);
+            });
+            if (movable.length === 0) continue;
+
+            const before = scoreOf(i, around);
+
+            // Candidate orders per movable bond: what its own length supports,
+            // plus whatever it currently is, so a repair never depends on the
+            // length table having an entry for the pair.
+            const cands: number[][] = [];
+            const orig: number[] = [];
+            let combos = 1;
+            for (let m = 0; m < movable.length; m++) {
+                const j = movable[m];
+                const cur = nb.get(j) as number;
+                orig.push(cur);
+                const d = bpDist(atoms[i], atoms[j]);
+                const s = bpSupportedOrder(atoms[i].element, atoms[j].element, d);
+                const list: number[] = [];
+                if (s > 0) list.push(s);
+                if (list.indexOf(cur) < 0) list.push(cur);
+                // The neighbouring steps as well. A centre can be off its
+                // valence because a bond sits a whole unit away from what the
+                // geometry alone would pick, and the only way to see whether
+                // paying that unit is worth it is to try it. The score decides
+                // — but only among values that do not fit the length *worse*
+                // than the current one, which is the same condition the sweep
+                // applies at the end. Filtering here rather than there is what
+                // keeps the pass cheap: on a structure where every centre is
+                // off its valence for a reason no re-arrangement can fix, every
+                // bond drops to a single candidate, the combination count
+                // collapses to one, and the whole neighbourhood is skipped
+                // instead of enumerated.
+                const curDev = bpSpecDev(atoms[i].element, atoms[j].element, cur, d);
+                const extra = [cur - 0.5, cur + 0.5];
+                for (let t = 0; t < extra.length; t++) {
+                    const v = extra[t];
+                    if (v < 1 || v > 3 || list.indexOf(v) >= 0) continue;
+                    if (bpSpecDev(atoms[i].element, atoms[j].element, v, d) <= curDev + 1e-9) list.push(v);
+                }
+                cands.push(list);
+                combos *= list.length;
+            }
+            if (combos <= 1 || combos > 4096) continue;
+
+            // Sweep the combinations in place, so every score is read from the
+            // real state, then put the neighbourhood back the way it was.
+            const beforeDev = devOf(i, around);
+            let bestScore = before;
+            const pick: number[] = [];
+            const cur: number[] = [];
+            for (let m = 0; m < movable.length; m++) cur.push(0);
+            const walk = function (m: number): void {
+                if (m === movable.length) {
+                    for (let k = 0; k < movable.length; k++) setOrder(i, movable[k], cands[k][cur[k]]);
+                    const sc = scoreOf(i, around);
+                    // A gain in valence that costs the bond lengths is not a
+                    // gain — the lengths are the measurement, and a repair is
+                    // only worth taking when it is free in that currency.
+                    if (sc < bestScore - 1e-9 && devOf(i, around) <= beforeDev + 1e-9) {
+                        bestScore = sc;
+                        pick.length = 0;
+                        for (let k = 0; k < movable.length; k++) pick.push(cur[k]);
+                    }
+                    return;
+                }
+                for (let c = 0; c < cands[m].length; c++) {
+                    cur[m] = c;
+                    walk(m + 1);
+                }
+            };
+            walk(0);
+
+            for (let m = 0; m < movable.length; m++) setOrder(i, movable[m], orig[m]);
+            if (pick.length !== movable.length) continue;
+
+            for (let m = 0; m < movable.length; m++) {
+                const v = cands[m][pick[m]];
+                if (Math.abs(v - orig[m]) > 1e-9) {
+                    setOrder(i, movable[m], v);
+                    moved++;
+                }
+            }
+            any = true;
+        }
+        if (!any) break;
+    }
+    return moved;
+}
+
 // ---------------------------------------------------------------------------
 // 8. Components and diagnostics
 // ---------------------------------------------------------------------------
@@ -1503,6 +1746,19 @@ export interface PerceptionOptions {
     solve?: boolean;
     /** Components above this atom count keep the geometric result. */
     maxSolverAtoms?: number;
+    /**
+     * Also produce the formal charges and the diagnostics.
+     *
+     * Off by default, because the common caller wants the bond list and nothing
+     * else — a re-derivation after an edit, the webview's client-side entry
+     * point, a structure being loaded. Those extra results are O(atoms) work
+     * over the finished result (a component walk, a valence pass per component,
+     * a charge per atom), which is nothing on a small molecule and very visible
+     * on a big one: on a dense few-thousand-atom system they were most of the
+     * cost of a re-derivation that only ever read `.bonds`. Ask for them when
+     * you are going to look at them.
+     */
+    extras?: boolean;
 }
 
 export interface PerceptionDiagnostics {
@@ -1527,6 +1783,8 @@ export interface PerceptionDiagnostics {
     rolledBack: number;
     /** Bonds moved back onto the order their measured length argues for. */
     restoredBonds: number;
+    /** Bonds moved by the final valence pass. */
+    refinedBonds: number;
     /** Whether the total charge was supplied rather than assumed neutral. */
     chargeKnown: boolean;
 }
@@ -1571,6 +1829,7 @@ export function perceiveBonds(atoms: Atom[], opts?: PerceptionOptions): Percepti
         declinedByCombos: 0,
         rolledBack: 0,
         restoredBonds: 0,
+        refinedBonds: 0,
         chargeKnown: typeof options.charge === 'number'
     };
     if (n === 0) return { bonds: [], charges: [], diagnostics: diagnostics };
@@ -1594,7 +1853,10 @@ export function perceiveBonds(atoms: Atom[], opts?: PerceptionOptions): Percepti
     //    solver *could* have settled are counted instead — so a caller can see
     //    what is available before opting in.
     const useSolver = options.solve === true;
-    const comps = bpComponents(bondMap, n);
+    const wantExtras = options.extras === true;
+    // The component split serves the valence check and the diagnostics. A
+    // caller who asks for neither is not made to walk the whole graph for it.
+    const comps = (useSolver || wantExtras) ? bpComponents(bondMap, n) : [];
 
     if (!useSolver) {
         for (let c = 0; c < comps.length; c++) {
@@ -1669,14 +1931,23 @@ export function perceiveBonds(atoms: Atom[], opts?: PerceptionOptions): Percepti
         }
     }
 
+    // 5b) One last look at valence. A centre can still be off a value its
+    //     element may take — a half unit left where a table entry brackets two
+    //     orders, or a component the valence check declined — and a bond around
+    //     such a centre can sometimes be moved to fix it without the
+    //     neighbourhood paying for it elsewhere. Only strictly-improving moves
+    //     are kept, so this cannot leave a structure worse than the passes
+    //     above did; and hydrogen bonds are pinned, so it cannot churn the
+    //     largest group of bonds in the structure for nothing.
+    diagnostics.refinedBonds = bpRefineValences(bondMap, atoms);
+
     // 6) Collect the result. The formal charges and the off-valence list are
     //    derived from the finished orders here — they read, they never write,
     //    so they carry no risk to the bonds the passes above settled.
     const bonds: Bond[] = [];
     const seen: { [key: string]: number } = {};
-    const off = new Set<number>();
-    const charges: (number | null)[] = new Array(n);
-    for (let i = 0; i < n; i++) charges[i] = null;
+    const off = wantExtras ? new Set<number>() : null;
+    const charges: (number | null)[] = wantExtras ? new Array(n).fill(null) : [];
 
     bondMap.forEach(function (neighbors, i) {
         let valence = 0;
@@ -1687,20 +1958,23 @@ export function perceiveBonds(atoms: Atom[], opts?: PerceptionOptions): Percepti
             seen[key] = 1;
             bonds.push({ atom1: i < j ? i : j, atom2: i < j ? j : i, order: order });
         });
+        if (!wantExtras) return;
         const z = bpZOf(atoms[i].element);
-        if (bpValenceGap(z, valence, bpCeiling(atoms[i].element)) > 1e-6) off.add(i);
+        if (bpValenceGap(z, valence, bpCeiling(atoms[i].element)) > 1e-6) (off as Set<number>).add(i);
         charges[i] = bpAtomicCharge(z, valence);
     });
 
     bonds.sort(function (a, b) {
         return a.atom1 - b.atom1 || a.atom2 - b.atom2;
     });
-    off.forEach(function (i) {
-        diagnostics.offValence.push(i);
-    });
-    diagnostics.offValence.sort(function (a, b) {
-        return a - b;
-    });
+    if (off) {
+        (off as Set<number>).forEach(function (i) {
+            diagnostics.offValence.push(i);
+        });
+        diagnostics.offValence.sort(function (a, b) {
+            return a - b;
+        });
+    }
 
     return {
         bonds: bonds,
@@ -1727,6 +2001,7 @@ const MODULE_FUNCTIONS: Array<(...args: never[]) => unknown> = [
     bpCheckValency, bpCheckSaturation, bpCheckCharge, bpDetermineOrders,
     bpRelaxLadder, bpRelaxCenter, bpRelaxValence,
     bpValenceOf, bpComponentGap, bpRestoreAromatic,
+    bpSupportedOrder, bpRefineValences,
     bpComponents, bpHasViolation, bpSolveComponent,
     perceiveBonds
 ];
@@ -1759,7 +2034,7 @@ export const BOND_PERCEPTION_SOURCE: string = (function buildSource(): string {
     for (let i = 0; i < MODULE_FUNCTIONS.length; i++) {
         parts.push(MODULE_FUNCTIONS[i].toString());
     }
-    parts.push('return {perceiveBonds:perceiveBonds, pairCutoff:bpPairCutoff};');
+    parts.push('return {perceiveBonds:perceiveBonds, pairCutoff:bpPairCutoff, supportedOrder:bpSupportedOrder};');
     parts.push('})()');
     const source = parts.join('\n');
     // The webview receives this inside its own template literal, so a backtick

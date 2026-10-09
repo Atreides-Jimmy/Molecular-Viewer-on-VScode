@@ -2384,15 +2384,47 @@ function recomputeMovedBonds(){
         return selArr;
     }
 
+    // Cheap check first. A move only changes the distances from the moved atoms
+    // outward, so only the bonds touching them can have changed geometry — and
+    // a bond whose current order is still the one its own length supports
+    // cannot come out different. If every such bond is still supported and no
+    // new contact has appeared, there is nothing to re-derive and the component
+    // walk is skipped altogether; that is what keeps a small drag cheap on a
+    // large structure, while a drag that really changes the chemistry still
+    // falls through to the full re-derivation below.
+    var adjOf={};
+    for(var ab=0;ab<MD.bonds.length;ab++){
+        var abo=MD.bonds[ab];
+        (adjOf[abo.atom1]||(adjOf[abo.atom1]={}))[abo.atom2]=abo.order;
+        (adjOf[abo.atom2]||(adjOf[abo.atom2]={}))[abo.atom1]=abo.order;
+    }
+    var stable=true;
+    for(si=0;si<selectedAtoms.length&&stable;si++){
+        var s0=selectedAtoms[si];
+        var nb0=adjOf[s0];
+        if(!nb0)continue;
+        var a0=atoms[s0];
+        if(!a0)continue;
+        for(var j0 in nb0){
+            var jj=+j0;
+            var aj=atoms[jj];
+            if(!aj)continue;
+            var dx0=a0.x-aj.x,dy0=a0.y-aj.y,dz0=a0.z-aj.z;
+            var d0=Math.sqrt(dx0*dx0+dy0*dy0+dz0*dz0);
+            if(BP.supportedOrder(a0.element,aj.element,d0)!==nb0[j0]){stable=false;break}
+        }
+    }
+
     // Seeds: the moved atoms plus every atom that has just come within bonding
     // range of one. The sweep is the same spatial hash and the same per-element
     // search radii the detector uses, so a contact dragged onto a previously
     // unrelated atom is still found.
+    var newContact=false;
     var inA={};
     for(si=0;si<selectedAtoms.length;si++)inA[selectedAtoms[si]]=true;
     var CELL=3;
     var normEls=new Array(n);var distinct=[];var seenEl={};
-    for(var i=0;i<n;i++){var ne=atoms[i].element.charAt(0).toUpperCase()+atoms[i].element.slice(1).toLowerCase();normEls[i]=ne;
+    for(var i=0;i<n;i++){var rawEl=atoms[i].element||'';var ne=rawEl.charAt(0).toUpperCase()+rawEl.slice(1).toLowerCase();normEls[i]=ne;
         if(!seenEl[ne]){seenEl[ne]=1;distinct.push(ne)}}
     var rangeFor={};
     for(var di=0;di<distinct.length;di++){var e1=distinct[di];var mc=0;
@@ -2411,9 +2443,18 @@ function recomputeMovedBonds(){
             var gb=grid.get(gk);if(!gb)continue;
             for(var q=0;q<gb.length;q++){var j=gb[q];if(j===s)continue;
                 var ddx=atoms[s].x-atoms[j].x,ddy=atoms[s].y-atoms[j].y,ddz=atoms[s].z-atoms[j].z;
-                if(Math.sqrt(ddx*ddx+ddy*ddy+ddz*ddz)<=BP.pairCutoff(atoms[s].element,atoms[j].element))inA[j]=1}
+                if(Math.sqrt(ddx*ddx+ddy*ddy+ddz*ddz)<=BP.pairCutoff(atoms[s].element,atoms[j].element)){
+                    inA[j]=1;
+                    // a pair that had no bond and is now inside the cutoff is a
+                    // bond that has to be considered
+                    if(!(adjOf[s]&&adjOf[s][j]))newContact=true}}
         }
     }
+
+    // Nothing moved a bond off the order its own length supports, and nothing
+    // new came into range: the re-derivation below would reproduce exactly what
+    // is already there. This is the common outcome of a small adjustment.
+    if(stable&&!newContact)return [];
 
     // Grow the seeds to whole components along the current bond graph.
     var adj={};
