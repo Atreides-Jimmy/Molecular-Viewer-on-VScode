@@ -4,6 +4,7 @@ import { parseFile, parseLogFile, LogFrame, OrcaFrame, RouteSection, parseTcl, r
 import { ensureBonds } from '../parsers/bondDetector';
 import { BOND_PERCEPTION_SOURCE } from '../parsers/bondPerception';
 import { addHydrogens } from '../parsers/addHydrogens';
+import { optimizeSelection, describeForceField } from '../parsers/mmOptimizer';
 import { smilesTo3dSafe, validateSmiles } from '../parsers/smilesTo3d';
 import { MolecularData, AtomGroup, OptStep, NormalMode, VmdScene, VmdMolecule } from '../types';
 
@@ -893,6 +894,44 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                 case 'info':
                     vscode.window.showInformationMessage(message.text);
                     break;
+                case 'mmOptimize':
+                    // Molecular mechanics runs here, in the extension host: the
+                    // work is bounded but heavy for a large selection, and
+                    // running it off the webview keeps the view responsive while
+                    // it works. The answer carries new coordinates for the
+                    // selected atoms only — every other atom is a fixed source
+                    // of force and is not returned at all.
+                    try {
+                        // The panel's settings travel with the request; the module
+                        // validates every one of them, so an unexpected payload
+                        // simply falls back to its own defaults.
+                        const mmResult = optimizeSelection(message.atoms, message.bonds, message.selected, message.options);
+                        webviewPanel.webview.postMessage({
+                            command: 'mmResult',
+                            ok: mmResult.ok,
+                            message: mmResult.message,
+                            atomCount: mmResult.atomCount,
+                            indices: mmResult.indices,
+                            coords: mmResult.coords,
+                            energyBefore: mmResult.energyBefore,
+                            energyAfter: mmResult.energyAfter,
+                            iterations: mmResult.iterations,
+                            maxGrad: mmResult.maxGrad,
+                            rmsGrad: mmResult.rmsGrad,
+                            maxMove: mmResult.maxMove,
+                            converged: mmResult.converged,
+                            stopReason: mmResult.stopReason,
+                            counts: mmResult.counts,
+                            invalid: mmResult.invalid
+                        });
+                    } catch (e: any) {
+                        webviewPanel.webview.postMessage({
+                            command: 'mmResult',
+                            ok: false,
+                            message: 'Molecular Mechanics failed: ' + (e && e.message ? e.message : e)
+                        });
+                    }
+                    break;
                 case 'error':
                     vscode.window.showErrorMessage(message.text);
                     break;
@@ -987,7 +1026,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
 
         const vmdData = vmdPayload && vmdPayload.molecules.length > 0 ? vmdPayload : null;
 
-        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, routes: routesData, vmd: vmdData, autoBeta: !!(autoBeta && !vmdData) });
+        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, routes: routesData, vmd: vmdData, autoBeta: !!(autoBeta && !vmdData), mmParams: describeForceField() });
 
         // The bond perception module, as source. Both sides run this text —
         // the host calls the compiled function directly, the webview evaluates
@@ -1019,6 +1058,23 @@ body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;b
 #mode-info{white-space:nowrap;flex-shrink:0}
 #container{flex:1;position:relative;overflow:hidden;min-height:0;outline:none}
 #mol-info{position:absolute;top:8px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.55);padding:6px 10px;border-radius:4px;z-index:25;pointer-events:none;line-height:1.6;max-width:calc(100% - 16px);overflow:hidden}
+#mm-panel{display:none;position:absolute;top:8px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.62);border:1px solid var(--vscode-panel-border,#444);border-radius:4px;padding:8px 10px;z-index:26;line-height:1.5;width:340px;max-width:calc(100% - 16px);max-height:calc(100% - 60px);overflow-y:auto;pointer-events:auto}
+#mm-panel.show{display:block}
+#mm-panel .mm-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:5px;font-weight:600}
+#mm-panel .mm-close{cursor:pointer;opacity:0.7;padding:0 2px}
+#mm-panel .mm-close:hover{opacity:1}
+#mm-panel .mm-param{color:var(--vscode-descriptionForeground,#a9a9a9);font-size:10px;line-height:1.45;margin:1px 0}
+#mm-panel .mm-sec{margin:7px 0 3px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.15);font-size:10px;color:var(--vscode-descriptionForeground,#999);text-transform:uppercase;letter-spacing:0.4px}
+#mm-panel .mm-ctl{display:flex;align-items:center;gap:6px;margin:3px 0}
+#mm-panel .mm-ctl-label{flex:0 0 96px;color:var(--vscode-descriptionForeground,#a9a9a9)}
+#mm-panel .mm-ctl-sel{flex:1 1 auto;min-width:0;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;font-size:11px;padding:1px 2px}
+#mm-panel .mm-sel{margin-top:6px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.15);word-break:break-word}
+#mm-panel .mm-run{margin-top:6px;width:100%;background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff);border:none;border-radius:3px;padding:4px 6px;font-size:11px;cursor:pointer}
+#mm-panel .mm-run:hover:not(:disabled){background:var(--vscode-button-hoverBackground,#1177bb)}
+#mm-panel .mm-run:disabled{opacity:0.5;cursor:default}
+#mm-panel .mm-res{margin-top:6px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.15);font-size:10px;line-height:1.45}
+#mm-panel .mm-res-head{color:var(--vscode-textLink-foreground,#3794ff);font-weight:600}
+#mm-panel .mm-err{color:var(--vscode-errorForeground,#f66);margin-top:5px;font-size:10px;line-height:1.4}
 #axes-indicator{position:absolute;bottom:12px;left:12px;width:90px;height:90px;z-index:25;pointer-events:none}
 #axes-indicator svg{width:100%;height:100%}
 #crystal-panel{position:absolute;top:8px;right:8px;background:rgba(0,0,0,0.6);border:1px solid var(--vscode-panel-border,#444);border-radius:4px;padding:8px 10px;font-size:11px;color:var(--vscode-editor-foreground,#ccc);z-index:25;display:none;min-width:180px;max-width:calc(100% - 16px)}
@@ -1181,6 +1237,7 @@ canvas{display:block}
 <button class="tbtn" data-mode="dihedral">Dihedral</button>
 <button class="tbtn" data-mode="rotateGroup">Rotate Group</button>
 <button class="tbtn" data-mode="moveAtoms">Move Atoms</button>
+<button class="tbtn" data-mode="mmOpt">MM Optimize</button>
 <div class="tsep"></div>
 <button class="tbtn" data-mode="addAtom">Add Atom</button>
 <button class="tbtn" data-mode="deleteAtom">Delete Atom</button>
@@ -1213,7 +1270,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="box-select-rect"></div>
@@ -2364,7 +2421,7 @@ var panGrabSide='left';
 var diffPanGrabOffset={x:0,y:0};
 var diffPanRefZ=0;
 
-function recomputeMovedBonds(){
+function recomputeMovedBonds(selOverride){
     // Partial bond re-derivation after a fragment move/rotate session ends.
     //
     // Only the selected atoms changed position, so connectivity — and with it
@@ -2384,9 +2441,14 @@ function recomputeMovedBonds(){
     // Returns the atoms whose bonds were re-derived (the caller rebuilds only
     // their meshes), an empty array when nothing changed, or null when the
     // caller should fall back to a full scene refresh.
-    if(selectedAtoms.length===0)return [];
+    //
+    // selOverride: the atoms that moved, when they are not the current
+    // selection (a molecular-mechanics run moves the atoms its own request
+    // named, which the user may have re-selected in the meantime).
+    var selList=selOverride||selectedAtoms;
+    if(selList.length===0)return [];
     var sel={};
-    for(var si=0;si<selectedAtoms.length;si++)sel[selectedAtoms[si]]=true;
+    for(var si=0;si<selList.length;si++)sel[selList[si]]=true;
     var atoms=MD.atoms,n=atoms.length;
     if(MD.hasExplicitBonds){
         // Authored bonds keep their orders and are never re-derived — but a
@@ -2426,8 +2488,8 @@ function recomputeMovedBonds(){
         (adjOf[abo.atom2]||(adjOf[abo.atom2]={}))[abo.atom1]=abo.order;
     }
     var stable=true;
-    for(si=0;si<selectedAtoms.length&&stable;si++){
-        var s0=selectedAtoms[si];
+    for(si=0;si<selList.length&&stable;si++){
+        var s0=selList[si];
         var nb0=adjOf[s0];
         if(!nb0)continue;
         var a0=atoms[s0];
@@ -2448,7 +2510,7 @@ function recomputeMovedBonds(){
     // unrelated atom is still found.
     var newContact=false;
     var inA={};
-    for(si=0;si<selectedAtoms.length;si++)inA[selectedAtoms[si]]=true;
+    for(si=0;si<selList.length;si++)inA[selList[si]]=true;
     var CELL=3;
     var normEls=new Array(n);var distinct=[];var seenEl={};
     for(var i=0;i<n;i++){var rawEl=atoms[i].element||'';var ne=rawEl.charAt(0).toUpperCase()+rawEl.slice(1).toLowerCase();normEls[i]=ne;
@@ -2461,8 +2523,8 @@ function recomputeMovedBonds(){
     for(i=0;i<n;i++){var cx=Math.floor(atoms[i].x/CELL),cy=Math.floor(atoms[i].y/CELL),cz=Math.floor(atoms[i].z/CELL);
         var key=(cx*73856093)^(cy*19349663)^(cz*83492791);
         var bkt=grid.get(key);if(!bkt){bkt=[];grid.set(key,bkt)}bkt.push(i)}
-    for(si=0;si<selectedAtoms.length;si++){
-        var s=selectedAtoms[si];if(!atoms[s])continue;
+    for(si=0;si<selList.length;si++){
+        var s=selList[si];if(!atoms[s])continue;
         var range=rangeFor[normEls[s]];
         var csx=Math.floor(atoms[s].x/CELL),csy=Math.floor(atoms[s].y/CELL),csz=Math.floor(atoms[s].z/CELL);
         for(var dx=-range;dx<=range;dx++)for(var dy=-range;dy<=range;dy++)for(var dz=-range;dz<=range;dz++){
@@ -2532,9 +2594,9 @@ function recomputeMovedBonds(){
 // for the moved region, then rebuild only the affected region's bond meshes.
 // A full scene rebuild runs only when the region-scoped re-detection fell
 // back to the full detector (null region).
-function refreshMovedBondsAndMeshes(){
+function refreshMovedBondsAndMeshes(selOverride){
     var oldBonds=MD.bonds;
-    var region=recomputeMovedBonds();
+    var region=recomputeMovedBonds(selOverride);
     if(region){if(region.length)rebuildMovedBondMeshes(oldBonds,region)}
     else updateScenePositions(true);
     // 原子被移动过, 质心随之改变 —— 放在区域刷新之后: 上面的网格都还是按旧中心
@@ -2785,13 +2847,245 @@ var initCam=computeInitialCamDist();
 camera.position.set(0,0,initCam);camera.lookAt(0,0,0);
 camDist=initCam;
 
-var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',replaceAtom:'Replace Atom - Click atom(s) to select, click button again to confirm',addH:'Add H - Click atom(s) to select, click the button again to complete their hydrogens',selectAtoms:'Select Atoms - Input indices or element symbols',boxSelect:'Box Select - Drag a rectangle to select atoms',rotateGroup:'Rotate Group - Select group + axis atoms, then adjust angle',moveAtoms:'Move Atoms - Select atoms; drag/arrows rotate view, right-drag pans; Ctrl+drag or Ctrl+arrows rotates group, Ctrl+right-drag moves group'};
+// ===== Molecular mechanics optimisation =====
+// The panel carries the force field's own parameter list (built host-side from
+// the module that runs the optimisation, so the two can never disagree), the
+// atoms a run would move, and the button that starts it. Selection is the
+// viewer's usual one — a click here, or a selection carried in from Select
+// Atoms / Box Select / Replace Atom / Add H / Rotate Group / Move Atoms — and
+// only those atoms move: the answer the host sends back carries new
+// coordinates for them and nothing else, so the frozen part of the structure is
+// untouched by construction rather than by a promise.
+var mmPending=false;         // a request is in flight
+var mmLastResult=null;       // last run's numbers, shown under the button
+var mmErrorMsg='';           // last failure, shown in the panel
+var mmOptions={};            // the settings chosen in the panel (key -> value)
+
+function mmPanelEl(){return document.getElementById('mm-panel')}
+function mmPanelVisible(){var el=mmPanelEl();return !!(el&&el.classList.contains('show'))}
+// The controls the panel offers come from the host's field description, so the
+// choices and the defaults are the optimiser's own and cannot drift from it.
+function mmControls(){
+    var p=MD.mmParams;
+    return (p&&p.controls)?p.controls:[];
+}
+// The value a control currently holds: what the user picked, or its default.
+function mmOptionValue(ctl){
+    var v=mmOptions[ctl.key];
+    return (v===undefined||v===null)?ctl.defaultValue:v;
+}
+function mmOptionSnapshot(){
+    var out={};
+    var ctls=mmControls();
+    for(var i=0;i<ctls.length;i++)out[ctls[i].key]=mmOptionValue(ctls[i]);
+    return out;
+}
+function showMmPanel(){
+    var el=mmPanelEl();
+    if(!el)return;
+    el.classList.add('show');
+    refreshMmPanel();
+}
+function hideMmPanel(){
+    var el=mmPanelEl();
+    if(!el)return;
+    el.classList.remove('show');
+    layoutPanels();
+}
+function mmStopText(reason){
+    if(reason==='gradient')return 'converged';
+    if(reason==='energy')return 'energy converged';
+    if(reason==='time')return 'time budget reached';
+    if(reason==='iterations')return 'step budget reached';
+    return 'no further gain';
+}
+function mmResultHTML(r){
+    if(!r)return '';
+    var delta=r.energyAfter-r.energyBefore;
+    var c=r.counts||{};
+    var html='<div class="mm-res"><div class="mm-res-head">Last run</div>';
+    html+='Energy: '+r.energyBefore.toFixed(3)+' &rarr; '+r.energyAfter.toFixed(3)+' kcal/mol (&Delta; '+delta.toFixed(3)+')<br>';
+    html+='Steps: '+r.iterations+' ('+mmStopText(r.stopReason)+') &middot; max|F| '+r.maxGrad.toFixed(3)+' &middot; RMS '+r.rmsGrad.toFixed(3)+'<br>';
+    html+='Moved '+r.moved+' atom(s), largest displacement '+r.maxMove.toFixed(3)+' A<br>';
+    html+='Terms: '+(c.bonds||0)+' bond, '+(c.angles||0)+' angle, '+(c.torsions||0)+' torsion, '+(c.impropers||0)+' improper, '+(c.nonbonded||0)+' non-bonded';
+    html+='</div>';
+    return html;
+}
+// One selection control per settable parameter, with the current choice
+// preselected — the default choice is the one the panel opens with.
+function mmControlHTML(ctl){
+    var cur=mmOptionValue(ctl);
+    var html='<div class="mm-ctl"><label class="mm-ctl-label">'+ctl.label+'</label>';
+    html+='<select class="mm-ctl-sel" data-mmkey="'+ctl.key+'">';
+    for(var i=0;i<ctl.options.length;i++){
+        var opt=ctl.options[i];
+        var sel=(String(opt.value)===String(cur))?' selected':'';
+        html+='<option value="'+String(opt.value)+'"'+sel+'>'+opt.label+'</option>';
+    }
+    html+='</select></div>';
+    return html;
+}
+function refreshMmPanel(){
+    var el=mmPanelEl();
+    if(!el||currentMode!=='mmOpt')return;
+    var params=MD.mmParams||{};
+    var lines=params.lines||[];
+    var html='<div class="mm-head"><span>Molecular Mechanics &mdash; '+(params.name||'optimisation')+'</span><span class="mm-close" id="mm-close">×</span></div>';
+    for(var i=0;i<lines.length;i++)html+='<div class="mm-param">'+lines[i]+'</div>';
+    var ctls=mmControls();
+    if(ctls.length){
+        html+='<div class="mm-sec">Parameters</div>';
+        for(i=0;i<ctls.length;i++)html+=mmControlHTML(ctls[i]);
+    }
+    var n=selectedAtoms.length;
+    html+='<div class="mm-sel">Selected atoms ('+n+'): '+(n?formatAtomList(selectedAtoms):'none &mdash; click atoms in the view, or use Select Atoms / Box Select')+'</div>';
+    html+='<button class="mm-run" id="mm-run"'+(n===0||mmPending?' disabled':'')+'>'+(mmPending?'Optimizing...':'Start Optimization')+'</button>';
+    if(mmErrorMsg)html+='<div class="mm-err">'+mmErrorMsg+'</div>';
+    html+=mmResultHTML(mmLastResult);
+    el.innerHTML=html;
+    wireMmPanel();
+    layoutPanels();
+}
+// The panel's controls are re-rendered on every refresh, so their handlers are
+// bound once to the panel itself (the pattern the egg panel uses): a click is
+// routed by the element's id, a change by the control's key. Nothing is bound
+// to the replaced innerHTML, so no listener can survive its element.
+var mmPanelWired=false;
+function wireMmPanel(){
+    var el=mmPanelEl();
+    if(!el||mmPanelWired)return;
+    mmPanelWired=true;
+    el.addEventListener('click',function(e){
+        var t=e&&e.target;
+        if(!t||!t.id)return;
+        if(t.id==='mm-close')hideMmPanel();
+        else if(t.id==='mm-run')startMmOptimization();
+    });
+    el.addEventListener('change',function(e){
+        var t=e&&e.target;
+        if(!t||typeof t.getAttribute!=='function')return;
+        var key=t.getAttribute('data-mmkey');
+        if(!key)return;
+        var ctls=mmControls();
+        for(var k=0;k<ctls.length;k++){
+            if(ctls[k].key!==key)continue;
+            var opts=ctls[k].options;
+            for(var o=0;o<opts.length;o++){
+                if(String(opts[o].value)===String(t.value)){mmOptions[key]=opts[o].value;break}
+            }
+            break;
+        }
+    });
+}
+// Every path that changes the selection calls this, so the panel's list and its
+// button state follow the view without the panel having to own the selection.
+function mmSelectionChanged(){
+    if(currentMode==='mmOpt'&&mmPanelVisible())refreshMmPanel();
+}
+function startMmOptimization(){
+    if(mmPending)return;
+    if(diffMode){modeInfoEl.textContent='Molecular Mechanics is not available in diff mode';return}
+    if(CRY){modeInfoEl.textContent='Molecular Mechanics is not available for crystal structures';return}
+    if(selectedAtoms.length===0){
+        modeInfoEl.textContent='Molecular Mechanics - select atoms first: click atoms here, or use Select Atoms / Box Select';
+        return;
+    }
+    if(vibActive||vibPaused)stopVibration();
+    if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
+    mmPending=true;mmErrorMsg='';
+    modeInfoEl.textContent='Molecular Mechanics: optimizing '+selectedAtoms.length+' atom(s)...';
+    refreshMmPanel();
+    vscodeApi.postMessage({
+        command:'mmOptimize',
+        atoms:MD.atoms.map(function(a){return{element:a.element,x:a.x,y:a.y,z:a.z}}),
+        bonds:MD.bonds.map(function(b){return{atom1:b.atom1,atom2:b.atom2,order:b.order}}),
+        selected:selectedAtoms.slice(),
+        options:mmOptionSnapshot()
+    });
+}
+function applyMmResult(msg){
+    mmPending=false;
+    if(!msg||!msg.ok){
+        mmErrorMsg=(msg&&msg.message)||'Molecular Mechanics failed';
+        modeInfoEl.textContent=mmErrorMsg;
+        refreshMmPanel();
+        return;
+    }
+    if(diffMode||CRY){
+        // The view moved on (a comparison opened, a crystal was loaded) while
+        // the request was in flight; the answer addresses the structure it was
+        // computed from, which is no longer the one on screen.
+        mmErrorMsg='Molecular Mechanics: the view changed while computing - nothing was applied';
+        modeInfoEl.textContent=mmErrorMsg;
+        refreshMmPanel();
+        return;
+    }
+    if(typeof msg.atomCount==='number'&&msg.atomCount!==MD.atoms.length){
+        mmErrorMsg='Molecular Mechanics: the structure changed while computing - nothing was applied';
+        modeInfoEl.textContent=mmErrorMsg;
+        refreshMmPanel();
+        return;
+    }
+    var idx=Array.isArray(msg.indices)?msg.indices:[];
+    var coords=Array.isArray(msg.coords)?msg.coords:[];
+    var targets=[];
+    for(var k=0;k<idx.length&&k<coords.length;k++){
+        var i=idx[k];
+        var c=coords[k];
+        if(typeof i!=='number'||i<0||i>=MD.atoms.length)continue;
+        if(!c||c.length<3||!isFinite(c[0])||!isFinite(c[1])||!isFinite(c[2]))continue;
+        targets.push({index:i,x:c[0],y:c[1],z:c[2]});
+    }
+    if(targets.length===0){
+        mmErrorMsg='Molecular Mechanics: the answer carried no usable coordinates';
+        modeInfoEl.textContent=mmErrorMsg;
+        refreshMmPanel();
+        return;
+    }
+    pushUndo();
+    var moved=[];
+    targets.forEach(function(t){
+        var a=MD.atoms[t.index];
+        if(!a)return;
+        a.x=t.x;a.y=t.y;a.z=t.z;
+        moved.push(t.index);
+    });
+    // Refresh the moved region only (the pattern the Move Atoms release uses):
+    // spheres and the bonds that touch them are redrawn, connectivity is
+    // re-judged for the region's whole connected component, and the rotation
+    // centre follows the new geometry.
+    updateAtomMeshPositions();
+    rebuildBondsTouching(moved);
+    refreshMovedBondsAndMeshes(moved);
+    mmLastResult={
+        energyBefore:typeof msg.energyBefore==='number'?msg.energyBefore:0,
+        energyAfter:typeof msg.energyAfter==='number'?msg.energyAfter:0,
+        iterations:msg.iterations||0,
+        maxGrad:typeof msg.maxGrad==='number'?msg.maxGrad:0,
+        rmsGrad:typeof msg.rmsGrad==='number'?msg.rmsGrad:0,
+        maxMove:typeof msg.maxMove==='number'?msg.maxMove:0,
+        stopReason:msg.stopReason||'',
+        counts:msg.counts||null,
+        moved:moved.length
+    };
+    refreshMmPanel();
+    modeInfoEl.textContent=msg.message||('Molecular Mechanics: optimized '+moved.length+' atom(s)');
+}
+
+var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',replaceAtom:'Replace Atom - Click atom(s) to select, click button again to confirm',addH:'Add H - Click atom(s) to select, click the button again to complete their hydrogens',selectAtoms:'Select Atoms - Input indices or element symbols',boxSelect:'Box Select - Drag a rectangle to select atoms',rotateGroup:'Rotate Group - Select group + axis atoms, then adjust angle',mmOpt:'Molecular Mechanics - Click atoms to select them; the panel optimizes only those atoms',moveAtoms:'Move Atoms - Select atoms; drag/arrows rotate view, right-drag pans; Ctrl+drag or Ctrl+arrows rotates group, Ctrl+right-drag moves group'};
 
 function setMode(m){
     if(m==='moveAtoms'&&CRY){
         // Moving atoms in a periodic supercell breaks image consistency;
         // the mode is only offered for molecular structures.
         modeInfoEl.textContent='Move Atoms is not available for crystal structures';
+        return;
+    }
+    if(m==='mmOpt'&&(CRY||diffMode)){
+        // The force field relaxes a molecular structure against its own
+        // neighbours; a periodic cell would need image atoms it does not have,
+        // and a two-structure comparison has two structures to choose from.
+        modeInfoEl.textContent='Molecular Mechanics is not available '+(CRY?'for crystal structures':'in diff mode');
         return;
     }
     if(m==='addH'&&(CRY||diffMode)){
@@ -2816,12 +3110,20 @@ function setMode(m){
         if(m==='addH'){
             if(selectedAtoms.length>0){startAddHydrogens();return}
         }
+        if(m==='mmOpt'){
+            // The toolbar button always opens the panel again (the × only
+            // closes it), so there is never a state without a way back.
+            var mp0=mmPanelEl();
+            if(mp0&&!mp0.classList.contains('show')){showMmPanel()}else{refreshMmPanel()}
+            layoutPanels();
+            return;
+        }
         layoutPanels();
         return;
     }
     var oldMode=currentMode;
     currentMode=m;
-    var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect'||oldMode==='replaceAtom'||oldMode==='addH'||oldMode==='rotateGroup'||oldMode==='moveAtoms')&&(m==='selectAtoms'||m==='boxSelect'||m==='replaceAtom'||m==='addH'||m==='rotateGroup'||m==='moveAtoms'));
+    var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect'||oldMode==='replaceAtom'||oldMode==='addH'||oldMode==='rotateGroup'||oldMode==='moveAtoms'||oldMode==='mmOpt')&&(m==='selectAtoms'||m==='boxSelect'||m==='replaceAtom'||m==='addH'||m==='rotateGroup'||m==='moveAtoms'||m==='mmOpt'));
     if(oldMode==='moveAtoms'&&m!=='moveAtoms')stopMoveSession();
     if(!preserveSel){
         selectedAtoms=[];diffSelectedAtoms=[];originalCoords=null;
@@ -2834,6 +3136,10 @@ function setMode(m){
     if(sp2)sp2.style.display=(m==='selectAtoms')?'block':'none';
     var rp2=document.getElementById('rotate-panel');
     if(rp2)rp2.style.display=(m==='rotateGroup')?'block':'none';
+    var mp2=mmPanelEl();
+    if(mp2){
+        if(m==='mmOpt'){showMmPanel()}else if(mp2.classList.contains('show')){mp2.classList.remove('show')}
+    }
     if(m==='rotateGroup'){
         resetRotAxisState();
         syncRotatePanelGroupField();
@@ -2849,6 +3155,7 @@ function setMode(m){
 function resetSelection(){
     selectedAtoms=[];diffSelectedAtoms=[];originalCoords=null;highlightSelected();
     selInfoEl.textContent='';
+    mmSelectionChanged();
 }
 
 document.querySelectorAll('.tbtn[data-mode]').forEach(function(b){b.addEventListener('click',function(){
@@ -2875,11 +3182,13 @@ document.querySelectorAll('.tbtn[data-mode]').forEach(function(b){b.addEventList
         var names=formatAtomList(selectedAtoms);
         selInfoEl.textContent='Selected: '+names+' ('+selectedAtoms.length+' atoms)';
         inp.value='';
+        mmSelectionChanged();
     }
     okBtn.addEventListener('click',doSelect);
     inp.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();doSelect()}});
     clrBtn.addEventListener('click',function(){
         selectedAtoms=[];diffSelectedAtoms=[];highlightSelected();selInfoEl.textContent='';
+        mmSelectionChanged();
     });
 })();
 
@@ -3160,6 +3469,12 @@ function doUndo(){
     if(CRY&&snap.baseAtoms){CRY.baseAtoms=snap.baseAtoms;CRY.baseBonds=snap.baseBonds}
     if(CRY){rebuildCrystal()}rebuildScene();updateUndoBtn();
     if(diffMode)resetSelection();
+    if(currentMode==='mmOpt'){
+        // The panel's last-run block describes a geometry that has just been
+        // undone, so it goes with it.
+        mmLastResult=null;mmErrorMsg='';
+        refreshMmPanel();
+    }
     if(currentMode==='rotateGroup'&&rotActive){
         if(snap.rotAngle!=null){
             // Undo one angle adjustment: sync slider and displays to the
@@ -3240,6 +3555,8 @@ window.addEventListener('message',function(event){
         importStructure(msg);
     }else if(msg.command==='hydrogenResult'){
         applyHydrogenResult(msg);
+    }else if(msg.command==='mmResult'){
+        applyMmResult(msg);
     }
 });
 
@@ -3681,6 +3998,12 @@ function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct)
 }
 
 function startDiff(msg){
+    // The comparison has two structures to choose from, so a molecular-mechanics
+    // panel has nothing to act on while it is open; it comes back on exit.
+    if(currentMode==='mmOpt'){
+        var mmPanelInDiff=mmPanelEl();
+        if(mmPanelInDiff)mmPanelInDiff.classList.remove('show');
+    }
     diffData={atoms:msg.atoms,bonds:msg.bonds,title:msg.title||msg.fileName,fileName:msg.fileName,charge:msg.charge};
 
     var detBonds1=detectBondsFromAtoms(MD.atoms,MD.charge);
@@ -4087,6 +4410,9 @@ function hBondDiff(s,e,d,hl,r,c){
 
 function exitDiff(){
     diffMode=false;
+    // A molecular-mechanics session survives the comparison: its panel comes
+    // back with the same selection once the second structure is gone.
+    if(currentMode==='mmOpt')showMmPanel();
     if(diffPivot){
         scene.remove(diffPivot);
         diffPivot.traverse(function(ch){
@@ -4290,6 +4616,7 @@ function switchFrame(idx){
     undoStack.length=0;updateUndoBtn();
     if(diffMode)resetSelection();
     resetRotAxisState();
+    if(currentMode==='mmOpt'){mmLastResult=null;refreshMmPanel()}
     rebuildScene();
     updateFrameInfo();
     // [2026-09-12 | Atreides-Jimmy] Follow the structure change in the
@@ -4331,6 +4658,7 @@ function switchMolecule(idx){
     vmdSurfaceSignature='';
     undoStack.length=0;updateUndoBtn();
     resetRotAxisState();
+    if(currentMode==='mmOpt'){mmLastResult=null;refreshMmPanel()}
     rebuildScene();
     updateMolLabel();
     // Frame the new structure: it may sit at a very different position or size.
@@ -5296,6 +5624,7 @@ function layoutPanels(){
     }
     var defs=[
         {id:'mol-info',pr:0,anc:'tl'},
+        {id:'mm-panel',pr:1,anc:'tl'},
         {id:'crystal-panel',pr:1,anc:'tr'},
         {id:'diff-panel',pr:2,anc:'br'},
         {id:'select-panel',pr:3,anc:'bl'},
@@ -5426,7 +5755,7 @@ function selectAtom(idx){
         checkSelectionComplete();
         return;
     }
-    if(currentMode==='selectAtoms'||currentMode==='replaceAtom'||currentMode==='addH'||currentMode==='rotateGroup'||currentMode==='moveAtoms'){
+    if(currentMode==='selectAtoms'||currentMode==='replaceAtom'||currentMode==='addH'||currentMode==='rotateGroup'||currentMode==='moveAtoms'||currentMode==='mmOpt'){
         var pos=selectedAtoms.indexOf(idx);
         if(pos>=0){
             selectedAtoms.splice(pos,1);
@@ -5435,6 +5764,7 @@ function selectAtom(idx){
             selInfoEl.textContent=selectedAtoms.length?('Selected: '+dn):'';
             if(currentMode==='rotateGroup')syncRotatePanelGroupField();
             checkSelectionComplete();
+            mmSelectionChanged();
             return;
         }
     }
@@ -5445,6 +5775,7 @@ function selectAtom(idx){
     selInfoEl.textContent='Selected: '+names;
     if(currentMode==='rotateGroup')syncRotatePanelGroupField();
     checkSelectionComplete();
+    mmSelectionChanged();
 }
 
 function updateDiffSelInfo(){
@@ -5494,6 +5825,10 @@ function checkSelectionComplete(){
     else if(currentMode==='addH'){
         var hnames=formatAtomList(selectedAtoms);
         selInfoEl.textContent='Selected for Add H: '+hnames+' (click Add H button to complete)';
+    }
+    else if(currentMode==='mmOpt'){
+        var mnames=formatAtomList(selectedAtoms);
+        selInfoEl.textContent='Selected for MM optimization: '+mnames+' ('+selectedAtoms.length+' atoms, click Start Optimization)';
     }
 }
 
