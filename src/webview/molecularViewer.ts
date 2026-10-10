@@ -4,6 +4,7 @@ import { parseFile, parseLogFile, LogFrame, OrcaFrame, RouteSection, parseTcl, r
 import { ensureBonds } from '../parsers/bondDetector';
 import { BOND_PERCEPTION_SOURCE } from '../parsers/bondPerception';
 import { addHydrogens } from '../parsers/addHydrogens';
+import { beginOptimization, describeForceField, MmHistoryPoint, MmOptimizeResult, MmSession } from '../parsers/mmOptimizer';
 import { smilesTo3dSafe, validateSmiles } from '../parsers/smilesTo3d';
 import { MolecularData, AtomGroup, OptStep, NormalMode, VmdScene, VmdMolecule } from '../types';
 
@@ -47,6 +48,50 @@ interface ImportBondPayload {
     atom2: number;
     order: number;
 }
+
+/**
+ * One Molecular Mechanics run in flight for a webview panel.
+ *
+ * The optimiser is a session that can be stepped, so the extension host runs it
+ * in small chunks, yielding to the message loop between them: every progress
+ * chunk is posted to the panel (which draws it live) and — because the host's
+ * message loop is only blocked for the length of one chunk — Pause / Resume /
+ * Cancel and a new run are serviced between chunks instead of after the whole
+ * optimisation. `lastStep` is the step of the newest history point the panel
+ * has been sent, so a chunk only carries what the panel has not seen (the
+ * module downsamples a very long history, so points are matched by step, not by
+ * index); `lastPost` throttles the stream to a readable frame rate.
+ */
+interface MmRunState {
+    id: string;
+    session: MmSession;
+    paused: boolean;
+    stopped: boolean;
+    lastStep: number;
+    lastPost: number;
+}
+
+/** Search passes per chunk: short enough that a pause is felt immediately. */
+const MM_CHUNK_STEPS = 10;
+/**
+ * The chunk is not a fixed number of passes but a fixed *amount of work*: the
+ * whole point of stepping the session is that the message loop gets a turn
+ * between chunks, so a Pause is felt within one chunk — and one pass costs more
+ * the more atoms the selection has. Measured on this machine, ten passes cost
+ * ~3 ms on a 72-atom structure but ~42 ms (worst chunk 66 ms) at 356 atoms, so
+ * at the 3000-atom cap a fixed ten would hold the loop for a large fraction of a
+ * second and a Pause would land that much late. The count therefore starts at
+ * ten and is adapted from how long the last chunk actually took; it is only ever
+ * raised back towards ten, so a cheap run is not sliced more finely than it
+ * needs to be. The answer does not depend on it — a run stepped in chunks of 1,
+ * 2, 3, 7, 10 or 1000 passes was verified to be byte-identical.
+ */
+const MM_CHUNK_TARGET_MS = 60;
+/** A chunk this much over target asks for fewer passes; this much under, more. */
+const MM_CHUNK_OVER = 1.5;
+const MM_CHUNK_UNDER = 0.5;
+/** Shortest gap between two progress messages (ms), unless the run just ended. */
+const MM_PROGRESS_MS = 75;
 
 /**
  * Payload of one molecule of a VMD visualization script: the structure the
@@ -536,6 +581,172 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
 
         webviewPanel.webview.html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes, document.vmdPayload, document.autoBeta);
 
+        // The panel's Molecular Mechanics run (at most one at a time). The pump
+        // steps it in chunks and yields between them, so the panel keeps
+        // receiving progress and its Pause / Resume / Cancel -- or a brand new
+        // run -- are handled while the optimisation is still working.
+        let mmRun: MmRunState | null = null;
+
+        /** Everything the panel needs to draw a run's current state. */
+        const mmStateMessage = (run: MmRunState, command: string): { [key: string]: unknown } => {
+            const snap = run.session.finish();
+            return {
+                command: command,
+                runId: run.id,
+                step: snap.iterations,
+                energy: snap.energyAfter,
+                energyBefore: snap.energyBefore,
+                maxGrad: snap.maxGrad,
+                rmsGrad: snap.rmsGrad,
+                coords: snap.coords,
+                indices: snap.indices,
+                points: mmNewPoints(run),
+                done: run.session.done,
+                converged: snap.converged,
+                stopReason: snap.stopReason,
+                message: snap.message
+            };
+        };
+
+        /** History points the panel has not been sent yet, oldest first. */
+        const mmNewPoints = (run: MmRunState): MmHistoryPoint[] => {
+            const history = run.session.history;
+            const points: MmHistoryPoint[] = [];
+            for (let i = 0; i < history.length; i++) {
+                if (history[i].step > run.lastStep) {
+                    points.push(history[i]);
+                }
+            }
+            if (points.length > 0) {
+                run.lastStep = points[points.length - 1].step;
+            }
+            return points;
+        };
+
+        /** The finished result, in the shape the panel's last-run block reads. */
+        const mmResultMessage = (runId: string, result: MmOptimizeResult): { [key: string]: unknown } => ({
+            command: 'mmResult',
+            runId: runId,
+            ok: result.ok,
+            message: result.message,
+            atomCount: result.atomCount,
+            indices: result.indices,
+            coords: result.coords,
+            energyBefore: result.energyBefore,
+            energyAfter: result.energyAfter,
+            iterations: result.iterations,
+            maxGrad: result.maxGrad,
+            rmsGrad: result.rmsGrad,
+            maxMove: result.maxMove,
+            converged: result.converged,
+            stopReason: result.stopReason,
+            counts: result.counts,
+            invalid: result.invalid
+        });
+
+        /** Drop the run without finishing it (cancel, replace, dispose). */
+        const mmDiscardRun = (reason: 'cancelled' | 'replaced'): MmRunState | null => {
+            const run = mmRun;
+            if (!run) {
+                return null;
+            }
+            run.stopped = true;
+            run.session.abandon();
+            mmRun = null;
+            if (reason === 'cancelled') {
+                webviewPanel.webview.postMessage({ command: 'mmCancelled', runId: run.id });
+            }
+            return run;
+        };
+
+        // Each chunk is scheduled on a timer rather than chained through
+        // `setImmediate`: the message loop must get a turn between two chunks,
+        // because that is where the panel's Pause / Resume / Cancel land. A
+        // timer also lets the host's own I/O be serviced first, so a Pause is
+        // seen within one chunk instead of after the whole optimisation.
+        //
+        // The pump is handed the run it was scheduled for, and the run is what
+        // the wake-up checks: a chunk chain left over from a replaced run wakes
+        // up, sees it no longer owns the panel's run, and stops. Reading the
+        // current run instead would let that stale chain step whatever run is
+        // there — so after a cancel-and-restart the new run would be driven by
+        // two chains at once, at twice the chunk rate it was asked for.
+        const mmSchedulePump = (run: MmRunState): void => {
+            setTimeout(() => mmPump(run), 0);
+        };
+
+        // Passes the next chunk will ask for, adapted from the last one's cost
+        // (see MM_CHUNK_TARGET_MS). Per panel, so one big run cannot slow the
+        // next run's first chunk down.
+        let mmChunkSteps = MM_CHUNK_STEPS;
+        /** Size one chunk by how much work the previous one turned out to be. */
+        const mmAdaptChunk = (costMs: number): void => {
+            if (costMs > MM_CHUNK_TARGET_MS * MM_CHUNK_OVER) {
+                mmChunkSteps = Math.max(1, mmChunkSteps > 2 ? Math.floor(mmChunkSteps / 2) : 1);
+            } else if (costMs < MM_CHUNK_TARGET_MS * MM_CHUNK_UNDER && mmChunkSteps < MM_CHUNK_STEPS) {
+                mmChunkSteps++;
+            }
+        };
+
+        const mmPump = (run: MmRunState): void => {
+            if (mmRun !== run || run.stopped || run.paused) {
+                return;
+            }
+            try {
+                const chunkStart = Date.now();
+                const state = run.session.step(mmChunkSteps);
+                mmAdaptChunk(Date.now() - chunkStart);
+                if (mmRun !== run) {
+                    // Replaced while this chunk ran (cannot happen between two
+                    // synchronous statements, but the guard keeps the pump from
+                    // driving a run nobody owns).
+                    return;
+                }
+                const now = Date.now();
+                if (!state.done && now - run.lastPost < MM_PROGRESS_MS) {
+                    mmSchedulePump(run);
+                    return;
+                }
+                run.lastPost = now;
+                webviewPanel.webview.postMessage({
+                    command: 'mmProgress',
+                    runId: run.id,
+                    step: state.step,
+                    energy: state.energy,
+                    maxGrad: state.maxGrad,
+                    rmsGrad: state.rmsGrad,
+                    coords: state.coords,
+                    points: mmNewPoints(run),
+                    done: state.done
+                });
+                if (state.done) {
+                    run.stopped = true;
+                    mmRun = null;
+                    webviewPanel.webview.postMessage(mmResultMessage(run.id, run.session.finish()));
+                    return;
+                }
+                mmSchedulePump(run);
+            } catch (e: any) {
+                const run2 = mmRun;
+                const id = run2 ? run2.id : run.id;
+                if (run2) {
+                    run2.stopped = true;
+                    run2.session.abandon();
+                    mmRun = null;
+                }
+                webviewPanel.webview.postMessage({
+                    command: 'mmResult',
+                    runId: id,
+                    ok: false,
+                    message: 'Molecular Mechanics failed: ' + (e && e.message ? e.message : e)
+                });
+            }
+        };
+
+        webviewPanel.onDidDispose(() => {
+            mmDiscardRun('replaced');
+        });
+
         webviewPanel.webview.onDidReceiveMessage(async (message) => {
             switch (message.command) {
                 case 'saveFile':
@@ -893,6 +1104,119 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                 case 'info':
                     vscode.window.showInformationMessage(message.text);
                     break;
+                case 'mmOptimize':
+                    // Molecular mechanics runs here, in the extension host: the
+                    // work is bounded but heavy for a large selection, and
+                    // running it off the webview keeps the view responsive while
+                    // it works. It is stepped in chunks (see mmPump), so the
+                    // panel watches the energy and the coordinates instead of
+                    // waiting for one final answer, and it can stop the run —
+                    // the answer carries new coordinates for the selected atoms
+                    // only; every other atom is a fixed source of force and is
+                    // not returned at all.
+                    try {
+                        // A new run replaces one already in flight for this
+                        // panel: the old session is dropped (its answer is no
+                        // longer wanted) and told to the panel as cancelled.
+                        mmDiscardRun('replaced');
+                        const runId = typeof message.runId === 'string' && message.runId.length > 0
+                            ? message.runId
+                            : 'mm-' + Date.now();
+                        // The panel's settings travel with the request; the module
+                        // validates every one of them, so an unexpected payload
+                        // simply falls back to its own defaults.
+                        const began = beginOptimization(message.atoms, message.bonds, message.selected, message.options);
+                        if (began.result !== null) {
+                            // Refused, or a selection with nothing to optimise:
+                            // one complete answer, exactly as before.
+                            webviewPanel.webview.postMessage(mmResultMessage(runId, began.result));
+                            break;
+                        }
+                        const session = began.session as MmSession;
+                        const run: MmRunState = {
+                            id: runId,
+                            session: session,
+                            paused: false,
+                            stopped: false,
+                            lastStep: -1,
+                            lastPost: Date.now()
+                        };
+                        mmRun = run;
+                        // A new run starts optimistic and shrinks its chunk only
+                        // if its own first chunks turn out to be expensive.
+                        mmChunkSteps = MM_CHUNK_STEPS;
+                        // The first message carries the input geometry (step 0
+                        // of the history), so the curve starts where the run did.
+                        webviewPanel.webview.postMessage(mmStateMessage(run, 'mmProgress'));
+                        mmSchedulePump(run);
+                    } catch (e: any) {
+                        webviewPanel.webview.postMessage({
+                            command: 'mmResult',
+                            runId: typeof message.runId === 'string' ? message.runId : '',
+                            ok: false,
+                            message: 'Molecular Mechanics failed: ' + (e && e.message ? e.message : e)
+                        });
+                    }
+                    break;
+                case 'mmPause': {
+                    // Stop pumping and keep the session: the panel is told where
+                    // the run stands, and `mmResume` continues from exactly this
+                    // state (the search's step size, conjugate direction and
+                    // pair list are all part of it, not of an iteration).
+                    // Idempotent, and it always answers: a pause whose reply was
+                    // lost (or that arrived twice) can never leave the panel
+                    // waiting for an answer that will not come.
+                    const run = mmRun;
+                    if (run && !run.stopped && run.id === message.runId) {
+                        if (!run.paused) {
+                            run.paused = true;
+                            run.session.pause();
+                        }
+                        webviewPanel.webview.postMessage(mmStateMessage(run, 'mmPaused'));
+                    } else if (typeof message.runId === 'string' && message.runId.length > 0) {
+                        // No run of that id is in flight here — it already
+                        // finished, or a newer run replaced it between the panel's
+                        // click and this message. The panel flipped to Pause
+                        // optimistically, so it is waiting to be told something;
+                        // answering that the run is over is what lets it return to
+                        // Start instead of sitting on a button that does nothing.
+                        webviewPanel.webview.postMessage({ command: 'mmCancelled', runId: message.runId });
+                    }
+                    break;
+                }
+                case 'mmResume': {
+                    const run = mmRun;
+                    if (run && !run.stopped && run.id === message.runId) {
+                        if (run.paused) {
+                            run.paused = false;
+                            run.lastPost = 0;
+                            // The time spent paused is added back to the run's
+                            // wall-clock budget, so a pause cannot eat it.
+                            run.session.resume();
+                        }
+                        // Answer the request either way, so the panel hears back
+                        // even when it asked to resume a run that was already
+                        // going (its optimistic state flip is then confirmed).
+                        webviewPanel.webview.postMessage(mmStateMessage(run, 'mmProgress'));
+                        mmSchedulePump(run);
+                    } else if (typeof message.runId === 'string' && message.runId.length > 0) {
+                        // Same as the pause above: a resume for a run that is no
+                        // longer here is answered, so the panel's optimistic
+                        // "running" cannot outlive the run it belongs to.
+                        webviewPanel.webview.postMessage({ command: 'mmCancelled', runId: message.runId });
+                    }
+                    break;
+                }
+                case 'mmCancel': {
+                    // The run is dropped; whatever geometry it produced is
+                    // already on screen, and the panel is told so it can stop
+                    // waiting for progress.
+                    const run = mmRun;
+                    if (run && run.id === message.runId) {
+                        mmDiscardRun('cancelled');
+                    }
+                    break;
+                }
                 case 'error':
                     vscode.window.showErrorMessage(message.text);
                     break;
@@ -987,7 +1311,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
 
         const vmdData = vmdPayload && vmdPayload.molecules.length > 0 ? vmdPayload : null;
 
-        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, routes: routesData, vmd: vmdData, autoBeta: !!(autoBeta && !vmdData) });
+        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, routes: routesData, vmd: vmdData, autoBeta: !!(autoBeta && !vmdData), hasExplicitBonds: !!data.hasExplicitBonds, mmParams: describeForceField() });
 
         // The bond perception module, as source. Both sides run this text —
         // the host calls the compiled function directly, the webview evaluates
@@ -1019,6 +1343,34 @@ body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;b
 #mode-info{white-space:nowrap;flex-shrink:0}
 #container{flex:1;position:relative;overflow:hidden;min-height:0;outline:none}
 #mol-info{position:absolute;top:8px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.55);padding:6px 10px;border-radius:4px;z-index:25;pointer-events:none;line-height:1.6;max-width:calc(100% - 16px);overflow:hidden}
+#mm-panel{display:none;position:absolute;top:8px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.62);border:1px solid var(--vscode-panel-border,#444);border-radius:4px;padding:8px 10px;z-index:26;line-height:1.5;width:340px;max-width:calc(100% - 16px);max-height:calc(100% - 60px);overflow-y:auto;pointer-events:auto}
+#mm-panel.show{display:block}
+#mm-panel .mm-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:5px;font-weight:600}
+#mm-panel .mm-close{cursor:pointer;opacity:0.7;padding:0 2px}
+#mm-panel .mm-close:hover{opacity:1}
+#mm-panel .mm-param{color:var(--vscode-descriptionForeground,#a9a9a9);font-size:10px;line-height:1.45;margin:1px 0}
+#mm-panel .mm-sec{margin:7px 0 3px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.15);font-size:10px;color:var(--vscode-descriptionForeground,#999);text-transform:uppercase;letter-spacing:0.4px}
+#mm-panel .mm-ctl{display:flex;align-items:center;gap:6px;margin:3px 0}
+#mm-panel .mm-ctl-label{flex:0 0 96px;color:var(--vscode-descriptionForeground,#a9a9a9)}
+#mm-panel .mm-ctl-sel{flex:1 1 auto;min-width:0;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;font-size:11px;padding:1px 2px}
+#mm-panel .mm-sel{margin-top:6px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.15);word-break:break-word}
+#mm-panel .mm-run{margin-top:6px;width:100%;background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff);border:none;border-radius:3px;padding:4px 6px;font-size:11px;cursor:pointer}
+#mm-panel .mm-run:hover:not(:disabled){background:var(--vscode-button-hoverBackground,#1177bb)}
+#mm-panel .mm-run:disabled{opacity:0.5;cursor:default}
+#mm-panel .mm-res{margin-top:6px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.15);font-size:10px;line-height:1.45}
+#mm-panel .mm-res-head{color:var(--vscode-textLink-foreground,#3794ff);font-weight:600}
+#mm-panel .mm-err{color:var(--vscode-errorForeground,#f66);margin-top:5px;font-size:10px;line-height:1.4}
+#mm-panel .mm-btns{display:flex;gap:6px;margin-top:6px}
+#mm-panel .mm-btns button{flex:1 1 0;min-width:0;background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#ccc);border:1px solid var(--vscode-button-border,#555);border-radius:3px;padding:4px 6px;font-size:11px;cursor:pointer}
+#mm-panel .mm-btns button:hover:not(:disabled){background:var(--vscode-button-secondaryHoverBackground,#45494e)}
+#mm-panel .mm-btns button:disabled{opacity:0.5;cursor:default}
+#mm-panel .mm-prog{margin-top:6px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.15);font-size:10px;line-height:1.45;white-space:pre-wrap}
+#mm-panel .mm-curve-title{color:var(--vscode-descriptionForeground,#999);font-size:10px;margin:5px 0 1px}
+#mm-panel .mm-curve{width:100%;height:78px;display:block}
+#mm-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
+#mm-reopen.show{display:block}
+#mm-reopen:hover{background:var(--vscode-button-background,#0e639c)}
+#mm-reopen.busy{border-color:var(--vscode-textLink-foreground,#3794ff);color:var(--vscode-textLink-foreground,#3794ff)}
 #axes-indicator{position:absolute;bottom:12px;left:12px;width:90px;height:90px;z-index:25;pointer-events:none}
 #axes-indicator svg{width:100%;height:100%}
 #crystal-panel{position:absolute;top:8px;right:8px;background:rgba(0,0,0,0.6);border:1px solid var(--vscode-panel-border,#444);border-radius:4px;padding:8px 10px;font-size:11px;color:var(--vscode-editor-foreground,#ccc);z-index:25;display:none;min-width:180px;max-width:calc(100% - 16px)}
@@ -1181,6 +1533,7 @@ canvas{display:block}
 <button class="tbtn" data-mode="dihedral">Dihedral</button>
 <button class="tbtn" data-mode="rotateGroup">Rotate Group</button>
 <button class="tbtn" data-mode="moveAtoms">Move Atoms</button>
+<button class="tbtn" data-mode="mmOpt">MM Optimize</button>
 <div class="tsep"></div>
 <button class="tbtn" data-mode="addAtom">Add Atom</button>
 <button class="tbtn" data-mode="deleteAtom">Delete Atom</button>
@@ -1213,7 +1566,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="box-select-rect"></div>
@@ -2364,7 +2717,7 @@ var panGrabSide='left';
 var diffPanGrabOffset={x:0,y:0};
 var diffPanRefZ=0;
 
-function recomputeMovedBonds(){
+function recomputeMovedBonds(selOverride){
     // Partial bond re-derivation after a fragment move/rotate session ends.
     //
     // Only the selected atoms changed position, so connectivity — and with it
@@ -2384,9 +2737,14 @@ function recomputeMovedBonds(){
     // Returns the atoms whose bonds were re-derived (the caller rebuilds only
     // their meshes), an empty array when nothing changed, or null when the
     // caller should fall back to a full scene refresh.
-    if(selectedAtoms.length===0)return [];
+    //
+    // selOverride: the atoms that moved, when they are not the current
+    // selection (a molecular-mechanics run moves the atoms its own request
+    // named, which the user may have re-selected in the meantime).
+    var selList=selOverride||selectedAtoms;
+    if(selList.length===0)return [];
     var sel={};
-    for(var si=0;si<selectedAtoms.length;si++)sel[selectedAtoms[si]]=true;
+    for(var si=0;si<selList.length;si++)sel[selList[si]]=true;
     var atoms=MD.atoms,n=atoms.length;
     if(MD.hasExplicitBonds){
         // Authored bonds keep their orders and are never re-derived — but a
@@ -2426,8 +2784,8 @@ function recomputeMovedBonds(){
         (adjOf[abo.atom2]||(adjOf[abo.atom2]={}))[abo.atom1]=abo.order;
     }
     var stable=true;
-    for(si=0;si<selectedAtoms.length&&stable;si++){
-        var s0=selectedAtoms[si];
+    for(si=0;si<selList.length&&stable;si++){
+        var s0=selList[si];
         var nb0=adjOf[s0];
         if(!nb0)continue;
         var a0=atoms[s0];
@@ -2448,7 +2806,7 @@ function recomputeMovedBonds(){
     // unrelated atom is still found.
     var newContact=false;
     var inA={};
-    for(si=0;si<selectedAtoms.length;si++)inA[selectedAtoms[si]]=true;
+    for(si=0;si<selList.length;si++)inA[selList[si]]=true;
     var CELL=3;
     var normEls=new Array(n);var distinct=[];var seenEl={};
     for(var i=0;i<n;i++){var rawEl=atoms[i].element||'';var ne=rawEl.charAt(0).toUpperCase()+rawEl.slice(1).toLowerCase();normEls[i]=ne;
@@ -2461,8 +2819,8 @@ function recomputeMovedBonds(){
     for(i=0;i<n;i++){var cx=Math.floor(atoms[i].x/CELL),cy=Math.floor(atoms[i].y/CELL),cz=Math.floor(atoms[i].z/CELL);
         var key=(cx*73856093)^(cy*19349663)^(cz*83492791);
         var bkt=grid.get(key);if(!bkt){bkt=[];grid.set(key,bkt)}bkt.push(i)}
-    for(si=0;si<selectedAtoms.length;si++){
-        var s=selectedAtoms[si];if(!atoms[s])continue;
+    for(si=0;si<selList.length;si++){
+        var s=selList[si];if(!atoms[s])continue;
         var range=rangeFor[normEls[s]];
         var csx=Math.floor(atoms[s].x/CELL),csy=Math.floor(atoms[s].y/CELL),csz=Math.floor(atoms[s].z/CELL);
         for(var dx=-range;dx<=range;dx++)for(var dy=-range;dy<=range;dy++)for(var dz=-range;dz<=range;dz++){
@@ -2505,13 +2863,28 @@ function recomputeMovedBonds(){
     var res=BP.perceiveBonds(subAtoms,opt);
 
     // Splice: a bond with both ends inside the component is replaced by the
-    // freshly derived one; everything else is kept as it is.
+    // freshly derived one; everything else is kept as it is. What the derived
+    // bond carries is the chemistry (its endpoints and its order) — anything the
+    // *file's own recipe* put on a bond for drawing it, a VMD script's per-bond
+    // radius above all, is not the detector's business and is carried across for
+    // a pair that already had it, so re-deriving an order cannot silently
+    // re-thin a bond the script asked to be drawn thicker (or hide one the
+    // script said not to draw at all).
+    var drawProp={};
+    for(bi=0;bi<MD.bonds.length;bi++){
+        b=MD.bonds[bi];
+        if(b.vmdR!==undefined)drawProp[Math.min(b.atom1,b.atom2)+'-'+Math.max(b.atom1,b.atom2)]=b.vmdR;
+    }
     var compIdx={};for(ci=0;ci<comp.length;ci++)compIdx[comp[ci]]=1;
     var out=[];
     for(bi=0;bi<MD.bonds.length;bi++){b=MD.bonds[bi];
         if(!compIdx[b.atom1]&&!compIdx[b.atom2])out.push(b)}
     for(var ri=0;ri<res.bonds.length;ri++){var rb=res.bonds[ri];
-        out.push({atom1:comp[rb.atom1],atom2:comp[rb.atom2],order:rb.order})}
+        var na=comp[rb.atom1],nx=comp[rb.atom2];
+        var nbb={atom1:na,atom2:nx,order:rb.order};
+        var kp=drawProp[Math.min(na,nx)+'-'+Math.max(na,nx)];
+        if(kp!==undefined)nbb.vmdR=kp;
+        out.push(nbb)}
 
     // An unchanged result means there is nothing to rebuild.
     var before={};
@@ -2532,9 +2905,9 @@ function recomputeMovedBonds(){
 // for the moved region, then rebuild only the affected region's bond meshes.
 // A full scene rebuild runs only when the region-scoped re-detection fell
 // back to the full detector (null region).
-function refreshMovedBondsAndMeshes(){
+function refreshMovedBondsAndMeshes(selOverride){
     var oldBonds=MD.bonds;
-    var region=recomputeMovedBonds();
+    var region=recomputeMovedBonds(selOverride);
     if(region){if(region.length)rebuildMovedBondMeshes(oldBonds,region)}
     else updateScenePositions(true);
     // 原子被移动过, 质心随之改变 —— 放在区域刷新之后: 上面的网格都还是按旧中心
@@ -2785,13 +3158,740 @@ var initCam=computeInitialCamDist();
 camera.position.set(0,0,initCam);camera.lookAt(0,0,0);
 camDist=initCam;
 
-var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',replaceAtom:'Replace Atom - Click atom(s) to select, click button again to confirm',addH:'Add H - Click atom(s) to select, click the button again to complete their hydrogens',selectAtoms:'Select Atoms - Input indices or element symbols',boxSelect:'Box Select - Drag a rectangle to select atoms',rotateGroup:'Rotate Group - Select group + axis atoms, then adjust angle',moveAtoms:'Move Atoms - Select atoms; drag/arrows rotate view, right-drag pans; Ctrl+drag or Ctrl+arrows rotates group, Ctrl+right-drag moves group'};
+// ===== Molecular mechanics optimisation =====
+// The panel carries the force field's own parameter list (built host-side from
+// the module that runs the optimisation, so the two can never disagree), the
+// precision presets, the atoms a run would move and the buttons that steer it.
+// Selection is the viewer's usual one — a click here, or a selection carried in
+// from Select Atoms / Box Select / Replace Atom / Add H / Rotate Group / Move
+// Atoms — and only those atoms move.
+//
+// A run is a *session* the host steps in chunks, so the panel watches it work:
+// the host posts mmProgress / mmPaused / mmCancelled / mmResult, and every
+// progress chunk's coordinates are written straight into the structure (spheres
+// and only the bonds that touch them — the cheap Move Atoms path) while the
+// energy and force curves grow from the history that travels with it. **Pause**
+// stops the host's pump and keeps the session, so **Resume** continues from
+// exactly that state and **Restore initial** writes this run's own starting
+// geometry back; leaving the mode — another tool, a frame, a molecule, an undo,
+// an import, a comparison — **cancels** the run, because an optimisation must
+// never keep writing coordinates into a structure the user has moved on from.
+// The run id ties every reply to the run that asked for it, so a late answer
+// from a replaced run is ignored instead of applied.
+var mmLastResult=null;       // last finished run's numbers, shown under the buttons
+var mmErrorMsg='';           // last failure, shown in the panel
+var mmOptions={};            // the settings chosen in the panel (key -> value)
+var mmRun=null;              // the run being watched (null = none), see mmStartRun
+var mmRunSeq=0;              // run id source; the host echoes the id back
+var MM_HISTORY_CAP=4000;     // curve points kept; past this, every other one
+
+function mmPanelEl(){return document.getElementById('mm-panel')}
+function mmPanelVisible(){var el=mmPanelEl();return !!(el&&el.classList.contains('show'))}
+// The controls the panel offers come from the host's field description, so the
+// choices and the defaults are the optimiser's own and cannot drift from it.
+function mmControls(){
+    var p=MD.mmParams;
+    return (p&&p.controls)?p.controls:[];
+}
+// The value a control currently holds: what the user picked, or its default.
+function mmOptionValue(ctl){
+    var v=mmOptions[ctl.key];
+    return (v===undefined||v===null)?ctl.defaultValue:v;
+}
+function mmOptionSnapshot(){
+    var out={};
+    var ctls=mmControls();
+    for(var i=0;i<ctls.length;i++)out[ctls[i].key]=mmOptionValue(ctls[i]);
+    return out;
+}
+
+// ---- precision presets: the choice lives here, the values in the module ----
+function mmPresets(){
+    var p=MD.mmParams;
+    return (p&&p.presets)?p.presets:[];
+}
+function mmFindPreset(key){
+    var list=mmPresets();
+    for(var i=0;i<list.length;i++)if(list[i].key===key)return list[i];
+    return null;
+}
+// Choosing a preset writes the module's values into the controls, so what runs
+// is exactly what the selects show.
+function mmApplyPreset(key){
+    mmOptions.preset=key;
+    var p=mmFindPreset(key);
+    if(!p)return;
+    var ks=Object.keys(p.options||{});
+    for(var i=0;i<ks.length;i++)mmOptions[ks[i]]=p.options[ks[i]];
+}
+// A manual change keeps the preset label only while every other control still
+// matches it; otherwise the choice is a custom one.
+function mmSyncPresetState(){
+    var cur=mmOptions.preset;
+    if(cur==='custom')return;
+    var p=mmFindPreset(cur);
+    if(!p){mmOptions.preset='custom';return}
+    var ctls=mmControls();
+    for(var i=0;i<ctls.length;i++){
+        var k=ctls[i].key;
+        if(k==='preset')continue;
+        if(p.options[k]===undefined)continue;
+        if(String(mmOptionValue(ctls[i]))!==String(p.options[k])){mmOptions.preset='custom';return}
+    }
+}
+// The preset select is the one control a manual change can move *indirectly*,
+// so it is updated in place rather than by re-rendering the panel (a rebuild
+// would drop the user's focus and redraw every canvas mid-click).
+function mmSyncPresetSelect(){
+    var el=mmPanelEl();
+    if(!el||typeof el.querySelector!=='function')return;
+    var sel=el.querySelector('.mm-ctl-sel[data-mmkey="preset"]');
+    if(sel&&String(sel.value)!==String(mmOptions.preset))sel.value=String(mmOptions.preset);
+}
+
+// ---- the run being watched ----
+function mmRunActive(){return !!(mmRun&&(mmRun.state==='running'||mmRun.state==='paused'))}
+function mmRunMatches(msg){return !!(mmRun&&msg&&msg.runId===mmRun.id)}
+function mmPoints(){return mmRun?mmRun.history:[]}
+// The host sends only the points this panel has not seen; a point already on the
+// curve is dropped, so one re-sent after a history thinning cannot double up.
+function mmAppendPoints(pts){
+    if(!mmRun||!Array.isArray(pts))return;
+    var i;
+    for(i=0;i<pts.length;i++){
+        var p=pts[i];
+        if(!p||typeof p.step!=='number'||p.step<=mmRun.lastStep)continue;
+        mmRun.history.push({step:p.step,energy:p.energy,maxGrad:p.maxGrad,rmsGrad:p.rmsGrad});
+        mmRun.lastStep=p.step;
+    }
+    if(mmRun.history.length>MM_HISTORY_CAP){
+        var thinned=[];
+        for(i=0;i<mmRun.history.length;i+=2)thinned.push(mmRun.history[i]);
+        var last=mmRun.history[mmRun.history.length-1];
+        if(thinned[thinned.length-1]!==last)thinned.push(last);
+        mmRun.history=thinned;
+    }
+}
+// Write one chunk's coordinates into the structure. The first write takes the
+// undo snapshot, so a single Undo returns the structure to before the run; per
+// chunk only the moved atoms' spheres and the bond meshes that touch them are
+// rebuilt (the Move Atoms drag path), and the full release pass runs once, when
+// the run stops.
+function mmApplyLiveCoords(coords){
+    if(!mmRun||!Array.isArray(coords))return false;
+    var idx=mmRun.indices;
+    var n=Math.min(idx.length,coords.length);
+    // Which of this chunk's coordinates are actually new, decided *before* any
+    // of them is written — so the undo snapshot below is taken once, in front of
+    // the first real change, and a chunk that moves nothing (a converged run's
+    // first report, or a repeated state) leaves no undo step behind.
+    var plan=[];
+    for(var k=0;k<n;k++){
+        var c=coords[k];
+        if(!c||c.length<3||!isFinite(c[0])||!isFinite(c[1])||!isFinite(c[2]))continue;
+        var i=idx[k];
+        if(typeof i!=='number'||i<0||i>=MD.atoms.length)continue;
+        var a=MD.atoms[i];
+        if(a.x===c[0]&&a.y===c[1]&&a.z===c[2])continue;
+        plan.push([i,c]);
+    }
+    if(plan.length===0)return false;
+    if(!mmRun.undoPushed){pushUndo();mmRun.undoPushed=true}
+    var moved=[];
+    for(k=0;k<plan.length;k++){
+        i=plan[k][0];c=plan[k][1];
+        a=MD.atoms[i];
+        a.x=c[0];a.y=c[1];a.z=c[2];
+        moved.push(i);
+        if(mmRun.moved.indexOf(i)<0)mmRun.moved.push(i);
+        if(!mmRun.movedAll[i]){mmRun.movedAll[i]=true;mmRun.movedCount++}
+    }
+    updateAtomMeshPositions();
+    rebuildBondsTouching(moved);
+    return true;
+}
+// Re-derive the connectivity of the region the run moved — the Move Atoms
+// release path — exactly once per stop. This is the one heavyweight step on the
+// client side of a run, and it is guarded: it must never be able to take its
+// caller (and with it the panel's state and its buttons) down with it. A
+// failure here leaves the spheres exactly where the last chunk put them and
+// says so, rather than stranding the panel half-updated.
+function mmEndLiveRefresh(){
+    if(!mmRun||mmRun.moved.length===0)return;
+    var moved=mmRun.moved;
+    mmRun.moved=[];
+    try{
+        refreshMovedBondsAndMeshes(moved);
+    }catch(err){
+        mmErrorMsg='Molecular Mechanics: the moved region could not be re-perceived - '+
+            (err&&err.message?err.message:err);
+        updateAtomMeshPositions();
+    }
+}
+function mmUpdateProgressText(){
+    var el=document.getElementById('mm-prog');
+    if(!el)return;
+    if(!mmRun||!mmRun.last){el.textContent='';return}
+    var L=mmRun.last;
+    var what=mmRun.state==='paused'?'paused':(mmRun.state==='running'?'running':(mmRun.restored?'restored':'finished'));
+    var txt='Step '+L.step+' ('+what+') - E '+L.energy.toFixed(3)+' kcal/mol';
+    if(typeof mmRun.energyBefore==='number')txt+=' (delta '+(L.energy-mmRun.energyBefore).toFixed(3)+')';
+    txt+=' \u00b7 max|F| '+L.maxGrad.toFixed(3)+' \u00b7 RMS '+L.rmsGrad.toFixed(3);
+    el.textContent=txt;
+}
+
+// ---- the live curves (plain 2-D canvas, drawn from the run's history) ----
+function mmFmtValue(v){
+    var a=Math.abs(v);
+    if(a!==0&&(a<0.01||a>=100000))return v.toExponential(1);
+    if(a>=1000)return v.toFixed(0);
+    if(a>=10)return v.toFixed(1);
+    return v.toFixed(2);
+}
+function mmDrawCurve(canvas,series,useLog){
+    var pts=mmPoints();
+    if(!canvas||pts.length<1)return;
+    var ctx=canvas.getContext('2d');
+    if(!ctx)return;
+    var i,s;
+    var dpr=window.devicePixelRatio||1;
+    // The canvas fills the panel (width:100%), so its own box — not the panel's
+    // padding box — is the width to draw into. A pixel width pinned by an earlier
+    // pass is cleared first, so the measurement is of the current layout and not
+    // of the last draw, and the display box is left to CSS: drawing into the
+    // padding box instead used to make the curve wider than the element that
+    // shows it, clipping its right edge (the end-of-axis step label with it).
+    canvas.style.width='';canvas.style.height='';
+    var w=canvas.clientWidth||0;
+    if(w<1)w=300;
+    var h=canvas.clientHeight||78;
+    canvas.width=w*dpr;canvas.height=h*dpr;
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    ctx.clearRect(0,0,w,h);
+    var padL=46,padR=6,padT=15,padB=14;
+    var pw=w-padL-padR,ph=h-padT-padB;
+    var vals=[];
+    for(s=0;s<series.length;s++){
+        for(i=0;i<pts.length;i++){
+            var v=pts[i][series[s].field];
+            if(typeof v==='number'&&isFinite(v))vals.push(v);
+        }
+    }
+    if(vals.length===0||pw<=4||ph<=4){
+        ctx.fillStyle='#888';ctx.font='9px sans-serif';ctx.textAlign='left';ctx.textBaseline='top';
+        ctx.fillText('no data',padL,padT+10);
+        return;
+    }
+    var vmin=Math.min.apply(null,vals),vmax=Math.max.apply(null,vals);
+    var log=!!useLog&&vmin>0;
+    var lo,hi;
+    if(log){
+        lo=Math.log(Math.max(vmin,1e-12));hi=Math.log(Math.max(vmax,1e-12));
+    }else{lo=vmin;hi=vmax}
+    if(hi-lo<1e-12)hi=lo+1;
+    function yOf(v){
+        var t=log?Math.log(Math.max(v,1e-12)):v;
+        return padT+ph*(hi-t)/(hi-lo);
+    }
+    ctx.strokeStyle='rgba(255,255,255,0.12)';ctx.lineWidth=1;
+    ctx.fillStyle='#888';ctx.font='9px sans-serif';ctx.textAlign='right';ctx.textBaseline='middle';
+    for(var g=0;g<=2;g++){
+        var y=padT+ph*g/2;
+        ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(padL+pw,y);ctx.stroke();
+        var tv=log?Math.exp(hi-(hi-lo)*g/2):hi-(hi-lo)*g/2;
+        ctx.fillText(mmFmtValue(tv),padL-3,y);
+    }
+    ctx.textAlign='center';ctx.textBaseline='top';
+    ctx.fillText('0',padL,padT+ph+2);
+    ctx.fillText(String(pts[pts.length-1].step),padL+pw,padT+ph+2);
+    for(s=0;s<series.length;s++){
+        var ser=series[s];
+        ctx.strokeStyle=ser.color;ctx.lineWidth=1.5;ctx.beginPath();
+        var drew=false;
+        for(i=0;i<pts.length;i++){
+            var vv=pts[i][ser.field];
+            if(typeof vv!=='number'||!isFinite(vv))continue;
+            if(log&&vv<=0)continue;
+            var x=padL+(pts.length<=1?0:pw*i/(pts.length-1));
+            var yy=yOf(vv);
+            if(!drew){ctx.moveTo(x,yy);drew=true}else ctx.lineTo(x,yy);
+        }
+        ctx.stroke();
+        // A run that has taken no step yet has exactly one point, and one moveTo
+        // draws no line at all — the curve would read as "no data" for the whole
+        // first chunk even though the run has started and reported its input
+        // energy. The single point is marked with a dot instead.
+        if(pts.length===1){
+            var v1=pts[0][ser.field];
+            if(typeof v1==='number'&&isFinite(v1)&&!(log&&v1<=0)){
+                ctx.fillStyle=ser.color;
+                ctx.fillRect(padL-1,yOf(v1)-1,3,3);
+            }
+        }
+    }
+    ctx.textAlign='left';ctx.textBaseline='top';ctx.font='9px sans-serif';
+    for(s=0;s<series.length;s++){
+        ctx.fillStyle=series[s].color;
+        ctx.fillRect(padL+s*92,padT-11,8,2);
+        ctx.fillText(series[s].label,padL+s*92+11,padT-13);
+    }
+}
+function mmDrawCurves(){
+    if(currentMode!=='mmOpt')return;
+    if(!mmRun)return;
+    mmDrawCurve(document.getElementById('mm-cv-energy'),
+        [{field:'energy',color:'#3794ff',label:'Energy'}],false);
+    mmDrawCurve(document.getElementById('mm-cv-force'),
+        [{field:'maxGrad',color:'#ff6b6b',label:'max |F|'},{field:'rmsGrad',color:'#74c0fc',label:'rms |F|'}],true);
+}
+
+// ---- the small button that reopens the panel after its x ----
+// Same idea as the log file's Convergence / Route buttons: closing the panel
+// hides it, this brings it back, and its label doubles as the run's state while
+// one is in flight (so a closed panel still shows that the run is alive).
+function mmUpdateReopen(){
+    var el=document.getElementById('mm-reopen');
+    if(!el)return;
+    var show=(!diffMode&&!CRY&&currentMode==='mmOpt'&&!mmPanelVisible());
+    el.classList.toggle('show',show);
+    el.classList.toggle('busy',mmRunActive());
+    if(mmRunActive()&&mmRun.last){
+        el.textContent='\u2697\uFE0F MM '+(mmRun.state==='paused'?'paused':'running')+' - step '+mmRun.last.step;
+    }else{
+        el.textContent='\u2697\uFE0F MM Optimize';
+    }
+}
+(function(){
+    var el=document.getElementById('mm-reopen');
+    if(el)el.addEventListener('click',function(){showMmPanel()});
+})();
+
+function showMmPanel(){
+    var el=mmPanelEl();
+    if(!el)return;
+    el.classList.add('show');
+    mmUpdateReopen();
+    refreshMmPanel();
+}
+function hideMmPanel(){
+    var el=mmPanelEl();
+    if(!el)return;
+    el.classList.remove('show');
+    mmUpdateReopen();
+    layoutPanels();
+}
+function mmStopText(reason){
+    if(reason==='gradient')return 'converged';
+    if(reason==='energy')return 'energy converged';
+    if(reason==='time')return 'time budget reached';
+    if(reason==='iterations')return 'step budget reached';
+    return 'no further gain';
+}
+function mmResultHTML(r){
+    if(!r)return '';
+    var delta=r.energyAfter-r.energyBefore;
+    var c=r.counts||{};
+    var html='<div class="mm-res"><div class="mm-res-head">Last run</div>';
+    html+='Energy: '+r.energyBefore.toFixed(3)+' &rarr; '+r.energyAfter.toFixed(3)+' kcal/mol (&Delta; '+delta.toFixed(3)+')<br>';
+    html+='Steps: '+r.iterations+' ('+mmStopText(r.stopReason)+') &middot; max|F| '+r.maxGrad.toFixed(3)+' &middot; RMS '+r.rmsGrad.toFixed(3)+'<br>';
+    html+='Moved '+r.moved+' atom(s), largest displacement '+r.maxMove.toFixed(3)+' A<br>';
+    html+='Terms: '+(c.bonds||0)+' bond, '+(c.angles||0)+' angle, '+(c.torsions||0)+' torsion, '+(c.impropers||0)+' improper, '+(c.nonbonded||0)+' non-bonded';
+    html+='</div>';
+    return html;
+}
+// One selection control per settable parameter, with the current choice
+// preselected — the default choice is the one the panel opens with.
+function mmControlHTML(ctl){
+    var cur=mmOptionValue(ctl);
+    var html='<div class="mm-ctl"><label class="mm-ctl-label">'+ctl.label+'</label>';
+    html+='<select class="mm-ctl-sel" data-mmkey="'+ctl.key+'">';
+    for(var i=0;i<ctl.options.length;i++){
+        var opt=ctl.options[i];
+        var sel=(String(opt.value)===String(cur))?' selected':'';
+        html+='<option value="'+String(opt.value)+'"'+sel+'>'+opt.label+'</option>';
+    }
+    html+='</select></div>';
+    return html;
+}
+// The buttons of the current state. While a run is going there is **one**
+// toggle button that reads Pause and becomes Resume when the run is paused —
+// the same single-button pattern the vibration panel uses, so the two states
+// sit in the same place and a pause is always one click away from continuing.
+// Restore initial writes *this run's* starting geometry back, so it is the way
+// out of a run that went further than wanted (and the way back to Start).
+function mmButtonsHTML(){
+    if(mmRun&&(mmRun.state==='running'||mmRun.state==='paused')){
+        var paused=mmRun.state==='paused';
+        return '<div class="mm-btns">'+
+            '<button id="mm-toggle">'+(paused?'Resume':'Pause')+'</button>'+
+            '<button id="mm-restore">Restore initial</button></div>';
+    }
+    var n=selectedAtoms.length;
+    var html='<button class="mm-run" id="mm-run"'+(n===0?' disabled':'')+'>Start Optimization</button>';
+    if(mmRun&&!mmRun.restored){
+        html+='<div class="mm-btns"><button id="mm-restore">Restore initial</button></div>';
+    }
+    return html;
+}
+function refreshMmPanel(){
+    var el=mmPanelEl();
+    if(!el||currentMode!=='mmOpt')return;
+    var params=MD.mmParams||{};
+    var lines=params.lines||[];
+    var html='<div class="mm-head"><span>Molecular Mechanics &mdash; '+(params.name||'optimisation')+'</span><span class="mm-close" id="mm-close">×</span></div>';
+    for(var i=0;i<lines.length;i++)html+='<div class="mm-param">'+lines[i]+'</div>';
+    var ctls=mmControls();
+    if(ctls.length){
+        html+='<div class="mm-sec">Parameters</div>';
+        for(i=0;i<ctls.length;i++)html+=mmControlHTML(ctls[i]);
+    }
+    html+='<div class="mm-prog" id="mm-prog"></div>';
+    // The canvases exist as soon as there is a run, so the curves can grow with
+    // it — the panel is not necessarily re-rendered while a run is streaming.
+    if(mmRun){
+        html+='<div class="mm-curve-title">Energy (kcal/mol)</div><canvas class="mm-curve" id="mm-cv-energy"></canvas>';
+        html+='<div class="mm-curve-title">Force (kcal/mol/\u00c5, log)</div><canvas class="mm-curve" id="mm-cv-force"></canvas>';
+    }
+    var n=selectedAtoms.length;
+    if(mmRunActive()){
+        // While a run is going, the panel's buttons act on the atoms the *run*
+        // named — not on whatever the user has clicked since. Changing the
+        // selection mid-run is allowed (it is the next run's), so both sets are
+        // named instead of showing only the newer one and implying the run
+        // follows it.
+        html+='<div class="mm-sel">'+(mmRun.state==='paused'?'Paused on':'Optimizing')+
+            ' ('+mmRun.indices.length+'): '+formatAtomList(mmRun.indices)+
+            '<br>Selected in the view ('+n+'): '+(n?formatAtomList(selectedAtoms):'none')+'</div>';
+    }else{
+        html+='<div class="mm-sel">Selected atoms ('+n+'): '+(n?formatAtomList(selectedAtoms):'none &mdash; click atoms in the view, or use Select Atoms / Box Select')+'</div>';
+    }
+    html+=mmButtonsHTML();
+    if(mmErrorMsg)html+='<div class="mm-err">'+mmErrorMsg+'</div>';
+    html+=mmResultHTML(mmLastResult);
+    el.innerHTML=html;
+    wireMmPanel();
+    mmUpdateProgressText();
+    layoutPanels();
+    mmDrawCurves();
+}
+// The panel's controls are re-rendered on every refresh, so their handlers are
+// bound once to the panel itself (the pattern the egg panel uses): a click is
+// routed by the element's id, a change by the control's key. Nothing is bound
+// to the replaced innerHTML, so no listener can survive its element.
+var mmPanelWired=false;
+function wireMmPanel(){
+    var el=mmPanelEl();
+    if(!el||mmPanelWired)return;
+    mmPanelWired=true;
+    el.addEventListener('click',function(e){
+        var t=e&&e.target;
+        if(!t||!t.id)return;
+        if(t.id==='mm-close')hideMmPanel();
+        else if(t.id==='mm-run')startMmOptimization();
+        else if(t.id==='mm-toggle')mmToggleRun();
+        else if(t.id==='mm-restore')mmRestoreInitial();
+    });
+    el.addEventListener('change',function(e){
+        var t=e&&e.target;
+        if(!t||typeof t.getAttribute!=='function')return;
+        var key=t.getAttribute('data-mmkey');
+        if(!key)return;
+        if(key==='preset'){
+            // A preset rewrites every other control, so the panel is rebuilt to
+            // show the values that will run; "custom" only relabels the choice.
+            var v=String(t.value);
+            if(v==='custom'){mmOptions.preset='custom';return}
+            mmApplyPreset(v);
+            refreshMmPanel();
+            return;
+        }
+        var ctls=mmControls();
+        for(var k=0;k<ctls.length;k++){
+            if(ctls[k].key!==key)continue;
+            var opts=ctls[k].options;
+            for(var o=0;o<opts.length;o++){
+                if(String(opts[o].value)===String(t.value)){mmOptions[key]=opts[o].value;break}
+            }
+            break;
+        }
+        // Hand-edited values are a custom choice, and the select says so.
+        mmSyncPresetState();
+        mmSyncPresetSelect();
+    });
+}
+// Every path that changes the selection calls this, so the panel's list and its
+// button state follow the view without the panel having to own the selection.
+function mmSelectionChanged(){
+    if(currentMode==='mmOpt'&&mmPanelVisible())refreshMmPanel();
+}
+// Start a run: remember the atoms it may move and the geometry they start from
+// (Restore's copy), then ask the host for a session. The answer arrives as a
+// stream of mmProgress chunks; nothing is written into the structure here.
+function startMmOptimization(){
+    if(mmRunActive())return;
+    // An Add H request still in flight will append atoms when it lands. Starting
+    // a run now would mean the two answers describe different structures, so the
+    // start waits for it rather than racing it (the round trip is a millisecond
+    // or two — this is a guard against the click, not a long wait).
+    if(addHPending){modeInfoEl.textContent='Molecular Mechanics - wait for the Add H request to finish first';return}
+    if(diffMode){modeInfoEl.textContent='Molecular Mechanics is not available in diff mode';return}
+    if(CRY){modeInfoEl.textContent='Molecular Mechanics is not available for crystal structures';return}
+    if(selectedAtoms.length===0){
+        modeInfoEl.textContent='Molecular Mechanics - select atoms first: click atoms here, or use Select Atoms / Box Select';
+        return;
+    }
+    // Anything else that owns the coordinates has to let go before the run
+    // starts: a playing normal mode and a frame auto-play both write the
+    // structure every frame, and a Move Atoms drag is mid-session on it. Each is
+    // stopped *before* the starting geometry is captured, so what the run calls
+    // "where it began" is the geometry on screen at the click, not a half-drawn
+    // vibration amplitude.
+    if(vibActive||vibPaused)stopVibration();
+    if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
+    stopFrameAutoPlay();
+    var i,indices=selectedAtoms.slice(),origin=new Array(indices.length);
+    for(i=0;i<indices.length;i++){
+        var a=MD.atoms[indices[i]];
+        origin[i]=a?[a.x,a.y,a.z]:null;
+    }
+    mmRunSeq++;
+    mmRun={
+        id:'mm-'+mmRunSeq+'-'+Date.now(),
+        state:'running',
+        atomCount:MD.atoms.length,
+        indices:indices,
+        origin:{indices:indices.slice(),coords:origin},
+        history:[],
+        lastStep:-1,
+        last:null,
+        energyBefore:null,
+        undoPushed:false,
+        restored:false,
+        moved:[],
+        movedAll:{},
+        movedCount:0
+    };
+    mmErrorMsg='';
+    mmLastResult=null;   // the block described a run this one replaces
+    modeInfoEl.textContent='Molecular Mechanics: optimizing '+indices.length+' atom(s)...';
+    mmUpdateReopen();
+    refreshMmPanel();
+    vscodeApi.postMessage({
+        command:'mmOptimize',
+        runId:mmRun.id,
+        atoms:MD.atoms.map(function(a){return{element:a.element,x:a.x,y:a.y,z:a.z}}),
+        bonds:MD.bonds.map(function(b){return{atom1:b.atom1,atom2:b.atom2,order:b.order}}),
+        selected:indices.slice(),
+        options:mmOptionSnapshot()
+    });
+}
+// One progress chunk: the structure follows it live and the curves grow.
+function mmHandleProgress(msg){
+    if(!mmRunMatches(msg))return;
+    // A run that has already stopped on this side (its result applied, its
+    // geometry restored, or it was cancelled) takes nothing more from the wire.
+    if(mmRun.state==='done')return;
+    // While the panel holds the view, a chunk still in flight is *recorded* but
+    // not drawn onto the structure. The two halves are separated on purpose: the
+    // curve is a record of the search and the host advances its "already sent"
+    // mark the moment it posts a point, so a point dropped here is gone for
+    // good; the coordinates are not the record, they are the thing the pause is
+    // there to hold still. The host's own mmPaused reply then carries the
+    // geometry it actually stopped at, so what the user paused on is what they
+    // keep looking at — while the curve stays complete.
+    var held=(mmRun.state!=='running');
+    if(typeof msg.energyBefore==='number')mmRun.energyBefore=msg.energyBefore;
+    mmAppendPoints(msg.points);
+    mmRun.last={
+        step:typeof msg.step==='number'?msg.step:0,
+        energy:typeof msg.energy==='number'?msg.energy:0,
+        maxGrad:typeof msg.maxGrad==='number'?msg.maxGrad:0,
+        rmsGrad:typeof msg.rmsGrad==='number'?msg.rmsGrad:0
+    };
+    if(!held){
+        mmApplyLiveCoords(msg.coords);
+        modeInfoEl.textContent='Molecular Mechanics: optimizing '+mmRun.indices.length+
+            ' atom(s) - step '+mmRun.last.step+' (E '+mmRun.last.energy.toFixed(2)+' kcal/mol)';
+    }
+    mmUpdateProgressText();
+    mmUpdateReopen();
+    mmDrawCurves();
+}
+// The host stopped pumping at a pause: the session is kept, so Resume continues
+// from exactly this geometry and these forces.
+function mmHandlePaused(msg){
+    if(!mmRunMatches(msg))return;
+    if(mmRun.state!=='running'&&mmRun.state!=='paused')return;
+    mmAppendPoints(msg.points);
+    if(typeof msg.energyBefore==='number')mmRun.energyBefore=msg.energyBefore;
+    mmApplyLiveCoords(msg.coords);
+    mmRun.state='paused';
+    mmRun.last={
+        step:typeof msg.step==='number'?msg.step:0,
+        energy:typeof msg.energy==='number'?msg.energy:0,
+        maxGrad:typeof msg.maxGrad==='number'?msg.maxGrad:0,
+        rmsGrad:typeof msg.rmsGrad==='number'?msg.rmsGrad:0
+    };
+    // The panel is put into its paused state first, then the heavy region
+    // rebuild runs behind the guard — so the button the user needs is on screen
+    // before any work that could fail.
+    refreshMmPanel();
+    mmEndLiveRefresh();
+    mmDrawCurves();
+    modeInfoEl.textContent='Molecular Mechanics: paused at step '+mmRun.last.step+
+        ' - Resume continues it, Restore initial puts the starting geometry back';
+}
+// The host dropped the run (this panel asked for it, or it was replaced): the
+// geometry already applied stays, and the panel stops waiting for progress.
+function mmHandleCancelled(msg){
+    if(!mmRunMatches(msg))return;
+    if(!mmRunActive())return;
+    mmRun.state='done';
+    mmEndLiveRefresh();
+    modeInfoEl.textContent='Molecular Mechanics: run cancelled';
+    mmUpdateProgressText();
+    mmUpdateReopen();
+    refreshMmPanel();
+}
+function applyMmResult(msg){
+    if(mmRun&&msg&&msg.runId&&msg.runId!==mmRun.id)return;   // a replaced run's answer
+    if(!mmRun){
+        // No run on this side any more (cancelled, or the view moved on): the
+        // answer addresses a structure state that is no longer the one on
+        // screen, so nothing is written — the message is only reported.
+        if(msg&&msg.message)modeInfoEl.textContent=msg.message;
+        return;
+    }
+    if(mmRunActive()){mmRun.state='done';mmEndLiveRefresh()}
+    if(!msg||!msg.ok){
+        mmErrorMsg=(msg&&msg.message)||'Molecular Mechanics failed';
+        modeInfoEl.textContent=mmErrorMsg;
+        mmUpdateProgressText();
+        mmUpdateReopen();
+        refreshMmPanel();
+        return;
+    }
+    if(diffMode||CRY){
+        // The view moved on (a comparison opened, a crystal was loaded) while
+        // the request was in flight; the answer addresses the structure it was
+        // computed from, which is no longer the one on screen.
+        mmErrorMsg='Molecular Mechanics: the view changed while computing - nothing was applied';
+        modeInfoEl.textContent=mmErrorMsg;
+        refreshMmPanel();
+        return;
+    }
+    if(typeof msg.atomCount==='number'&&msg.atomCount!==MD.atoms.length){
+        mmErrorMsg='Molecular Mechanics: the structure changed while computing - nothing was applied';
+        modeInfoEl.textContent=mmErrorMsg;
+        refreshMmPanel();
+        return;
+    }
+    if(typeof msg.energyBefore==='number')mmRun.energyBefore=msg.energyBefore;
+    mmAppendPoints(msg.points);
+    // The final coordinates are authoritative (the live stream has already
+    // written them, and this re-writes the same values — the cheap path).
+    mmApplyLiveCoords(msg.coords);
+    mmRun.state='done';
+    mmEndLiveRefresh();
+    mmRun.last={
+        step:typeof msg.iterations==='number'?msg.iterations:(mmRun.last?mmRun.last.step:0),
+        energy:typeof msg.energyAfter==='number'?msg.energyAfter:(mmRun.last?mmRun.last.energy:0),
+        maxGrad:typeof msg.maxGrad==='number'?msg.maxGrad:(mmRun.last?mmRun.last.maxGrad:0),
+        rmsGrad:typeof msg.rmsGrad==='number'?msg.rmsGrad:(mmRun.last?mmRun.last.rmsGrad:0)
+    };
+    mmLastResult={
+        energyBefore:typeof msg.energyBefore==='number'?msg.energyBefore:0,
+        energyAfter:typeof msg.energyAfter==='number'?msg.energyAfter:0,
+        iterations:msg.iterations||0,
+        maxGrad:typeof msg.maxGrad==='number'?msg.maxGrad:0,
+        rmsGrad:typeof msg.rmsGrad==='number'?msg.rmsGrad:0,
+        maxMove:typeof msg.maxMove==='number'?msg.maxMove:0,
+        stopReason:msg.stopReason||'',
+        counts:msg.counts||null,
+        moved:mmRun.movedCount
+    };
+    mmUpdateProgressText();
+    mmUpdateReopen();
+    refreshMmPanel();
+    modeInfoEl.textContent=msg.message||('Molecular Mechanics: optimized '+mmRun.movedCount+' atom(s)');
+}
+// One button, two states. The flip is applied here, not waited for: the host's
+// answer only confirms it. That matters because the panel must never be left
+// showing a state it cannot leave — a lost or slow reply would otherwise strand
+// the user on a disabled button, with the run neither paused in the UI nor
+// continuable. The host is idempotent for the same reason (a pause that arrives
+// twice, or after the run already stopped, is harmless).
+function mmToggleRun(){
+    if(!mmRun)return;
+    if(mmRun.state==='running'){
+        mmRun.state='paused';
+        vscodeApi.postMessage({command:'mmPause',runId:mmRun.id});
+    }else if(mmRun.state==='paused'){
+        mmRun.state='running';
+        vscodeApi.postMessage({command:'mmResume',runId:mmRun.id});
+    }else{
+        return;
+    }
+    mmEndLiveRefresh();
+    mmUpdateProgressText();
+    refreshMmPanel();
+    modeInfoEl.textContent=mmRun.state==='paused'
+        ?('Molecular Mechanics: paused at step '+(mmRun.last?mmRun.last.step:0)+
+            ' - Resume continues it, Restore initial puts the starting geometry back')
+        :('Molecular Mechanics: optimizing '+mmRun.indices.length+' atom(s)...');
+}
+// Put this run's own starting geometry back. A live run is cancelled first (its
+// remaining steps describe a geometry nobody wants any more); the write itself
+// is one undo snapshot plus the moved-region refresh.
+function mmRestoreInitial(){
+    if(!mmRun||mmRun.restored)return;
+    var origin=mmRun.origin;
+    if(mmRunActive())vscodeApi.postMessage({command:'mmCancel',runId:mmRun.id});
+    pushUndo();
+    var moved=[];
+    for(var k=0;k<origin.indices.length;k++){
+        var c=origin.coords[k];
+        var i=origin.indices[k];
+        if(!c||typeof i!=='number'||i<0||i>=MD.atoms.length)continue;
+        var a=MD.atoms[i];
+        if(a.x!==c[0]||a.y!==c[1]||a.z!==c[2])moved.push(i);
+        a.x=c[0];a.y=c[1];a.z=c[2];
+    }
+    mmRun.state='done';
+    mmRun.restored=true;
+    mmRun.moved=[];
+    updateAtomMeshPositions();
+    if(moved.length>0)refreshMovedBondsAndMeshes(moved);
+    mmUpdateProgressText();
+    mmUpdateReopen();
+    refreshMmPanel();
+    modeInfoEl.textContent='Molecular Mechanics: restored the geometry this run started from';
+}
+// Leaving the mode — or any edit that replaces the structure — cancels the run,
+// so a late chunk can never write into a structure the user has moved on from.
+function mmCancelRun(){
+    if(!mmRun)return;
+    if(mmRunActive())vscodeApi.postMessage({command:'mmCancel',runId:mmRun.id});
+    mmEndLiveRefresh();
+    mmRun=null;
+    mmUpdateProgressText();
+    mmUpdateReopen();
+}
+
+var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',replaceAtom:'Replace Atom - Click atom(s) to select, click button again to confirm',addH:'Add H - Click atom(s) to select, click the button again to complete their hydrogens',selectAtoms:'Select Atoms - Input indices or element symbols',boxSelect:'Box Select - Drag a rectangle to select atoms',rotateGroup:'Rotate Group - Select group + axis atoms, then adjust angle',mmOpt:'Molecular Mechanics - Click atoms to select them; the panel optimizes only those atoms',moveAtoms:'Move Atoms - Select atoms; drag/arrows rotate view, right-drag pans; Ctrl+drag or Ctrl+arrows rotates group, Ctrl+right-drag moves group'};
 
 function setMode(m){
     if(m==='moveAtoms'&&CRY){
         // Moving atoms in a periodic supercell breaks image consistency;
         // the mode is only offered for molecular structures.
         modeInfoEl.textContent='Move Atoms is not available for crystal structures';
+        return;
+    }
+    if(m==='mmOpt'&&(CRY||diffMode)){
+        // The force field relaxes a molecular structure against its own
+        // neighbours; a periodic cell would need image atoms it does not have,
+        // and a two-structure comparison has two structures to choose from.
+        modeInfoEl.textContent='Molecular Mechanics is not available '+(CRY?'for crystal structures':'in diff mode');
         return;
     }
     if(m==='addH'&&(CRY||diffMode)){
@@ -2816,13 +3916,22 @@ function setMode(m){
         if(m==='addH'){
             if(selectedAtoms.length>0){startAddHydrogens();return}
         }
+        if(m==='mmOpt'){
+            // The toolbar button always opens the panel again (the × only
+            // closes it), so there is never a state without a way back.
+            var mp0=mmPanelEl();
+            if(mp0&&!mp0.classList.contains('show')){showMmPanel()}else{refreshMmPanel()}
+            layoutPanels();
+            return;
+        }
         layoutPanels();
         return;
     }
     var oldMode=currentMode;
     currentMode=m;
-    var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect'||oldMode==='replaceAtom'||oldMode==='addH'||oldMode==='rotateGroup'||oldMode==='moveAtoms')&&(m==='selectAtoms'||m==='boxSelect'||m==='replaceAtom'||m==='addH'||m==='rotateGroup'||m==='moveAtoms'));
+    var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect'||oldMode==='replaceAtom'||oldMode==='addH'||oldMode==='rotateGroup'||oldMode==='moveAtoms'||oldMode==='mmOpt')&&(m==='selectAtoms'||m==='boxSelect'||m==='replaceAtom'||m==='addH'||m==='rotateGroup'||m==='moveAtoms'||m==='mmOpt'));
     if(oldMode==='moveAtoms'&&m!=='moveAtoms')stopMoveSession();
+    if(oldMode==='mmOpt'&&m!=='mmOpt')mmCancelRun();
     if(!preserveSel){
         selectedAtoms=[];diffSelectedAtoms=[];originalCoords=null;
     }
@@ -2834,6 +3943,10 @@ function setMode(m){
     if(sp2)sp2.style.display=(m==='selectAtoms')?'block':'none';
     var rp2=document.getElementById('rotate-panel');
     if(rp2)rp2.style.display=(m==='rotateGroup')?'block':'none';
+    var mp2=mmPanelEl();
+    if(mp2){
+        if(m==='mmOpt'){showMmPanel()}else if(mp2.classList.contains('show')){mp2.classList.remove('show')}
+    }
     if(m==='rotateGroup'){
         resetRotAxisState();
         syncRotatePanelGroupField();
@@ -2849,6 +3962,7 @@ function setMode(m){
 function resetSelection(){
     selectedAtoms=[];diffSelectedAtoms=[];originalCoords=null;highlightSelected();
     selInfoEl.textContent='';
+    mmSelectionChanged();
 }
 
 document.querySelectorAll('.tbtn[data-mode]').forEach(function(b){b.addEventListener('click',function(){
@@ -2875,11 +3989,13 @@ document.querySelectorAll('.tbtn[data-mode]').forEach(function(b){b.addEventList
         var names=formatAtomList(selectedAtoms);
         selInfoEl.textContent='Selected: '+names+' ('+selectedAtoms.length+' atoms)';
         inp.value='';
+        mmSelectionChanged();
     }
     okBtn.addEventListener('click',doSelect);
     inp.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();doSelect()}});
     clrBtn.addEventListener('click',function(){
         selectedAtoms=[];diffSelectedAtoms=[];highlightSelected();selInfoEl.textContent='';
+        mmSelectionChanged();
     });
 })();
 
@@ -3152,6 +4268,7 @@ function pushUndo(){
 function updateUndoBtn(){var b=document.getElementById('undo-btn');if(b)b.disabled=undoStack.length===0}
 function doUndo(){
     if(undoStack.length===0)return;
+    if(mmRun)mmCancelRun();
     if(vibActive||vibPaused)stopVibration();
     if(moveDragActive||moveKeyActive||fragRotActive)stopMoveSession();
     var snap=undoStack.pop();
@@ -3160,6 +4277,12 @@ function doUndo(){
     if(CRY&&snap.baseAtoms){CRY.baseAtoms=snap.baseAtoms;CRY.baseBonds=snap.baseBonds}
     if(CRY){rebuildCrystal()}rebuildScene();updateUndoBtn();
     if(diffMode)resetSelection();
+    if(currentMode==='mmOpt'){
+        // The panel's last-run block describes a geometry that has just been
+        // undone, so it goes with it.
+        mmLastResult=null;mmErrorMsg='';
+        refreshMmPanel();
+    }
     if(currentMode==='rotateGroup'&&rotActive){
         if(snap.rotAngle!=null){
             // Undo one angle adjustment: sync slider and displays to the
@@ -3240,6 +4363,14 @@ window.addEventListener('message',function(event){
         importStructure(msg);
     }else if(msg.command==='hydrogenResult'){
         applyHydrogenResult(msg);
+    }else if(msg.command==='mmProgress'){
+        mmHandleProgress(msg);
+    }else if(msg.command==='mmPaused'){
+        mmHandlePaused(msg);
+    }else if(msg.command==='mmCancelled'){
+        mmHandleCancelled(msg);
+    }else if(msg.command==='mmResult'){
+        applyMmResult(msg);
     }
 });
 
@@ -3250,6 +4381,7 @@ function importStructure(msg){
     if(diffMode||CRY)return;
     if(vibActive||vibPaused)stopVibration();
     if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
+    mmCancelRun();
     var newAtoms=msg.atoms||[];
     var newBonds=msg.bonds||[];
     if(newAtoms.length===0)return;
@@ -3356,6 +4488,18 @@ function applyHydrogenResult(msg){
         modeInfoEl.textContent='Add H: the structure changed while computing - nothing was added';
         return;
     }
+    // Appending atoms is the one structure change that does not pass through a
+    // mode switch, and the answer lands whenever the host gets to it — by which
+    // time the user may have started something else entirely. So every writer is
+    // ended here, explicitly, before the structure grows: an optimisation must
+    // never keep writing coordinates into a structure it did not start from, a
+    // normal-mode playback must not rewrite atoms around the new hydrogens (its
+    // own stop would write the pre-add geometry back over them), and a Move
+    // Atoms session must not re-derive bonds on a structure that has just gained
+    // atoms.
+    if(vibActive||vibPaused)stopVibration();
+    stopMoveSession();
+    mmCancelRun();
     pushUndo();
     var N0=MD.atoms.length;
     newAtoms.forEach(function(a){
@@ -3681,6 +4825,15 @@ function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct)
 }
 
 function startDiff(msg){
+    // The comparison has two structures to choose from, so a molecular-mechanics
+    // panel has nothing to act on while it is open; it comes back on exit, and a
+    // run that was still going is dropped rather than left writing coordinates
+    // into the structure being compared.
+    if(currentMode==='mmOpt'){
+        var mmPanelInDiff=mmPanelEl();
+        if(mmPanelInDiff)mmPanelInDiff.classList.remove('show');
+    }
+    mmCancelRun();
     diffData={atoms:msg.atoms,bonds:msg.bonds,title:msg.title||msg.fileName,fileName:msg.fileName,charge:msg.charge};
 
     var detBonds1=detectBondsFromAtoms(MD.atoms,MD.charge);
@@ -4087,6 +5240,9 @@ function hBondDiff(s,e,d,hl,r,c){
 
 function exitDiff(){
     diffMode=false;
+    // A molecular-mechanics session survives the comparison: its panel comes
+    // back with the same selection once the second structure is gone.
+    if(currentMode==='mmOpt')showMmPanel();
     if(diffPivot){
         scene.remove(diffPivot);
         diffPivot.traverse(function(ch){
@@ -4272,7 +5428,14 @@ function updateFrameInfo(){
 }
 function switchFrame(idx){
     if(idx<0||idx>=totalFrames)return;
+    // A frame is a structure of its own, so anything still writing the one on
+    // screen has to let go before it is replaced: a normal-mode playback
+    // rewrites every atom on each animation frame, and its own stop puts the
+    // geometry it started from back — done after the swap, that would write the
+    // previous frame's coordinates over the frame just loaded.
+    if(vibActive||vibPaused)stopVibration();
     stopMoveSession();
+    mmCancelRun();
     currentFrame=idx;
     var f=MD.frames[idx];
     MD.atoms=f.atoms.map(function(a,i){a.index=i;return a});
@@ -4290,6 +5453,7 @@ function switchFrame(idx){
     undoStack.length=0;updateUndoBtn();
     if(diffMode)resetSelection();
     resetRotAxisState();
+    if(currentMode==='mmOpt'){mmLastResult=null;refreshMmPanel()}
     rebuildScene();
     updateFrameInfo();
     // [2026-09-12 | Atreides-Jimmy] Follow the structure change in the
@@ -4318,7 +5482,11 @@ function switchMolecule(idx){
     if(!VMD||idx<0||idx>=VMD.molecules.length||idx===vmdMolIdx)return;
     if(diffMode){modeInfoEl.textContent='Molecule switching is not available in diff mode';return}
     if(CRY){modeInfoEl.textContent='Molecule switching is not available for crystal structures';return}
+    // Same rule as a frame change: every writer of the current structure ends
+    // before it is replaced (see switchFrame).
+    if(vibActive||vibPaused)stopVibration();
     stopMoveSession();
+    mmCancelRun();
     vmdMolIdx=idx;
     var m=VMD.molecules[idx];
     MD.atoms=m.atoms;
@@ -4331,6 +5499,7 @@ function switchMolecule(idx){
     vmdSurfaceSignature='';
     undoStack.length=0;updateUndoBtn();
     resetRotAxisState();
+    if(currentMode==='mmOpt'){mmLastResult=null;refreshMmPanel()}
     rebuildScene();
     updateMolLabel();
     // Frame the new structure: it may sit at a very different position or size.
@@ -4356,14 +5525,31 @@ function switchMolecule(idx){
 function detectBondsFromAtoms(atoms,charge){
     return BP.perceiveBonds(atoms,(typeof charge==='number')?{charge:charge}:undefined).bonds;
 }
+// Stopping auto-play is its own step because more than the button needs it: a
+// frame auto-play replaces the structure every 500 ms, and any operation that
+// needs the structure to hold still — a Molecular Mechanics run, an edit, a
+// normal-mode playback — has to end it first rather than be cancelled by it a
+// moment later.
+function stopFrameAutoPlay(){
+    if(!isAutoPlaying)return;
+    if(autoPlayTimer){clearInterval(autoPlayTimer);autoPlayTimer=null}
+    isAutoPlaying=false;
+    var btn=document.getElementById('auto-play');
+    if(btn){btn.textContent='⏵ Play';btn.classList.remove('playing')}
+}
 document.getElementById('prev-frame').addEventListener('click',function(){if(currentFrame>0)switchFrame(currentFrame-1)});
 document.getElementById('next-frame').addEventListener('click',function(){if(currentFrame<totalFrames-1)switchFrame(currentFrame+1)});
 document.getElementById('frame-num').addEventListener('change',function(){var n=parseInt(this.value);if(!isNaN(n)&&n>=1&&n<=totalFrames)switchFrame(n-1)});
 document.getElementById('auto-play').addEventListener('click',function(){
     if(isAutoPlaying){
-        clearInterval(autoPlayTimer);autoPlayTimer=null;isAutoPlaying=false;
-        this.textContent='⏵ Play';this.classList.remove('playing');
+        stopFrameAutoPlay();
     }else{
+        // The loop replaces the structure every 500 ms, so everything else
+        // writing it ends now rather than on the first tick — the same rule the
+        // other starters follow, applied at the moment the user asks for it.
+        if(vibActive||vibPaused)stopVibration();
+        stopMoveSession();
+        mmCancelRun();
         isAutoPlaying=true;this.textContent='⏸ Stop';this.classList.add('playing');
         autoPlayTimer=setInterval(function(){
             var next=currentFrame+1;if(next>=totalFrames)next=0;
@@ -5047,6 +6233,23 @@ function updateVibrationPositions(){
 function startVibration(modeIdx){
     stopVibration();
     if(!NORMAL_MODES||modeIdx<0||modeIdx>=NORMAL_MODES.length)return;
+    // A normal mode is a playback, not the user's geometry: it rewrites every
+    // atom's position on each frame and puts the geometry it started from back
+    // when it stops. A Molecular Mechanics run writing coordinates into the same
+    // array would fight it frame by frame — and stopping the mode would then
+    // rewind the run's progress. So the run is ended first, exactly as any other
+    // change of what the structure is: the geometry it reached so far stays on
+    // screen and the mode plays over that.
+    var hadRun=mmRunActive();
+    mmCancelRun();
+    if(hadRun)modeInfoEl.textContent='Molecular Mechanics: the run was ended so the normal mode can play';
+    // The two other loops that write the structure end here as well. A frame
+    // auto-play replaces the structure every 500 ms — and since a frame change
+    // stops a playback, leaving it on would kill this one a moment after it
+    // started — and a Move Atoms session is mid-edit on the selection the
+    // playback is about to rewrite.
+    stopFrameAutoPlay();
+    stopMoveSession();
     if(totalFrames>0&&currentFrame!==totalFrames-1){switchFrame(totalFrames-1)}
     var mode=NORMAL_MODES[modeIdx];
     if(!mode.displacements||mode.displacements.length!==MD.atoms.length)return;
@@ -5217,10 +6420,6 @@ if(ROUTES&&ROUTES.length>0){
 }
 layoutPanels();
 
-// Stop vibration on frame switch to avoid stale positions
-var origSwitchFrame=switchFrame;
-switchFrame=function(idx){if(vibActive||vibPaused)stopVibration();origSwitchFrame(idx)};
-
 function formatAtomList(indices,atoms){
     atoms=atoms||MD.atoms;
     if(indices.length===0)return '';
@@ -5284,8 +6483,12 @@ function getMoleculeScreenBox(){
             right:Math.min(w,maxX+pad),bottom:Math.min(h,maxY+pad)};
 }
 function layoutPanels(){
+    // The Molecular Mechanics reopen button follows the mode (and the run) the
+    // way the other reopen buttons follow their panels, so it is refreshed
+    // before the layout measures anything.
+    mmUpdateReopen();
     var container=document.getElementById('container');
-    if(!container)return;
+    if(!container){mmDrawCurves();return;}
     var cRect=container.getBoundingClientRect();
     var cTop=cRect.top,cLeft=cRect.left,cW=cRect.width,cH=cRect.height;
     var molBox=getMoleculeScreenBox();
@@ -5296,6 +6499,7 @@ function layoutPanels(){
     }
     var defs=[
         {id:'mol-info',pr:0,anc:'tl'},
+        {id:'mm-panel',pr:1,anc:'tl'},
         {id:'crystal-panel',pr:1,anc:'tr'},
         {id:'diff-panel',pr:2,anc:'br'},
         {id:'select-panel',pr:3,anc:'bl'},
@@ -5305,6 +6509,7 @@ function layoutPanels(){
         {id:'opt-panel',pr:7,anc:'tl'},
         {id:'freq-panel',pr:8,anc:'tl'},
         {id:'route-panel',pr:8,anc:'tl'},
+        {id:'mm-reopen',pr:9,anc:'tl'},
         {id:'opt-reopen',pr:9,anc:'tl'},
         {id:'freq-reopen',pr:10,anc:'tl'},
         {id:'route-reopen',pr:10,anc:'tl'},
@@ -5374,6 +6579,11 @@ function layoutPanels(){
             if(!resolved)break;
         }
     }
+    // A reflow (a window resize, the panel being moved or restyled) changes the
+    // box the curves are drawn into, and they are sized from that box — so they
+    // are redrawn here rather than left at the width of the previous layout.
+    // A no-op unless the Molecular Mechanics panel is up with a run behind it.
+    mmDrawCurves();
 }
 function highlightSelected(){
     atomMeshes.forEach(function(m,i){
@@ -5426,7 +6636,7 @@ function selectAtom(idx){
         checkSelectionComplete();
         return;
     }
-    if(currentMode==='selectAtoms'||currentMode==='replaceAtom'||currentMode==='addH'||currentMode==='rotateGroup'||currentMode==='moveAtoms'){
+    if(currentMode==='selectAtoms'||currentMode==='replaceAtom'||currentMode==='addH'||currentMode==='rotateGroup'||currentMode==='moveAtoms'||currentMode==='mmOpt'){
         var pos=selectedAtoms.indexOf(idx);
         if(pos>=0){
             selectedAtoms.splice(pos,1);
@@ -5435,6 +6645,7 @@ function selectAtom(idx){
             selInfoEl.textContent=selectedAtoms.length?('Selected: '+dn):'';
             if(currentMode==='rotateGroup')syncRotatePanelGroupField();
             checkSelectionComplete();
+            mmSelectionChanged();
             return;
         }
     }
@@ -5445,6 +6656,7 @@ function selectAtom(idx){
     selInfoEl.textContent='Selected: '+names;
     if(currentMode==='rotateGroup')syncRotatePanelGroupField();
     checkSelectionComplete();
+    mmSelectionChanged();
 }
 
 function updateDiffSelInfo(){
@@ -5494,6 +6706,10 @@ function checkSelectionComplete(){
     else if(currentMode==='addH'){
         var hnames=formatAtomList(selectedAtoms);
         selInfoEl.textContent='Selected for Add H: '+hnames+' (click Add H button to complete)';
+    }
+    else if(currentMode==='mmOpt'){
+        var mnames=formatAtomList(selectedAtoms);
+        selInfoEl.textContent='Selected for MM optimization: '+mnames+' ('+selectedAtoms.length+' atoms, click Start Optimization)';
     }
 }
 

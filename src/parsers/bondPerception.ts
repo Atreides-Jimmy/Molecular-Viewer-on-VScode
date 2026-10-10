@@ -2001,7 +2001,7 @@ const MODULE_FUNCTIONS: Array<(...args: never[]) => unknown> = [
     bpCheckValency, bpCheckSaturation, bpCheckCharge, bpDetermineOrders,
     bpRelaxLadder, bpRelaxCenter, bpRelaxValence,
     bpValenceOf, bpComponentGap, bpRestoreAromatic,
-    bpSupportedOrder, bpRefineValences,
+    bpSupportedOrder, bpSpecDev, bpRefineValences,
     bpComponents, bpHasViolation, bpSolveComponent,
     perceiveBonds
 ];
