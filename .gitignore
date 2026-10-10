@@ -4,5 +4,6 @@ dist/
 .vscode/
 test/
 .trae/
+.workbuddy
 .DS_Store
 ROADMAP.md
