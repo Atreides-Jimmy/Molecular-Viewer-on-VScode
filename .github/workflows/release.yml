@@ -1,8 +1,8 @@
 name: Build & Release
 
-# 触发分支 → 发布类型：
+# 触发分支 → 发布通道：
 #   developing → 预发行 (pre-release)
-#   main       → 正式版 (release，并标记为 Latest)
+#   main       → 正式版 (release)
 #
 # 产物命名规则（两个分支一致）：<name>-<版本号>-<commit 前 7 位>.vsix，例如
 #   Molecular-Viewer-0.9.6-abc1234.vsix
@@ -18,6 +18,23 @@ on:
       - main
   # 允许在 Actions 页面手动触发（便于重跑或补发）
   workflow_dispatch:
+
+env:
+  # developing 分支的构建是否勾选 GitHub Release 的「Pre-release」。
+  #
+  # 之所以做成开关：GitHub 硬性规定 Latest 不能是草稿或预发行
+  # （API 返回 422「Latest release cannot be a draft or prerelease」），
+  # 所以一个 Release 要么是「预发行」，要么能占据 Latest 徽标，二者不可兼得。
+  #
+  #   "true" （默认）—— developing 保持预发行；于是 Latest 始终落在最新的
+  #                     正式版上（无论那份正式版来自哪个分支）。
+  #   "false"        —— 两个分支都按正式 Release 发布；此时「最新的一次构建」
+  #                     （无论来自 developing 还是 main）都会被置为 Latest，
+  #                     也就排在 Releases 列表最前面。
+  #
+  # 置为 "false" 并不丢失预发行的语义：developing 构建的版本号仍带 -<hash>
+  # 后缀，Release 标题/说明仍标注「预发行」，打包仍用 vsce 的 --pre-release。
+  PRERELEASE_ON_DEVELOPING: "true"
 
 # 同一个分支上连推多次时，取消尚未跑完的旧任务，避免重复发布
 concurrency:
@@ -48,17 +65,29 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # 分支决定发布类型，后续步骤统一读这里的结果
+      # 分支决定发布通道，后续步骤统一读这里的结果：
+      #   prerelease    → vsce 是否用 --pre-release 打包（跟随分支，developing 恒为真）
+      #   gh_prerelease → GitHub Release 是否勾选 Pre-release（受上面的开关约束）
+      #   latest        → GitHub Release 是否在创建时直接置为 Latest
       - name: Resolve release channel
         id: channel
         run: |
           set -euo pipefail
           if [ "${GITHUB_REF_NAME}" = "main" ]; then
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
             echo "label=正式版" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "gh_prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "latest=true" >> "$GITHUB_OUTPUT"
           else
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
             echo "label=预发行" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            if [ "${PRERELEASE_ON_DEVELOPING}" = "true" ]; then
+              echo "gh_prerelease=true" >> "$GITHUB_OUTPUT"
+              echo "latest=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "gh_prerelease=false" >> "$GITHUB_OUTPUT"
+              echo "latest=true" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
       # 只在 runner 的临时工作区里改写 package.json（哈希取自 GitHub 自动注入的
@@ -114,17 +143,27 @@ jobs:
           TAG="${{ steps.meta.outputs.tag }}"
           VSIX="${{ steps.meta.outputs.vsix }}"
           TITLE="Molecular Viewer ${{ steps.meta.outputs.version }}"
-          PRERELEASE="${{ steps.channel.outputs.prerelease }}"
+          GH_PRERELEASE="${{ steps.channel.outputs.gh_prerelease }}"
+          LATEST="${{ steps.channel.outputs.latest }}"
           NOTES_FILE="$RUNNER_TEMP/release-notes.md"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             # 同一 commit 已被另一分支发布过（例如 developing 合并进 main）：
-            # 只替换附件，并把发布类型修正成本次分支应有的类型
+            # 只替换附件，并把发布类型修正成本次分支应有的类型。
             gh release upload "$TAG" "$VSIX" --clobber
-            if [ "$PRERELEASE" = "true" ]; then
-              gh release edit "$TAG" --prerelease=true
+            if [ "$GH_PRERELEASE" = "true" ]; then
+              # 但绝不把当前正占据 Latest 的正式版降级成预发行：一次 developing
+              # 重跑不该把正式版的 Latest 徽标抹掉（Latest 不能是预发行）。
+              if [ "$(gh release view "$TAG" --json isLatest --jq '.isLatest')" = "true" ]; then
+                echo "::warning::$TAG 目前是 Latest，保持为正式版，不转为预发行"
+              else
+                gh release edit "$TAG" --prerelease=true
+              fi
             else
-              gh release edit "$TAG" --prerelease=false --latest
+              gh release edit "$TAG" --prerelease=false
+              if [ "$LATEST" = "true" ]; then
+                gh release edit "$TAG" --latest
+              fi
             fi
           else
             args=(
@@ -137,13 +176,45 @@ jobs:
             if [ -s "$NOTES_FILE" ]; then
               args+=(--notes "$(cat "$NOTES_FILE")")
             fi
-            if [ "$PRERELEASE" = "true" ]; then
+            if [ "$GH_PRERELEASE" = "true" ]; then
               args+=(--prerelease)
-            else
+            fi
+            if [ "$LATEST" = "true" ]; then
               args+=(--latest)
             fi
             gh "${args[@]}"
           fi
+
+      # Latest 徽标始终交给「最新的一次可成为 Latest 的构建」——无论它来自
+      # developing 还是 main ——而不是只看触发分支。预发行不能成为 Latest
+      # （GitHub 返回 422），所以当最新一次构建是预发行时，徽标仍留在最新的
+      # 正式版上；PRERELEASE_ON_DEVELOPING 置为 "false" 后，最新一次构建
+      # 就能直接占据它。
+      # 这一步也是自愈的：任何一次重跑、补发或类型修正之后，徽标都会被重新落
+      # 回当前正确的位置。
+      - name: Point Latest at the newest eligible release
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          newest=$(gh release list \
+            --limit 200 \
+            --exclude-drafts \
+            --exclude-pre-releases \
+            --json tagName,publishedAt,createdAt \
+            --jq 'sort_by(.publishedAt // .createdAt) | reverse | .[0].tagName // ""')
+          if [ -z "$newest" ]; then
+            echo "::notice::还没有可成为 Latest 的正式版，徽标保持不变"
+            exit 0
+          fi
+          if [ "$(gh release view "$newest" --json isLatest --jq '.isLatest')" = "true" ]; then
+            echo "Latest 已经是 $newest"
+          else
+            gh release edit "$newest" --latest
+            echo "Latest -> $newest"
+          fi
+          echo "latest=$newest" >> "$GITHUB_OUTPUT"
 
       - name: Summary
         run: |
@@ -158,4 +229,6 @@ jobs:
             echo "| VSIX | \`${{ steps.meta.outputs.vsix }}\` |"
             echo "| 分支 | \`${GITHUB_REF_NAME}\` |"
             echo "| Commit | \`${{ steps.meta.outputs.sha7 }}\` |"
+            echo "| Pre-release | ${{ steps.channel.outputs.gh_prerelease }} |"
+            echo "| Latest | \`${{ steps.latest.outputs.latest }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"

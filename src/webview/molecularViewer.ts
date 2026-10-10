@@ -1,11 +1,11 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { parseFile, parseLogFile, LogFrame, OrcaFrame, RouteSection, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg } from '../parsers/index';
-import { ensureBonds } from '../parsers/bondDetector';
-import { BOND_PERCEPTION_SOURCE } from '../parsers/bondPerception';
-import { addHydrogens } from '../parsers/addHydrogens';
-import { beginOptimization, describeForceField, MmHistoryPoint, MmOptimizeResult, MmSession } from '../parsers/mmOptimizer';
-import { smilesTo3dSafe, validateSmiles } from '../parsers/smilesTo3d';
+import { ensureBonds } from '../tools/bondDetector';
+import { BOND_PERCEPTION_SOURCE } from '../tools/bondPerception';
+import { addHydrogens } from '../tools/addHydrogens';
+import { beginOptimization, describeForceField, MmHistoryPoint, MmOptimizeResult, MmSession } from '../tools/mmOptimizer';
+import { smilesTo3dSafe, validateSmiles } from '../tools/smilesTo3d';
 import { MolecularData, AtomGroup, OptStep, NormalMode, VmdScene, VmdMolecule } from '../types';
 
 const ATOM_COLORS: { [key: string]: string } = {
