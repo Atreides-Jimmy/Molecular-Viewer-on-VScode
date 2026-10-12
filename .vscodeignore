@@ -9,3 +9,10 @@ build.bat
 build.sh
 test/**
 media/icon.svg
+
+# CI / 开发辅助文件，不应打进 VSIX
+.github/**
+.trae/**
+.workbuddy/**
+ROADMAP.md
+*.vsix

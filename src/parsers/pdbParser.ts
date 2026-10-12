@@ -13,8 +13,7 @@ const ATOMIC_NUMBER_MAP: { [key: string]: number } = {
     PA: 91, U: 92, NP: 93, PU: 94, AM: 95, CM: 96, BK: 97, CF: 98
 };
 
-function pdbElement(atomName: string, altElement?: string): string {
-    if (altElement && altElement.trim() !== '') {
+function pdbElement(atomName: string, altElement?: string): string {    if (altElement && altElement.trim() !== '') {
         const e = altElement.trim();
         const upper = e.toUpperCase();
         if (ATOMIC_NUMBER_MAP[upper] !== undefined) {
@@ -46,8 +45,7 @@ function pdbElement(atomName: string, altElement?: string): string {
     return elem.charAt(0).toUpperCase();
 }
 
-export function parsePdb(content: string): MolecularData {
-    const lines = content.split(/\r?\n/);
+export function parsePdb(content: string): MolecularData {    const lines = content.split(/\r?\n/);
     const atoms: Atom[] = [];
     const bonds: Bond[] = [];
     let hasExplicitBonds = false;
@@ -90,8 +88,22 @@ export function parsePdb(content: string): MolecularData {
             const z = parseFloat(line.substring(46, 54).trim());
 
             if (!isNaN(x) && !isNaN(y) && !isNaN(z)) {
+                // Occupancy (columns 55-60) and the temperature-factor column
+                // (61-66) are read as plain numbers: the visualization toolchain
+                // writes an arbitrary per-atom scalar into the latter (unit
+                // index, force error, …) rather than a B-factor, and the viewer
+                // can colour the structure by it.
+                const atom: Atom = { element, x, y, z, index: atomIndex };
+                const occupancy = parseFloat(line.substring(54, 60).trim());
+                if (!isNaN(occupancy) && line.length > 59) {
+                    atom.occupancy = occupancy;
+                }
+                const beta = parseFloat(line.substring(60, 66).trim());
+                if (!isNaN(beta) && line.length > 65) {
+                    atom.beta = beta;
+                }
                 atomSerialMap.set(serial, atomIndex);
-                atoms.push({ element, x, y, z, index: atomIndex });
+                atoms.push(atom);
                 atomIndex++;
             }
         } else if (recType === 'CONECT') {

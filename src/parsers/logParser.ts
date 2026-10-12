@@ -22,6 +22,12 @@ export interface LogFrame {
     stepLabel: string;
     charge?: number;
     multiplicity?: number;
+    /** Single-point energy (Hartree) of the optimization step this frame is the
+     *  geometry of, filled by the parser for opt logs so the webview can both
+     *  label the frame and highlight its point in the convergence charts.
+     *  [2026-09-12 | Atreides-Jimmy] Added for the convergence-chart highlight
+     *  (feature 2) and value tooltip (feature 3). */
+    energy?: number;
 }
 
 export interface GaussianLogResult {
@@ -61,6 +67,28 @@ export interface RouteSection {
     raw: string;             // route text joined into one line
     keywords: RouteKeyword[];
     hasOpt: boolean;         // the section requests an optimization
+}
+
+
+
+/**
+ * Join route lines into a single string.  Handles Gaussian column-80 word
+ * wrapping: if the previous line ends with an alphanumeric character and the
+ * next line starts with one, they are joined without a space (mid-word wrap).
+ */
+function joinRouteLines(lines: string[]): string {
+    if (lines.length === 0) return '';
+    const trimmed = lines.map(l => l.trimStart());
+    let result = trimmed[0];
+    for (let i = 1; i < trimmed.length; i++) {
+        const cur = trimmed[i];
+        if (/\w$/.test(result) && /^\w/.test(cur)) {
+            result += cur;
+        } else {
+            result += ' ' + cur;
+        }
+    }
+    return result.trim();
 }
 
 /**
@@ -129,12 +157,18 @@ function parseRouteSection(routeText: string): RouteSection {
         }
         const pi = t.indexOf('(');
         if (pi > 0 && t.endsWith(')')) {
-            // Keyword with a bare parenthesized option list, e.g. iop(5/17=17)
-            keywords.push({
-                name: t.slice(0, pi),
-                options: t.slice(pi + 1, -1).split(',').map(s => s.trim()).filter(s => s !== '')
-            });
-            continue;
+            // Only split when the part before '(' is a simple alphabetic keyword
+            // (e.g. iop, scrf, TD).  Basis-set names like 6-31G(d,p) or
+            // method/basis combos like B3LYP/6-31G(d,p) contain digits, '-',
+            // '+', or '/' and must be kept as a single token.
+            const namePart = t.slice(0, pi);
+            if (/^[A-Za-z]+$/.test(namePart)) {
+                keywords.push({
+                    name: namePart,
+                    options: t.slice(pi + 1, -1).split(',').map(s => s.trim()).filter(s => s !== '')
+                });
+                continue;
+            }
         }
         keywords.push({ name: t, options: [] });
     }
@@ -263,6 +297,35 @@ function parseModesFromHeader(lines: string[], headerIdx: number): { modes: Norm
     return { modes, endIdx: i };
 }
 
+/**
+ * Attach a freshly parsed single-point energy to the geometry frame(s) that
+ * still wait for one, i.e. the frames emitted after the previous energy was
+ * consumed by a convergence table.
+ *
+ * [2026-09-12 | Atreides-Jimmy] Added for the convergence-chart highlight and
+ * value tooltip: the webview can only point at "the step this structure
+ * belongs to" if the parser records which energy a frame's geometry was
+ * computed at.
+ *
+ * - `opt=external` runs (Gaussian + XTB/XO) print the geometry of every cycle
+ *   BEFORE its `Energy= ... NIter=` line, so the energy belongs to the single
+ *   frame printed since the previous energy.
+ * - Standard Gaussian logs print `SCF Done` before the geometry, so the energy
+ *   already in `pendingEnergy` is assigned to the first frame that follows it
+ *   (a second geometry block of the same cycle keeps no energy, matching the
+ *   fact that it has no convergence-table row of its own).
+ *
+ * The backward scan is bounded by `MAX_FRAMES_PER_ENERGY` so a pathological log
+ * can never turn this into a quadratic scan over the whole trajectory. Frames
+ * that already carry an energy are stepped over, never overwritten.
+ */
+const MAX_FRAMES_PER_ENERGY = 8;
+function assignPendingEnergyToFrames(frames: LogFrame[], energy: number): void {
+    for (let k = frames.length - 1; k >= 0 && k >= frames.length - MAX_FRAMES_PER_ENERGY; k--) {
+        if (frames[k].energy == null) frames[k].energy = energy;
+    }
+}
+
 export function parseGaussianLog(content: string): GaussianLogResult {
     const lines = content.split(/\r?\n/);
     const frames: LogFrame[] = [];
@@ -339,10 +402,20 @@ export function parseGaussianLog(content: string): GaussianLogResult {
                     let j = routeStart + 1;
                     while (j < lines.length) {
                         const t2 = lines[j].trim();
-                        if (t2 === '' || DASH_RE.test(t2) || ROUTE_START_RE.test(t2)) break;
+                        if (t2 === '' || DASH_RE.test(t2)) break;
+                        if (ROUTE_START_RE.test(t2)) {
+                            // A '#' line after a blank/dash line is a new section;
+                            // a '#' line directly after a collected route line is a
+                            // continuation (Gaussian wraps long route cards and may
+                            // start the continuation with '#p ...' at the next line).
+                            if (j > routeStart + 1) {
+                                const prev = lines[j - 1].trim();
+                                if (prev === '' || DASH_RE.test(prev)) break;
+                            }
+                        }
                         j++;
                     }
-                    const sec = parseRouteSection(lines.slice(routeStart, j).map(l => l.trim()).join(' '));
+                    const sec = parseRouteSection(joinRouteLines(lines.slice(routeStart, j).map(l => l.trim())));
                     routes.push(sec);
                     if (sec.hasOpt) routeHasOpt = true;
                     i = j;
@@ -397,7 +470,11 @@ export function parseGaussianLog(content: string): GaussianLogResult {
                     hasExplicitBonds: false,
                     stepLabel: label,
                     charge: logCharge,
-                    multiplicity: logMultiplicity
+                    multiplicity: logMultiplicity,
+                    // A `SCF Done` line prints BEFORE its geometry in standard
+                    // Gaussian output, so the pending energy is the one this
+                    // frame was computed at. [2026-09-12 | Atreides-Jimmy]
+                    energy: pendingEnergy
                 });
                 if (isStandard) stdFrames++;
             }
@@ -449,6 +526,8 @@ export function parseGaussianLog(content: string): GaussianLogResult {
         // SCF Done:  E(RHF) =  -76.0107469158     A.U. after   10 cycles
         const scfMatch = line.match(/SCF Done:\s+E\([^)]+\)\s*=\s*(-?\d+\.\d+)/);
         if (scfMatch) {
+            // The energy is carried into the next geometry frame below, which is
+            // the structure it was computed at. [2026-09-12 | Atreides-Jimmy]
             pendingEnergy = parseFloat(scfMatch[1]);
             i++;
             continue;
@@ -462,6 +541,9 @@ export function parseGaussianLog(content: string): GaussianLogResult {
         const extEnergyMatch = line.match(/^\s*Energy=\s*(-?\d+\.\d+)\s+NIter=/);
         if (extEnergyMatch) {
             pendingEnergy = parseFloat(extEnergyMatch[1]);
+            // [2026-09-12 | Atreides-Jimmy] opt=external logs print the cycle's
+            // geometry BEFORE its energy — bind it here (same purpose as above).
+            assignPendingEnergyToFrames(frames, pendingEnergy);
             i++;
             continue;
         }

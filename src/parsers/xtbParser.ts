@@ -107,6 +107,10 @@ export function parseXtbLog(content: string): XtbLogResult {
             title: comment,
             hasExplicitBonds: false,
             stepLabel,
+            // xtb prints one energy per frame, so every frame maps 1:1 onto an
+            // optStep — the webview uses it to highlight the point of the frame
+            // being viewed. [2026-09-12 | Atreides-Jimmy]
+            energy,
         });
 
         if (!isPlaceholder) {

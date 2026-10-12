@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { MolecularViewerProvider } from './webview/molecularViewer';
 import { parseFile } from './parsers/index';
-import { ensureBonds } from './parsers/bondDetector';
+import { ensureBonds } from './tools/bondDetector';
 import { MolecularData } from './types';
 
 export function activate(context: vscode.ExtensionContext) {
