@@ -1413,6 +1413,10 @@ body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;b
 #rotate-panel .rp-slider-row input[type=number]{width:58px;flex-shrink:0;padding:3px 4px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:11px;box-sizing:border-box}
 #rotate-panel .rp-error{color:var(--vscode-errorForeground,#f66);font-size:11px;margin-top:4px;line-height:1.4}
 #rotate-panel .rp-hint{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:4px;line-height:1.4}
+#view-panel{display:block;position:absolute;bottom:40px;left:8px;z-index:50;background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:4px;padding:8px;width:210px;max-width:calc(100% - 16px);box-shadow:0 2px 8px rgba(0,0,0,0.3)}
+#view-panel .vp-title{font-size:12px;font-weight:bold;margin-bottom:6px}
+#view-panel .tbtn{width:100%;text-align:center}
+#view-panel .vp-hint{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:6px;line-height:1.4}
 canvas{display:block}
 #atom-tooltip{position:absolute;display:none;color:var(--vscode-editor-foreground,#ccc);font-size:12px;background:var(--vscode-editor-background,#1e1e1e);padding:4px 8px;border-radius:3px;border:1px solid var(--vscode-panel-border,#444);pointer-events:none;z-index:30}
 #box-select-rect{position:fixed;display:none;border:1px dashed #ffeb3b;background:rgba(255,235,59,0.12);pointer-events:none;z-index:40}
@@ -1566,7 +1570,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="vp-title">Auto Rotate</div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin; the next left press stops it.</div></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="box-select-rect"></div>
@@ -4205,6 +4209,10 @@ function setMode(m){
     var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect'||oldMode==='replaceAtom'||oldMode==='addH'||oldMode==='rotateGroup'||oldMode==='moveAtoms'||oldMode==='mmOpt')&&(m==='selectAtoms'||m==='boxSelect'||m==='replaceAtom'||m==='addH'||m==='rotateGroup'||m==='moveAtoms'||m==='mmOpt'));
     if(oldMode==='moveAtoms'&&m!=='moveAtoms')stopMoveSession();
     if(oldMode==='mmOpt'&&m!=='mmOpt')mmCancelRun();
+    // Auto Rotate is a View-mode control: leaving the mode takes its panel away,
+    // so the spin it started ends with it rather than running on with no way
+    // back to the switch.
+    if(oldMode==='view'&&m!=='view')stopSpin();
     if(!preserveSel){
         selectedAtoms=[];diffSelectedAtoms=[];originalCoords=null;
     }
@@ -4216,6 +4224,8 @@ function setMode(m){
     if(sp2)sp2.style.display=(m==='selectAtoms')?'block':'none';
     var rp2=document.getElementById('rotate-panel');
     if(rp2)rp2.style.display=(m==='rotateGroup')?'block':'none';
+    var vp2=document.getElementById('view-panel');
+    if(vp2)vp2.style.display=(m==='view')?'block':'none';
     var mp2=mmPanelEl();
     if(mp2){
         if(m==='mmOpt'){showMmPanel()}else if(mp2.classList.contains('show')){mp2.classList.remove('show')}
@@ -4517,6 +4527,7 @@ function commitRotAngle(newAngle){
     });
 })();
 document.getElementById('reset-btn').addEventListener('click',function(){
+    stopSpin();
     rotQuat.identity();panX=0;panY=0;
     if(diffMode){
         camDist=camDiffInit();diffCamDist=camDist;
@@ -5518,6 +5529,7 @@ function enterDiffRender(diffs,mapping){
 }
 
 function exitDiff(){
+    stopSpin();
     diffMode=false;
     // A molecular-mechanics session survives the comparison: its panel comes
     // back with the same selection once the second structure is gone.
@@ -6725,6 +6737,7 @@ function layoutPanels(){
         {id:'diff-panel',pr:2,anc:'br'},
         {id:'select-panel',pr:3,anc:'bl'},
         {id:'rotate-panel',pr:3,anc:'bl'},
+        {id:'view-panel',pr:3,anc:'bl'},
         {id:'diff-label',pr:4,anc:'tc',pct:0.25},
         {id:'diff-label-right',pr:5,anc:'tc',pct:0.75},
         {id:'opt-panel',pr:7,anc:'tl'},
@@ -7772,6 +7785,89 @@ var raycaster=new THREE.Raycaster();
 var mouse=new THREE.Vector2();
 var isBoxSelecting=false;var boxStart=null;
 
+// ===== Auto-rotate: flick the molecule and it keeps turning =====
+// The toggle lives in the View-mode panel (#view-panel, bottom-left, shown
+// only while the View button's mode is active) rather than in the toolbar.
+// With it on, a left-drag that rotates the view (or a one-finger touch drag)
+// arms a spin: on release the molecule is handed the angular velocity the drag
+// was released with, so it keeps turning about a fixed world axis until the
+// next left press stops it. A right/middle press pans and leaves the spin
+// running. This is a view-only rotation — it writes rotQuat (or the grabbed
+// side's diffRotQuat in Diff mode) and never touches the coordinates, so it
+// cannot fight any edit.
+//
+// Arbitration: exactly one writer holds a rotation quaternion at a time. A
+// left press, an arrow key, Reset View, leaving Diff mode, leaving View mode
+// and switching the toggle off each call stopSpin(), so the free spin can
+// never run underneath a manual rotation (which would otherwise compose with
+// it and drift away).
+var spinOn=false;                          // toolbar toggle (off by default)
+var spinAxis=new THREE.Vector3(0,1,0);     // fixed world axis of the current spin
+var spinSpeed=0;                           // rad/s, 0 = not spinning
+var spinQuatRef=null;                      // rotQuat or diffRotQuat, whichever spins
+var spinSamples=[];                        // recent {t,x,y} of the arming drag
+var spinPrevT=0;                           // last animate() timestamp, for the frame step
+var SPIN_ANGLE_PER_PX=0.008;               // must equal the drag rotation scale (see mousemove)
+var SPIN_WINDOW_MS=120;                    // only the last 120 ms before release set the speed
+var SPIN_GAIN=1.0;                         // released speed = drag speed * SPIN_GAIN
+var SPIN_MAX=8.0;                          // rad/s cap, so a wild flick cannot blur the view
+var SPIN_MIN=0.05;                         // below this a release reads as a stop, not a spin
+
+function stopSpin(){spinSpeed=0;spinQuatRef=null;spinSamples.length=0}
+
+// One point per rotation mousemove/touchmove. The buffer keeps only the last
+// SPIN_WINDOW_MS, so a drag that is held still before release releases at a
+// standstill (no spin) rather than throwing whatever speed it reached earlier.
+function spinRecordPoint(x,y){
+    if(!spinOn)return;
+    var t=performance.now();
+    spinSamples.push({t:t,x:x,y:y});
+    while(spinSamples.length>0&&t-spinSamples[0].t>SPIN_WINDOW_MS)spinSamples.shift();
+    if(spinSamples.length>64)spinSamples.shift();
+}
+
+// Release: the accumulated drag becomes an angular velocity. Distance over
+// time is the release speed, so dragging farther or flicking faster spins the
+// molecule faster; the direction is the drag direction, mapped onto the world
+// X/Y axes exactly the way the drag itself rotated the view. Every path that
+// decides not to spin clears the spin itself, so a stale speed from an earlier
+// flick can never leak through a release that should have been a standstill.
+function spinLaunch(){
+    if(!spinOn){stopSpin();return}
+    var now=performance.now();
+    while(spinSamples.length>0&&now-spinSamples[0].t>SPIN_WINDOW_MS)spinSamples.shift();
+    if(spinSamples.length<2){stopSpin();return}
+    var a=spinSamples[0],b=spinSamples[spinSamples.length-1];
+    spinSamples.length=0;
+    var dt=(b.t-a.t)/1000;
+    if(!(dt>0.001)){stopSpin();return}
+    var wx=(b.y-a.y)*SPIN_ANGLE_PER_PX*SPIN_GAIN/dt;
+    var wy=(b.x-a.x)*SPIN_ANGLE_PER_PX*SPIN_GAIN/dt;
+    var mag=Math.sqrt(wx*wx+wy*wy);
+    if(!(mag>SPIN_MIN)){stopSpin();return}
+    if(mag>SPIN_MAX){var s=SPIN_MAX/mag;wx*=s;wy*=s;mag=SPIN_MAX}
+    spinAxis.set(wx/mag,wy/mag,0);
+    spinSpeed=mag;
+    spinQuatRef=diffMode?(diffTransformSide==='right'?diffRotQuat:rotQuat):rotQuat;
+}
+
+function updateSpinButton(){
+    var b=document.getElementById('spin-btn');
+    if(!b)return;
+    b.classList.toggle('active',spinOn);
+    b.textContent=spinOn?'On':'Off';
+}
+(function(){
+    var b=document.getElementById('spin-btn');
+    if(!b)return;
+    b.addEventListener('click',function(){
+        spinOn=!spinOn;
+        if(!spinOn)stopSpin();
+        updateSpinButton();
+        modeInfoEl.textContent=spinOn?'Auto Rotate on: drag and release to spin':(MODE_INFO[currentMode]||currentMode);
+    });
+})();
+
 function getClickedAtom(e){
     var rect=canvas.getBoundingClientRect();
     if(diffMode){
@@ -7813,6 +7909,9 @@ function getClickedAtom(e){
 }
 
 canvas.addEventListener('mousedown',function(e){
+    // Any left press ends a free spin; a right/middle press pans and leaves it
+    // running. This is the only mouse path that stops the spin.
+    if(e.button===0)stopSpin();
     if(currentMode==='boxSelect'&&e.button===0){
         boxStart={x:e.clientX,y:e.clientY};
         isBoxSelecting=true;
@@ -7921,6 +8020,7 @@ canvas.addEventListener('mousemove',function(e){
         var side=diffTransformSide;
         var rq=side==='right'?diffRotQuat:rotQuat;
         if(isRot){
+            spinRecordPoint(e.clientX,e.clientY);
             var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),dm.x*0.008);
             var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),dm.y*0.008);
             rq.premultiply(qx);rq.premultiply(qy);rq.normalize();
@@ -7949,6 +8049,7 @@ canvas.addEventListener('mousemove',function(e){
         }
     }else{
         if(isRot){
+            spinRecordPoint(e.clientX,e.clientY);
             var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),dm.x*0.008);
             var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),dm.y*0.008);
             rotQuat.premultiply(qx);rotQuat.premultiply(qy);rotQuat.normalize();
@@ -8056,9 +8157,10 @@ canvas.addEventListener('mouseup',function(e){
         }
         boxStart=null;needsRender=true;layoutPanels();return;
     }
+    if(e.button===0&&isRot)spinLaunch();
     isRot=false;isPan=false;layoutPanels();
 });
-canvas.addEventListener('mouseleave',function(){isRot=false;isPan=false;panGrabActive=false;tooltipEl.style.display='none';if(moveDragActive)endMoveDrag();if(fragRotActive)endFragRot();if(isBoxSelecting){isBoxSelecting=false;boxRectEl.style.display='none';boxStart=null}});
+canvas.addEventListener('mouseleave',function(){isRot=false;isPan=false;panGrabActive=false;spinSamples.length=0;tooltipEl.style.display='none';if(moveDragActive)endMoveDrag();if(fragRotActive)endFragRot();if(isBoxSelecting){isBoxSelecting=false;boxRectEl.style.display='none';boxStart=null}});
 canvas.addEventListener('wheel',function(e){e.preventDefault();
     if(diffMode){
         var rect=canvas.getBoundingClientRect();
@@ -8083,6 +8185,7 @@ canvas.addEventListener('contextmenu',function(e){e.preventDefault()});
 var touchSD=0;
 canvas.addEventListener('touchstart',function(e){e.preventDefault();
     if(e.touches.length===1){
+        stopSpin();
         isRot=true;prevM={x:e.touches[0].clientX,y:e.touches[0].clientY};
         if(diffMode){var rect=canvas.getBoundingClientRect();var halfW=Math.floor(rect.width/2);diffTransformSide=(e.touches[0].clientX-rect.left)<halfW?'left':'right'}
     }
@@ -8090,6 +8193,7 @@ canvas.addEventListener('touchstart',function(e){e.preventDefault();
 },{passive:false});
 canvas.addEventListener('touchmove',function(e){e.preventDefault();
     if(e.touches.length===1&&isRot){
+        spinRecordPoint(e.touches[0].clientX,e.touches[0].clientY);
         var dm={x:e.touches[0].clientX-prevM.x,y:e.touches[0].clientY-prevM.y};
         var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),dm.x*0.008);
         var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),dm.y*0.008);
@@ -8115,12 +8219,12 @@ canvas.addEventListener('touchmove',function(e){e.preventDefault();
         touchSD=d}
     needsRender=true;
 },{passive:false});
-canvas.addEventListener('touchend',function(e){isRot=false;if(e.touches.length<2)touchSD=0});
+canvas.addEventListener('touchend',function(e){if(e.touches.length===0&&isRot)spinLaunch();isRot=false;if(e.touches.length<2)touchSD=0});
 
 document.addEventListener('keydown',function(e){
     if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'||e.target.tagName==='SELECT')return;
     ctrlDown=e.ctrlKey;
-    if(e.key in keyState){keyState[e.key]=true;e.preventDefault()}
+    if(e.key in keyState){keyState[e.key]=true;stopSpin();e.preventDefault()}
     if(e.key==='Delete'){
         e.preventDefault();
         if(selectedAtoms.length>0){showBatchDeleteModal()}
@@ -8158,6 +8262,9 @@ window.addEventListener('pagehide',function(){
 
 function animate(){
     requestAnimationFrame(animate);
+    var spinNow=performance.now();
+    var spinDt=spinPrevT?(spinNow-spinPrevT)/1000:0;
+    spinPrevT=spinNow;
     var keyActive=false;
     if(keyState.ArrowLeft||keyState.ArrowRight||keyState.ArrowUp||keyState.ArrowDown){
         keyActive=true;
@@ -8210,6 +8317,17 @@ function animate(){
             if(keyState.ArrowUp){var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),-keyRotSpeed);rq.premultiply(qy)}
             if(keyState.ArrowDown){var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),keyRotSpeed);rq.premultiply(qy)}
             rq.normalize();
+            updateTransform();
+        }
+    }
+    if(spinQuatRef&&spinSpeed>0){
+        // Free rotation: keep turning about the world axis spinLaunch() set.
+        // The step is clamped so a tab that sat in the background for a while
+        // does not hand the molecule a several-second jump on its first frame.
+        if(spinDt>0.1)spinDt=0.1;
+        if(spinDt>0){
+            var spinQ=new THREE.Quaternion().setFromAxisAngle(spinAxis,spinSpeed*spinDt);
+            spinQuatRef.premultiply(spinQ);spinQuatRef.normalize();
             updateTransform();
         }
     }
