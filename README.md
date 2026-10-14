@@ -200,7 +200,7 @@ The list mirrors the extensions the viewer registers; `.dat` is MOPAC's alternat
 | Hover over atom | Show element + coordinates tooltip |
 | Arrow keys | Rotate molecule (←/→ around Y, ↑/↓ around X) |
 | ◀ ▶ (molecule selector) | Switch between the molecules a VMD TCL script creates (`mol new`), shown only when a script defines more than one |
-| Color by Beta | Toggle per-atom scalar colouring for structures whose PDB columns 61-66 carry a scalar; starts active when such a file was coloured automatically at load, and is hidden when a script is driving the view |
+| Color by Beta | Toggle scalar colouring for structures whose PDB columns 61-66 carry a scalar — each atom's sphere and the bond halves that meet it take that atom's scalar colour, so a force-error picture reads as one gradient rather than gradient spheres between element-coloured bonds; starts active when such a file was coloured automatically at load, and is hidden when a script is driving the view |
 | Reset View button | Return to default view |
 
 ### Editing Workflow

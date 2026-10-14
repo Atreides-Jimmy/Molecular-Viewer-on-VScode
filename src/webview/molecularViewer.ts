@@ -2930,7 +2930,10 @@ function createBond(b){
     var ord=b.order||1;
     // Multiple-bond line offsets keep their proportions to the bond radius.
     var offK=br/0.12;
-    var c1=new THREE.Color(a1.color),c2=new THREE.Color(a2.color);
+    // 键的两半跟随它连的原子: 标量 (Beta) 配色下原子球是按标量画视图色, 这里
+    // 让半键读同一个颜色, 一根键两半就与两端原子一致。betaColorOf 在配色关闭
+    // (或原子没有标量) 时返回 null, 退化成元素颜色, 非 Beta 文件的行为不变。
+    var c1=new THREE.Color(betaColorOf(a1)||a1.color),c2=new THREE.Color(betaColorOf(a2)||a2.color);
     if(ord<1.25){
         addBondPiece(br,c1,false,0,0,0,0,0);addBondPiece(br,c2,false,0,0,0,0,1);
     }else if(ord<1.75){
