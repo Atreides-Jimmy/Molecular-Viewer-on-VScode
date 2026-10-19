@@ -1413,6 +1413,14 @@ body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;b
 #rotate-panel .rp-slider-row input[type=number]{width:58px;flex-shrink:0;padding:3px 4px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:11px;box-sizing:border-box}
 #rotate-panel .rp-error{color:var(--vscode-errorForeground,#f66);font-size:11px;margin-top:4px;line-height:1.4}
 #rotate-panel .rp-hint{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:4px;line-height:1.4}
+/* The View-mode controls are two cards, not one: Auto Rotate and Edit
+   Coordinates each carry their own collision box in layoutPanels(), so a tall
+   neighbour (the Diff results panel above all) can push them apart instead of
+   one of them ending up underneath something else. */
+#view-panel,#bake-panel{display:block;position:absolute;bottom:40px;right:8px;z-index:50;background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:4px;padding:8px;width:210px;max-width:calc(100% - 16px);box-shadow:0 2px 8px rgba(0,0,0,0.3)}
+#view-panel .vp-title,#bake-panel .vp-title{font-size:12px;font-weight:bold;margin-bottom:6px}
+#view-panel .tbtn,#bake-panel .tbtn{width:100%;text-align:center}
+#view-panel .vp-hint,#bake-panel .vp-hint{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:6px;line-height:1.4}
 canvas{display:block}
 #atom-tooltip{position:absolute;display:none;color:var(--vscode-editor-foreground,#ccc);font-size:12px;background:var(--vscode-editor-background,#1e1e1e);padding:4px 8px;border-radius:3px;border:1px solid var(--vscode-panel-border,#444);pointer-events:none;z-index:30}
 #box-select-rect{position:fixed;display:none;border:1px dashed #ffeb3b;background:rgba(255,235,59,0.12);pointer-events:none;z-index:40}
@@ -1566,7 +1574,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="vp-title">Auto Rotate</div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div></div><div id="bake-panel"><div class="vp-title">Edit Coordinates</div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="box-select-rect"></div>
@@ -1694,10 +1702,44 @@ var scene=new THREE.Scene();
 // would clash with the editor theme and wash out white atoms.
 scene.background=new THREE.Color(0x1e1e1e);
 var camera=new THREE.PerspectiveCamera(60,cw/ch,0.1,1000);
-var renderer=new THREE.WebGLRenderer({antialias:true});
+var renderer=null;
+try{
+    renderer=new THREE.WebGLRenderer({antialias:true});
+}catch(webglErr){
+    // three.js throws here only when neither webgl2, webgl nor
+    // experimental-webgl could be created at all — which in an editor webview
+    // means the *window's* shared GPU process is unavailable (a driver reset,
+    // or too many live WebGL contexts), not that this structure is too large.
+    // No page can bring that process back, so the message says what can.
+    throw new Error((webglErr&&webglErr.message?webglErr.message:'WebGL is unavailable')+
+        ' - the GPU process of the editor window is unavailable. Run "Developer: Reload Window" (or restart the editor) and open the file again.');
+}
 renderer.setSize(cw,ch);
 renderer.setPixelRatio(window.devicePixelRatio);
 container.appendChild(renderer.domElement);
+// A lost context is the other half of the failure: the driver reset takes the
+// context away from every webview in the window at once, and a page that does
+// not handle it simply goes blank. Keep the canvas alive, say what happened,
+// and rebuild the scene if (and when) the context comes back.
+renderer.domElement.addEventListener('webglcontextlost',function(ev){
+    ev.preventDefault();
+    contextLost=true;
+    needsRender=false;
+    if(loadingEl)loadingEl.style.display='none';
+    if(errorEl){
+        errorEl.style.display='block';
+        errorEl.textContent='WebGL context lost - the graphics driver reset. Waiting for it to come back; if it does not, run "Developer: Reload Window".';
+    }
+},false);
+renderer.domElement.addEventListener('webglcontextrestored',function(){
+    contextLost=false;
+    if(errorEl)errorEl.style.display='none';
+    // three.js re-initialises its own GPU state, and the scene is rebuilt so
+    // every buffer is uploaded fresh instead of from a cache that survived the
+    // reset. The shared pools survive too: their data is still valid.
+    rebuildScene();
+    needsRender=true;
+},false);
 if(loadingEl)loadingEl.style.display='none';
 
 scene.add(new THREE.AmbientLight(0x404040,1.5));
@@ -2074,13 +2116,87 @@ function updateAxesIndicator(){
 }
 
 var atomMeshes=[];
-var bondMeshes=[];
 var currentBondIdx=-1;
 var needsRender=true;
+var contextLost=false;      // the WebGL context is gone until it is restored
+
+// ===== Shared geometries and materials =====
+// Every drawn thing used to own a geometry and a material. A 2175-atom file
+// built 2175 sphere geometries plus 13906 bond cylinders, each of the 16081
+// objects with its own material, and the first frame had to create roughly
+// 32000 GL buffers. A per-object material is the expensive half: three.js
+// re-uploads a material's whole uniform set before every draw call whose
+// material id changed, so ~16k distinct materials meant roughly a million
+// uniform uploads per frame — enough driver work in one frame to reset the GPU
+// process on Windows (driver timeout), and once that shared GPU process is
+// gone *no* webview in the window can create a WebGL context again, so every
+// later file fails with three.js's "Error creating WebGL context.".
+//
+// Two pools remove the resource half of that: a sphere geometry is shared by
+// every atom with the same radius, a material by every atom with the same
+// colour, occupancy and highlight state, and every bond cylinder is drawn by
+// one instanced mesh. A pooled resource outlives the meshes that draw with it,
+// so it is marked, and disposeMesh leaves it alone.
+var geoPool={};
+var matPool={};
+function pooledGeo(key,make){
+    var g=geoPool[key];
+    if(!g){g=make();g.userData={shared:true};geoPool[key]=g}
+    return g;
+}
+function pooledMat(key,make){
+    var m=matPool[key];
+    if(!m){m=make();m.userData={shared:true};matPool[key]=m}
+    return m;
+}
+function sphereGeoFor(r,segs){
+    return pooledGeo('s|'+r.toFixed(4)+'|'+segs[0]+'|'+segs[1],function(){return new THREE.SphereGeometry(r,segs[0],segs[1])});
+}
+// An atom's colour follows the scalar-colour toggle (a scene rebuild), and its
+// highlight is a *state*: plain, selected, or diff-highlighted. Both used to be
+// written into the atom's own material, which is exactly why every atom needed
+// one. Keying the pool by (colour, occupancy, state) keeps the same three
+// appearances while a whole structure shares a handful of materials.
+function atomMaterial(col,occ,state){
+    var o=(occ!=null&&occ<0.999)?occ.toFixed(3):'1';
+    return pooledMat('a|'+col+'|'+o+'|'+state,function(){
+        var m;
+        if(o!=='1')m=new THREE.MeshPhongMaterial({color:0xffffff,map:getOccupancyTexture(col,occ),shininess:80,specular:0x444444});
+        else m=new THREE.MeshPhongMaterial({color:new THREE.Color(col),shininess:80,specular:0x444444});
+        if(state===1){m.emissive=new THREE.Color(0xffff00);m.emissiveIntensity=0.6}
+        else if(state===2){m.emissive=new THREE.Color(0xff6600);m.emissiveIntensity=0.4}
+        return m;
+    });
+}
+// Ask for one of those three states. Every writer of the highlight goes
+// through here, so no call site can leave a shared material in a changed state
+// for the atoms it is shared with.
+function setAtomHighlight(mesh,state){
+    if(!mesh||!mesh.userData)return;
+    mesh.material=atomMaterial(mesh.userData.baseColor!=null?mesh.userData.baseColor:'#FF1493',mesh.userData.occ,state);
+}
+// The comparison's atoms follow the same idea, with the diff highlight being a
+// colour of its own (0xff6600, the way the comparison has always marked a
+// difference) rather than a glow over the structure's colour.
+function diffAtomMaterial(col,state){
+    return pooledMat('d|'+col+'|'+state,function(){
+        var m=new THREE.MeshPhongMaterial({color:new THREE.Color(state===2?0xff6600:col),shininess:80,specular:0x444444});
+        if(state===1){m.emissive=new THREE.Color(0xffff00);m.emissiveIntensity=0.6}
+        else if(state===2){m.emissive=new THREE.Color(0xff6600);m.emissiveIntensity=0.4}
+        return m;
+    });
+}
+function setDiffAtomHighlight(mesh,state){
+    if(!mesh||!mesh.userData)return;
+    mesh.material=diffAtomMaterial(mesh.userData.baseColor!=null?mesh.userData.baseColor:'#FF1493',state);
+}
 
 function disposeMesh(ch){
-    if(ch.geometry)ch.geometry.dispose();
-    if(ch.material){
+    // A pooled geometry/material is still drawing every other atom or bond
+    // with the same shape or colour, so it must not be released with the one
+    // mesh that happened to be disposed first.
+    if(ch.geometry&&!(ch.geometry.userData&&ch.geometry.userData.shared))ch.geometry.dispose();
+    if(ch.material&&!(ch.material.userData&&ch.material.userData.shared)){
         if(ch.material.map)ch.material.map.dispose();
         ch.material.dispose();
     }
@@ -2091,6 +2207,115 @@ function sphereSegs(n){
     if(n<=1000)return [20,16];
     return [12,10];
 }
+
+// ===== Bonds: one instanced mesh for every cylinder =====
+// A bond used to be two to eight separate meshes — a cylinder per half, six
+// more for an aromatic bond's dashed line — so 3309 bonds became 13906 meshes,
+// which is where most of the object count came from. A bond piece is now a
+// *record*: one shared unit cylinder draws all of them, with the piece's own
+// radius and length in the instance matrix and its colour in the instance
+// colour buffer. Placement lives in one routine that reads a piece's transform
+// off the two atoms it spans — the very arithmetic normal-mode playback
+// already used — so building a piece and animating it can no longer drift.
+var bondPieceIdx=[];        // bond index -> [piece slot, ...]
+var _bpDir=new THREE.Vector3(),_bpQuat=new THREE.Quaternion();
+var _bpM=new THREE.Matrix4(),_bpPos=new THREE.Vector3(),_bpScale=new THREE.Vector3();
+var _bpCol=new THREE.Color(),_bpY=new THREE.Vector3(0,1,0);
+
+// One instanced cylinder pool: a unit cylinder (radius 1, height 1, centred),
+// its own material, and the piece list that fills it. The main structure draws
+// every bond from the single pool below; the comparison draws its bonds from
+// two, because a highlighted bond carries an orange glow in its material.
+function newBondPool(shininess,emiCol,emiInt,parent){
+    return {
+        pieces:[],
+        inst:null,
+        cap:0,
+        parent:parent,
+        mat:pooledMat('bond|'+shininess+'|'+emiCol+'|'+emiInt,function(){
+            var m=new THREE.MeshPhongMaterial({color:0xffffff,shininess:shininess,specular:0x222222});
+            if(emiCol){m.emissive=new THREE.Color(emiCol);m.emissiveIntensity=emiInt}
+            return m;
+        })
+    };
+}
+function unitCylinderGeo(){
+    return pooledGeo('cyl8',function(){return new THREE.CylinderGeometry(1,1,1,8,1)});
+}
+// Grow (never shrink) the pool's instanced mesh. The mesh is only recreated
+// when the piece count outgrows the capacity, so an edit that only moves atoms
+// reuses the buffers it already uploaded.
+function poolEnsure(pool,n){
+    if(pool.inst&&pool.cap>=n){
+        // A scene rebuild clears the group the pool draws into, so the mesh
+        // has to be put back before it is drawn again — its buffers are still
+        // uploaded and its size is unchanged, which is the whole point of
+        // keeping the capacity.
+        if(pool.parent&&pool.inst.parent!==pool.parent)pool.parent.add(pool.inst);
+        return;
+    }
+    if(pool.inst){
+        if(pool.inst.parent)pool.inst.parent.remove(pool.inst);
+        pool.inst.dispose();
+        pool.inst=null;
+    }
+    var cap=1;
+    while(cap<n)cap*=2;
+    var inst=new THREE.InstancedMesh(unitCylinderGeo(),pool.mat,cap);
+    // The instances span the whole structure while the shared unit geometry is
+    // one unit wide, so the mesh's own bounding sphere says nothing about where
+    // its bonds are and three.js would cull the lot as soon as the origin left
+    // the view. One draw call is cheap enough to always draw.
+    inst.frustumCulled=false;
+    _bpCol.setRGB(1,1,1);
+    for(var i=0;i<cap;i++)inst.setColorAt(i,_bpCol);
+    inst.count=0;
+    pool.inst=inst;pool.cap=cap;
+    if(pool.parent)pool.parent.add(inst);
+}
+// Write one piece's transform and colour. The cylinder's midpoint is the
+// instance position, its length the y scale and its radius the x/z scale, so a
+// single unit cylinder covers every radius and length in the structure. The
+// colour goes straight into the instance colour buffer — no temporary colour
+// object per piece per frame.
+function poolPut(pool,slot,px,py,pz,dx,dy,dz,l,r,col){
+    _bpDir.set(dx,dy,dz).normalize();
+    _bpQuat.setFromUnitVectors(_bpY,_bpDir);
+    _bpM.compose(_bpPos.set(px,py,pz),_bpQuat,_bpScale.set(r,l,r));
+    pool.inst.setMatrixAt(slot,_bpM);
+    var arr=pool.inst.instanceColor.array;
+    arr[slot*3]=col.r;arr[slot*3+1]=col.g;arr[slot*3+2]=col.b;
+}
+// A piece that cannot be placed (its bond or an atom is gone, or the two atoms
+// sit on top of each other) is collapsed to zero size rather than left wearing
+// the transform it had a frame ago.
+function poolHide(pool,slot){
+    _bpM.makeScale(0,0,0);
+    pool.inst.setMatrixAt(slot,_bpM);
+}
+function poolUpload(pool){
+    if(!pool.inst)return;
+    // The count field is how many instances the mesh *draws*, and it is the one
+    // field three.js does not take from the buffers: a new InstancedMesh starts
+    // at the capacity, but a pool that is refilled after an edit or a rebuild
+    // has to state its piece count here or it draws whatever it was left at (a
+    // fresh mesh is created with count 0, so forgetting this draws no bonds at
+    // all).
+    pool.inst.count=pool.pieces.length;
+    pool.inst.instanceMatrix.needsUpdate=true;
+    if(pool.inst.instanceColor)pool.inst.instanceColor.needsUpdate=true;
+}
+function poolClear(pool){
+    if(pool.inst){
+        if(pool.inst.parent)pool.inst.parent.remove(pool.inst);
+        pool.inst.dispose();
+        pool.inst=null;pool.cap=0;
+    }
+    pool.pieces.length=0;
+}
+
+// The main structure's bonds: one pool, one draw call, whatever the size.
+var bondPool=newBondPool(40,0,0,moleculeGroup);
 
 // ===== VMD Surf patches =====
 // A "mol representation Surf <probe> <isovalue>" patch is the isosurface of
@@ -2429,36 +2654,40 @@ function rebuildScene(){
     oldChildren.forEach(function(ch){disposeMesh(ch);moleculeGroup.remove(ch)});
     if(vmdSurfaceGroup)moleculeGroup.add(vmdSurfaceGroup);
     atomMeshes.length=0;
-    bondMeshes.length=0;
     cellWireframe=null;
     rotAxisLineMesh=null;
     CX=0;CY=0;CZ=0;
     MD.atoms.forEach(function(a){CX+=a.x;CY+=a.y;CZ+=a.z});
     if(MD.atoms.length>0){CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length}
     var segs=sphereSegs();
+    // The pools are caches: an entry outlives the meshes that drew with it, so
+    // a rebuild after an edit or a colour toggle does not re-create every
+    // material. Scalar colouring is the one case where the number of entries
+    // grows with the data — every distinct scalar is its own colour, so a
+    // 2175-atom structure carrying a B-factor per atom reaches a few hundred
+    // (measured: 524) — so the material pool is dropped once it passes a bound
+    // no real structure reaches. Only the cache is emptied: the meshes on
+    // screen hold their own references, so nothing about the picture changes.
+    if(Object.keys(matPool).length>8192)matPool={};
     MD.atoms.forEach(function(a,i){
         a.index=i;
         var r=atomRadius(a);
         var drawn=r>0.0005;
-        var g=new THREE.SphereGeometry(drawn?r:0.001,segs[0],segs[1]);
         // 标量配色是视图状态: 在这里按原子现算, a.color 保持元素颜色不变。
         var col=betaColorOf(a)||a.color;
         var occ=a.occupancy!=null?a.occupancy:1;
-        var m;
-        if(occ<0.999){
-            var tex=getOccupancyTexture(col,occ);
-            m=new THREE.MeshPhongMaterial({color:0xffffff,map:tex,shininess:80,specular:0x444444});
-        }else{
-            m=new THREE.MeshPhongMaterial({color:new THREE.Color(col),shininess:80,specular:0x444444});
-        }
-        var mesh=new THREE.Mesh(g,m);
+        // Geometry and material come from the pools: atoms of the same radius
+        // (and colour/occupancy) draw with the very same objects, so a
+        // structure of any size costs a handful of GPU buffers and materials
+        // instead of one of each per atom.
+        var mesh=new THREE.Mesh(sphereGeoFor(drawn?r:0.001,segs),atomMaterial(col,occ,0));
         mesh.position.set(a.x-CX,a.y-CY,a.z-CZ);
-        mesh.userData={element:a.element,index:i};
+        mesh.userData={element:a.element,index:i,baseColor:col,occ:occ};
         mesh.visible=drawn;
         moleculeGroup.add(mesh);
         atomMeshes.push(mesh);
     });
-    for(var bi=0;bi<MD.bonds.length;bi++){currentBondIdx=bi;createBond(MD.bonds[bi])}
+    rebuildBondPieces();
     if(CRY)buildCellWireframe();
     highlightSelected();
     needsRender=true;
@@ -2477,9 +2706,7 @@ function updateScenePositions(keepCenter){
         if(MD.atoms.length>0){CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length}
     }
     atomMeshes.forEach(function(m,i){var a=MD.atoms[i];if(a)m.position.set(a.x-CX,a.y-CY,a.z-CZ)});
-    for(var i=bondMeshes.length-1;i>=0;i--){disposeMesh(bondMeshes[i]);moleculeGroup.remove(bondMeshes[i])}
-    bondMeshes.length=0;
-    for(var bi=0;bi<MD.bonds.length;bi++){currentBondIdx=bi;createBond(MD.bonds[bi])}
+    rebuildBondPieces();
     if(CRY)buildCellWireframe();
     highlightSelected();
     hideVmdSurfaces();
@@ -2502,9 +2729,10 @@ function shiftAllMeshesForCenter(dx,dy,dz){
     for(i=0;i<atomMeshes.length;i++){
         atomMeshes[i].position.x-=dx;atomMeshes[i].position.y-=dy;atomMeshes[i].position.z-=dz;
     }
-    for(i=0;i<bondMeshes.length;i++){
-        bondMeshes[i].position.x-=dx;bondMeshes[i].position.y-=dy;bondMeshes[i].position.z-=dz;
-    }
+    // A bond piece's transform is computed from the atoms *minus the centre*,
+    // so re-placing them all against the new centre is the same shift — and it
+    // is one pass over the instances, with no geometry involved.
+    placeBondPieces();
     // Surface meshes need no shift: their geometry is written relative to the
     // centre, and refreshVmdSurfaces rebuilds them for the new one.
 }
@@ -2528,81 +2756,106 @@ function updateRotationCenter(){
     needsRender=true;
 }
 
-// Incremental bond-mesh rebuild for Move Atoms drags: only bonds with at
-// least one endpoint in the moving selection are rebuilt; every other bond
-// mesh is left untouched (its endpoints did not move, so it is still exact).
+// Rebuild every piece from the current bond list. A piece is pure
+// description, so building the list is cheap; the instanced mesh that draws
+// them is only ever recreated when the count outgrows the capacity it has.
+function rebuildBondPieces(){
+    bondPool.pieces.length=0;
+    for(var bi=0;bi<MD.bonds.length;bi++){currentBondIdx=bi;createBond(MD.bonds[bi])}
+    reindexBondPieces();
+    placeBondPieces();
+}
+// bond index -> the piece slots that draw it, so a drag can re-place exactly
+// the bonds that moved without walking the whole list.
+function reindexBondPieces(){
+    bondPieceIdx=[];
+    for(var i=0;i<bondPool.pieces.length;i++){
+        var bi=bondPool.pieces[i].bondIdx;
+        if(!bondPieceIdx[bi])bondPieceIdx[bi]=[];
+        bondPieceIdx[bi].push(i);
+    }
+}
+// Place every piece and upload the instance buffers once. This is the whole
+// structure's bond refresh (a scene rebuild, a frame switch, a centre change)
+// and also one frame of a normal-mode playback — the arithmetic the two used to
+// keep apart is now the same routine.
+function placeBondPieces(){
+    if(bondPool.pieces.length===0){poolClear(bondPool);needsRender=true;return}
+    poolEnsure(bondPool,bondPool.pieces.length);
+    for(var i=0;i<bondPool.pieces.length;i++)placePiece(bondPool,i);
+    poolUpload(bondPool);
+    needsRender=true;
+}
+
+// Incremental bond refresh for Move Atoms drags: only bonds with at least one
+// endpoint in the moving selection are re-placed; every other piece keeps the
+// transform it already has (its endpoints did not move, so it is still exact).
+// A drag changes no bond's order, so each affected bond's pieces keep their
+// slots and only their instance matrices are rewritten — no geometry at all.
 // Runs synchronously on every drag frame so bonds never lag behind atoms.
 function rebuildBondsTouching(selSet){
     var sel={};
     for(var i=0;i<selSet.length;i++)sel[selSet[i]]=true;
-    var affected={};
     for(var bi=0;bi<MD.bonds.length;bi++){
         var b=MD.bonds[bi];
-        if(sel[b.atom1]||sel[b.atom2])affected[bi]=true;
+        if(!sel[b.atom1]&&!sel[b.atom2])continue;
+        var slots=bondPieceIdx[bi];
+        if(!slots)continue;
+        for(var k=0;k<slots.length;k++)placePiece(bondPool,slots[k]);
     }
-    for(var i=bondMeshes.length-1;i>=0;i--){
-        if(affected[bondMeshes[i].userData.bondIdx]){
-            disposeMesh(bondMeshes[i]);moleculeGroup.remove(bondMeshes[i]);
-            bondMeshes.splice(i,1);
-        }
-    }
-    for(var bi=0;bi<MD.bonds.length;bi++){
-        if(!affected[bi])continue;
-        currentBondIdx=bi;createBond(MD.bonds[bi]);
-    }
+    poolUpload(bondPool);
     needsRender=true;
 }
 
-// Release-time localized bond-mesh rebuild for Move Atoms: recomputeMovedBonds
-// just replaced MD.bonds with a re-derived list, so meshes for bonds in the
+// Release-time localized bond rebuild for Move Atoms: recomputeMovedBonds just
+// replaced MD.bonds with a re-derived list, so the pieces of bonds in the
 // affected region are stale (bonds may have appeared, vanished or changed
-// order) while every other mesh is still exact (its endpoints never moved).
-// Disposes the meshes whose OLD bond touched the region (by old index — the
-// list has already been re-derived), renumbers the surviving meshes' bondIdx
-// into the new bond array (indices shifted because the removed bonds sat in
-// the middle of the old list — updateVibBondMeshes() dereferences bondIdx
-// into MD.bonds, so stale indices would vibrate the wrong bond), then
-// rebuilds only the new region bonds.
+// order) while every other piece is still exact (its endpoints never moved).
+// Drops the pieces whose OLD bond touched the region (by old index — the list
+// has already been re-derived), renumbers the surviving pieces into the new
+// bond array (indices shifted because the removed bonds sat in the middle of
+// the old list — placePiece() dereferences bondIdx into MD.bonds, so a stale
+// index would place the wrong bond), then adds only the region's new bonds.
 function rebuildMovedBondMeshes(oldBonds,selSet){
     var sel={};
     for(var i=0;i<selSet.length;i++)sel[selSet[i]]=true;
-    var affected={};
-    for(var bi=0;bi<MD.bonds.length;bi++){
-        var b=MD.bonds[bi];
-        if(sel[b.atom1]||sel[b.atom2])affected[bi]=true;
-    }
-    for(var i=bondMeshes.length-1;i>=0;i--){
-        var ob=oldBonds[bondMeshes[i].userData.bondIdx];
-        if(ob&&(sel[ob.atom1]||sel[ob.atom2])){disposeMesh(bondMeshes[i]);moleculeGroup.remove(bondMeshes[i]);bondMeshes.splice(i,1)}
+    var keep=[];
+    for(i=0;i<bondPool.pieces.length;i++){
+        var p=bondPool.pieces[i];
+        var ob=oldBonds[p.bondIdx];
+        if(ob&&(sel[ob.atom1]||sel[ob.atom2]))continue;
+        keep.push(p);
     }
     if(oldBonds!==MD.bonds){
         var key2idx={};
-        for(bi=0;bi<MD.bonds.length;bi++){var b2=MD.bonds[bi];key2idx[Math.min(b2.atom1,b2.atom2)+'-'+Math.max(b2.atom1,b2.atom2)]=bi}
-        for(i=0;i<bondMeshes.length;i++){
-            var ob2=oldBonds[bondMeshes[i].userData.bondIdx];
+        for(var bi=0;bi<MD.bonds.length;bi++){var b2=MD.bonds[bi];key2idx[Math.min(b2.atom1,b2.atom2)+'-'+Math.max(b2.atom1,b2.atom2)]=bi}
+        for(i=0;i<keep.length;i++){
+            var ob2=oldBonds[keep[i].bondIdx];
             if(!ob2)continue;
-            bondMeshes[i].userData.bondIdx=key2idx[Math.min(ob2.atom1,ob2.atom2)+'-'+Math.max(ob2.atom1,ob2.atom2)];
+            keep[i].bondIdx=key2idx[Math.min(ob2.atom1,ob2.atom2)+'-'+Math.max(ob2.atom1,ob2.atom2)];
         }
     }
+    bondPool.pieces.length=0;
+    for(i=0;i<keep.length;i++)bondPool.pieces.push(keep[i]);
     for(bi=0;bi<MD.bonds.length;bi++){
-        if(!affected[bi])continue;
-        currentBondIdx=bi;createBond(MD.bonds[bi]);
+        var b=MD.bonds[bi];
+        if(!sel[b.atom1]&&!sel[b.atom2])continue;
+        currentBondIdx=bi;createBond(b);
     }
-    needsRender=true;
+    reindexBondPieces();
+    placeBondPieces();
 }
 
-function getPerp(dir){
-    var up=Math.abs(dir.y)<0.99?new THREE.Vector3(0,1,0):new THREE.Vector3(1,0,0);
-    return new THREE.Vector3().crossVectors(dir,up).normalize();
-}
-
-function createBond(b){
+// Place one piece from the current atom coordinates. The piece's position,
+// orientation and size all follow the two atoms it spans, so this is the single
+// source of bond geometry: building the scene, dragging an atom, streaming an
+// optimisation and playing a normal mode all end up here.
+function placePiece(pool,slot){
+    var p=pool.pieces[slot];
+    var b=MD.bonds[p.bondIdx];
+    if(!b||p.bondIdx<0||p.bondIdx>=MD.bonds.length){poolHide(pool,slot);return}
     var a1=MD.atoms[b.atom1],a2=MD.atoms[b.atom2];
-    if(!a1||!a2)return;
-    // A VMD script sets the bond radius per bond (the representation that
-    // covers both endpoints); 0 means the script does not draw it at all.
-    var br=typeof b.vmdR==='number'?b.vmdR:0.12;
-    if(br<=0.0005)return;
+    if(!a1||!a2){poolHide(pool,slot);return}
     var a2x=a2.x,a2y=a2.y,a2z=a2.z;
     if(b.shift&&CRY){
         var lv=CRY.latticeVectors;
@@ -2610,75 +2863,103 @@ function createBond(b){
         a2y+=b.shift[0]*lv[0][1]+b.shift[1]*lv[1][1]+b.shift[2]*lv[2][1];
         a2z+=b.shift[0]*lv[0][2]+b.shift[1]*lv[1][2]+b.shift[2]*lv[2][2];
     }
-    var s=new THREE.Vector3(a1.x-CX,a1.y-CY,a1.z-CZ);
-    var e=new THREE.Vector3(a2x-CX,a2y-CY,a2z-CZ);
-    var d=new THREE.Vector3().subVectors(e,s);
-    var l=d.length();
-    var mp=new THREE.Vector3().addVectors(s,e).multiplyScalar(0.5);
-    var ord=b.order||1;
-    // Multiple-bond line offsets keep their proportions to the bond radius.
-    var offK=br/0.12;
-    var c1=new THREE.Color(a1.color),c2=new THREE.Color(a2.color);
-    if(ord<1.25){hBond(s,mp,d,l/2,br,c1,{half:0});hBond(mp,e,d,l/2,br,c2,{half:1})}
-    else if(ord<1.75){var off=0.10*offK,p=getPerp(d).multiplyScalar(off);
-        hBond(s,mp,d,l/2,br,c1,{half:0});hBond(mp,e,d,l/2,br,c2,{half:1});
-        hDashedBond(s.clone().add(p),e.clone().add(p),d,l,br*0.7,c1,6,1,off);
-    }else if(ord<2.5){var off=0.12*offK,p=getPerp(d).multiplyScalar(off);
-        hBond(s.clone().add(p),mp.clone().add(p),d,l/2,br*0.6,c1,{half:0,perpSign:1,perpMag:off});hBond(mp.clone().add(p),e.clone().add(p),d,l/2,br*0.6,c2,{half:1,perpSign:1,perpMag:off});
-        hBond(s.clone().sub(p),mp.clone().sub(p),d,l/2,br*0.6,c1,{half:0,perpSign:-1,perpMag:off});hBond(mp.clone().sub(p),e.clone().sub(p),d,l/2,br*0.6,c2,{half:1,perpSign:-1,perpMag:off});
-    }else if(ord<3.5){var off=0.15*offK,p=getPerp(d).multiplyScalar(off);
-        hBond(s,mp,d,l/2,br*0.45,c1,{half:0});hBond(mp,e,d,l/2,br*0.45,c2,{half:1});
-        hBond(s.clone().add(p),mp.clone().add(p),d,l/2,br*0.45,c1,{half:0,perpSign:1,perpMag:off});hBond(mp.clone().add(p),e.clone().add(p),d,l/2,br*0.45,c2,{half:1,perpSign:1,perpMag:off});
-        hBond(s.clone().sub(p),mp.clone().sub(p),d,l/2,br*0.45,c1,{half:0,perpSign:-1,perpMag:off});hBond(mp.clone().sub(p),e.clone().sub(p),d,l/2,br*0.45,c2,{half:1,perpSign:-1,perpMag:off});
-    }else{hBond(s,mp,d,l/2,br,c1,{half:0});hBond(mp,e,d,l/2,br,c2,{half:1})}
+    var sx=a1.x-CX,sy=a1.y-CY,sz=a1.z-CZ;
+    var ex=a2x-CX,ey=a2y-CY,ez=a2z-CZ;
+    var dx=ex-sx,dy=ey-sy,dz=ez-sz;
+    var l=Math.sqrt(dx*dx+dy*dy+dz*dz);
+    if(l<0.001){poolHide(pool,slot);return}
+    var mpx=(sx+ex)*0.5,mpy=(sy+ey)*0.5,mpz=(sz+ez)*0.5;
+    var px=0,py=0,pz=0;
+    if(p.perpMag){
+        // The extra line of a double or triple bond sits in the plane
+        // perpendicular to it: cross the bond with y — or with x for a bond
+        // that is itself nearly parallel to y, where that cross product would
+        // vanish and the direction would be lost.
+        var upx=0,upy=1,upz=0;
+        if(Math.abs(dy)>=0.99){upx=1;upy=0;upz=0}
+        var qx=dy*upz-dz*upy,qy=dz*upx-dx*upz,qz=dx*upy-dy*upx;
+        var ql=Math.sqrt(qx*qx+qy*qy+qz*qz);
+        if(ql>0.0001){qx/=ql;qy/=ql;qz/=ql}
+        var off=p.perpMag*p.perpSign;
+        px=qx*off;py=qy*off;pz=qz*off;
+    }
+    if(p.isDashed){
+        // The dash window is stored as a fraction of the bond, so the dashes
+        // follow the bond when it stretches — an aromatic bond that a drag
+        // lengthens keeps its pattern instead of leaving a gap.
+        var t0=p.dashT0*l,t1=p.dashT1*l;
+        var dl=t1-t0;
+        if(dl<0.001){poolHide(pool,slot);return}
+        var dirx=dx/l,diry=dy/l,dirz=dz/l;
+        var dsx=sx+dirx*t0+px,dsy=sy+diry*t0+py,dsz=sz+dirz*t0+pz;
+        var dex=sx+dirx*t1+px,dey=sy+diry*t1+py,dez=sz+dirz*t1+pz;
+        poolPut(pool,slot,(dsx+dex)*0.5,(dsy+dey)*0.5,(dsz+dez)*0.5,dx,dy,dz,dl,p.r,p.col);
+        return;
+    }
+    var msx,msy,msz,mex,mey,mez;
+    if(p.half===0){msx=sx+px;msy=sy+py;msz=sz+pz;mex=mpx+px;mey=mpy+py;mez=mpz+pz}
+    else{msx=mpx+px;msy=mpy+py;msz=mpz+pz;mex=ex+px;mey=ey+py;mez=ez+pz}
+    var hdx=mex-msx,hdy=mey-msy,hdz=mez-msz;
+    var hl=Math.sqrt(hdx*hdx+hdy*hdy+hdz*hdz);
+    if(hl<0.001){poolHide(pool,slot);return}
+    poolPut(pool,slot,(msx+mex)*0.5,(msy+mey)*0.5,(msz+mez)*0.5,hdx,hdy,hdz,hl,p.r,p.col);
 }
 
-function hDashedBond(s,e,d,hl,r,c,dashes,perpSign,perpMag){
-    var seg=hl/dashes, gap=seg*0.35, dashLen=seg-gap;
-    var dir=d.clone().normalize();
+// One drawn cylinder of one bond. Nothing is placed here: a piece records
+// *what* to draw (radius, colour, which half, the aromatic dash window, the
+// multiple-bond offset) and placePiece() reads its transform off the atoms
+// every time, so an edit or an animation can never leave a piece behind.
+function addBondPiece(r,col,isDashed,dashT0,dashT1,perpSign,perpMag,half){
+    bondPool.pieces.push({bondIdx:currentBondIdx,r:r,col:col,isDashed:!!isDashed,
+        dashT0:dashT0||0,dashT1:dashT1||0,perpSign:perpSign||0,perpMag:perpMag||0,half:half||0});
+}
+// The dashed line of an aromatic bond: six short cylinders along the bond,
+// shifted onto one side by the same kind of offset a double bond uses.
+function addDashPieces(r,col,off){
+    var dashes=6,seg=1/dashes,gap=seg*0.35,dashLen=seg-gap;
     for(var k=0;k<dashes;k++){
         var t0=k*seg+gap*0.5;
         var t1=t0+dashLen;
-        if(t1>hl)t1=hl;
-        var ds=s.clone().add(dir.clone().multiplyScalar(t0));
-        var de=s.clone().add(dir.clone().multiplyScalar(t1));
-        var dm=new THREE.Vector3().addVectors(ds,de).multiplyScalar(0.5);
-        var dl=t1-t0;
-        if(dl<0.001)continue;
-        var g=new THREE.CylinderGeometry(r,r,dl,6,1);
-        var m=new THREE.MeshPhongMaterial({color:c,shininess:40,specular:0x222222});
-        var mesh=new THREE.Mesh(g,m);
-        mesh.position.copy(dm);
-        var axis=new THREE.Vector3(0,1,0);
-        mesh.quaternion.copy(new THREE.Quaternion().setFromUnitVectors(axis,dir));
-        mesh.userData.bondIdx=currentBondIdx;
-        mesh.userData.origHl=dl;
-        mesh.userData.isDashed=true;
-        mesh.userData.dashT0=t0/hl;
-        mesh.userData.dashT1=t1/hl;
-        mesh.userData.perpSign=perpSign||0;
-        mesh.userData.perpMag=perpMag||0;
-        moleculeGroup.add(mesh);
-        bondMeshes.push(mesh);
+        if(t1>1)t1=1;
+        addBondPiece(r,col,true,t0,t1,1,off,0);
     }
 }
-function hBond(s,e,d,hl,r,c,meta){
-    var g=new THREE.CylinderGeometry(r,r,hl,8,1);
-    var m=new THREE.MeshPhongMaterial({color:c,shininess:40,specular:0x222222});
-    var mesh=new THREE.Mesh(g,m);
-    var mid=new THREE.Vector3().addVectors(s,e).multiplyScalar(0.5);
-    mesh.position.copy(mid);
-    var axis=new THREE.Vector3(0,1,0);
-    mesh.quaternion.copy(new THREE.Quaternion().setFromUnitVectors(axis,d.clone().normalize()));
-    if(meta){
-        mesh.userData.bondIdx=currentBondIdx;
-        mesh.userData.origHl=hl;
-        mesh.userData.half=meta.half;
-        mesh.userData.perpSign=meta.perpSign||0;
-        mesh.userData.perpMag=meta.perpMag||0;
+
+// Declare the pieces one bond is drawn with. The order thresholds are the same
+// the viewer has always used: one line below 1.25, an aromatic line with its
+// dashed partner below 1.75, two lines below 2.5, three below 3.5.
+function createBond(b){
+    var a1=MD.atoms[b.atom1],a2=MD.atoms[b.atom2];
+    if(!a1||!a2)return;
+    // A VMD script sets the bond radius per bond (the representation that
+    // covers both endpoints); 0 means the script does not draw it at all.
+    var br=typeof b.vmdR==='number'?b.vmdR:0.12;
+    if(br<=0.0005)return;
+    var ord=b.order||1;
+    // Multiple-bond line offsets keep their proportions to the bond radius.
+    var offK=br/0.12;
+    // 键的两半跟随它连的原子: 标量 (Beta) 配色下原子球是按标量画视图色, 这里
+    // 让半键读同一个颜色, 一根键两半就与两端原子一致。betaColorOf 在配色关闭
+    // (或原子没有标量) 时返回 null, 退化成元素颜色, 非 Beta 文件的行为不变。
+    var c1=new THREE.Color(betaColorOf(a1)||a1.color),c2=new THREE.Color(betaColorOf(a2)||a2.color);
+    if(ord<1.25){
+        addBondPiece(br,c1,false,0,0,0,0,0);addBondPiece(br,c2,false,0,0,0,0,1);
+    }else if(ord<1.75){
+        var off=0.10*offK;
+        addBondPiece(br,c1,false,0,0,0,0,0);addBondPiece(br,c2,false,0,0,0,0,1);
+        addDashPieces(br*0.7,c1,off);
+    }else if(ord<2.5){
+        var off2=0.12*offK;
+        addBondPiece(br*0.6,c1,false,0,0,1,off2,0);addBondPiece(br*0.6,c2,false,0,0,1,off2,1);
+        addBondPiece(br*0.6,c1,false,0,0,-1,off2,0);addBondPiece(br*0.6,c2,false,0,0,-1,off2,1);
+    }else if(ord<3.5){
+        var off3=0.15*offK;
+        addBondPiece(br*0.45,c1,false,0,0,0,0,0);addBondPiece(br*0.45,c2,false,0,0,0,0,1);
+        addBondPiece(br*0.45,c1,false,0,0,1,off3,0);addBondPiece(br*0.45,c2,false,0,0,1,off3,1);
+        addBondPiece(br*0.45,c1,false,0,0,-1,off3,0);addBondPiece(br*0.45,c2,false,0,0,-1,off3,1);
+    }else{
+        addBondPiece(br,c1,false,0,0,0,0,0);addBondPiece(br,c2,false,0,0,0,0,1);
     }
-    moleculeGroup.add(mesh);
-    bondMeshes.push(mesh);
 }
 
 var isRot=false,isPan=false,prevM={x:0,y:0},panX=0,panY=0,camDist=10;
@@ -2939,8 +3220,12 @@ function endFragRot(){
 }
 function stopMoveSession(){
     // Force-terminate any in-progress move/rotate (mode switch, frame switch,
-    // undo, delete...). The latch prevents arrow keys (still held down) from
-    // instantly starting a new session; it clears once all keys are released.
+    // undo, delete...). An Alt-drag writes the same coordinates a move session
+    // writes, and every entry that replaces the structure already passes
+    // through here, so it is ended at this one door too. The latch prevents
+    // arrow keys (still held down) from instantly starting a new session; it
+    // clears once all keys are released.
+    if(bakeActive)endBakeSession();
     if(moveDragActive||moveKeyActive||fragRotActive){
         moveDragActive=false;moveKeyActive=false;fragRotActive=false;
         moveKeyLatch=true;
@@ -3881,6 +4166,9 @@ function mmCancelRun(){
 var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',replaceAtom:'Replace Atom - Click atom(s) to select, click button again to confirm',addH:'Add H - Click atom(s) to select, click the button again to complete their hydrogens',selectAtoms:'Select Atoms - Input indices or element symbols',boxSelect:'Box Select - Drag a rectangle to select atoms',rotateGroup:'Rotate Group - Select group + axis atoms, then adjust angle',mmOpt:'Molecular Mechanics - Click atoms to select them; the panel optimizes only those atoms',moveAtoms:'Move Atoms - Select atoms; drag/arrows rotate view, right-drag pans; Ctrl+drag or Ctrl+arrows rotates group, Ctrl+right-drag moves group'};
 
 function setMode(m){
+    // An Alt-drag that is still running belongs to the mode it started in: a
+    // mode switch commits the coordinates it has written so far.
+    if(bakeActive)endBakeSession();
     if(m==='moveAtoms'&&CRY){
         // Moving atoms in a periodic supercell breaks image consistency;
         // the mode is only offered for molecular structures.
@@ -3929,9 +4217,15 @@ function setMode(m){
     }
     var oldMode=currentMode;
     currentMode=m;
+    bakeHintShown=false;
+    updateBakeHint();
     var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect'||oldMode==='replaceAtom'||oldMode==='addH'||oldMode==='rotateGroup'||oldMode==='moveAtoms'||oldMode==='mmOpt')&&(m==='selectAtoms'||m==='boxSelect'||m==='replaceAtom'||m==='addH'||m==='rotateGroup'||m==='moveAtoms'||m==='mmOpt'));
     if(oldMode==='moveAtoms'&&m!=='moveAtoms')stopMoveSession();
     if(oldMode==='mmOpt'&&m!=='mmOpt')mmCancelRun();
+    // Auto Rotate is a View-mode control: leaving the mode takes its panel away,
+    // so the spin it started ends with it rather than running on with no way
+    // back to the switch.
+    if(oldMode==='view'&&m!=='view')stopSpin();
     if(!preserveSel){
         selectedAtoms=[];diffSelectedAtoms=[];originalCoords=null;
     }
@@ -3943,6 +4237,12 @@ function setMode(m){
     if(sp2)sp2.style.display=(m==='selectAtoms')?'block':'none';
     var rp2=document.getElementById('rotate-panel');
     if(rp2)rp2.style.display=(m==='rotateGroup')?'block':'none';
+    var vp2=document.getElementById('view-panel');
+    if(vp2)vp2.style.display=(m==='view')?'block':'none';
+    // The Edit Coordinates card is the second half of the View-mode controls and
+    // shares its visibility, but it is its own box in layoutPanels().
+    var bp2=document.getElementById('bake-panel');
+    if(bp2)bp2.style.display=(m==='view')?'block':'none';
     var mp2=mmPanelEl();
     if(mp2){
         if(m==='mmOpt'){showMmPanel()}else if(mp2.classList.contains('show')){mp2.classList.remove('show')}
@@ -4244,6 +4544,7 @@ function commitRotAngle(newAngle){
     });
 })();
 document.getElementById('reset-btn').addEventListener('click',function(){
+    stopSpin();
     rotQuat.identity();panX=0;panY=0;
     if(diffMode){
         camDist=camDiffInit();diffCamDist=camDist;
@@ -4271,6 +4572,7 @@ function doUndo(){
     if(mmRun)mmCancelRun();
     if(vibActive||vibPaused)stopVibration();
     if(moveDragActive||moveKeyActive||fragRotActive)stopMoveSession();
+    if(bakeActive)endBakeSession();
     var snap=undoStack.pop();
     MD.atoms=snap.atoms;MD.bonds=snap.bonds;
     MD.hasExplicitBonds=!!snap.hasExplicitBonds;
@@ -4326,7 +4628,43 @@ var diffData=null;
 var diffPivot=null;
 var diffMolGroup=null;
 var diffAtomMeshes=[];
-var diffBondMeshes=[];
+// The comparison's bonds use the same instanced cylinders as the main
+// structure, in two pools: the plain one, and one whose material carries the
+// orange glow a highlighted bond is drawn with. A highlighted bond simply
+// belongs to the other pool, so the highlight costs a refill of the two lists.
+var diffBondPieces=[];
+var diffBondPoolPlain=newBondPool(40,0,0,null);
+var diffBondPoolHot=newBondPool(40,0xff6600,0.3,null);
+var _dbHotCol=new THREE.Color();
+function addDiffBondPiece(px,py,pz,dx,dy,dz,l,r,col,key,hi){
+    diffBondPieces.push({x:px,y:py,z:pz,dx:dx,dy:dy,dz:dz,l:l,r:r,col:col,key:key,hi:!!hi});
+}
+// Refill both pools from the piece list: each piece goes to the pool its
+// highlight state selects, and its colour follows. Called when the comparison
+// is built and whenever the highlighted set changes.
+function diffBuildBondPools(){
+    _dbHotCol.setRGB(1,0.4,0);
+    diffBondPoolPlain.parent=diffMolGroup;
+    diffBondPoolHot.parent=diffMolGroup;
+    diffBondPoolPlain.pieces.length=0;
+    diffBondPoolHot.pieces.length=0;
+    for(var i=0;i<diffBondPieces.length;i++){
+        var p=diffBondPieces[i];
+        (p.hi?diffBondPoolHot:diffBondPoolPlain).pieces.push(p);
+    }
+    diffWriteBondPool(diffBondPoolPlain);
+    diffWriteBondPool(diffBondPoolHot);
+    needsRender=true;
+}
+function diffWriteBondPool(pool){
+    if(pool.pieces.length===0){poolClear(pool);return}
+    poolEnsure(pool,pool.pieces.length);
+    for(var i=0;i<pool.pieces.length;i++){
+        var p=pool.pieces[i];
+        poolPut(pool,i,p.x,p.y,p.z,p.dx,p.dy,p.dz,p.l,p.r,p.hi?_dbHotCol:p.col);
+    }
+    poolUpload(pool);
+}
 var diffCX=0,diffCY=0,diffCZ=0;
 var diffRotQuat=new THREE.Quaternion();
 var diffThresholdPct=2;
@@ -4858,6 +5196,7 @@ function startDiff(msg){
         diffLabelRight.textContent='Diff: '+diffData.fileName+' (skeleton differs)';
         diffLabelRight.classList.add('show');
         modeInfoEl.textContent='Diff Mode (skeletons differ)';
+        updateBakeHint();
         enterDiffRender();
         layoutPanels();
         return;
@@ -5038,9 +5377,10 @@ function refreshDiff(){
             '<div class="diff-row">Left: '+MD.atoms.length+' atoms, '+diffDetBonds1.length+' bonds (detected)</div>'+
             '<div class="diff-row">Right: '+diffData.atoms.length+' atoms, '+diffDetBonds2.length+' bonds (detected)</div>';
         diffLabelRight.textContent='Diff: '+diffData.fileName+' (skeleton differs)';
-        atomMeshes.forEach(function(m){m.userData.diffHi=false;m.material.emissive=new THREE.Color(0x000000);m.material.emissiveIntensity=0});
-        diffAtomMeshes.forEach(function(m){m.userData.diffHi=false;if(m.material){if(m.userData.origColor)m.material.color.copy(m.userData.origColor);m.material.emissive=new THREE.Color(0x000000);m.material.emissiveIntensity=0}});
-        diffBondMeshes.forEach(function(m){if(m.material)m.material.emissive=new THREE.Color(0x000000)});
+        atomMeshes.forEach(function(m){m.userData.diffHi=false;setAtomHighlight(m,0)});
+        diffAtomMeshes.forEach(function(m){m.userData.diffHi=false;setDiffAtomHighlight(m,0)});
+        diffBondPieces.forEach(function(p){p.hi=false});
+        diffBuildBondPools();
         needsRender=true;
     }
 }
@@ -5065,27 +5405,16 @@ function updateDiffHighlights(diffs){
 
     diffAtomMeshes.forEach(function(m,i){
         var origI=diffReverseMapping?diffReverseMapping[i]:-1;
-        var isHi=origI>=0&&highlightAtoms[origI];
-        m.userData.diffHi=isHi?true:false;
-        if(m.userData.origColor){
-            m.material.color.copy(m.userData.origColor);
-        }
+        m.userData.diffHi=(origI>=0&&highlightAtoms[origI])?true:false;
     });
 
-    diffBondMeshes.forEach(function(mesh){
-        if(mesh.userData&&mesh.userData.bondKey){
-            var isHi=highlightBonds[mesh.userData.bondKey];
-            if(isHi){
-                mesh.material.color.set(0xff6600);
-                mesh.material.emissive=new THREE.Color(0xff6600);
-                mesh.material.emissiveIntensity=0.3;
-            }else{
-                mesh.material.color.copy(mesh.userData.origColor);
-                mesh.material.emissive=new THREE.Color(0x000000);
-                mesh.material.emissiveIntensity=0;
-            }
-        }
+    // A highlighted bond moves to the pool whose material carries the orange
+    // glow; the two pools are refilled from the piece list, which is a pass
+    // over the instances, not a material edit per mesh.
+    diffBondPieces.forEach(function(p){
+        if(p.key)p.hi=highlightBonds[p.key]?true:false;
     });
+    diffBuildBondPools();
 
     highlightSelected();
 }
@@ -5130,6 +5459,9 @@ diffReopenEl.addEventListener('click',function(){
 function enterDiffRender(diffs,mapping){
     if(vibActive||vibPaused)stopVibration();
     stopMoveSession();
+    // A comparison has two structures and two view states, so the panel stops
+    // advertising Alt coordinate editing for as long as it is up.
+    updateBakeHint();
     diffPivot=new THREE.Group();scene.add(diffPivot);
     diffMolGroup=new THREE.Group();diffPivot.add(diffMolGroup);
 
@@ -5155,43 +5487,39 @@ function enterDiffRender(diffs,mapping){
     var dSegs=sphereSegs(diffData.atoms.length);
     diffData.atoms.forEach(function(a,i){
         var r=getR(a.element);
-        var g=new THREE.SphereGeometry(r,dSegs[0],dSegs[1]);
         var isHi=highlightAtoms[mapping?mapping.indexOf(i):-1];
-        var origColor=new THREE.Color(a.color);
-        var col=isHi?new THREE.Color(0xff6600):origColor;
-        var m=new THREE.MeshPhongMaterial({color:col,shininess:80,specular:0x444444});
-        if(isHi){m.emissive=new THREE.Color(0xff6600);m.emissiveIntensity=0.4}
-        var mesh=new THREE.Mesh(g,m);
+        // Same pooled geometry and material scheme as the left-hand structure:
+        // a comparison of two large structures draws its two sides from a
+        // handful of objects instead of one per atom.
+        var mesh=new THREE.Mesh(sphereGeoFor(r,dSegs),diffAtomMaterial(a.color,isHi?2:0));
         mesh.position.set(a.x-diffCX,a.y-diffCY,a.z-diffCZ);
-        mesh.userData={element:a.element,index:i,diffHi:isHi?true:false,origColor:origColor};
+        mesh.userData={element:a.element,index:i,diffHi:isHi?true:false,baseColor:a.color};
         diffMolGroup.add(mesh);
         diffAtomMeshes.push(mesh);
     });
 
+    // The right-hand bonds: two pieces per bond (one per half), each carrying
+    // the transform it is drawn with. The comparison's structure never moves,
+    // so a piece stores its own numbers and the highlight can be re-applied by
+    // refilling the two pools rather than editing a material per mesh.
+    diffBondPieces.length=0;
     diffData.bonds.forEach(function(b){
         var a1=diffData.atoms[b.atom1],a2=diffData.atoms[b.atom2];
         if(!a1||!a2)return;
-        var s=new THREE.Vector3(a1.x-diffCX,a1.y-diffCY,a1.z-diffCZ);
-        var e=new THREE.Vector3(a2.x-diffCX,a2.y-diffCY,a2.z-diffCZ);
-        var d=new THREE.Vector3().subVectors(e,s);
-        var l=d.length();
-        var mp=new THREE.Vector3().addVectors(s,e).multiplyScalar(0.5);
-        var br=0.12;
+        var sx=a1.x-diffCX,sy=a1.y-diffCY,sz=a1.z-diffCZ;
+        var ex=a2.x-diffCX,ey=a2.y-diffCY,ez=a2.z-diffCZ;
+        var dx=ex-sx,dy=ey-sy,dz=ez-sz;
+        var l=Math.sqrt(dx*dx+dy*dy+dz*dz);
+        if(l<0.001)return;
+        var mpx=(sx+ex)*0.5,mpy=(sy+ey)*0.5,mpz=(sz+ez)*0.5;
         var origI1=mapping?mapping.indexOf(b.atom1):-1;
         var origI2=mapping?mapping.indexOf(b.atom2):-1;
         var bondKey=Math.min(origI1,origI2)+'-'+Math.max(origI1,origI2);
         var isHi=highlightBonds[bondKey];
-        var c1Orig=new THREE.Color(a1.color);
-        var c2Orig=new THREE.Color(a2.color);
-        var c1=isHi?new THREE.Color(0xff6600):c1Orig;
-        var c2=isHi?new THREE.Color(0xff6600):c2Orig;
-        hBondDiff(s,mp,d,l/2,br,c1);
-        hBondDiff(mp,e,d,l/2,br,c2);
-        if(diffBondMeshes.length>=2){
-            diffBondMeshes[diffBondMeshes.length-2].userData={origColor:c1Orig,bondKey:bondKey};
-            diffBondMeshes[diffBondMeshes.length-1].userData={origColor:c2Orig,bondKey:bondKey};
-        }
+        addDiffBondPiece(sx,sy,sz,mpx-sx,mpy-sy,mpz-sz,l/2,0.12,new THREE.Color(a1.color),bondKey,isHi);
+        addDiffBondPiece(mpx,mpy,mpz,ex-mpx,ey-mpy,ez-mpz,l/2,0.12,new THREE.Color(a2.color),bondKey,isHi);
     });
+    diffBuildBondPools();
 
     if(diffs&&mapping){
         var leftHi={};
@@ -5200,16 +5528,12 @@ function enterDiffRender(diffs,mapping){
         diffs.dihedrals.forEach(function(d){leftHi[d.i1]=true;leftHi[d.i2]=true;leftHi[d.i3]=true;leftHi[d.i4]=true});
         atomMeshes.forEach(function(m,i){
             m.userData.diffHi=leftHi[i]?true:false;
-            if(leftHi[i]){
-                m.material.emissive=new THREE.Color(0xff6600);
-                m.material.emissiveIntensity=0.4;
-            }
         });
-        var leftBondHi={};
-        diffs.bonds.forEach(function(d){leftBondHi[Math.min(d.i1,d.i2)+'-'+Math.max(d.i1,d.i2)]=true});
-        bondMeshes.forEach(function(mesh){
-            mesh.material.emissive=new THREE.Color(0x000000);
-        });
+        // The flags above are only half of it — the appearance has to be put on
+        // the atoms now, because nothing else runs on this path: the comparison
+        // is entered without a recompute, so the highlight would otherwise wait
+        // for the next click to appear.
+        highlightSelected();
     }
 
     var allAtoms=MD.atoms.concat(diffData.atoms);
@@ -5226,35 +5550,27 @@ function enterDiffRender(diffs,mapping){
     updateTransform();
 }
 
-function hBondDiff(s,e,d,hl,r,c){
-    var g=new THREE.CylinderGeometry(r,r,hl,8,1);
-    var m=new THREE.MeshPhongMaterial({color:c,shininess:40,specular:0x222222});
-    var mesh=new THREE.Mesh(g,m);
-    var mid=new THREE.Vector3().addVectors(s,e).multiplyScalar(0.5);
-    mesh.position.copy(mid);
-    var axis=new THREE.Vector3(0,1,0);
-    mesh.quaternion.copy(new THREE.Quaternion().setFromUnitVectors(axis,d.clone().normalize()));
-    diffMolGroup.add(mesh);
-    diffBondMeshes.push(mesh);
-}
-
 function exitDiff(){
+    stopSpin();
     diffMode=false;
+    updateBakeHint();
     // A molecular-mechanics session survives the comparison: its panel comes
     // back with the same selection once the second structure is gone.
     if(currentMode==='mmOpt')showMmPanel();
     if(diffPivot){
         scene.remove(diffPivot);
         diffPivot.traverse(function(ch){
-            if(ch.geometry)ch.geometry.dispose();
-            if(ch.material){
-                if(ch.material.map)ch.material.map.dispose();
-                ch.material.dispose();
-            }
+            // The comparison draws with the same pooled geometries/materials
+            // the structure uses, so releasing them here would break the side
+            // that is about to be shown again — only what this mesh owns goes.
+            disposeMesh(ch);
         });
         diffPivot=null;diffMolGroup=null;
     }
-    diffAtomMeshes=[];diffBondMeshes=[];
+    poolClear(diffBondPoolPlain);
+    poolClear(diffBondPoolHot);
+    diffBondPieces.length=0;
+    diffAtomMeshes=[];
     diffSelectedAtoms=[];
     diffMapping=null;diffReverseMapping=null;
     diffDetBonds1=null;diffDetBonds2=null;
@@ -5273,8 +5589,7 @@ function exitDiff(){
     modeInfoEl.textContent='View Mode';
     atomMeshes.forEach(function(m){
         m.userData.diffHi=false;
-        m.material.emissive=new THREE.Color(0x000000);
-        m.material.emissiveIntensity=0;
+        setAtomHighlight(m,0);
     });
     highlightSelected();
     pivotGroup.visible=true;
@@ -6158,71 +6473,12 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
 var vibActive=false,vibModeIdx=-1,vibBasePositions=null,vibTimer=null;
 var vibPaused=false,vibPausedElapsed=0,vibStartTime=0;
 var vibPeriodMs=3000,vibAmplitude=0.35,vibMaxMag=1;
-var _vibTmpV1=new THREE.Vector3(),_vibTmpQ=new THREE.Quaternion(),_vibYAxis=new THREE.Vector3(0,1,0);
+// A playback frame moves every atom and then re-places every bond piece from
+// the new coordinates — the same routine the scene build and a drag use, so a
+// bond can never disagree with the atoms it spans. Only the instance buffers
+// are uploaded; no geometry is rebuilt and no mesh is created per frame.
 function updateVibBondMeshes(){
-    for(var i=0;i<bondMeshes.length;i++){
-        var mesh=bondMeshes[i];
-        var ud=mesh.userData;
-        if(ud.bondIdx===undefined||ud.bondIdx<0||ud.bondIdx>=MD.bonds.length)continue;
-        var b=MD.bonds[ud.bondIdx];
-        if(!b)continue;
-        var a1=MD.atoms[b.atom1],a2=MD.atoms[b.atom2];
-        if(!a1||!a2)continue;
-        var a2x=a2.x,a2y=a2.y,a2z=a2.z;
-        if(b.shift&&CRY){
-            var lv=CRY.latticeVectors;
-            a2x+=b.shift[0]*lv[0][0]+b.shift[1]*lv[1][0]+b.shift[2]*lv[2][0];
-            a2y+=b.shift[0]*lv[0][1]+b.shift[1]*lv[1][1]+b.shift[2]*lv[2][1];
-            a2z+=b.shift[0]*lv[0][2]+b.shift[1]*lv[1][2]+b.shift[2]*lv[2][2];
-        }
-        var sx=a1.x-CX,sy=a1.y-CY,sz=a1.z-CZ;
-        var ex=a2x-CX,ey=a2y-CY,ez=a2z-CZ;
-        var dx=ex-sx,dy=ey-sy,dz=ez-sz;
-        var l=Math.sqrt(dx*dx+dy*dy+dz*dz);
-        if(l<0.001)continue;
-        var mpx=(sx+ex)*0.5,mpy=(sy+ey)*0.5,mpz=(sz+ez)*0.5;
-        var px=0,py=0,pz=0;
-        if(ud.perpMag){
-            var upx=0,upy=1,upz=0;
-            if(Math.abs(dy)>=0.99){upx=1;upy=0;upz=0}
-            var perpx=dy*upz-dz*upy,perpy=dz*upx-dx*upz,perpz=dx*upy-dy*upx;
-            var perpLen=Math.sqrt(perpx*perpx+perpy*perpy+perpz*perpz);
-            if(perpLen>0.0001){perpx/=perpLen;perpy/=perpLen;perpz/=perpLen}
-            var off=ud.perpMag*ud.perpSign;
-            px=perpx*off;py=perpy*off;pz=perpz*off;
-        }
-        if(ud.isDashed){
-            var dirx=dx/l,diry=dy/l,dirz=dz/l;
-            var t0=ud.dashT0*l,t1=ud.dashT1*l;
-            var dsx=sx+dirx*t0+px,dsy=sy+diry*t0+py,dsz=sz+dirz*t0+pz;
-            var dex=sx+dirx*t1+px,dey=sy+diry*t1+py,dez=sz+dirz*t1+pz;
-            var dl=t1-t0;
-            if(dl<0.001)continue;
-            mesh.position.set((dsx+dex)*0.5,(dsy+dey)*0.5,(dsz+dez)*0.5);
-            _vibTmpV1.set(dirx,diry,dirz);
-            _vibTmpQ.setFromUnitVectors(_vibYAxis,_vibTmpV1);
-            mesh.quaternion.copy(_vibTmpQ);
-            mesh.scale.y=dl/ud.origHl;
-        }else{
-            var msx,msy,msz,mex,mey,mez;
-            if(ud.half===0){
-                msx=sx+px;msy=sy+py;msz=sz+pz;
-                mex=mpx+px;mey=mpy+py;mez=mpz+pz;
-            }else{
-                msx=mpx+px;msy=mpy+py;msz=mpz+pz;
-                mex=ex+px;mey=ey+py;mez=ez+pz;
-            }
-            var hdx=mex-msx,hdy=mey-msy,hdz=mez-msz;
-            var hl=Math.sqrt(hdx*hdx+hdy*hdy+hdz*hdz);
-            if(hl<0.001)continue;
-            mesh.position.set((msx+mex)*0.5,(msy+mey)*0.5,(msz+mez)*0.5);
-            _vibTmpV1.set(hdx,hdy,hdz).normalize();
-            _vibTmpQ.setFromUnitVectors(_vibYAxis,_vibTmpV1);
-            mesh.quaternion.copy(_vibTmpQ);
-            mesh.scale.y=hl/ud.origHl;
-        }
-    }
-    needsRender=true;
+    placeBondPieces();
 }
 function updateVibrationPositions(){
     for(var i=0;i<MD.atoms.length&&i<atomMeshes.length;i++){
@@ -6501,7 +6757,17 @@ function layoutPanels(){
         {id:'mol-info',pr:0,anc:'tl'},
         {id:'mm-panel',pr:1,anc:'tl'},
         {id:'crystal-panel',pr:1,anc:'tr'},
+        // The egg list shares the top-right corner with the supercell panel and
+        // the Diff reopen button shares the bottom-right with the View cards;
+        // both used to be absent from this list, so a panel laid out over them
+        // covered them instead of giving way.
+        {id:'egg-panel',pr:1,anc:'tr'},
         {id:'diff-panel',pr:2,anc:'br'},
+        {id:'diff-reopen',pr:2,anc:'br'},
+        // Auto Rotate and Edit Coordinates are two cards, each with its own
+        // collision box, stacked bottom-up in that reading order.
+        {id:'bake-panel',pr:3,anc:'br'},
+        {id:'view-panel',pr:4,anc:'br'},
         {id:'select-panel',pr:3,anc:'bl'},
         {id:'rotate-panel',pr:3,anc:'bl'},
         {id:'diff-label',pr:4,anc:'tc',pct:0.25},
@@ -6585,19 +6851,17 @@ function layoutPanels(){
     // A no-op unless the Molecular Mechanics panel is up with a run behind it.
     mmDrawCurves();
 }
+// The highlight is a *state* picked from the shared material pool (plain,
+// selected, diff-highlighted), never a field written into a material — every
+// atom with the same colour and state draws with the same material, and a
+// per-atom material would be one material per atom again.
 function highlightSelected(){
     atomMeshes.forEach(function(m,i){
-        var sel=selectedAtoms.indexOf(i)>=0;
-        if(sel){m.material.emissive=new THREE.Color(0xffff00);m.material.emissiveIntensity=0.6}
-        else if(m.userData.diffHi){m.material.emissive=new THREE.Color(0xff6600);m.material.emissiveIntensity=0.4}
-        else{m.material.emissive=new THREE.Color(0x000000);m.material.emissiveIntensity=0}
+        setAtomHighlight(m,selectedAtoms.indexOf(i)>=0?1:(m.userData.diffHi?2:0));
     });
     if(diffMode){
         diffAtomMeshes.forEach(function(m,i){
-            var sel=diffSelectedAtoms.indexOf(i)>=0;
-            if(sel){m.material.emissive=new THREE.Color(0xffff00);m.material.emissiveIntensity=0.6}
-            else if(m.userData.diffHi){m.material.emissive=new THREE.Color(0xff6600);m.material.emissiveIntensity=0.4}
-            else{m.material.emissive=new THREE.Color(0x000000);m.material.emissiveIntensity=0}
+            setDiffAtomHighlight(m,diffSelectedAtoms.indexOf(i)>=0?1:(m.userData.diffHi?2:0));
         });
     }
     needsRender=true;
@@ -7553,6 +7817,274 @@ var raycaster=new THREE.Raycaster();
 var mouse=new THREE.Vector2();
 var isBoxSelecting=false;var boxStart=null;
 
+// ===== Auto-rotate: flick the molecule and it keeps turning =====
+// The toggle lives in the View-mode panel (#view-panel, bottom-right, shown
+// only while the View button's mode is active) rather than in the toolbar.
+// Two inputs feed one angular velocity:
+//   - a left-drag that rotates the view (or a one-finger touch drag) arms a
+//     spin: on release the molecule is handed the angular velocity the drag
+//     was released with (spinLaunch);
+//   - an arrow key, held, spins the view up — the longer the hold, the faster
+//     (keySpinDrive) — and releasing it hands over the speed it reached.
+// Either way the molecule then keeps turning about a fixed world axis until
+// something stops it. A right/middle press pans and leaves the spin running.
+// This is a view-only rotation — it writes rotQuat (or the grabbed side's
+// diffRotQuat in Diff mode) and never touches the coordinates, so it cannot
+// fight any edit.
+//
+// Arbitration: exactly one writer holds a rotation quaternion at a time. A
+// left press, Reset View, leaving Diff mode, leaving View mode and switching
+// the toggle off each call stopSpin(); an arrow key first stops any spin and
+// then drives its own, so the two can never compose with each other into a
+// drift. Ctrl+arrow in Move Atoms rotates the selection, not the view, and
+// never reaches any of this.
+var spinOn=false;                          // toolbar toggle (off by default)
+var spinAxis=new THREE.Vector3(0,1,0);     // fixed world axis of the current spin
+var spinSpeed=0;                           // rad/s, 0 = not spinning
+var spinQuatRef=null;                      // rotQuat or diffRotQuat, whichever spins
+var spinSamples=[];                        // recent {t,x,y} of the arming drag
+var spinPrevT=0;                           // last animate() timestamp, for the frame step
+var SPIN_ANGLE_PER_PX=0.008;               // must equal the drag rotation scale (see mousemove)
+var SPIN_WINDOW_MS=120;                    // only the last 120 ms before release set the speed
+var SPIN_GAIN=1.0;                         // released speed = drag speed * SPIN_GAIN
+var SPIN_MAX=8.0;                          // rad/s cap, so a wild flick cannot blur the view
+var SPIN_MIN=0.05;                         // below this a release reads as a stop, not a spin
+var KEY_SPIN_BASE=0.5;                     // rad/s an arrow key starts at (Auto Rotate on)
+var KEY_SPIN_RATE=2.5;                     // rad/s added per second the key is held, up to SPIN_MAX
+var keySpinActive=false;                   // an arrow-key spin-up session is running
+var keySpinHold=0;                         // seconds the current arrow-key hold has lasted
+
+function stopSpin(){spinSpeed=0;spinQuatRef=null;spinSamples.length=0;keySpinActive=false;keySpinHold=0}
+
+// One point per rotation mousemove/touchmove. The buffer keeps only the last
+// SPIN_WINDOW_MS, so a drag that is held still before release releases at a
+// standstill (no spin) rather than throwing whatever speed it reached earlier.
+function spinRecordPoint(x,y){
+    if(!spinOn)return;
+    var t=performance.now();
+    spinSamples.push({t:t,x:x,y:y});
+    while(spinSamples.length>0&&t-spinSamples[0].t>SPIN_WINDOW_MS)spinSamples.shift();
+    if(spinSamples.length>64)spinSamples.shift();
+}
+
+// Release: the accumulated drag becomes an angular velocity. Distance over
+// time is the release speed, so dragging farther or flicking faster spins the
+// molecule faster; the direction is the drag direction, mapped onto the world
+// X/Y axes exactly the way the drag itself rotated the view. Every path that
+// decides not to spin clears the spin itself, so a stale speed from an earlier
+// flick can never leak through a release that should have been a standstill.
+function spinLaunch(){
+    if(!spinOn){stopSpin();return}
+    var now=performance.now();
+    while(spinSamples.length>0&&now-spinSamples[0].t>SPIN_WINDOW_MS)spinSamples.shift();
+    if(spinSamples.length<2){stopSpin();return}
+    var a=spinSamples[0],b=spinSamples[spinSamples.length-1];
+    spinSamples.length=0;
+    var dt=(b.t-a.t)/1000;
+    if(!(dt>0.001)){stopSpin();return}
+    var wx=(b.y-a.y)*SPIN_ANGLE_PER_PX*SPIN_GAIN/dt;
+    var wy=(b.x-a.x)*SPIN_ANGLE_PER_PX*SPIN_GAIN/dt;
+    var mag=Math.sqrt(wx*wx+wy*wy);
+    if(!(mag>SPIN_MIN)){stopSpin();return}
+    if(mag>SPIN_MAX){var s=SPIN_MAX/mag;wx*=s;wy*=s;mag=SPIN_MAX}
+    spinAxis.set(wx/mag,wy/mag,0);
+    spinSpeed=mag;
+    spinQuatRef=diffMode?(diffTransformSide==='right'?diffRotQuat:rotQuat):rotQuat;
+}
+
+// A held arrow key, with Auto Rotate on, drives the very same angular velocity
+// a released drag does: the axis is the one the pressed keys name, and the
+// speed ramps up the longer they are held, so holding a key longer spins the
+// view faster and releasing it hands that speed straight to the free rotation
+// (nothing is applied here — the one application site in animate() turns
+// whatever spinQuatRef/spinAxis/spinSpeed hold). The key mapping is the mouse
+// mapping: Right/Left are +Y/-Y and Down/Up are +X/-X, so a flick and a key
+// hold spin the same way. Ctrl+arrows in Move Atoms rotate the selection, not
+// the view, and never reach here.
+function keySpinDrive(dt){
+    if(!keySpinActive){keySpinActive=true;keySpinHold=0;spinSpeed=0}
+    if(dt>0)keySpinHold+=dt;
+    var kx=0,ky=0;
+    if(keyState.ArrowDown)kx+=1;
+    if(keyState.ArrowUp)kx-=1;
+    if(keyState.ArrowRight)ky+=1;
+    if(keyState.ArrowLeft)ky-=1;
+    if(kx===0&&ky===0){stopSpin();return}
+    var m=Math.sqrt(kx*kx+ky*ky);
+    spinAxis.set(kx/m,ky/m,0);
+    spinSpeed=Math.min(KEY_SPIN_BASE+KEY_SPIN_RATE*keySpinHold,SPIN_MAX);
+    spinQuatRef=diffMode?(diffTransformSide==='right'?diffRotQuat:rotQuat):rotQuat;
+}
+
+function updateSpinButton(){
+    var b=document.getElementById('spin-btn');
+    if(!b)return;
+    b.classList.toggle('active',spinOn);
+    b.textContent=spinOn?'On':'Off';
+}
+(function(){
+    var b=document.getElementById('spin-btn');
+    if(!b)return;
+    b.addEventListener('click',function(){
+        spinOn=!spinOn;
+        if(!spinOn)stopSpin();
+        updateSpinButton();
+        modeInfoEl.textContent=spinOn?'Auto Rotate on: drag and release to spin':(MODE_INFO[currentMode]||currentMode);
+    });
+})();
+
+// ===== Alt-drag: write the view transform into the coordinates =====
+// A View-mode drag normally turns the view (rotQuat) or slides it (panX/panY)
+// and leaves the file alone. Holding Alt during the press turns the very same
+// drag into a coordinate edit: the structure keeps the orientation and position
+// it was dragged to, and Save writes those numbers. The view state is what
+// stays untouched, and that is exactly what keeps the picture identical to a
+// plain drag — with p the on-screen position of an atom, R the view quaternion,
+// C the pivot (the atoms' centroid) and pan the view offset:
+//     plain drag:  p = pan' + R' * (a  - C)
+//     Alt drag:    p = pan  + R  * (a' - C),   a' = C + (R^-1 R' R)(a - C)
+// Rotation is taken about C, which a rotation about C leaves where it was. A
+// translation freezes pan and moves the atoms by R^-1 * dpan; on release the
+// pan the drag would have reached is committed too, and because the centre
+// follows the atoms by exactly that translation the two cancel on screen — the
+// picture stays where the drag put it while the file carries the movement.
+// One undo snapshot per drag (dropped again for an Alt-click that moves
+// nothing), and no bond is re-derived: a rigid transform changes no distance.
+// Only the press decides: releasing Alt mid-drag keeps the drag an edit, and a
+// drag that was not started with Alt never becomes one halfway through. Diff
+// mode (two structures, two view states) and crystal structures (coordinates
+// tied to the cell) keep the view-only behaviour.
+var bakeActive=false;        // an Alt-drag that writes coordinates is running
+var bakeKind='';             // 'rot' | 'pan'
+var bakeButton=-1;           // the mouse button that started that drag
+var bakeMoved=false;         // the drag actually changed a coordinate
+var bakeOrigX=null,bakeOrigY=null,bakeOrigZ=null;  // coordinates at the press
+var bakeCx=0,bakeCy=0,bakeCz=0;                    // pivot, frozen for the drag
+var bakeQTotal=new THREE.Quaternion();             // rotation written so far
+var bakeLocalDelta=new THREE.Vector3();            // translation written so far
+var bakePan0={x:0,y:0};      // pan offset kept frozen for a baked translation
+var bakePanTgt={x:0,y:0};    // the pan a plain drag would have reached
+var bakeHintShown=false;     // the "not available" notice is shown once per mode
+var _bakeV=new THREE.Vector3();
+
+function bakeUnavailableReason(){
+    if(diffMode)return 'Alt coordinate editing is not available in diff mode';
+    if(CRY)return 'Alt coordinate editing is not available for crystal structures';
+    return 'Alt coordinate editing needs a loaded structure';
+}
+// Everything that would make a baked edit wrong: a periodic cell, a second
+// structure with its own view state, or nothing loaded at all.
+function bakeAllowed(){
+    return currentMode==='view'&&!diffMode&&!CRY&&MD.atoms.length>0;
+}
+function startBakeSession(kind,button){
+    if(!bakeAllowed())return false;
+    // Vibration owns the coordinates while it plays; a baked edit replaces them
+    // wholesale, so the animation ends first (its own base positions are kept
+    // for a rewind, which is what stopVibration does everywhere else).
+    if(vibActive||vibPaused)stopVibration();
+    // A frame auto-play would replace the structure under the snapshot a
+    // moment later, so the drag takes the structure before it starts.
+    stopFrameAutoPlay();
+    var n=MD.atoms.length;
+    bakeOrigX=new Float64Array(n);
+    bakeOrigY=new Float64Array(n);
+    bakeOrigZ=new Float64Array(n);
+    for(var i=0;i<n;i++){
+        var a=MD.atoms[i];
+        if(!a)continue;
+        bakeOrigX[i]=a.x;bakeOrigY[i]=a.y;bakeOrigZ[i]=a.z;
+    }
+    bakeActive=true;bakeKind=kind;bakeButton=button;bakeMoved=false;
+    bakeCx=CX;bakeCy=CY;bakeCz=CZ;
+    bakeQTotal.identity();bakeLocalDelta.set(0,0,0);
+    bakePan0.x=panX;bakePan0.y=panY;
+    bakePanTgt.x=panX;bakePanTgt.y=panY;
+    pushUndo();
+    modeInfoEl.textContent=(kind==='rot'?'Alt: rotating ':'Alt: moving ')+n+
+        ' atom(s) in the file - release to commit, Undo reverts';
+    return true;
+}
+// Recompute every atom from the snapshot with the transform accumulated so far.
+// Working from the snapshot (rather than from the previous frame) keeps the
+// drag exact: one mousemove is one absolute result, nothing accumulates.
+function bakeWriteAtoms(){
+    // The snapshot describes one structure. If the array was replaced under the
+    // drag (a frame or molecule switch that did not pass through the session
+    // door), writing it would mix two structures — do nothing instead.
+    if(!bakeOrigX||MD.atoms.length!==bakeOrigX.length)return;
+    var n=MD.atoms.length;
+    var q=bakeQTotal;
+    var ox=bakeLocalDelta.x,oy=bakeLocalDelta.y,oz=bakeLocalDelta.z;
+    var cx=bakeCx,cy=bakeCy,cz=bakeCz,v=_bakeV;
+    for(var i=0;i<n;i++){
+        var a=MD.atoms[i];
+        if(!a){continue}
+        v.set(bakeOrigX[i]-cx,bakeOrigY[i]-cy,bakeOrigZ[i]-cz).applyQuaternion(q);
+        a.x=cx+v.x+ox;a.y=cy+v.y+oy;a.z=cz+v.z+oz;
+    }
+    bakeMoved=true;
+    // Spheres and bond pieces only: the geometry itself never changes, and CX is
+    // frozen for the drag, so both are a re-placement of existing objects.
+    updateAtomMeshPositions();
+    placeBondPieces();
+    needsRender=true;
+}
+function bakeRotateBy(qx,qy){
+    if(!bakeActive||bakeKind!=='rot')return;
+    // The view premultiplies qx then qy, i.e. Q = qy*qx in the world frame.
+    // Conjugate it into the molecule's own frame to write it into the
+    // coordinates while the view quaternion stays exactly as it is.
+    var qWorld=qy.clone().multiply(qx);
+    var qLocal=rotQuat.clone().conjugate().multiply(qWorld).multiply(rotQuat);
+    bakeQTotal.premultiply(qLocal);
+    bakeQTotal.normalize();
+    bakeWriteAtoms();
+}
+function bakeTranslateTo(dx,dy){
+    if(!bakeActive||bakeKind!=='pan')return;
+    // pan lives in the world frame; the atoms have to move along the same
+    // world direction, which the view conjugation turns into molecule-local.
+    bakeLocalDelta.set(dx,dy,0).applyQuaternion(rotQuat.clone().conjugate());
+    bakeWriteAtoms();
+}
+function endBakeSession(){
+    if(!bakeActive)return;
+    bakeActive=false;
+    if(!bakeMoved){
+        // An Alt-click that changed nothing pushed a snapshot it does not need.
+        if(undoStack.length>0){undoStack.pop();updateUndoBtn()}
+    }else{
+        // The centre follows the atoms, so a baked translation changes it by
+        // exactly that translation. Committing the pan the drag would have
+        // reached makes the two cancel on screen: the picture stays where the
+        // drag put it while the coordinates carry the movement. Then the new
+        // centroid becomes the rotation pivot again.
+        if(bakeKind==='pan'){panX=bakePanTgt.x;panY=bakePanTgt.y}
+        updateRotationCenter();
+        if(bakeKind==='pan')updateTransform();
+    }
+    bakeOrigX=bakeOrigY=bakeOrigZ=null;
+    bakeKind='';bakeButton=-1;bakeMoved=false;
+    bakeQTotal.identity();bakeLocalDelta.set(0,0,0);
+    needsRender=true;
+    if(currentMode==='view')modeInfoEl.textContent=MODE_INFO.view;
+}
+// The panel states the feature where the mode it belongs to is switched on.
+function updateBakeHint(){
+    var hint=document.getElementById('vp-bake-hint');
+    if(!hint)return;
+    // CRY never changes within a session; only a comparison can come and go, and
+    // every path that enters or leaves one calls this.
+    if(diffMode||CRY){
+        hint.textContent=bakeUnavailableReason()+'.';
+    }else{
+        hint.innerHTML='Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. '+
+            'The atom coordinates change, so Save writes the new geometry.';
+    }
+}
+updateBakeHint();
+
 function getClickedAtom(e){
     var rect=canvas.getBoundingClientRect();
     if(diffMode){
@@ -7594,6 +8126,9 @@ function getClickedAtom(e){
 }
 
 canvas.addEventListener('mousedown',function(e){
+    // Any left press ends a free spin; a right/middle press pans and leaves it
+    // running. This is the only mouse path that stops the spin.
+    if(e.button===0)stopSpin();
     if(currentMode==='boxSelect'&&e.button===0){
         boxStart={x:e.clientX,y:e.clientY};
         isBoxSelecting=true;
@@ -7651,6 +8186,17 @@ canvas.addEventListener('mousedown',function(e){
         prevM={x:e.clientX,y:e.clientY};
         e.preventDefault();return;
     }
+    // Alt in View mode: this press writes the drag into the coordinates instead
+    // of only turning or sliding the view. Left rotates, middle/right translates
+    // — the very same mapping the view uses. Decided here, once, so a drag can
+    // never change its meaning halfway through; anywhere it is not available
+    // (a crystal, a comparison) the drag stays view-only and says why once.
+    if(e.altKey&&currentMode==='view'&&(e.button===0||e.button===1||e.button===2)){
+        if(!startBakeSession(e.button===0?'rot':'pan',e.button)&&!bakeHintShown){
+            bakeHintShown=true;
+            modeInfoEl.textContent=bakeUnavailableReason();
+        }
+    }
     if(currentMode!=='view'&&e.button===0){
         var idx=getClickedAtom(e);
         if(idx>=0){selectAtom(idx);e.preventDefault();return}
@@ -7702,6 +8248,7 @@ canvas.addEventListener('mousemove',function(e){
         var side=diffTransformSide;
         var rq=side==='right'?diffRotQuat:rotQuat;
         if(isRot){
+            spinRecordPoint(e.clientX,e.clientY);
             var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),dm.x*0.008);
             var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),dm.y*0.008);
             rq.premultiply(qx);rq.premultiply(qy);rq.normalize();
@@ -7730,19 +8277,42 @@ canvas.addEventListener('mousemove',function(e){
         }
     }else{
         if(isRot){
+            spinRecordPoint(e.clientX,e.clientY);
             var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),dm.x*0.008);
             var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),dm.y*0.008);
-            rotQuat.premultiply(qx);rotQuat.premultiply(qy);rotQuat.normalize();
-            updateTransform()
+            if(bakeActive&&bakeKind==='rot'){
+                // An Alt-drag writes the rotation into the coordinates and leaves
+                // the view quaternion alone, so the two can never turn it twice.
+                if(dm.x||dm.y)bakeRotateBy(qx,qy);
+            }else{
+                rotQuat.premultiply(qx);rotQuat.premultiply(qy);rotQuat.normalize();
+                updateTransform()
+            }
         }
         if(isPan){
+            var bakePan=bakeActive&&bakeKind==='pan';
             if(panGrabActive){
                 // Cursor-locked: recompute pan so the grabbed point follows
                 // the cursor 1:1 (same world-z reference plane as at grab).
                 var pc2=screenPointOnPlane(e,panRefZ);
-                if(pc2){panX=pc2.x-panGrabOffset.x;panY=pc2.y-panGrabOffset.y}
-            }else{panX+=dm.x*0.01*(camDist/20);panY-=dm.y*0.01*(camDist/20)}
-            updateTransform()
+                if(pc2){
+                    if(bakePan){bakePanTgt.x=pc2.x-panGrabOffset.x;bakePanTgt.y=pc2.y-panGrabOffset.y}
+                    else{panX=pc2.x-panGrabOffset.x;panY=pc2.y-panGrabOffset.y}
+                }
+            }else if(bakePan){
+                // No grab reference: accumulate the plain-drag pan a would-be
+                // view pan would have reached, keeping panX/panY frozen instead.
+                bakePanTgt.x+=dm.x*0.01*(camDist/20);
+                bakePanTgt.y-=dm.y*0.01*(camDist/20);
+            }else{
+                panX+=dm.x*0.01*(camDist/20);panY-=dm.y*0.01*(camDist/20)
+            }
+            if(bakePan){
+                // The whole translation since the press, applied in one go: the
+                // pan offset stays where it was, the atoms take the movement.
+                var bdx=bakePanTgt.x-bakePan0.x,bdy=bakePanTgt.y-bakePan0.y;
+                if(bdx||bdy)bakeTranslateTo(bdx,bdy);
+            }else updateTransform()
         }
     }
     prevM={x:e.clientX,y:e.clientY};
@@ -7797,6 +8367,11 @@ canvas.addEventListener('mousemove',function(e){
 canvas.addEventListener('mouseup',function(e){
     if(moveDragActive){endMoveDrag()}
     if(fragRotActive){endFragRot()}
+    // An Alt-drag commits on the release of the button that started it. A bake
+    // drag does not throw the view afterwards: the drag was an edit, and a spin
+    // launched from it would keep turning what was just committed.
+    var bakedThisRelease=bakeActive&&e.button===bakeButton;
+    if(bakedThisRelease)endBakeSession();
     panGrabActive=false;
     if(isBoxSelecting){
         isBoxSelecting=false;boxRectEl.style.display='none';
@@ -7837,9 +8412,10 @@ canvas.addEventListener('mouseup',function(e){
         }
         boxStart=null;needsRender=true;layoutPanels();return;
     }
+    if(e.button===0&&isRot&&!bakedThisRelease)spinLaunch();
     isRot=false;isPan=false;layoutPanels();
 });
-canvas.addEventListener('mouseleave',function(){isRot=false;isPan=false;panGrabActive=false;tooltipEl.style.display='none';if(moveDragActive)endMoveDrag();if(fragRotActive)endFragRot();if(isBoxSelecting){isBoxSelecting=false;boxRectEl.style.display='none';boxStart=null}});
+canvas.addEventListener('mouseleave',function(){if(bakeActive)endBakeSession();isRot=false;isPan=false;panGrabActive=false;spinSamples.length=0;tooltipEl.style.display='none';if(moveDragActive)endMoveDrag();if(fragRotActive)endFragRot();if(isBoxSelecting){isBoxSelecting=false;boxRectEl.style.display='none';boxStart=null}});
 canvas.addEventListener('wheel',function(e){e.preventDefault();
     if(diffMode){
         var rect=canvas.getBoundingClientRect();
@@ -7864,6 +8440,7 @@ canvas.addEventListener('contextmenu',function(e){e.preventDefault()});
 var touchSD=0;
 canvas.addEventListener('touchstart',function(e){e.preventDefault();
     if(e.touches.length===1){
+        stopSpin();
         isRot=true;prevM={x:e.touches[0].clientX,y:e.touches[0].clientY};
         if(diffMode){var rect=canvas.getBoundingClientRect();var halfW=Math.floor(rect.width/2);diffTransformSide=(e.touches[0].clientX-rect.left)<halfW?'left':'right'}
     }
@@ -7871,6 +8448,7 @@ canvas.addEventListener('touchstart',function(e){e.preventDefault();
 },{passive:false});
 canvas.addEventListener('touchmove',function(e){e.preventDefault();
     if(e.touches.length===1&&isRot){
+        spinRecordPoint(e.touches[0].clientX,e.touches[0].clientY);
         var dm={x:e.touches[0].clientX-prevM.x,y:e.touches[0].clientY-prevM.y};
         var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),dm.x*0.008);
         var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),dm.y*0.008);
@@ -7896,12 +8474,19 @@ canvas.addEventListener('touchmove',function(e){e.preventDefault();
         touchSD=d}
     needsRender=true;
 },{passive:false});
-canvas.addEventListener('touchend',function(e){isRot=false;if(e.touches.length<2)touchSD=0});
+canvas.addEventListener('touchend',function(e){if(e.touches.length===0&&isRot)spinLaunch();isRot=false;if(e.touches.length<2)touchSD=0});
 
 document.addEventListener('keydown',function(e){
     if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'||e.target.tagName==='SELECT')return;
     ctrlDown=e.ctrlKey;
-    if(e.key in keyState){keyState[e.key]=true;e.preventDefault()}
+    // The first arrow key of a hold-session stops whatever spin is running, so
+    // the key takes over; keys pressed while another is already held (and the
+    // auto-repeat of a held key) must not, or every repeat would restart the
+    // spin-up ramp from its base speed.
+    if(e.key in keyState){
+        if(!keyState.ArrowLeft&&!keyState.ArrowRight&&!keyState.ArrowUp&&!keyState.ArrowDown)stopSpin();
+        keyState[e.key]=true;e.preventDefault();
+    }
     if(e.key==='Delete'){
         e.preventDefault();
         if(selectedAtoms.length>0){showBatchDeleteModal()}
@@ -7913,21 +8498,49 @@ document.addEventListener('keyup',function(e){
     if(e.key in keyState){
         keyState[e.key]=false;e.preventDefault();
         // Clear the move-session latches once every arrow key is released, so
-        // fresh sessions may start on the next key press.
-        if(!keyState.ArrowLeft&&!keyState.ArrowRight&&!keyState.ArrowUp&&!keyState.ArrowDown){moveKeyLatch=false;keyRotLatch=false}
+        // fresh sessions may start on the next key press. An arrow-key spin
+        // ends its ramp here too: the speed it reached stays and becomes the
+        // free rotation, while the next hold starts its ramp over again.
+        if(!keyState.ArrowLeft&&!keyState.ArrowRight&&!keyState.ArrowUp&&!keyState.ArrowDown){moveKeyLatch=false;keyRotLatch=false;keySpinActive=false;keySpinHold=0}
     }
 });
 window.addEventListener('blur',function(){
     ctrlDown=false;
     keyState.ArrowLeft=keyState.ArrowRight=keyState.ArrowUp=keyState.ArrowDown=false;
+    keySpinActive=false;keySpinHold=0;
+    // The mouse-up may never arrive after focus is lost: commit what the drag
+    // already wrote rather than leaving the session (and its snapshot) open.
+    if(bakeActive)endBakeSession();
 });
 
 window.addEventListener('resize',function(){var rw=container.clientWidth||window.innerWidth;var rh=container.clientHeight||(window.innerHeight-60);if(rw<1)rw=window.innerWidth;if(rh<1)rh=window.innerHeight-60;camera.aspect=rw/rh;camera.updateProjectionMatrix();renderer.setSize(rw,rh);needsRender=true;layoutPanels()});
 
+// Hand the context back when the page is really going away. Editors keep their
+// webviews (and their contexts) alive while hidden, and the window has a hard
+// cap on how many WebGL contexts may exist at once — a viewer that is finished
+// with its canvas should not be one of them.
+window.addEventListener('pagehide',function(){
+    try{
+        if(renderer){
+            renderer.dispose();
+            if(typeof renderer.forceContextLoss==='function')renderer.forceContextLoss();
+        }
+    }catch(e){}
+},false);
+
 function animate(){
     requestAnimationFrame(animate);
+    var spinNow=performance.now();
+    var spinDt=spinPrevT?(spinNow-spinPrevT)/1000:0;
+    spinPrevT=spinNow;
+    // One clamp for every rotation source: a tab that sat in the background for
+    // a while must not hand the molecule a several-second jump on its first frame.
+    if(spinDt>0.1)spinDt=0.1;
     var keyActive=false;
-    if(keyState.ArrowLeft||keyState.ArrowRight||keyState.ArrowUp||keyState.ArrowDown){
+    // A running Alt-drag owns the orientation: an arrow key must not turn the
+    // view under it (that would apply the drag's rotation twice) nor start a
+    // spin. The keys are simply ignored until the drag commits.
+    if(!bakeActive&&(keyState.ArrowLeft||keyState.ArrowRight||keyState.ArrowUp||keyState.ArrowDown)){
         keyActive=true;
         if(moveKeyActive&&!ctrlDown){
             // Ctrl released mid-hold: end the fragment rotation session and
@@ -7965,19 +8578,41 @@ function animate(){
                 if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
             }
         }else if(!diffMode&&!keyRotLatch){
-            if(keyState.ArrowLeft){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),-keyRotSpeed);rotQuat.premultiply(qx)}
-            if(keyState.ArrowRight){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),keyRotSpeed);rotQuat.premultiply(qx)}
-            if(keyState.ArrowUp){var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),-keyRotSpeed);rotQuat.premultiply(qy)}
-            if(keyState.ArrowDown){var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),keyRotSpeed);rotQuat.premultiply(qy)}
-            rotQuat.normalize();
-            updateTransform();
+            if(spinOn){
+                // Auto Rotate: a held arrow key spins the view up rather than
+                // turning it at a fixed rate. Nothing is applied here — the one
+                // spin site below turns whatever the drive just set.
+                keySpinDrive(spinDt);
+            }else{
+                if(keyState.ArrowLeft){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),-keyRotSpeed);rotQuat.premultiply(qx)}
+                if(keyState.ArrowRight){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),keyRotSpeed);rotQuat.premultiply(qx)}
+                if(keyState.ArrowUp){var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),-keyRotSpeed);rotQuat.premultiply(qy)}
+                if(keyState.ArrowDown){var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),keyRotSpeed);rotQuat.premultiply(qy)}
+                rotQuat.normalize();
+                updateTransform();
+            }
         }else if(diffMode){
-            var rq=(diffTransformSide==='right')?diffRotQuat:rotQuat;
-            if(keyState.ArrowLeft){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),-keyRotSpeed);rq.premultiply(qx)}
-            if(keyState.ArrowRight){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),keyRotSpeed);rq.premultiply(qx)}
-            if(keyState.ArrowUp){var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),-keyRotSpeed);rq.premultiply(qy)}
-            if(keyState.ArrowDown){var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),keyRotSpeed);rq.premultiply(qy)}
-            rq.normalize();
+            if(spinOn){
+                keySpinDrive(spinDt);
+            }else{
+                var rq=(diffTransformSide==='right')?diffRotQuat:rotQuat;
+                if(keyState.ArrowLeft){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),-keyRotSpeed);rq.premultiply(qx)}
+                if(keyState.ArrowRight){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),keyRotSpeed);rq.premultiply(qx)}
+                if(keyState.ArrowUp){var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),-keyRotSpeed);rq.premultiply(qy)}
+                if(keyState.ArrowDown){var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),keyRotSpeed);rq.premultiply(qy)}
+                rq.normalize();
+                updateTransform();
+            }
+        }
+    }
+    if(spinQuatRef&&spinSpeed>0){
+        // The one place a spin is applied, whatever set it — a released drag
+        // (spinLaunch) or a held arrow key (keySpinDrive). Free rotation, with
+        // no damping, so the view keeps turning until something stops it; the
+        // frame step was clamped above.
+        if(spinDt>0){
+            var spinQ=new THREE.Quaternion().setFromAxisAngle(spinAxis,spinSpeed*spinDt);
+            spinQuatRef.premultiply(spinQ);spinQuatRef.normalize();
             updateTransform();
         }
     }
