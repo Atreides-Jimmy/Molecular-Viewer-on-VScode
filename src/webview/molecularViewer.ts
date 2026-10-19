@@ -1413,10 +1413,14 @@ body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;b
 #rotate-panel .rp-slider-row input[type=number]{width:58px;flex-shrink:0;padding:3px 4px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:11px;box-sizing:border-box}
 #rotate-panel .rp-error{color:var(--vscode-errorForeground,#f66);font-size:11px;margin-top:4px;line-height:1.4}
 #rotate-panel .rp-hint{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:4px;line-height:1.4}
-#view-panel{display:block;position:absolute;bottom:40px;right:8px;z-index:50;background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:4px;padding:8px;width:210px;max-width:calc(100% - 16px);box-shadow:0 2px 8px rgba(0,0,0,0.3)}
-#view-panel .vp-title{font-size:12px;font-weight:bold;margin-bottom:6px}
-#view-panel .tbtn{width:100%;text-align:center}
-#view-panel .vp-hint{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:6px;line-height:1.4}
+/* The View-mode controls are two cards, not one: Auto Rotate and Edit
+   Coordinates each carry their own collision box in layoutPanels(), so a tall
+   neighbour (the Diff results panel above all) can push them apart instead of
+   one of them ending up underneath something else. */
+#view-panel,#bake-panel{display:block;position:absolute;bottom:40px;right:8px;z-index:50;background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:4px;padding:8px;width:210px;max-width:calc(100% - 16px);box-shadow:0 2px 8px rgba(0,0,0,0.3)}
+#view-panel .vp-title,#bake-panel .vp-title{font-size:12px;font-weight:bold;margin-bottom:6px}
+#view-panel .tbtn,#bake-panel .tbtn{width:100%;text-align:center}
+#view-panel .vp-hint,#bake-panel .vp-hint{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:6px;line-height:1.4}
 canvas{display:block}
 #atom-tooltip{position:absolute;display:none;color:var(--vscode-editor-foreground,#ccc);font-size:12px;background:var(--vscode-editor-background,#1e1e1e);padding:4px 8px;border-radius:3px;border:1px solid var(--vscode-panel-border,#444);pointer-events:none;z-index:30}
 #box-select-rect{position:fixed;display:none;border:1px dashed #ffeb3b;background:rgba(255,235,59,0.12);pointer-events:none;z-index:40}
@@ -1570,7 +1574,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="vp-title">Auto Rotate</div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="vp-title">Auto Rotate</div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div></div><div id="bake-panel"><div class="vp-title">Edit Coordinates</div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="box-select-rect"></div>
@@ -3216,8 +3220,12 @@ function endFragRot(){
 }
 function stopMoveSession(){
     // Force-terminate any in-progress move/rotate (mode switch, frame switch,
-    // undo, delete...). The latch prevents arrow keys (still held down) from
-    // instantly starting a new session; it clears once all keys are released.
+    // undo, delete...). An Alt-drag writes the same coordinates a move session
+    // writes, and every entry that replaces the structure already passes
+    // through here, so it is ended at this one door too. The latch prevents
+    // arrow keys (still held down) from instantly starting a new session; it
+    // clears once all keys are released.
+    if(bakeActive)endBakeSession();
     if(moveDragActive||moveKeyActive||fragRotActive){
         moveDragActive=false;moveKeyActive=false;fragRotActive=false;
         moveKeyLatch=true;
@@ -4158,6 +4166,9 @@ function mmCancelRun(){
 var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',replaceAtom:'Replace Atom - Click atom(s) to select, click button again to confirm',addH:'Add H - Click atom(s) to select, click the button again to complete their hydrogens',selectAtoms:'Select Atoms - Input indices or element symbols',boxSelect:'Box Select - Drag a rectangle to select atoms',rotateGroup:'Rotate Group - Select group + axis atoms, then adjust angle',mmOpt:'Molecular Mechanics - Click atoms to select them; the panel optimizes only those atoms',moveAtoms:'Move Atoms - Select atoms; drag/arrows rotate view, right-drag pans; Ctrl+drag or Ctrl+arrows rotates group, Ctrl+right-drag moves group'};
 
 function setMode(m){
+    // An Alt-drag that is still running belongs to the mode it started in: a
+    // mode switch commits the coordinates it has written so far.
+    if(bakeActive)endBakeSession();
     if(m==='moveAtoms'&&CRY){
         // Moving atoms in a periodic supercell breaks image consistency;
         // the mode is only offered for molecular structures.
@@ -4206,6 +4217,8 @@ function setMode(m){
     }
     var oldMode=currentMode;
     currentMode=m;
+    bakeHintShown=false;
+    updateBakeHint();
     var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect'||oldMode==='replaceAtom'||oldMode==='addH'||oldMode==='rotateGroup'||oldMode==='moveAtoms'||oldMode==='mmOpt')&&(m==='selectAtoms'||m==='boxSelect'||m==='replaceAtom'||m==='addH'||m==='rotateGroup'||m==='moveAtoms'||m==='mmOpt'));
     if(oldMode==='moveAtoms'&&m!=='moveAtoms')stopMoveSession();
     if(oldMode==='mmOpt'&&m!=='mmOpt')mmCancelRun();
@@ -4226,6 +4239,10 @@ function setMode(m){
     if(rp2)rp2.style.display=(m==='rotateGroup')?'block':'none';
     var vp2=document.getElementById('view-panel');
     if(vp2)vp2.style.display=(m==='view')?'block':'none';
+    // The Edit Coordinates card is the second half of the View-mode controls and
+    // shares its visibility, but it is its own box in layoutPanels().
+    var bp2=document.getElementById('bake-panel');
+    if(bp2)bp2.style.display=(m==='view')?'block':'none';
     var mp2=mmPanelEl();
     if(mp2){
         if(m==='mmOpt'){showMmPanel()}else if(mp2.classList.contains('show')){mp2.classList.remove('show')}
@@ -4555,6 +4572,7 @@ function doUndo(){
     if(mmRun)mmCancelRun();
     if(vibActive||vibPaused)stopVibration();
     if(moveDragActive||moveKeyActive||fragRotActive)stopMoveSession();
+    if(bakeActive)endBakeSession();
     var snap=undoStack.pop();
     MD.atoms=snap.atoms;MD.bonds=snap.bonds;
     MD.hasExplicitBonds=!!snap.hasExplicitBonds;
@@ -5178,6 +5196,7 @@ function startDiff(msg){
         diffLabelRight.textContent='Diff: '+diffData.fileName+' (skeleton differs)';
         diffLabelRight.classList.add('show');
         modeInfoEl.textContent='Diff Mode (skeletons differ)';
+        updateBakeHint();
         enterDiffRender();
         layoutPanels();
         return;
@@ -5440,6 +5459,9 @@ diffReopenEl.addEventListener('click',function(){
 function enterDiffRender(diffs,mapping){
     if(vibActive||vibPaused)stopVibration();
     stopMoveSession();
+    // A comparison has two structures and two view states, so the panel stops
+    // advertising Alt coordinate editing for as long as it is up.
+    updateBakeHint();
     diffPivot=new THREE.Group();scene.add(diffPivot);
     diffMolGroup=new THREE.Group();diffPivot.add(diffMolGroup);
 
@@ -5531,6 +5553,7 @@ function enterDiffRender(diffs,mapping){
 function exitDiff(){
     stopSpin();
     diffMode=false;
+    updateBakeHint();
     // A molecular-mechanics session survives the comparison: its panel comes
     // back with the same selection once the second structure is gone.
     if(currentMode==='mmOpt')showMmPanel();
@@ -6734,10 +6757,19 @@ function layoutPanels(){
         {id:'mol-info',pr:0,anc:'tl'},
         {id:'mm-panel',pr:1,anc:'tl'},
         {id:'crystal-panel',pr:1,anc:'tr'},
+        // The egg list shares the top-right corner with the supercell panel and
+        // the Diff reopen button shares the bottom-right with the View cards;
+        // both used to be absent from this list, so a panel laid out over them
+        // covered them instead of giving way.
+        {id:'egg-panel',pr:1,anc:'tr'},
         {id:'diff-panel',pr:2,anc:'br'},
+        {id:'diff-reopen',pr:2,anc:'br'},
+        // Auto Rotate and Edit Coordinates are two cards, each with its own
+        // collision box, stacked bottom-up in that reading order.
+        {id:'bake-panel',pr:3,anc:'br'},
+        {id:'view-panel',pr:4,anc:'br'},
         {id:'select-panel',pr:3,anc:'bl'},
         {id:'rotate-panel',pr:3,anc:'bl'},
-        {id:'view-panel',pr:3,anc:'br'},
         {id:'diff-label',pr:4,anc:'tc',pct:0.25},
         {id:'diff-label-right',pr:5,anc:'tc',pct:0.75},
         {id:'opt-panel',pr:7,anc:'tl'},
@@ -7901,6 +7933,158 @@ function updateSpinButton(){
     });
 })();
 
+// ===== Alt-drag: write the view transform into the coordinates =====
+// A View-mode drag normally turns the view (rotQuat) or slides it (panX/panY)
+// and leaves the file alone. Holding Alt during the press turns the very same
+// drag into a coordinate edit: the structure keeps the orientation and position
+// it was dragged to, and Save writes those numbers. The view state is what
+// stays untouched, and that is exactly what keeps the picture identical to a
+// plain drag — with p the on-screen position of an atom, R the view quaternion,
+// C the pivot (the atoms' centroid) and pan the view offset:
+//     plain drag:  p = pan' + R' * (a  - C)
+//     Alt drag:    p = pan  + R  * (a' - C),   a' = C + (R^-1 R' R)(a - C)
+// Rotation is taken about C, which a rotation about C leaves where it was. A
+// translation freezes pan and moves the atoms by R^-1 * dpan; on release the
+// pan the drag would have reached is committed too, and because the centre
+// follows the atoms by exactly that translation the two cancel on screen — the
+// picture stays where the drag put it while the file carries the movement.
+// One undo snapshot per drag (dropped again for an Alt-click that moves
+// nothing), and no bond is re-derived: a rigid transform changes no distance.
+// Only the press decides: releasing Alt mid-drag keeps the drag an edit, and a
+// drag that was not started with Alt never becomes one halfway through. Diff
+// mode (two structures, two view states) and crystal structures (coordinates
+// tied to the cell) keep the view-only behaviour.
+var bakeActive=false;        // an Alt-drag that writes coordinates is running
+var bakeKind='';             // 'rot' | 'pan'
+var bakeButton=-1;           // the mouse button that started that drag
+var bakeMoved=false;         // the drag actually changed a coordinate
+var bakeOrigX=null,bakeOrigY=null,bakeOrigZ=null;  // coordinates at the press
+var bakeCx=0,bakeCy=0,bakeCz=0;                    // pivot, frozen for the drag
+var bakeQTotal=new THREE.Quaternion();             // rotation written so far
+var bakeLocalDelta=new THREE.Vector3();            // translation written so far
+var bakePan0={x:0,y:0};      // pan offset kept frozen for a baked translation
+var bakePanTgt={x:0,y:0};    // the pan a plain drag would have reached
+var bakeHintShown=false;     // the "not available" notice is shown once per mode
+var _bakeV=new THREE.Vector3();
+
+function bakeUnavailableReason(){
+    if(diffMode)return 'Alt coordinate editing is not available in diff mode';
+    if(CRY)return 'Alt coordinate editing is not available for crystal structures';
+    return 'Alt coordinate editing needs a loaded structure';
+}
+// Everything that would make a baked edit wrong: a periodic cell, a second
+// structure with its own view state, or nothing loaded at all.
+function bakeAllowed(){
+    return currentMode==='view'&&!diffMode&&!CRY&&MD.atoms.length>0;
+}
+function startBakeSession(kind,button){
+    if(!bakeAllowed())return false;
+    // Vibration owns the coordinates while it plays; a baked edit replaces them
+    // wholesale, so the animation ends first (its own base positions are kept
+    // for a rewind, which is what stopVibration does everywhere else).
+    if(vibActive||vibPaused)stopVibration();
+    // A frame auto-play would replace the structure under the snapshot a
+    // moment later, so the drag takes the structure before it starts.
+    stopFrameAutoPlay();
+    var n=MD.atoms.length;
+    bakeOrigX=new Float64Array(n);
+    bakeOrigY=new Float64Array(n);
+    bakeOrigZ=new Float64Array(n);
+    for(var i=0;i<n;i++){
+        var a=MD.atoms[i];
+        if(!a)continue;
+        bakeOrigX[i]=a.x;bakeOrigY[i]=a.y;bakeOrigZ[i]=a.z;
+    }
+    bakeActive=true;bakeKind=kind;bakeButton=button;bakeMoved=false;
+    bakeCx=CX;bakeCy=CY;bakeCz=CZ;
+    bakeQTotal.identity();bakeLocalDelta.set(0,0,0);
+    bakePan0.x=panX;bakePan0.y=panY;
+    bakePanTgt.x=panX;bakePanTgt.y=panY;
+    pushUndo();
+    modeInfoEl.textContent=(kind==='rot'?'Alt: rotating ':'Alt: moving ')+n+
+        ' atom(s) in the file - release to commit, Undo reverts';
+    return true;
+}
+// Recompute every atom from the snapshot with the transform accumulated so far.
+// Working from the snapshot (rather than from the previous frame) keeps the
+// drag exact: one mousemove is one absolute result, nothing accumulates.
+function bakeWriteAtoms(){
+    // The snapshot describes one structure. If the array was replaced under the
+    // drag (a frame or molecule switch that did not pass through the session
+    // door), writing it would mix two structures — do nothing instead.
+    if(!bakeOrigX||MD.atoms.length!==bakeOrigX.length)return;
+    var n=MD.atoms.length;
+    var q=bakeQTotal;
+    var ox=bakeLocalDelta.x,oy=bakeLocalDelta.y,oz=bakeLocalDelta.z;
+    var cx=bakeCx,cy=bakeCy,cz=bakeCz,v=_bakeV;
+    for(var i=0;i<n;i++){
+        var a=MD.atoms[i];
+        if(!a){continue}
+        v.set(bakeOrigX[i]-cx,bakeOrigY[i]-cy,bakeOrigZ[i]-cz).applyQuaternion(q);
+        a.x=cx+v.x+ox;a.y=cy+v.y+oy;a.z=cz+v.z+oz;
+    }
+    bakeMoved=true;
+    // Spheres and bond pieces only: the geometry itself never changes, and CX is
+    // frozen for the drag, so both are a re-placement of existing objects.
+    updateAtomMeshPositions();
+    placeBondPieces();
+    needsRender=true;
+}
+function bakeRotateBy(qx,qy){
+    if(!bakeActive||bakeKind!=='rot')return;
+    // The view premultiplies qx then qy, i.e. Q = qy*qx in the world frame.
+    // Conjugate it into the molecule's own frame to write it into the
+    // coordinates while the view quaternion stays exactly as it is.
+    var qWorld=qy.clone().multiply(qx);
+    var qLocal=rotQuat.clone().conjugate().multiply(qWorld).multiply(rotQuat);
+    bakeQTotal.premultiply(qLocal);
+    bakeQTotal.normalize();
+    bakeWriteAtoms();
+}
+function bakeTranslateTo(dx,dy){
+    if(!bakeActive||bakeKind!=='pan')return;
+    // pan lives in the world frame; the atoms have to move along the same
+    // world direction, which the view conjugation turns into molecule-local.
+    bakeLocalDelta.set(dx,dy,0).applyQuaternion(rotQuat.clone().conjugate());
+    bakeWriteAtoms();
+}
+function endBakeSession(){
+    if(!bakeActive)return;
+    bakeActive=false;
+    if(!bakeMoved){
+        // An Alt-click that changed nothing pushed a snapshot it does not need.
+        if(undoStack.length>0){undoStack.pop();updateUndoBtn()}
+    }else{
+        // The centre follows the atoms, so a baked translation changes it by
+        // exactly that translation. Committing the pan the drag would have
+        // reached makes the two cancel on screen: the picture stays where the
+        // drag put it while the coordinates carry the movement. Then the new
+        // centroid becomes the rotation pivot again.
+        if(bakeKind==='pan'){panX=bakePanTgt.x;panY=bakePanTgt.y}
+        updateRotationCenter();
+        if(bakeKind==='pan')updateTransform();
+    }
+    bakeOrigX=bakeOrigY=bakeOrigZ=null;
+    bakeKind='';bakeButton=-1;bakeMoved=false;
+    bakeQTotal.identity();bakeLocalDelta.set(0,0,0);
+    needsRender=true;
+    if(currentMode==='view')modeInfoEl.textContent=MODE_INFO.view;
+}
+// The panel states the feature where the mode it belongs to is switched on.
+function updateBakeHint(){
+    var hint=document.getElementById('vp-bake-hint');
+    if(!hint)return;
+    // CRY never changes within a session; only a comparison can come and go, and
+    // every path that enters or leaves one calls this.
+    if(diffMode||CRY){
+        hint.textContent=bakeUnavailableReason()+'.';
+    }else{
+        hint.innerHTML='Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. '+
+            'The atom coordinates change, so Save writes the new geometry.';
+    }
+}
+updateBakeHint();
+
 function getClickedAtom(e){
     var rect=canvas.getBoundingClientRect();
     if(diffMode){
@@ -8002,6 +8186,17 @@ canvas.addEventListener('mousedown',function(e){
         prevM={x:e.clientX,y:e.clientY};
         e.preventDefault();return;
     }
+    // Alt in View mode: this press writes the drag into the coordinates instead
+    // of only turning or sliding the view. Left rotates, middle/right translates
+    // — the very same mapping the view uses. Decided here, once, so a drag can
+    // never change its meaning halfway through; anywhere it is not available
+    // (a crystal, a comparison) the drag stays view-only and says why once.
+    if(e.altKey&&currentMode==='view'&&(e.button===0||e.button===1||e.button===2)){
+        if(!startBakeSession(e.button===0?'rot':'pan',e.button)&&!bakeHintShown){
+            bakeHintShown=true;
+            modeInfoEl.textContent=bakeUnavailableReason();
+        }
+    }
     if(currentMode!=='view'&&e.button===0){
         var idx=getClickedAtom(e);
         if(idx>=0){selectAtom(idx);e.preventDefault();return}
@@ -8085,17 +8280,39 @@ canvas.addEventListener('mousemove',function(e){
             spinRecordPoint(e.clientX,e.clientY);
             var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),dm.x*0.008);
             var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),dm.y*0.008);
-            rotQuat.premultiply(qx);rotQuat.premultiply(qy);rotQuat.normalize();
-            updateTransform()
+            if(bakeActive&&bakeKind==='rot'){
+                // An Alt-drag writes the rotation into the coordinates and leaves
+                // the view quaternion alone, so the two can never turn it twice.
+                if(dm.x||dm.y)bakeRotateBy(qx,qy);
+            }else{
+                rotQuat.premultiply(qx);rotQuat.premultiply(qy);rotQuat.normalize();
+                updateTransform()
+            }
         }
         if(isPan){
+            var bakePan=bakeActive&&bakeKind==='pan';
             if(panGrabActive){
                 // Cursor-locked: recompute pan so the grabbed point follows
                 // the cursor 1:1 (same world-z reference plane as at grab).
                 var pc2=screenPointOnPlane(e,panRefZ);
-                if(pc2){panX=pc2.x-panGrabOffset.x;panY=pc2.y-panGrabOffset.y}
-            }else{panX+=dm.x*0.01*(camDist/20);panY-=dm.y*0.01*(camDist/20)}
-            updateTransform()
+                if(pc2){
+                    if(bakePan){bakePanTgt.x=pc2.x-panGrabOffset.x;bakePanTgt.y=pc2.y-panGrabOffset.y}
+                    else{panX=pc2.x-panGrabOffset.x;panY=pc2.y-panGrabOffset.y}
+                }
+            }else if(bakePan){
+                // No grab reference: accumulate the plain-drag pan a would-be
+                // view pan would have reached, keeping panX/panY frozen instead.
+                bakePanTgt.x+=dm.x*0.01*(camDist/20);
+                bakePanTgt.y-=dm.y*0.01*(camDist/20);
+            }else{
+                panX+=dm.x*0.01*(camDist/20);panY-=dm.y*0.01*(camDist/20)
+            }
+            if(bakePan){
+                // The whole translation since the press, applied in one go: the
+                // pan offset stays where it was, the atoms take the movement.
+                var bdx=bakePanTgt.x-bakePan0.x,bdy=bakePanTgt.y-bakePan0.y;
+                if(bdx||bdy)bakeTranslateTo(bdx,bdy);
+            }else updateTransform()
         }
     }
     prevM={x:e.clientX,y:e.clientY};
@@ -8150,6 +8367,11 @@ canvas.addEventListener('mousemove',function(e){
 canvas.addEventListener('mouseup',function(e){
     if(moveDragActive){endMoveDrag()}
     if(fragRotActive){endFragRot()}
+    // An Alt-drag commits on the release of the button that started it. A bake
+    // drag does not throw the view afterwards: the drag was an edit, and a spin
+    // launched from it would keep turning what was just committed.
+    var bakedThisRelease=bakeActive&&e.button===bakeButton;
+    if(bakedThisRelease)endBakeSession();
     panGrabActive=false;
     if(isBoxSelecting){
         isBoxSelecting=false;boxRectEl.style.display='none';
@@ -8190,10 +8412,10 @@ canvas.addEventListener('mouseup',function(e){
         }
         boxStart=null;needsRender=true;layoutPanels();return;
     }
-    if(e.button===0&&isRot)spinLaunch();
+    if(e.button===0&&isRot&&!bakedThisRelease)spinLaunch();
     isRot=false;isPan=false;layoutPanels();
 });
-canvas.addEventListener('mouseleave',function(){isRot=false;isPan=false;panGrabActive=false;spinSamples.length=0;tooltipEl.style.display='none';if(moveDragActive)endMoveDrag();if(fragRotActive)endFragRot();if(isBoxSelecting){isBoxSelecting=false;boxRectEl.style.display='none';boxStart=null}});
+canvas.addEventListener('mouseleave',function(){if(bakeActive)endBakeSession();isRot=false;isPan=false;panGrabActive=false;spinSamples.length=0;tooltipEl.style.display='none';if(moveDragActive)endMoveDrag();if(fragRotActive)endFragRot();if(isBoxSelecting){isBoxSelecting=false;boxRectEl.style.display='none';boxStart=null}});
 canvas.addEventListener('wheel',function(e){e.preventDefault();
     if(diffMode){
         var rect=canvas.getBoundingClientRect();
@@ -8286,6 +8508,9 @@ window.addEventListener('blur',function(){
     ctrlDown=false;
     keyState.ArrowLeft=keyState.ArrowRight=keyState.ArrowUp=keyState.ArrowDown=false;
     keySpinActive=false;keySpinHold=0;
+    // The mouse-up may never arrive after focus is lost: commit what the drag
+    // already wrote rather than leaving the session (and its snapshot) open.
+    if(bakeActive)endBakeSession();
 });
 
 window.addEventListener('resize',function(){var rw=container.clientWidth||window.innerWidth;var rh=container.clientHeight||(window.innerHeight-60);if(rw<1)rw=window.innerWidth;if(rh<1)rh=window.innerHeight-60;camera.aspect=rw/rh;camera.updateProjectionMatrix();renderer.setSize(rw,rh);needsRender=true;layoutPanels()});
@@ -8312,7 +8537,10 @@ function animate(){
     // a while must not hand the molecule a several-second jump on its first frame.
     if(spinDt>0.1)spinDt=0.1;
     var keyActive=false;
-    if(keyState.ArrowLeft||keyState.ArrowRight||keyState.ArrowUp||keyState.ArrowDown){
+    // A running Alt-drag owns the orientation: an arrow key must not turn the
+    // view under it (that would apply the drag's rotation twice) nor start a
+    // spin. The keys are simply ignored until the drag commits.
+    if(!bakeActive&&(keyState.ArrowLeft||keyState.ArrowRight||keyState.ArrowUp||keyState.ArrowDown)){
         keyActive=true;
         if(moveKeyActive&&!ctrlDown){
             // Ctrl released mid-hold: end the fragment rotation session and
