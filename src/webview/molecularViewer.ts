@@ -1508,9 +1508,38 @@ canvas{display:block}
 #freq-panel .freq-idx{width:28px;color:var(--vscode-descriptionForeground,#999)}
 #freq-panel .freq-val{flex:1;font-family:monospace}
 #freq-panel .freq-sym{width:30px;text-align:right;color:var(--vscode-descriptionForeground,#999)}
+/* A mode has two independent affordances: the circle selects it for the
+   manual-displacement slider, the ▶ plays it. They are separate controls on
+   purpose — watching a mode must never arm the slider, and picking one must
+   never start a playback. */
+#freq-panel .freq-pick{width:11px;height:11px;flex:0 0 11px;margin:0 6px 0 2px;border-radius:50%;border:1px solid #767676;cursor:pointer;box-sizing:border-box;align-self:center}
+#freq-panel .freq-pick:hover{border-color:#ffb86b;box-shadow:0 0 0 2px rgba(255,159,67,0.18)}
+#freq-panel .freq-pick.on{border-color:#ff9f43;background:#ff9f43;box-shadow:inset 0 0 0 2px rgba(18,18,18,0.85)}
 #freq-panel .freq-play{width:18px;text-align:center}
 #freq-panel .freq-stop{margin-top:6px;width:100%;padding:4px;border-radius:3px;border:1px solid var(--vscode-button-border,#555);background:var(--vscode-button-background,#0e639c);color:#fff;cursor:pointer;font-size:11px}
 #freq-panel .freq-stop:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
+/* Manual displacement: one mode written into the coordinates. The block is a
+   fixed-height footer of the panel (the mode list scrolls above it), so moving
+   the slider cannot resize the panel and make it fight the layout. */
+#freq-panel .freq-dis{margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.15);flex:0 0 auto}
+#freq-panel .vd-head{display:flex;justify-content:space-between;align-items:baseline;gap:6px;font-size:10px;letter-spacing:0.4px;text-transform:uppercase;color:var(--vscode-descriptionForeground,#999)}
+#freq-panel .vd-mode{font-family:monospace;text-transform:none;letter-spacing:0;color:#ffb86b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:168px}
+/* The traceability line: every mode that is in the distortion, and the largest
+   displacement of the whole combination. */
+#freq-panel .vd-comps{margin-top:2px;font-family:monospace;font-size:10px;color:#c99a5b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#freq-panel .vd-slider{width:100%;margin:5px 0 3px;accent-color:#ff9f43}
+#freq-panel .vd-slider:disabled{opacity:0.35}
+#freq-panel .vd-row{display:flex;align-items:baseline;gap:6px}
+#freq-panel .vd-val{flex:0 0 auto;font-family:monospace;font-size:11px;color:#ffb86b}
+#freq-panel .vd-max{flex:1 1 auto;font-size:10px;color:var(--vscode-descriptionForeground,#999);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#freq-panel .vd-reset{flex:0 0 auto;padding:2px 9px;border-radius:3px;border:1px solid var(--vscode-button-border,#555);background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#ccc);font-size:10px;cursor:pointer}
+#freq-panel .vd-reset:hover:not(:disabled){background:var(--vscode-button-secondaryHoverBackground,#45494e)}
+#freq-panel .vd-reset:disabled{opacity:0.4;cursor:default}
+#freq-panel .vd-hint{margin-top:3px;font-size:10px;line-height:1.35;color:var(--vscode-descriptionForeground,#999);min-height:27px}
+/* A mode row carries a second, independent state: playing (the animation that
+   borrows the geometry) and displaced (the session that writes it). */
+#freq-panel .freq-row.displaced{box-shadow:inset 2px 0 0 #ff9f43}
+#freq-panel .freq-row.displaced .freq-idx{color:#ffb86b}
 #freq-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
 #freq-reopen.show{display:block}
 #freq-reopen:hover{background:var(--vscode-button-background,#0e639c)}
@@ -3930,10 +3959,13 @@ function startMmOptimization(){
     // structure every frame, and a Move Atoms drag is mid-session on it. Each is
     // stopped *before* the starting geometry is captured, so what the run calls
     // "where it began" is the geometry on screen at the click, not a half-drawn
-    // vibration amplitude.
+    // vibration amplitude. A manual displacement is closed the same way — the
+    // run writes those very coordinates, so its slider must not stay armed over
+    // them (the run's own undo snapshot is taken in front of its first write).
     if(vibActive||vibPaused)stopVibration();
     if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
     stopFrameAutoPlay();
+    vdCommit();
     var i,indices=selectedAtoms.slice(),origin=new Array(indices.length);
     for(i=0;i<indices.length;i++){
         var a=MD.atoms[indices[i]];
@@ -4556,6 +4588,13 @@ document.getElementById('reset-btn').addEventListener('click',function(){
 });
 var undoStack=[];var MAX_UNDO=50;
 function pushUndo(){
+    // Every coordinate edit opens with a snapshot. An open manual displacement
+    // is a *pending* rewrite of the whole structure — its next slider move would
+    // put every atom back onto base + amplitude — so it is closed here, once,
+    // for every edit path at the one door they all pass through. The geometry it
+    // produced stays exactly as it is, and the snapshot below therefore captures
+    // the displaced structure the edit is about to change.
+    if(vdActive&&!vdSuppress)vdCommit();
     // hasExplicitBonds is part of the restore state: an Import can flip it
     // false→true, and an undo of that import must restore it, otherwise Move
     // Atoms would keep using the explicit-bonds (deletion-only) path on what
@@ -4573,6 +4612,9 @@ function doUndo(){
     if(vibActive||vibPaused)stopVibration();
     if(moveDragActive||moveKeyActive||fragRotActive)stopMoveSession();
     if(bakeActive)endBakeSession();
+    // The snapshot replaces every coordinate, so a displacement session has
+    // nothing left to be measured from — it is dropped, not committed.
+    vdEnd();
     var snap=undoStack.pop();
     MD.atoms=snap.atoms;MD.bonds=snap.bonds;
     MD.hasExplicitBonds=!!snap.hasExplicitBonds;
@@ -5198,6 +5240,10 @@ function startDiff(msg){
         modeInfoEl.textContent='Diff Mode (skeletons differ)';
         updateBakeHint();
         enterDiffRender();
+        // The displacement slider acts on one structure; a comparison shows
+        // two, so it is switched off (the session itself survives — the left
+        // side is still the geometry the user displaced).
+        vdSyncPanel();
         layoutPanels();
         return;
     }
@@ -5220,6 +5266,7 @@ function startDiff(msg){
     modeInfoEl.textContent='Diff Mode ('+totalDiff+' differences)';
 
     enterDiffRender(diffs,mapping);
+    vdSyncPanel();
     layoutPanels();
 }
 
@@ -5554,6 +5601,8 @@ function exitDiff(){
     stopSpin();
     diffMode=false;
     updateBakeHint();
+    // One structure again: the displacement block takes its mode back.
+    vdSyncPanel();
     // A molecular-mechanics session survives the comparison: its panel comes
     // back with the same selection once the second structure is gone.
     if(currentMode==='mmOpt')showMmPanel();
@@ -5751,6 +5800,9 @@ function switchFrame(idx){
     if(vibActive||vibPaused)stopVibration();
     stopMoveSession();
     mmCancelRun();
+    // A frame is a structure of its own: the equilibrium a displacement session
+    // was measured from belongs to the frame being left.
+    vdEnd();
     currentFrame=idx;
     var f=MD.frames[idx];
     MD.atoms=f.atoms.map(function(a,i){a.index=i;return a});
@@ -5798,10 +5850,11 @@ function switchMolecule(idx){
     if(diffMode){modeInfoEl.textContent='Molecule switching is not available in diff mode';return}
     if(CRY){modeInfoEl.textContent='Molecule switching is not available for crystal structures';return}
     // Same rule as a frame change: every writer of the current structure ends
-    // before it is replaced (see switchFrame).
+    // before it is replaced (see switchFrame), a displacement session included.
     if(vibActive||vibPaused)stopVibration();
     stopMoveSession();
     mmCancelRun();
+    vdEnd();
     vmdMolIdx=idx;
     var m=VMD.molecules[idx];
     MD.atoms=m.atoms;
@@ -6489,6 +6542,9 @@ function updateVibrationPositions(){
 function startVibration(modeIdx){
     stopVibration();
     if(!NORMAL_MODES||modeIdx<0||modeIdx>=NORMAL_MODES.length)return;
+    // Playing a mode is the animation half of a mode's selection and nothing
+    // else: the manual-displacement target (vdTarget) is set by its own circle
+    // in the list, so watching a mode can never re-aim the slider.
     // A normal mode is a playback, not the user's geometry: it rewrites every
     // atom's position on each frame and puts the geometry it started from back
     // when it stops. A Molecular Mechanics run writing coordinates into the same
@@ -6509,7 +6565,14 @@ function startVibration(modeIdx){
     if(totalFrames>0&&currentFrame!==totalFrames-1){switchFrame(totalFrames-1)}
     var mode=NORMAL_MODES[modeIdx];
     if(!mode.displacements||mode.displacements.length!==MD.atoms.length)return;
-    vibBasePositions=MD.atoms.map(function(a){return{x:a.x,y:a.y,z:a.z}});
+    // A manual displacement is the user's structure, not a pose: the playback
+    // always swings from the *undisplaced* equilibrium, so a mode looks the same
+    // whatever number the slider was left at, and stopping puts the displaced
+    // geometry back (see stopVibration). Without a session the geometry on
+    // screen already is the equilibrium.
+    vibBasePositions=(vdActive&&vdBase&&vdBase.length===MD.atoms.length)
+        ?vdBase.map(function(p){return{x:p.x,y:p.y,z:p.z}})
+        :MD.atoms.map(function(a){return{x:a.x,y:a.y,z:a.z}});
     var maxMag=0;
     mode.displacements.forEach(function(d){var m=Math.sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]);if(m>maxMag)maxMag=m});
     if(maxMag<1e-8)maxMag=1;
@@ -6564,6 +6627,10 @@ function stopVibration(){
             MD.atoms[i].z=vibBasePositions[i].z;
         }
         vibBasePositions=null;
+        // A manual displacement is the geometry the user left the structure in;
+        // the playback only borrowed it, so it is written back before the
+        // animation disappears. Without a session this is a no-op.
+        vdWriteAtoms();
         updateVibrationPositions();
     }
     vibActive=false;vibPaused=false;vibModeIdx=-1;
@@ -6572,6 +6639,360 @@ function stopVibration(){
     var rows=freqPanelEl.querySelectorAll('.freq-row');
     rows.forEach(function(r){r.classList.remove('playing')});
     updateFreqButton('pause');
+}
+
+// ===== Manual displacement along normal modes =====
+// The playback above is a *view* of a mode: it borrows the geometry for one
+// sine cycle and puts it back. Manual displacement is the other half — modes
+// written into the coordinates, so the structure can be pulled along them and
+// then measured, rotated, edited or saved like any other.
+//
+// The distortion is a *combination* of modes, not one at a time. The normal
+// modes of one frequency job are an orthogonal basis of the 3N-6 displacements
+// (orthogonal under the mass-weighted inner product, which the printed vectors
+// already carry), so
+//     x = x0 + sum_k (scale_k * dir_k)
+// is exactly a point in normal-coordinate space: displacing along a second mode
+// is the same arithmetic as a scan along a line in that space, and every
+// component keeps the per-atom weights and phases the calculation produced. A
+// component is added by dragging the slider of a picked mode and removed by
+// dragging it back to 0, so nothing accumulates invisibly — the block lists
+// every component that is in the structure, and every contributing row is
+// marked.
+//
+// State:
+//   * vdBase — the equilibrium geometry the whole combination is measured
+//     from, captured once when the first component is added. Every write is
+//     rebuilt from it (base + sum), never from the previous frame, so dragging
+//     back and forth cannot accumulate drift.
+//   * vdComp — the components, as {idx, scale, dir}, where dir is that mode's
+//     unit displacement (largest per-atom magnitude 1 Å).
+//   * vdTarget — the mode the slider points at (the one whose circle is
+//     filled). The slider edits *that* component; it plays nothing.
+//
+// The slider is a *fraction* of one mode, not a distance: -1.00 to +1.00, where
+// 1.00 moves that mode's most-moving atom by 1 Å. The block prints what each
+// component comes to and the largest displacement of the whole combination
+// (which is not the sum of the parts — vectors can cancel), so a number is
+// never the only thing on offer.
+//
+// A session is a *pending* rewrite of every atom. Anything that edits the
+// structure closes it first (vdCommit, called from pushUndo, which every
+// coordinate edit opens with), and anything that replaces the structure drops
+// it (vdEnd). The playback is the one deliberate exception: it swings around
+// the *pure* vdBase — the mode it shows is the mode the calculation produced,
+// not that mode on top of an arbitrary offset — and writes the combination back
+// when it stops.
+var VD_MAX_SCALE=1.0;    // slider range: -1 … +1 of one mode's displacement
+var vdActive=false;      // a displacement session holds the geometry
+var vdTarget=-1;         // mode the slider points at (its circle is filled)
+var vdComp=[];           // components: {idx, scale, dir}
+var vdBase=null;         // equilibrium coordinates [{x,y,z}, ...]
+var vdMaxDisp=0;         // largest atomic displacement of the combination, Å
+var vdUndoDepth=-1;      // undoStack length right after the session's snapshot
+var vdSuppress=false;    // the session's own pushUndo must not close it
+var vdMarkedSig='';      // component list the row markers were last built for
+var vdPickedRow=-1;      // row whose pick circle is currently filled
+
+function vdAvailable(){
+    return !CRY&&!diffMode&&!!NORMAL_MODES&&NORMAL_MODES.length>0&&MD.atoms.length>0;
+}
+/** Whether one mode can be written into the current structure at all. */
+function vdUsable(idx){
+    if(!NORMAL_MODES||idx<0||idx>=NORMAL_MODES.length)return false;
+    var m=NORMAL_MODES[idx];
+    return !!(m&&m.displacements&&m.displacements.length===MD.atoms.length);
+}
+/** Unit displacement vectors of one mode, scaled so the largest per-atom
+ *  magnitude is 1 Å — that is what makes the slider's 1.00 mean "the
+ *  most-moving atom travels 1 Å". Null when the mode carries no usable vector
+ *  for this structure. */
+function vdDirFor(idx){
+    if(!vdUsable(idx))return null;
+    var d=NORMAL_MODES[idx].displacements,n=MD.atoms.length;
+    var maxSq=0,i,v,q;
+    for(i=0;i<n;i++){
+        v=d[i];
+        q=v[0]*v[0]+v[1]*v[1]+v[2]*v[2];
+        if(q>maxSq)maxSq=q;
+    }
+    if(!(maxSq>1e-24))return null;
+    var inv=1/Math.sqrt(maxSq);
+    var dir=new Array(n);
+    for(i=0;i<n;i++){
+        v=d[i];
+        dir[i]=[v[0]*inv,v[1]*inv,v[2]*inv];
+    }
+    return dir;
+}
+/** The component of one mode (null when that mode is not in the distortion). */
+function vdFindComp(idx){
+    for(var i=0;i<vdComp.length;i++)if(vdComp[i].idx===idx)return vdComp[i];
+    return null;
+}
+/** The share of the picked mode: what the slider shows and edits. */
+function vdCurScale(){
+    var c=vdFindComp(vdTarget);
+    return c?c.scale:0;
+}
+/** Rebuild every atom from the equilibrium plus every component. Returns false
+ *  (and writes nothing) when the session and the structure no longer describe
+ *  the same atom list. */
+function vdWriteAtoms(){
+    var n=MD.atoms.length,i,c;
+    vdMaxDisp=0;
+    if(!vdActive||!vdBase||vdBase.length!==n)return false;
+    // Every component must describe this atom list before anything is written:
+    // a half-applied combination would be a structure nobody asked for.
+    for(c=0;c<vdComp.length;c++){
+        var cd=vdComp[c].dir;
+        if(!cd||cd.length!==n)return false;
+    }
+    for(i=0;i<n;i++){
+        var a=MD.atoms[i],b=vdBase[i];
+        a.x=b.x;a.y=b.y;a.z=b.z;
+    }
+    for(c=0;c<vdComp.length;c++){
+        var comp=vdComp[c],dir=comp.dir,sc=comp.scale;
+        for(i=0;i<n;i++){
+            var a2=MD.atoms[i],v=dir[i];
+            a2.x+=v[0]*sc;a2.y+=v[1]*sc;a2.z+=v[2]*sc;
+        }
+    }
+    // The largest displacement of the *combination* is not the sum of the
+    // components' own (vectors can cancel), so it is measured on the result.
+    var maxSq=0;
+    for(i=0;i<n;i++){
+        var a3=MD.atoms[i],b3=vdBase[i];
+        var dx=a3.x-b3.x,dy=a3.y-b3.y,dz=a3.z-b3.z;
+        var q=dx*dx+dy*dy+dz*dz;
+        if(q>maxSq)maxSq=q;
+    }
+    vdMaxDisp=Math.sqrt(maxSq);
+    return true;
+}
+/** Add a mode to the distortion or change its share; false when the mode
+ *  carries no usable displacement for this structure. */
+function vdSetComp(idx,scale){
+    var c=vdFindComp(idx);
+    if(c){c.scale=scale;return true}
+    var dir=vdDirFor(idx);
+    if(!dir)return false;
+    vdComp.push({idx:idx,scale:scale,dir:dir});
+    return true;
+}
+/** Take one mode out of the distortion. */
+function vdDropComp(idx){
+    for(var i=0;i<vdComp.length;i++){
+        if(vdComp[i].idx===idx){vdComp.splice(i,1);return true}
+    }
+    return false;
+}
+/** The combination as the block states it, so the structure is always
+ *  traceable to the modes it was built from. */
+function vdCompsText(){
+    if(!vdComp.length)return 'no displacement yet';
+    var parts=[];
+    for(var i=0;i<vdComp.length;i++){
+        var c=vdComp[i];
+        parts.push('#'+(c.idx+1)+' '+(c.scale>=0?'+':'')+c.scale.toFixed(2));
+    }
+    return parts.join(' · ')+' · total '+vdMaxDisp.toFixed(2)+' Å';
+}
+/** Signature of the component list, for the row markers. */
+function vdCompSig(){
+    var s='';
+    for(var i=0;i<vdComp.length;i++)s+=vdComp[i].idx+',';
+    return s;
+}
+/** End the session bookkeeping; the atoms are left exactly as they are. */
+function vdDropSession(popUndo){
+    // The snapshot belongs to the session: when the geometry is back at the
+    // equilibrium it is not an edit any more, unless something else pushed on
+    // top of it in the meantime.
+    if(popUndo&&vdUndoDepth===undoStack.length&&undoStack.length>0){undoStack.pop();updateUndoBtn()}
+    vdActive=false;vdBase=null;vdComp.length=0;vdMaxDisp=0;vdUndoDepth=-1;
+}
+/** Open a session: the equilibrium snapshot and the one undo step it owns. */
+function vdBegin(){
+    vdBase=MD.atoms.map(function(a){return{x:a.x,y:a.y,z:a.z}});
+    vdComp.length=0;vdActive=true;
+    // One undo step per session, taken in front of the first coordinate it
+    // writes — the same rule an Alt-drag follows.
+    vdSuppress=true;pushUndo();vdSuppress=false;
+    vdUndoDepth=undoStack.length;
+}
+/** Back to the equilibrium: every component is removed and the atoms return to
+ *  the snapshot, so the session's own undo step goes with it. */
+function vdClearAll(msg){
+    if(!vdActive){vdSyncPanel();return}
+    vdComp.length=0;
+    vdWriteAtoms();            // nothing left to add: the atoms become vdBase
+    updateVibrationPositions();
+    vdDropSession(true);
+    updateRotationCenter();
+    vdSyncPanel();
+    modeInfoEl.textContent=msg||'Manual displacement cleared - back to the equilibrium geometry';
+}
+/** Drop the session without touching the geometry: the structure it was
+ *  measured from is being replaced (a frame, a molecule, an Undo). */
+function vdEnd(){
+    vdDropSession(false);
+    vdSyncPanel();
+}
+/** Close the session and keep the geometry it produced. Called in front of
+ *  every coordinate edit, so the edit starts from a structure nothing else is
+ *  holding a rewrite for, and the rotation centre describes what is on screen. */
+function vdCommit(){
+    if(!vdActive)return;
+    if(vibActive||vibPaused)stopVibration();
+    vdDropSession(false);
+    // The centre follows the geometry; meshes are stored relative to it, so
+    // this re-centres without moving the picture a pixel.
+    updateRotationCenter();
+    vdSyncPanel();
+}
+function vdReset(){
+    if(vibActive||vibPaused)stopVibration();
+    vdClearAll();
+}
+/** The manual half of a mode's selection: the circle in the list points the
+ *  displacement slider at that mode. It plays nothing and writes nothing — the
+ *  first slider move is what applies it — so picking a mode to adjust can never
+ *  start an animation, and watching one can never re-aim the slider. */
+function vdPick(idx){
+    if(!NORMAL_MODES||idx<0||idx>=NORMAL_MODES.length)return;
+    vdTarget=idx;
+    vdSyncPanel();
+    var m=NORMAL_MODES[idx];
+    if(!vdUsable(idx)){
+        modeInfoEl.textContent='Manual displacement - this mode has no displacements for the current structure';
+        return;
+    }
+    modeInfoEl.textContent='Manual displacement: mode '+(idx+1)+
+        (m&&m.frequency!=null?(' ('+m.frequency.toFixed(2)+' cm⁻¹)'):'')+
+        ' - drag the slider to move the structure along it';
+}
+/** The one entry point of the slider: one mode's fraction, -1 … +1. */
+function vdSetScale(scale){
+    if(!vdAvailable()){vdSyncPanel();return}
+    // Two writers may already own the coordinates. A Molecular Mechanics run
+    // streams them chunk by chunk and a Move Atoms session is mid-edit; a slider
+    // move under either would be overwritten (or would overwrite the run), so it
+    // is refused and the thumb is put back where the geometry actually is. The
+    // run keeps going — a slider is not a reason to end it.
+    if(mmRunActive()){
+        modeInfoEl.textContent='Manual displacement - a Molecular Mechanics run is using these coordinates';
+        vdSyncPanel();return;
+    }
+    if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
+    if(!isFinite(scale))scale=0;
+    if(scale>VD_MAX_SCALE)scale=VD_MAX_SCALE;
+    if(scale<-VD_MAX_SCALE)scale=-VD_MAX_SCALE;
+    // A playback owns the coordinates while it runs; ending it first puts the
+    // combination back, which is the geometry this edit is measured from.
+    if(vibActive||vibPaused)stopVibration();
+    var idx=vdTarget;
+    if(idx<0){vdSyncPanel();return}
+    // A repeated event with the same value (input + change, a keyboard repeat)
+    // is not a new edit and writes nothing.
+    if(Math.abs(scale-vdCurScale())<1e-12){vdSyncPanel();return}
+    var zero=Math.abs(scale)<1e-9;
+    if(zero&&!vdActive){vdSyncPanel();return}
+    if(!vdActive){
+        if(!vdUsable(idx)){vdSyncPanel();return}
+        vdBegin();
+    }
+    if(zero){
+        // Dragging a component back to 0 takes that mode out of the
+        // combination; when it was the last one the structure is back at the
+        // equilibrium and the session is over.
+        vdDropComp(idx);
+        if(!vdComp.length){
+            vdClearAll('Manual displacement cleared - back to the equilibrium geometry');
+            return;
+        }
+    }else if(!vdSetComp(idx,scale)){
+        if(!vdComp.length)vdDropSession(true);
+        vdSyncPanel();return;
+    }
+    vdWriteAtoms();
+    updateVibrationPositions();
+    modeInfoEl.textContent='Manual displacement: #'+(idx+1)+' '+(scale>=0?'+':'')+scale.toFixed(2)+
+        ' - '+vdComp.length+' mode'+(vdComp.length===1?'':'s')+', total max '+vdMaxDisp.toFixed(2)+' Å';
+    vdSyncPanel();
+}
+/** One place that keeps the panel's displacement block honest: the mode the
+ *  slider points at, the component list, whether the slider can be moved at
+ *  all, the value, the reset button and the row markers. Safe to call when the
+ *  panel is not open, and cheap enough to call on every slider event: nothing
+ *  is written to the DOM unless it actually changed. */
+function vdSyncPanel(){
+    var panel=freqPanelEl;
+    if(!panel)return;
+    var slider=panel.querySelector('#vd-slider');
+    if(!slider)return;
+    var modeEl=panel.querySelector('#vd-mode');
+    var compsEl=panel.querySelector('#vd-comps');
+    var valEl=panel.querySelector('#vd-val');
+    var maxEl=panel.querySelector('#vd-max');
+    var resetBtn=panel.querySelector('#vd-reset');
+    var hintEl=panel.querySelector('#vd-hint');
+    var m=(NORMAL_MODES&&vdTarget>=0&&vdTarget<NORMAL_MODES.length)?NORMAL_MODES[vdTarget]:null;
+    var usable=vdUsable(vdTarget);
+    var enabled=usable&&vdAvailable();
+    var off=!enabled;
+    if(slider.disabled!==off)slider.disabled=off;
+    var cur=vdCurScale();
+    // Only write the value when it actually differs: this runs on every input
+    // event of a drag, and re-assigning the thumb's own value is pointless work.
+    if(parseFloat(slider.value)!==cur)slider.value=String(cur);
+    var noReset=!vdActive;
+    if(resetBtn&&resetBtn.disabled!==noReset)resetBtn.disabled=noReset;
+    if(valEl){
+        var valTxt=(cur<0?'-':'+')+Math.abs(cur).toFixed(2);
+        if(valEl.textContent!==valTxt)valEl.textContent=valTxt;
+    }
+    // The fraction alone does not say how big the distortion is, so the same
+    // row spells out what this mode's share comes to for the atom that moves
+    // most within it (the unit vector makes that exactly |share| Å).
+    if(maxEl){
+        var maxTxt='max '+Math.abs(cur).toFixed(2)+' Å';
+        if(maxEl.textContent!==maxTxt)maxEl.textContent=maxTxt;
+    }
+    if(compsEl){
+        var compsTxt=vdCompsText();
+        if(compsEl.textContent!==compsTxt)compsEl.textContent=compsTxt;
+    }
+    if(modeEl){
+        var modeTxt=m?('mode '+(vdTarget+1)+' · '+m.frequency.toFixed(2)+' cm⁻¹'):'no mode selected';
+        if(modeEl.textContent!==modeTxt)modeEl.textContent=modeTxt;
+    }
+    if(hintEl){
+        var hintTxt;
+        if(!NORMAL_MODES||!NORMAL_MODES.length)hintTxt='No normal modes in this document.';
+        else if(!vdAvailable())hintTxt=diffMode?'Not available in diff mode.':'Not available for crystal structures.';
+        else if(!m)hintTxt='Pick a mode with the circle, then drag to move the structure along it.';
+        else if(!usable)hintTxt='This mode has no displacements for the current structure.';
+        else if(vdComp.length&&Math.abs(cur)>1e-9)hintTxt='In the distortion: drag to change its share, 0 takes it out.';
+        else if(vdComp.length)hintTxt='Drag to add this mode to the distortion.';
+        else hintTxt='Drag along the mode: 1.00 moves the most-moving atom by 1 Å.';
+        if(hintEl.textContent!==hintTxt)hintEl.textContent=hintTxt;
+    }
+    // The markers change only when the set of components or the picked mode
+    // changes, so the row list is walked on that transition and not on every
+    // slider event.
+    var sig=vdCompSig();
+    var picked=vdTarget;
+    if(sig!==vdMarkedSig||picked!==vdPickedRow){
+        vdMarkedSig=sig;vdPickedRow=picked;
+        panel.querySelectorAll('.freq-row').forEach(function(r){
+            var idx=parseInt(r.dataset.idx,10);
+            r.classList.toggle('displaced',!!vdFindComp(idx));
+            var pick=r.querySelector('.freq-pick');
+            if(pick)pick.classList.toggle('on',idx===picked);
+        });
+    }
 }
 
 function buildFreqPanel(){
@@ -6584,19 +7005,33 @@ function buildFreqPanel(){
             '<span class="freq-idx">'+(idx+1)+'</span>'+
             '<span class="freq-val">'+sign+freqStr+' cm⁻¹</span>'+
             '<span class="freq-sym">'+symStr+'</span>'+
-            '<span class="freq-play">▶</span></div>';
+            '<span class="freq-pick" data-idx="'+idx+'" data-pick="1" title="Select this mode for manual displacement"></span>'+
+            '<span class="freq-play" title="Play this vibration">▶</span></div>';
     }).join('');
     freqPanelEl.innerHTML=
         '<div class="freq-head"><span class="freq-title">Normal Modes ('+NORMAL_MODES.length+')</span>'+
         '<span class="freq-close">×</span></div>'+
         '<div class="freq-body">'+rowsHTML+'</div>'+
-        '<button class="freq-stop" id="freq-stop">⏸ Pause</button>';
+        '<button class="freq-stop" id="freq-stop">⏸ Pause</button>'+
+        '<div class="freq-dis">'+
+        '<div class="vd-head"><span>Manual Displacement</span><span class="vd-mode" id="vd-mode">no mode selected</span></div>'+
+        '<div class="vd-comps" id="vd-comps">no displacement yet</div>'+
+        '<input type="range" class="vd-slider" id="vd-slider" min="-'+VD_MAX_SCALE+'" max="'+VD_MAX_SCALE+'" step="0.01" value="0">'+
+        '<div class="vd-row"><span class="vd-val" id="vd-val">+0.00</span>'+
+        '<span class="vd-max" id="vd-max">max 0.00 Å</span>'+
+        '<button class="vd-reset" id="vd-reset" disabled>Reset all</button></div>'+
+        '<div class="vd-hint" id="vd-hint">Pick a mode with the circle, then drag to move the structure along it.</div>'+
+        '</div>';
     freqPanelEl.classList.add('show');
     freqReopenEl.classList.remove('show');
 
     var rows=freqPanelEl.querySelectorAll('.freq-row');
     rows.forEach(function(r){
-        r.addEventListener('click',function(){
+        r.addEventListener('click',function(e){
+            // The circle inside the row is the manual-selection control; its
+            // own handler stops the event, and this guard keeps the two apart
+            // even if it does not.
+            if(e&&e.target&&e.target.dataset&&e.target.dataset.pick)return;
             var idx=parseInt(r.dataset.idx);
             if(isNaN(idx))return;
             if((vibActive||vibPaused)&&vibModeIdx===idx){
@@ -6609,6 +7044,16 @@ function buildFreqPanel(){
                     r.classList.add('playing');
                 }
             }
+        });
+    });
+    // The other half of the selection: pick a mode for the displacement slider.
+    // It plays nothing and writes nothing; the first slider move does.
+    freqPanelEl.querySelectorAll('.freq-pick').forEach(function(p){
+        p.addEventListener('click',function(e){
+            if(e&&typeof e.stopPropagation==='function')e.stopPropagation();
+            var idx=parseInt(this.dataset.idx,10);
+            if(isNaN(idx))return;
+            vdPick(idx);
         });
     });
     var closeBtn=freqPanelEl.querySelector('.freq-close');
@@ -6627,6 +7072,20 @@ function buildFreqPanel(){
             else if(vibPaused){resumeVibration()}
         });
     }
+    // Manual displacement: the slider writes the mode currently named in the
+    // block. 'input' covers a drag, a click on the track and an arrow key on a
+    // focused slider; the handler itself drops repeated identical values.
+    var vdSlider=freqPanelEl.querySelector('#vd-slider');
+    if(vdSlider){
+        vdSlider.addEventListener('input',function(){vdSetScale(parseFloat(this.value))});
+        vdSlider.addEventListener('change',function(){vdSetScale(parseFloat(this.value))});
+    }
+    var vdResetBtn=freqPanelEl.querySelector('#vd-reset');
+    if(vdResetBtn)vdResetBtn.addEventListener('click',function(){vdReset()});
+    // The rows were just recreated, so the marker caches start empty.
+    vdMarkedSig='';
+    vdPickedRow=-1;
+    vdSyncPanel();
     layoutPanels();
 }
 
@@ -7719,7 +8178,14 @@ function doSave(){
         return;
     }
 
-    showModal('<h3>Save File</h3>'+
+    // Saving a displaced structure is exactly what the feature is for, so the
+    // dialog says which modes the geometry is built from instead of leaving the
+    // composition to be discovered in the file.
+    var vdNote=vdActive
+        ?'<div class="current-val">Coordinates include a manual displacement: '+
+            vdCompsText()+'.</div>'
+        :'';
+    showModal('<h3>Save File</h3>'+vdNote+
         '<label>Format:</label><select id="m-fmt">'+
         '<option value="xyz">XYZ (.xyz)</option>'+
         '<option value="gjf">Gaussian Input (.gjf)</option>'+
@@ -7996,11 +8462,13 @@ function startBakeSession(kind,button){
         bakeOrigX[i]=a.x;bakeOrigY[i]=a.y;bakeOrigZ[i]=a.z;
     }
     bakeActive=true;bakeKind=kind;bakeButton=button;bakeMoved=false;
-    bakeCx=CX;bakeCy=CY;bakeCz=CZ;
     bakeQTotal.identity();bakeLocalDelta.set(0,0,0);
     bakePan0.x=panX;bakePan0.y=panY;
     bakePanTgt.x=panX;bakePanTgt.y=panY;
     pushUndo();
+    // The snapshot may close a manual displacement, which re-centres the
+    // structure, so the pivot is read after it rather than before.
+    bakeCx=CX;bakeCy=CY;bakeCz=CZ;
     modeInfoEl.textContent=(kind==='rot'?'Alt: rotating ':'Alt: moving ')+n+
         ' atom(s) in the file - release to commit, Undo reverts';
     return true;
