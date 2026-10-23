@@ -2053,6 +2053,7 @@ function rebuildCrystal(){
 function removeDisorder(){
     if(!CRY)return;
     pushUndo();
+    var baseCountBefore=CRY.baseAtoms.length;
     var newBaseAtoms=[];
     var oldToNew={};
     CRY.baseAtoms.forEach(function(ba,i){
@@ -2073,6 +2074,7 @@ function removeDisorder(){
         return{atom1:oldToNew[b.atom1],atom2:oldToNew[b.atom2],order:b.order,shift:b.shift};
     });
     CRY.baseAtoms=newBaseAtoms;
+    if(CRY.baseAtoms.length<baseCountBefore)provMark('disorder',1);
     rebuildCrystal();
     rebuildScene();
 }
@@ -3235,7 +3237,7 @@ function endMoveDrag(){
     // A Ctrl+click without any displacement pushes a redundant snapshot — drop it.
     if(!moveDragMoved&&undoStack.length>0){undoStack.pop();updateUndoBtn()}
     // Re-detect connectivity once on release (not per frame during the drag).
-    if(moveDragMoved)refreshMovedBondsAndMeshes();
+    if(moveDragMoved){provMark('translate',1);refreshMovedBondsAndMeshes();}
     else refreshVmdSurfaces();
     document.body.style.cursor='';
     if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
@@ -3246,7 +3248,7 @@ function endFragRot(){
     // A Ctrl+click without any rotation pushes a redundant snapshot — drop it.
     if(!fragRotMoved&&undoStack.length>0){undoStack.pop();updateUndoBtn()}
     // Re-detect connectivity once on release (not per frame during the drag).
-    if(fragRotMoved)refreshMovedBondsAndMeshes();
+    if(fragRotMoved){provMark('rotate',1);refreshMovedBondsAndMeshes();}
     else refreshVmdSurfaces();
     document.body.style.cursor='';
     if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
@@ -3260,6 +3262,10 @@ function stopMoveSession(){
     // clears once all keys are released.
     if(bakeActive)endBakeSession();
     if(moveDragActive||moveKeyActive||fragRotActive){
+        // The geometry these sessions produced stays; the session is only
+        // ended, so what it did is still part of the structure that gets saved.
+        if(moveDragActive&&moveDragMoved)provMark('translate',1);
+        if((fragRotActive||moveKeyActive)&&fragRotMoved)provMark('rotate',1);
         moveDragActive=false;moveKeyActive=false;fragRotActive=false;
         moveKeyLatch=true;
         moveDragOrig=null;
@@ -4114,6 +4120,7 @@ function applyMmResult(msg){
     mmApplyLiveCoords(msg.coords);
     mmRun.state='done';
     mmEndLiveRefresh();
+    if(mmRun.movedCount>0)provMark('mmOpt',1);
     mmRun.last={
         step:typeof msg.iterations==='number'?msg.iterations:(mmRun.last?mmRun.last.step:0),
         energy:typeof msg.energyAfter==='number'?msg.energyAfter:(mmRun.last?mmRun.last.energy:0),
@@ -4169,6 +4176,9 @@ function mmRestoreInitial(){
     var origin=mmRun.origin;
     if(mmRunActive())vscodeApi.postMessage({command:'mmCancel',runId:mmRun.id});
     pushUndo();
+    // The run's geometry is being taken back, so its clause comes off the title
+    // as well (an Undo of this restore puts the run back, clause included).
+    provUnmark('mmOpt');
     var moved=[];
     for(var k=0;k<origin.indices.length;k++){
         var c=origin.coords[k];
@@ -4458,6 +4468,7 @@ function commitRotAngle(newAngle){
         restoreOriginal();
         applyGroupRotation(rotCommittedAngle);
         pushUndo();
+        provMark('rotate',1);
         undoStack[undoStack.length-1].rotAngle=rotCommittedAngle;
         restoreOriginal();
         applyGroupRotation(newAngle);
@@ -4591,6 +4602,17 @@ document.getElementById('reset-btn').addEventListener('click',function(){
     updateTransform();
 });
 var undoStack=[];var MAX_UNDO=50;
+// What a saved file's title line says about where the structure came from and
+// what was done to it (the functions that build and record it are at "Save
+// provenance", next to doSave). Declared here, with the other view state, so it
+// is never undefined when an edit path reads it.
+var PROV_PREFIX='MV: ';   // our own marker, so re-saving a file never stacks lines
+var PROV_MAX=190;         // characters — a title line, not a paragraph
+var provSource=provBaseName(MD.filePath);
+var provMerged=[];        // files merged into this structure, in order
+var provEdits=[];         // [{k,n}] — what changed it, in the order it happened
+var provModes={};         // mode index -> {freq,scale}: displacement kept in the geometry
+
 function pushUndo(){
     // Every coordinate edit opens with a snapshot. An open manual displacement
     // is a *pending* rewrite of the whole structure — its next slider move would
@@ -4603,7 +4625,7 @@ function pushUndo(){
     // false→true, and an undo of that import must restore it, otherwise Move
     // Atoms would keep using the explicit-bonds (deletion-only) path on what
     // is an auto-detected structure again.
-    var snap={atoms:JSON.parse(JSON.stringify(MD.atoms)),bonds:JSON.parse(JSON.stringify(MD.bonds)),hasExplicitBonds:!!MD.hasExplicitBonds};
+    var snap={atoms:JSON.parse(JSON.stringify(MD.atoms)),bonds:JSON.parse(JSON.stringify(MD.bonds)),hasExplicitBonds:!!MD.hasExplicitBonds,prov:provClone()};
     if(CRY){snap.baseAtoms=JSON.parse(JSON.stringify(CRY.baseAtoms));snap.baseBonds=JSON.parse(JSON.stringify(CRY.baseBonds))}
     undoStack.push(snap);
     if(undoStack.length>MAX_UNDO)undoStack.shift();
@@ -4622,6 +4644,9 @@ function doUndo(){
     var snap=undoStack.pop();
     MD.atoms=snap.atoms;MD.bonds=snap.bonds;
     MD.hasExplicitBonds=!!snap.hasExplicitBonds;
+    // The provenance belongs to the geometry: an undone edit is not in the
+    // structure any more, so its clause comes off the title with it.
+    provRestore(snap.prov);
     if(CRY&&snap.baseAtoms){CRY.baseAtoms=snap.baseAtoms;CRY.baseBonds=snap.baseBonds}
     if(CRY){rebuildCrystal()}rebuildScene();updateUndoBtn();
     if(diffMode)resetSelection();
@@ -4830,6 +4855,7 @@ function importStructure(msg){
     var need=maxD*2.5+5;
     if(camDist<need){camDist=need;camera.position.set(0,0,camDist);camera.lookAt(0,0,0)}
     needsRender=true;
+    provAddSource(msg.fileName);
     modeInfoEl.textContent='Imported '+newAtoms.length+' atoms from '+(msg.fileName||'file')+' - placed beside the existing structure';
 }
 
@@ -4885,6 +4911,7 @@ function applyHydrogenResult(msg){
     stopMoveSession();
     mmCancelRun();
     pushUndo();
+    provMark('addH',newAtoms.length);
     var N0=MD.atoms.length;
     newAtoms.forEach(function(a){
         MD.atoms.push({element:'H',x:a.x,y:a.y,z:a.z,color:(MD.atomColors&&MD.atomColors.H)||'#FFFFFF'});
@@ -5836,6 +5863,9 @@ function switchFrame(idx){
     // convergence charts: the point of the step now on screen gets highlighted
     // (renderOptCharts is a no-op while the panel is closed).
     if(typeof renderOptCharts==='function')renderOptCharts();
+    // A frame is a structure of its own: whatever was done to the one before
+    // is not part of this one, so the saved title starts from the frame again.
+    provReset();
 }
 
 // ===== VMD molecules =====
@@ -5886,6 +5916,7 @@ function switchMolecule(idx){
     rotQuat.identity();panX=0;panY=0;
     updateTransform();
     modeInfoEl.textContent=MODE_INFO[currentMode]||currentMode;
+    provReset();
 }
 
 // ===== Bond perception (client side) =====
@@ -6865,6 +6896,9 @@ function vdEnd(){
 function vdCommit(){
     if(!vdActive)return;
     if(vibActive||vibPaused)stopVibration();
+    // The components are about to be cleared, but the displacement stays in the
+    // coordinates — so it is kept for the title line before the session closes.
+    provCommitModes();
     vdDropSession(false);
     // The centre follows the geometry; meshes are stored relative to it, so
     // this re-centres without moving the picture a pixel.
@@ -7676,7 +7710,7 @@ function showBondLengthModal(){
             rebuildScene();
         }
     });
-    document.getElementById('m-ok').addEventListener('click',function(){hideModal();originalCoords=null;resetSelection()});
+    document.getElementById('m-ok').addEventListener('click',function(){provMarkIfMoved('bondLen');hideModal();originalCoords=null;resetSelection()});
     document.getElementById('m-cancel').addEventListener('click',function(){
         if(existingBond&&originalCoords){existingBond.order=curOrder}
         restoreOriginal();rebuildScene();undoStack.pop();updateUndoBtn();hideModal();originalCoords=null;resetSelection()
@@ -7700,7 +7734,7 @@ function showBondAngleModal(){
     valEl.addEventListener('input',function(){sliderEl.value=this.value;applyBondAngle(parseFloat(this.value),fixEl.value==='1',moveEl.value)});
     fixEl.addEventListener('change',function(){applyBondAngle(parseFloat(valEl.value),this.value==='1',moveEl.value)});
     moveEl.addEventListener('change',function(){applyBondAngle(parseFloat(valEl.value),fixEl.value==='1',this.value)});
-    document.getElementById('m-ok').addEventListener('click',function(){hideModal();originalCoords=null;resetSelection()});
+    document.getElementById('m-ok').addEventListener('click',function(){provMarkIfMoved('bondAngle');hideModal();originalCoords=null;resetSelection()});
     document.getElementById('m-cancel').addEventListener('click',function(){restoreOriginal();rebuildScene();undoStack.pop();updateUndoBtn();hideModal();originalCoords=null;resetSelection()});
 }
 
@@ -7721,7 +7755,7 @@ function showDihedralModal(){
     valEl.addEventListener('input',function(){sliderEl.value=this.value;applyDihedral(parseFloat(this.value),fixEl.value==='1',moveEl.value)});
     fixEl.addEventListener('change',function(){applyDihedral(parseFloat(valEl.value),this.value==='1',moveEl.value)});
     moveEl.addEventListener('change',function(){applyDihedral(parseFloat(valEl.value),fixEl.value==='1',this.value)});
-    document.getElementById('m-ok').addEventListener('click',function(){hideModal();originalCoords=null;resetSelection()});
+    document.getElementById('m-ok').addEventListener('click',function(){provMarkIfMoved('dihedral');hideModal();originalCoords=null;resetSelection()});
     document.getElementById('m-cancel').addEventListener('click',function(){restoreOriginal();rebuildScene();undoStack.pop();updateUndoBtn();hideModal();originalCoords=null;resetSelection()});
 }
 
@@ -7787,6 +7821,7 @@ function showAddAtomModal(){
     });
     document.getElementById('m-ok').addEventListener('click',function(){
         pushUndo();
+        provMark('addAtoms',1);
         var el=document.getElementById('m-elem').value;
         var bl=parseFloat(document.getElementById('m-val').value)||1.5;
         var bondOrder=parseFloat(document.getElementById('m-bond-order').value)||1;
@@ -7859,6 +7894,7 @@ function showReplaceAtomModal(){
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok" id="m-ok">Replace</button></div>',null);
     document.getElementById('m-ok').addEventListener('click',function(){
         pushUndo();
+        provMark('replaceAtoms',selectedAtoms.length);
         var el=document.getElementById('m-elem').value;
         selectedAtoms.forEach(function(idx){
             var a=MD.atoms[idx];
@@ -7888,6 +7924,7 @@ function showDeleteAtomModal(){
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok mbtn-danger" id="m-ok">Delete</button></div>',null);
     document.getElementById('m-ok').addEventListener('click',function(){
         pushUndo();
+        provMark('delAtoms',1);
         if(CRY){
             var baseIdx=a.baseIdx!=null?a.baseIdx:idx;
             CRY.baseAtoms.splice(baseIdx,1);
@@ -7915,7 +7952,7 @@ function showBatchDeleteModal(){
     showModal('<h3>Delete Atoms</h3>'+
         '<div class="current-val">Delete '+selectedAtoms.length+' atoms: '+names+'?</div>'+
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok mbtn-danger" id="m-ok">Delete</button></div>',null);
-    document.getElementById('m-ok').addEventListener('click',function(){pushUndo();batchDeleteSelected()});
+    document.getElementById('m-ok').addEventListener('click',function(){pushUndo();provMark('delAtoms',selectedAtoms.length);batchDeleteSelected()});
     document.getElementById('m-cancel').addEventListener('click',function(){hideModal();resetSelection()});
 }
 
@@ -7970,22 +8007,268 @@ function batchDeleteSelected(){
     }
 }
 
+// ===== Save provenance =====
+// A saved file's title line states where the structure came from and what has
+// been done to it here: the file it was opened from, the frame of a trajectory
+// it was taken out of, and the edits that changed it — atoms added or deleted,
+// the structure translated or turned, an optimisation, a displacement along a
+// normal mode — with the numbers a reader would otherwise have to reconstruct.
+//
+// The record is written where the change happens, not inferred at save time,
+// because "was this structure edited?" cannot be answered from the coordinates
+// alone, and it travels in the undo snapshot, so undoing an edit also takes its
+// clause off the title. Only formats that own a title or comment line get it;
+// every other format is written exactly as before.
+// The state itself is declared with the rest of the view state, above
+// pushUndo, because the undo snapshot is the first thing that reads it; the
+// functions that fill it in are the ones below.
+
+// Basename without a regex: the separator escape is the one thing in this page
+// that is easy to get wrong when the code itself lives in a template literal.
+function provBaseName(p){
+    var s=String(p||'');
+    var cut=-1;
+    for(var i=0;i<s.length;i++){
+        var c=s.charAt(i);
+        if(c==='/'||c===String.fromCharCode(92))cut=i;
+    }
+    return s.substring(cut+1);
+}
+function provClone(){
+    var edits=[],modes={},i,k;
+    for(i=0;i<provEdits.length;i++)edits.push({k:provEdits[i].k,n:provEdits[i].n});
+    for(k in provModes){if(provModes.hasOwnProperty(k))modes[k]={freq:provModes[k].freq,scale:provModes[k].scale}}
+    return {edits:edits,merged:provMerged.slice(),modes:modes};
+}
+function provRestore(p){
+    var i,k;
+    provEdits=[];provMerged=[];provModes={};
+    if(!p)return;
+    if(p.edits)for(i=0;i<p.edits.length;i++)provEdits.push({k:p.edits[i].k,n:p.edits[i].n});
+    if(p.merged)provMerged=p.merged.slice();
+    if(p.modes)for(k in p.modes){if(p.modes.hasOwnProperty(k))provModes[k]={freq:p.modes[k].freq,scale:p.modes[k].scale}}
+}
+/** The structure itself was replaced (another frame, another molecule): the
+ *  edits and the merged files belong to the structure that is gone. */
+function provReset(){provEdits=[];provMerged=[];provModes={}}
+/** Record one kind of change. Counted kinds add up, so ten single deletions
+ *  read as "10 atoms deleted" rather than ten clauses. */
+function provMark(kind,n){
+    for(var i=0;i<provEdits.length;i++){
+        if(provEdits[i].k===kind){provEdits[i].n=(provEdits[i].n||0)+(n||1);return}
+    }
+    provEdits.push({k:kind,n:n||1});
+}
+/** A change that was taken back without an Undo (MM "Restore initial", a
+ *  displacement dragged back to zero) is not an edit any more. */
+function provUnmark(kind){
+    for(var i=0;i<provEdits.length;i++){
+        if(provEdits[i].k===kind){provEdits.splice(i,1);return}
+    }
+}
+function provAddSource(name){
+    if(!name)return;
+    if(provMerged.indexOf(name)<0)provMerged.push(name);
+}
+function provFreqOf(idx){
+    var m=(typeof NORMAL_MODES!=='undefined'&&NORMAL_MODES)?NORMAL_MODES[idx]:null;
+    return (m&&typeof m.frequency==='number')?m.frequency:null;
+}
+/** Keep a displacement the slider committed: once the session closes it is no
+ *  longer in vdComp, but it is still in the coordinates and must still be said. */
+function provCommitModes(){
+    if(typeof vdComp==='undefined'||!vdComp)return;
+    for(var i=0;i<vdComp.length;i++){
+        var c=vdComp[i];
+        if(Math.abs(c.scale)<1e-9){delete provModes[c.idx];continue}
+        provModes[c.idx]={freq:provFreqOf(c.idx),scale:c.scale};
+    }
+}
+function provDropModes(){provModes={}}
+function provModesText(){
+    var seen={},k,i;
+    for(k in provModes){if(provModes.hasOwnProperty(k))seen[k]={freq:provModes[k].freq,scale:provModes[k].scale}}
+    // The live session is not committed yet, but its displacement is on screen.
+    if(typeof vdActive!=='undefined'&&vdActive&&typeof vdComp!=='undefined'&&vdComp){
+        for(i=0;i<vdComp.length;i++){
+            var c=vdComp[i];
+            if(Math.abs(c.scale)<1e-9)delete seen[c.idx];
+            else seen[c.idx]={freq:provFreqOf(c.idx),scale:c.scale};
+        }
+    }
+    var keys=[];
+    for(k in seen){if(seen.hasOwnProperty(k))keys.push(k)}
+    keys.sort(function(a,b){return a-b});
+    var parts=[];
+    for(i=0;i<keys.length;i++){
+        var e=seen[keys[i]];
+        var txt='mode '+(Number(keys[i])+1);
+        if(e.freq!=null){
+            txt+=' ('+Math.abs(e.freq).toFixed(1)+(e.freq<0?'i':'')+' cm-1)';
+        }
+        txt+=' '+(e.scale>=0?'+':'-')+Math.abs(e.scale).toFixed(2)+' A';
+        parts.push(txt);
+    }
+    return parts.join(' + ');
+}
+/** The three geometry dialogs preview live and keep the result on OK; nothing
+ *  moved means nothing to report, however many times the slider was touched. */
+function provMarkIfMoved(kind){
+    if(!originalCoords)return;
+    for(var i=0;i<originalCoords.length;i++){
+        var oc=originalCoords[i],a=MD.atoms[i];
+        if(!oc||!a)continue;
+        if(Math.abs(a.x-oc.x)>1e-9||Math.abs(a.y-oc.y)>1e-9||Math.abs(a.z-oc.z)>1e-9){provMark(kind,1);return}
+    }
+}
+/** The supercell is a property of the crystal on screen, not an edit that can be
+ *  undone, so it is read from the bounds at save time instead of being marked. */
+function provSupercellText(){
+    if(typeof CRY==='undefined'||!CRY||typeof boundary==='undefined'||!boundary)return '';
+    var ax=[];
+    if(boundary.aMin!==0||boundary.aMax!==1)ax.push('a['+boundary.aMin+','+boundary.aMax+']');
+    if(boundary.bMin!==0||boundary.bMax!==1)ax.push('b['+boundary.bMin+','+boundary.bMax+']');
+    if(boundary.cMin!==0||boundary.cMax!==1)ax.push('c['+boundary.cMin+','+boundary.cMax+']');
+    return ax.length?('supercell '+ax.join(' ')):'';
+}
+/** The title as PDB TITLE records: 60 characters per record, with PDB's
+ *  continuation number in columns 9-10 rather than one over-long line. */
+function provPdbTitle(text){
+    var s=String(text||''),out='',serial=1,i=0;
+    while(i<s.length){
+        var head=(serial<10)?('TITLE   '+serial+' '):('TITLE  '+serial+' ');
+        out+=head+s.substring(i,i+60)+'\\n';
+        i+=60;serial++;
+    }
+    return out;
+}
+function provEditText(e){
+    var n=e.n||1;
+    switch(e.k){
+        case 'addAtoms':return n===1?'1 atom added':n+' atoms added';
+        case 'delAtoms':return n===1?'1 atom deleted':n+' atoms deleted';
+        case 'replaceAtoms':return n===1?'1 atom replaced':n+' atoms replaced';
+        case 'addH':return n===1?'1 H added':n+' H added';
+        case 'translate':return 'translated';
+        case 'rotate':return 'rotated';
+        case 'mmOpt':return 'MM-optimized';
+        case 'bondLen':return 'bond length adjusted';
+        case 'bondAngle':return 'bond angle adjusted';
+        case 'dihedral':return 'dihedral adjusted';
+        case 'disorder':return 'disorder removed';
+        case 'supercell':return 'supercell rebuilt';
+    }
+    return '';
+}
+/** Join as many whole clauses as fit, never cutting one in half. */
+function provJoinText(head,parts,max){
+    if(!parts.length)return head;
+    var whole=(head?head+'; ':'')+parts.join(', ');
+    if(whole.length<=max)return whole;
+    var used=[];
+    for(var i=0;i<parts.length;i++){
+        var cand=used.concat([parts[i]]);
+        var txt=(head?head+'; ':'')+cand.join(', ');
+        if(txt.length>max-6){
+            if(used.length)return (head?head+'; ':'')+used.join(', ')+', ...';
+            return txt.substring(0,max-4)+' ...';
+        }
+        used=cand;
+    }
+    return (head?head+'; ':'')+used.join(', ');
+}
+/** The file's own title, when it says something the provenance does not. */
+function provOriginalTitle(){
+    if(typeof MD==='undefined'||!MD)return '';
+    // A trajectory's title belongs to its *first* structure — a log's title is
+    // the comment of the geometry the file opens on, and switching frames does
+    // not rewrite it. The frame clause already names the structure on screen, so
+    // appending this would state the opposite of it ("frame 79 of 79 ... | Step
+    // 1"): the tail is dropped rather than contradicting the line.
+    if(typeof totalFrames!=='undefined'&&totalFrames>1)return '';
+    // Same for a script's molecule list: the title describes the first molecule,
+    // and the molecule clause names the one on screen.
+    if(typeof VMD!=='undefined'&&VMD&&VMD.molecules&&VMD.molecules.length>1&&vmdMolIdx>0)return '';
+    var t=String(MD.title||'');
+    t=t.split('\\n').join(' ').split('\\r').join(' ').split('\\t').join(' ');
+    t=t.trim();
+    if(t.indexOf(PROV_PREFIX)===0)return '';
+    if(t===''||t==='Modified structure'||t==='Empty'||t==='No structures found')return '';
+    return t;
+}
+function provTitle(fallback,keepOriginal){
+    var merged=provMerged.slice();
+    var src=provSource;
+    if(!src&&merged.length)src=merged.shift();
+    var head=[];
+    if(src)head.push('from '+src);
+    if(totalFrames>1){
+        var fr='frame '+(currentFrame+1)+' of '+totalFrames;
+        var fl=(MD.frames&&MD.frames[currentFrame]&&MD.frames[currentFrame].stepLabel)?String(MD.frames[currentFrame].stepLabel):'';
+        if(fl)fr+=', '+fl;
+        head.push(fr);
+    }else if(VMD&&VMD.molecules&&VMD.molecules.length>1){
+        head.push('molecule '+(vmdMolIdx+1)+' of '+VMD.molecules.length);
+    }
+    // Merged files come after the frame: the frame belongs to the source file.
+    if(merged.length)head.push('merged with '+merged.join(', '));
+    var body=[];
+    for(var i=0;i<provEdits.length;i++){
+        var t=provEditText(provEdits[i]);
+        if(t)body.push(t);
+    }
+    var modeTxt=provModesText();
+    if(modeTxt)body.push('displaced along '+modeTxt);
+    var scTxt=provSupercellText();
+    if(scTxt)body.push(scTxt);
+    var line=provJoinText(head.join(', '),body,PROV_MAX);
+    if(keepOriginal!==false){
+        var orig=provOriginalTitle();
+        if(orig){
+            if(!line){
+                // Nothing to add provenance to: the file's own title stands in.
+                line=orig.length>PROV_MAX?(orig.substring(0,PROV_MAX-3)+'...'):orig;
+            }else{
+                var room=PROV_MAX-line.length-3;
+                if(room>=14)line+=' | '+(orig.length>room?orig.substring(0,room-3)+'...':orig);
+            }
+        }
+    }
+    if(!line)line=fallback||'Modified structure';
+    return PROV_PREFIX+line;
+}
+
 function doSave(){
     if(!MD.atoms||MD.atoms.length===0){alert('No atoms to save');return}
     for(var ci=0;ci<MD.atoms.length;ci++){var ca=MD.atoms[ci];if(isNaN(ca.x)||isNaN(ca.y)||isNaN(ca.z)){alert('Atom '+(ci+1)+' has invalid coordinates (NaN). Cannot save.');return}}
     if(CRY&&!CRY_INV){alert('Crystal lattice is degenerate (zero determinant). Cannot save crystal formats.');return}
     try{
-    var xyz=MD.atoms.length+'\\n'+(MD.title||'Modified structure')+'\\n';
+    // The line every format below is titled with: where this structure came
+    // from and what has been done to it since (see "Save provenance" above).
+    // A GJF title section can hold several lines, so it takes the provenance
+    // line and then the file's original title lines verbatim; every other
+    // format gets one line, with the original title kept after a '|'.
+    var saveTitle=provTitle(MD.title||'Modified structure',true);
+    var gjfTitle=provTitle(MD.title||'Modified structure',false);
+    var xyz=MD.atoms.length+'\\n'+saveTitle+'\\n';
     MD.atoms.forEach(function(a){xyz+=a.element+'  '+a.x.toFixed(6)+'  '+a.y.toFixed(6)+'  '+a.z.toFixed(6)+'\\n'});
     var gjf='';
     var meta=MD.gjfMeta;
     if(meta){
         meta.link0Lines.forEach(function(l){gjf+=l+'\\n'});
         gjf+=meta.routeLine+'\\n\\n';
-        meta.titleLines.forEach(function(l){gjf+=l+'\\n'});
+        gjf+=gjfTitle+'\\n';
+        // The file's own title card is kept, minus any line an earlier save of
+        // ours wrote there: the provenance is rebuilt, never accumulated.
+        meta.titleLines.forEach(function(l){
+            var t=String(l);
+            if(t.indexOf(PROV_PREFIX)===0)return;
+            if(t.trim()==='')return;
+            gjf+=t+'\\n';
+        });
         gjf+='\\n'+meta.chargeMultLine+'\\n';
     }else{
-        gjf='%chk=molecule.chk\\n%mem=4GB\\n%nproc=4\\n# B3LYP/6-31G(d)\\n\\n'+(MD.title||'Modified structure')+'\\n\\n0 1\\n';
+        gjf='%chk=molecule.chk\\n%mem=4GB\\n%nproc=4\\n# B3LYP/6-31G(d)\\n\\n'+saveTitle+'\\n\\n0 1\\n';
     }
     MD.atoms.forEach(function(a){
         var el=a.element; while(el.length<2) el+=' ';
@@ -8028,11 +8311,13 @@ function doSave(){
     if(chrg!==0)coord+='$chrg '+chrg+'\\n';
     if(mult!==1)coord+='$spin '+(mult-1)/2+'\\n';
 
-    var orcaInp='! B3LYP def2-SVP\\n\\n* xyz '+chrg+' '+mult+'\\n';
+    // ORCA's first line is a comment line, so the provenance is one there and
+    // the keywords keep their own line below it.
+    var orcaInp='# '+saveTitle+'\\n! B3LYP def2-SVP\\n\\n* xyz '+chrg+' '+mult+'\\n';
     MD.atoms.forEach(function(a){orcaInp+=a.element+' '+a.x.toFixed(6)+' '+a.y.toFixed(6)+' '+a.z.toFixed(6)+'\\n'});
     orcaInp+='*\\n';
 
-    var mol2='@<TRIPOS>MOLECULE\\n'+(MD.title||'Modified structure')+'\\n'+MD.atoms.length+' '+MD.bonds.length+' 0 0 0\\nSMALL\\nNO_CHARGES\\n\\n';
+    var mol2='@<TRIPOS>MOLECULE\\n'+saveTitle+'\\n'+MD.atoms.length+' '+MD.bonds.length+' 0 0 0\\nSMALL\\nNO_CHARGES\\n\\n';
     mol2+='@<TRIPOS>ATOM\\n';
     MD.atoms.forEach(function(a,i){mol2+=(i+1)+' '+a.element+' '+a.x.toFixed(6)+' '+a.y.toFixed(6)+' '+a.z.toFixed(6)+' '+a.element+' 1 UNK 0.000\\n'});
     mol2+='@<TRIPOS>BOND\\n';
@@ -8046,7 +8331,7 @@ function doSave(){
         bondIdx++;
     });
 
-    var mol='\\n '+MD.atoms.length+'  '+MD.bonds.length+'  0  0  0  0  0  0  0  0999 V2000\\n';
+    var mol=saveTitle+'\\n '+MD.atoms.length+'  '+MD.bonds.length+'  0  0  0  0  0  0  0  0999 V2000\\n';
     MD.atoms.forEach(function(a){
         var z=AN2[a.element]||0;
         var sx=(a.x*10).toFixed(4);
@@ -8071,7 +8356,9 @@ function doSave(){
     });
     mol+='M  END\\n';
 
-    var pdb='';
+    // PDB owns a TITLE record, so the provenance goes in there (wrapped at 60
+    // characters per record with a continuation number) instead of being lost.
+    var pdb=provPdbTitle(saveTitle);
     MD.atoms.forEach(function(a,i){
         var serial=(i+1).toString();while(serial.length<5)serial=' '+serial;
         var name;
@@ -8092,7 +8379,7 @@ function doSave(){
     });
     pdb+='END\\n';
 
-    var mopac=(MD.title||'Modified structure')+'\\n';
+    var mopac=saveTitle+'\\n';
     var chrgStr=chrg!==0?' CHARGE='+chrg:'';
     var multStr=mult!==1?' MS='+mult:'';
     mopac+='PM7'+chrgStr+multStr+'\\n\\n';
@@ -8136,7 +8423,7 @@ function doSave(){
             if(elemCounts[a.element]===undefined){elemOrder.push(a.element);elemCounts[a.element]=0}
             elemCounts[a.element]++;
         });
-        vaspContent=(MD.title||'Modified structure')+'\\n';
+        vaspContent=saveTitle+'\\n';
         vaspContent+='1.0\\n';
         for(var ii=0;ii<3;ii++){
             vaspContent+='  '+lv[ii][0].toFixed(8)+'  '+lv[ii][1].toFixed(8)+'  '+lv[ii][2].toFixed(8)+'\\n';
@@ -8157,7 +8444,9 @@ function doSave(){
         var clv=CRY.latticeVectors;
         var nGrid=2;
         cubeContent='Molecular Viewer export\\n';
-        cubeContent+='Generated from '+(MD.title||'structure')+'\\n';
+        // The cube format has exactly two comment lines before the atom count:
+        // the provenance takes the second one, it does not add a third.
+        cubeContent+=saveTitle+'\\n';
         cubeContent+='-'+MD.atoms.length+'  0.000000  0.000000  0.000000\\n';
         cubeContent+=nGrid+'  '+(clv[0][0]/nGrid).toFixed(8)+'  '+(clv[0][1]/nGrid).toFixed(8)+'  '+(clv[0][2]/nGrid).toFixed(8)+'\\n';
         cubeContent+=nGrid+'  '+(clv[1][0]/nGrid).toFixed(8)+'  '+(clv[1][1]/nGrid).toFixed(8)+'  '+(clv[1][2]/nGrid).toFixed(8)+'\\n';
@@ -8176,7 +8465,7 @@ function doSave(){
     var vestaContent='';
     if(CRY){
         var vInv=CRY_INV;
-        vestaContent='#VESTA_FORMAT_VERSION 3.5.4\\n\\n\\nCRYSTAL\\n\\nTITLE\\n'+(MD.title||'Modified structure')+'\\n\\nGROUP\\n    1   1 P 1\\n\\nSYMOP\\n 0.000000  0.000000  0.000000  1  0  0   0  1  0   0  0  1   1\\n-1.0 -1.0 -1.0  1 0 0  0 0 0  0 0 0\\n\\nTRANM 0\\n 0.000000  0.000000  0.000000  1  0  0   0  1  0   0  0  1\\n\\nLTRANSL\\n -1\\n 0.000000  0.000000  0.000000  0.000000  0.000000  0.000000\\n\\nLORIENT\\n -1   0   0   0   0\\n 1.000000  0.000000  0.000000  1.000000  0.000000  0.000000\\n 0.000000  0.000000  1.000000  0.000000  0.000000  1.000000\\n\\nLMATRIX\\n 1.000000  0.000000  0.000000  0.000000\\n 0.000000  1.000000  0.000000  0.000000\\n 0.000000  0.000000  1.000000  0.000000\\n 0.000000  0.000000  0.000000  1.000000\\n 0.000000  0.000000  0.000000\\n\\nCELLP\\n';
+        vestaContent='#VESTA_FORMAT_VERSION 3.5.4\\n\\n\\nCRYSTAL\\n\\nTITLE\\n'+saveTitle+'\\n\\nGROUP\\n    1   1 P 1\\n\\nSYMOP\\n 0.000000  0.000000  0.000000  1  0  0   0  1  0   0  0  1   1\\n-1.0 -1.0 -1.0  1 0 0  0 0 0  0 0 0\\n\\nTRANM 0\\n 0.000000  0.000000  0.000000  1  0  0   0  1  0   0  0  1\\n\\nLTRANSL\\n -1\\n 0.000000  0.000000  0.000000  0.000000  0.000000  0.000000\\n\\nLORIENT\\n -1   0   0   0   0\\n 1.000000  0.000000  0.000000  1.000000  0.000000  0.000000\\n 0.000000  0.000000  1.000000  0.000000  0.000000  1.000000\\n\\nLMATRIX\\n 1.000000  0.000000  0.000000  0.000000\\n 0.000000  1.000000  0.000000  0.000000\\n 0.000000  0.000000  1.000000  0.000000\\n 0.000000  0.000000  0.000000  1.000000\\n 0.000000  0.000000  0.000000\\n\\nCELLP\\n';
         vestaContent+=' '+CRY.a.toFixed(6)+'  '+CRY.b.toFixed(6)+'  '+CRY.c.toFixed(6)+'  '+CRY.alpha.toFixed(6)+'  '+CRY.beta.toFixed(6)+'  '+CRY.gamma.toFixed(6)+'\\n';
         vestaContent+=' 0.000000  0.000000  0.000000  0.000000  0.000000  0.000000\\n\\nSTRUC\\n';
         CRY.baseAtoms.forEach(function(ba,i){
@@ -8547,6 +8836,7 @@ function endBakeSession(){
         // reached makes the two cancel on screen: the picture stays where the
         // drag put it while the coordinates carry the movement. Then the new
         // centroid becomes the rotation pivot again.
+        provMark(bakeKind==='pan'?'translate':'rotate',1);
         if(bakeKind==='pan'){panX=bakePanTgt.x;panY=bakePanTgt.y}
         updateRotationCenter();
         if(bakeKind==='pan')updateTransform();
