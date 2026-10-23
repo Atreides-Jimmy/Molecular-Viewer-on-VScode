@@ -5759,6 +5759,11 @@ var currentFrame=0;
 var totalFrames=MD.frames?MD.frames.length:0;
 var autoPlayTimer=null;
 var isAutoPlaying=false;
+// How long each structure of a trajectory is held while it plays. A frame is a
+// still, not a film frame: every step is a whole scene rebuild, and it has to
+// stay on screen long enough to be read as one structure — but short enough
+// that a run of a few hundred steps is watchable rather than a slideshow.
+var FRAME_PLAY_MS=350;
 var frameNavEl=document.getElementById('frame-nav');
 var frameSepEl=document.getElementById('frame-sep');
 if(totalFrames>1){
@@ -5894,7 +5899,7 @@ function detectBondsFromAtoms(atoms,charge){
     return BP.perceiveBonds(atoms,(typeof charge==='number')?{charge:charge}:undefined).bonds;
 }
 // Stopping auto-play is its own step because more than the button needs it: a
-// frame auto-play replaces the structure every 500 ms, and any operation that
+// frame auto-play replaces the structure on every tick, and any operation that
 // needs the structure to hold still — a Molecular Mechanics run, an edit, a
 // normal-mode playback — has to end it first rather than be cancelled by it a
 // moment later.
@@ -5912,17 +5917,27 @@ document.getElementById('auto-play').addEventListener('click',function(){
     if(isAutoPlaying){
         stopFrameAutoPlay();
     }else{
-        // The loop replaces the structure every 500 ms, so everything else
+        // Playback replaces the structure on every tick, so everything else
         // writing it ends now rather than on the first tick — the same rule the
         // other starters follow, applied at the moment the user asks for it.
         if(vibActive||vibPaused)stopVibration();
         stopMoveSession();
         mmCancelRun();
+        // Playback stops on the last structure instead of wrapping around, so
+        // asking for it while that structure is on screen means "run the
+        // trajectory again": restart from the first one. Without this the
+        // button would do nothing at all there.
+        if(totalFrames>1&&currentFrame>=totalFrames-1)switchFrame(0);
         isAutoPlaying=true;this.textContent='⏸ Stop';this.classList.add('playing');
         autoPlayTimer=setInterval(function(){
-            var next=currentFrame+1;if(next>=totalFrames)next=0;
+            var next=currentFrame+1;
+            // The last structure is where a trajectory ends, and that is
+            // usually the one worth stopping to look at — the geometry the run
+            // converged to. Wrapping back to the first one would hide it, so
+            // playback stops here and the button returns to Play.
+            if(next>=totalFrames){stopFrameAutoPlay();return}
             switchFrame(next);
-        },500);
+        },FRAME_PLAY_MS);
     }
 });
 
@@ -6556,7 +6571,7 @@ function startVibration(modeIdx){
     mmCancelRun();
     if(hadRun)modeInfoEl.textContent='Molecular Mechanics: the run was ended so the normal mode can play';
     // The two other loops that write the structure end here as well. A frame
-    // auto-play replaces the structure every 500 ms — and since a frame change
+    // auto-play replaces the structure on every tick — and since a frame change
     // stops a playback, leaving it on would kill this one a moment after it
     // started — and a Move Atoms session is mid-edit on the selection the
     // playback is about to rewrite.
