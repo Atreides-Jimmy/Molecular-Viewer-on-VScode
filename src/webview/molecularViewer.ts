@@ -1330,10 +1330,11 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
 *{margin:0;padding:0;box-sizing:border-box}
 html{width:100%;height:100%;overflow:hidden}
 body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;background:var(--vscode-editor-background,#1e1e1e);font-family:var(--vscode-font-family,sans-serif);color:var(--vscode-editor-foreground,#ccc)}
-#toolbar{height:36px;flex-shrink:0;background:var(--vscode-editor-background,#1e1e1e);border-bottom:1px solid var(--vscode-panel-border,#444);display:flex;align-items:center;padding:0 8px;z-index:20;gap:2px;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
-#toolbar::-webkit-scrollbar{height:3px}
-#toolbar::-webkit-scrollbar-track{background:transparent}
-#toolbar::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.15);border-radius:2px}
+#toolbar{flex-shrink:0;background:var(--vscode-editor-background,#1e1e1e);border-bottom:1px solid var(--vscode-panel-border,#444);display:flex;flex-direction:column;padding:2px 0;z-index:20}
+#toolbar .trow{display:flex;align-items:center;gap:2px;min-height:34px;padding:0 8px;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
+#toolbar .trow::-webkit-scrollbar{height:3px}
+#toolbar .trow::-webkit-scrollbar-track{background:transparent}
+#toolbar .trow::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.15);border-radius:2px}
 .tbtn{background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#fff);border:1px solid var(--vscode-panel-border,#444);padding:3px 10px;border-radius:3px;cursor:pointer;font-size:11px;white-space:nowrap;flex-shrink:0}
 .tbtn:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e)}
 .tbtn.active{background:var(--vscode-button-background,#0e639c);border-color:var(--vscode-button-background,#0e639c)}
@@ -1559,11 +1560,12 @@ canvas{display:block}
 #route-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
 #route-reopen.show{display:block}
 #route-reopen:hover{background:var(--vscode-button-background,#0e639c)}
-@media (max-width:600px){.tbtn{padding:3px 6px;font-size:10px}#frame-info{font-size:10px}#toolbar{gap:1px}}
+@media (max-width:600px){.tbtn{padding:3px 6px;font-size:10px}#frame-info{font-size:10px}#toolbar .trow{gap:1px}}
 </style>
 </head>
 <body>
 <div id="toolbar">
+<div class="trow" id="toolbar-modes">
 <button class="tbtn active" data-mode="view">View</button>
 <button class="tbtn" data-mode="bondLength">Bond Length</button>
 <button class="tbtn" data-mode="bondAngle">Bond Angle</button>
@@ -1577,7 +1579,8 @@ canvas{display:block}
 <button class="tbtn" data-mode="replaceAtom">Replace Atom</button>
 <button class="tbtn" data-mode="addH">Add H</button>
 <button class="tbtn" id="import-btn">Import Structure</button>
-<div class="tsep"></div>
+</div>
+<div class="trow" id="toolbar-actions">
 <button class="tbtn" data-mode="selectAtoms">Select Atoms</button>
 <button class="tbtn" data-mode="boxSelect">Box Select</button>
 <div class="tsep"></div>
@@ -1600,6 +1603,7 @@ canvas{display:block}
 <button class="tbtn" id="prev-mol">◀</button>
 <span id="mol-label">1/1</span>
 <button class="tbtn" id="next-mol">▶</button>
+</div>
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>

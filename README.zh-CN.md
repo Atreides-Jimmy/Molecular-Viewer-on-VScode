@@ -12,6 +12,7 @@
 
 - **GJF Connect 段** — 读取 GJF 文件坐标段中的显式键信息，含键级（1.0、1.5、2.0、3.0）
 - **分子信息显示** — 在 3D 视图左上角显示 Hill 体系分子式、原子数、电荷、电子数与自旋多重度；晶体文件额外显示一行「晶胞组成」，给出整个晶胞的分子式
+- **两行工具栏** — 工具按钮排成两行，末尾的按钮不必再拖滚动条才点得到：编辑模式与工具（View、Bond Length、Bond Angle、Dihedral、Rotate Group、Move Atoms、MM Optimize、Add/Delete/Replace Atom、Add H、Import Structure）在第一行，选择工具以及结构/视图操作与轨迹、分子导航（Select Atoms、Box Select、Diff、Undo、Save As、Reset View、◀ n/N ▶、分子选择器）在第二行。两行各自独立横向滚动，且只在自身内容放不下时才出现滚动条——因此面板再窄也能点到每一个按钮，载入轨迹后也不会再把操作按钮挤到看不见的地方
 - **交互式鼠标控制**：
   - 左键拖拽 → 绕分子中心旋转
   - 滚轮 → 缩放
