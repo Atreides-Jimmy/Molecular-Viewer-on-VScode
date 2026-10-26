@@ -101,6 +101,27 @@ export interface OptStep {
     rmsDisplacement?: number;
 }
 
+/**
+ * The convergence targets the program itself states in its output.
+ *
+ * The convergence panel draws them as dashed target lines. They are read from
+ * the file instead of being hard-coded per program, because the same program
+ * can be told to converge tighter (ORCA's `TolMaxG`/`TolRMSD`, a Gaussian
+ * `opt=(tight)` route) and a chart that drew the default tolerances would then
+ * show a curve crossing the wrong line. A program that states none gets no
+ * lines at all rather than a borrowed scale.
+ */
+export interface OptThresholds {
+    /** Hartree/Bohr — largest single force component allowed at convergence. */
+    maxForce?: number;
+    /** Hartree/Bohr — RMS force allowed at convergence. */
+    rmsForce?: number;
+    /** Bohr — largest single displacement of the last step. */
+    maxDisplacement?: number;
+    /** Bohr — RMS displacement of the last step. */
+    rmsDisplacement?: number;
+}
+
 export interface NormalMode {
     index: number;
     frequency: number;

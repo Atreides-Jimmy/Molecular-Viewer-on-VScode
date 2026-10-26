@@ -1,12 +1,12 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { parseFile, parseLogFile, LogFrame, OrcaFrame, RouteSection, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg } from '../parsers/index';
+import { parseFile, parseLogFile, parseXyzTrajectory, LogFrame, OrcaFrame, RouteSection, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg } from '../parsers/index';
 import { ensureBonds } from '../tools/bondDetector';
 import { BOND_PERCEPTION_SOURCE } from '../tools/bondPerception';
 import { addHydrogens } from '../tools/addHydrogens';
 import { beginOptimization, describeForceField, MmHistoryPoint, MmOptimizeResult, MmSession } from '../tools/mmOptimizer';
 import { smilesTo3dSafe, validateSmiles } from '../tools/smilesTo3d';
-import { MolecularData, AtomGroup, OptStep, NormalMode, VmdScene, VmdMolecule } from '../types';
+import { MolecularData, AtomGroup, OptStep, NormalMode, OptThresholds, VmdScene, VmdMolecule } from '../types';
 
 const ATOM_COLORS: { [key: string]: string } = {
     H: '#FFFFFF', He: '#D9FFFF', Li: '#CC80FF', Be: '#C2FF00', B: '#FFB5B5',
@@ -166,6 +166,7 @@ interface LoadedStructure {
     optSteps?: OptStep[];
     normalModes?: NormalMode[];
     routes?: RouteSection[];
+    optThresholds?: OptThresholds;
     logSource?: string;
     error?: string;
 }
@@ -195,6 +196,7 @@ async function loadStructureFile(uri: vscode.Uri): Promise<LoadedStructure> {
             optSteps: logResult.optSteps,
             normalModes: logResult.normalModes,
             routes: logResult.routes,
+            optThresholds: logResult.optThresholds,
             logSource: logResult.source
         };
     }
@@ -417,6 +419,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         let optSteps: OptStep[] | undefined;
         let normalModes: NormalMode[] | undefined;
         let routes: RouteSection[] | undefined;
+        let optThresholds: OptThresholds | undefined;
         let logSource: string | undefined;
         let vmdPayload: VmdPayload | undefined;
         let autoBeta = false;
@@ -448,6 +451,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             optSteps = logResult.optSteps;
             normalModes = logResult.normalModes;
             routes = logResult.routes;
+            optThresholds = logResult.optThresholds;
             logSource = logResult.source;
             if (frames.length > 0) {
                 data = ensureBonds({
@@ -460,6 +464,40 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                 });
             } else {
                 data = { atoms: [], bonds: [], title: 'No structures found', hasExplicitBonds: false };
+            }
+        } else if (ext === 'xyz') {
+            // A multi-frame XYZ is a trajectory — ORCA writes one for every
+            // optimization as `<job>_trj.xyz`, with each frame's energy in its
+            // comment line — so it gets the same frame navigation (and, when the
+            // comment states an energy per frame, the same convergence chart) a
+            // log does. A single-frame file takes the ordinary structure path.
+            const traj = parseXyzTrajectory(textContent);
+            if (traj.frames.length > 1) {
+                frames = traj.frames.map((f, k) => ({
+                    atoms: f.atoms,
+                    bonds: [],
+                    title: f.title,
+                    hasExplicitBonds: false,
+                    stepLabel: 'Frame ' + (k + 1),
+                    energy: f.energy
+                }));
+                // The energy curve needs a value for every frame: a partial
+                // series would put step k at frame k of a different numbering.
+                const steps: OptStep[] = [];
+                for (let k = 0; k < traj.frames.length; k++) {
+                    const e = traj.frames[k].energy;
+                    if (e === undefined) { steps.length = 0; break; }
+                    steps.push({ step: k + 1, energy: e });
+                }
+                optSteps = steps.length > 1 ? steps : undefined;
+                data = ensureBonds({
+                    atoms: frames[0].atoms,
+                    bonds: [],
+                    title: frames[0].title,
+                    hasExplicitBonds: false
+                });
+            } else {
+                data = ensureBonds(parseFile(textContent, fileName));
             }
         } else {
             data = parseFile(textContent, fileName);
@@ -482,13 +520,14 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             frames = [];
             optSteps = undefined;
             normalModes = undefined;
+            optThresholds = undefined;
         }
 
         if (ext !== 'tcl') {
             data.filePath = uri.fsPath;
         }
 
-        return new MolecularDocument(uri, data, frames, optSteps, normalModes, logSource, routes, vmdPayload, autoBeta);
+        return new MolecularDocument(uri, data, frames, optSteps, normalModes, logSource, routes, vmdPayload, autoBeta, optThresholds);
     }
 
     /**
@@ -579,7 +618,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             enableScripts: true,
         };
 
-        webviewPanel.webview.html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes, document.vmdPayload, document.autoBeta);
+        webviewPanel.webview.html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes, document.vmdPayload, document.autoBeta, document.optThresholds);
 
         // The panel's Molecular Mechanics run (at most one at a time). The pump
         // steps it in chunks and yields between them, so the panel keeps
@@ -1224,7 +1263,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         });
     }
 
-    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[], logSource?: string, routes?: RouteSection[], vmdPayload?: VmdPayload, autoBeta: boolean = false): Promise<string> {
+    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[], logSource?: string, routes?: RouteSection[], vmdPayload?: VmdPayload, autoBeta: boolean = false, optThresholds?: OptThresholds): Promise<string> {
         const nonce = getNonce();
 
         const threeJsBytes = await vscode.workspace.fs.readFile(
@@ -1311,7 +1350,12 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
 
         const vmdData = vmdPayload && vmdPayload.molecules.length > 0 ? vmdPayload : null;
 
-        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, routes: routesData, vmd: vmdData, autoBeta: !!(autoBeta && !vmdData), hasExplicitBonds: !!data.hasExplicitBonds, mmParams: describeForceField() });
+        const optThresholdsData = optThresholds ? {
+            maxForce: optThresholds.maxForce, rmsForce: optThresholds.rmsForce,
+            maxDisplacement: optThresholds.maxDisplacement, rmsDisplacement: optThresholds.rmsDisplacement
+        } : null;
+
+        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, optThresholds: optThresholdsData, routes: routesData, vmd: vmdData, autoBeta: !!(autoBeta && !vmdData), hasExplicitBonds: !!data.hasExplicitBonds, mmParams: describeForceField() });
 
         // The bond perception module, as source. Both sides run this text —
         // the host calls the compiled function directly, the webview evaluates
@@ -6206,13 +6250,21 @@ var routePanelEl=document.getElementById('route-panel');
 var routeReopenEl=document.getElementById('route-reopen');
 var OPT_STEPS=MD.optSteps||null;
 var OPT_SOURCE=MD.optSource||null;
-// Gaussian's own convergence criteria (force 0.000450/0.000300 Hartree/Bohr,
-// displacement 0.001800/0.001200 Bohr) are the Item/Value/Converged? table
-// thresholds of Gaussian optimization logs. They apply ONLY when the log
-// really came from Gaussian — other programs (e.g. xtb, whose charts are
-// driven by its gnorm criterion) draw no threshold lines rather than a
-// borrowed, meaningless scale.
-var OPT_IS_GAUSSIAN=OPT_SOURCE==='gaussian';
+// The convergence targets to draw as dashed guides. The file's own values win:
+// ORCA states its criteria (TolMAXG / TolRMSG / TolMAXD / TolRMSD) in every
+// optimization output, and a run told to converge tighter than the default must
+// show the line it was actually held to. Gaussian only prints its criteria as
+// the Tolerance column of the same table, so its documented defaults stand in
+// (force 0.000450/0.000300 Hartree/Bohr, displacement 0.001800/0.001200 Bohr),
+// and they apply ONLY to a Gaussian log — xtb's gnorm criterion and a bare
+// trajectory state no tolerance at all, and a borrowed scale would draw a target
+// the run was never asked to meet.
+var OPT_THRESHOLDS=(function(){
+    var t=MD.optThresholds;
+    if(t&&(t.maxForce!=null||t.rmsForce!=null||t.maxDisplacement!=null||t.rmsDisplacement!=null))return t;
+    if(OPT_SOURCE==='gaussian')return {maxForce:0.000450,rmsForce:0.000300,maxDisplacement:0.001800,rmsDisplacement:0.001200};
+    return null;
+})();
 var NORMAL_MODES=MD.normalModes||null;
 
 // ---------------------------------------------------------------------------
@@ -6602,10 +6654,10 @@ function renderOptCharts(){
             drawConvergenceChart(cv,OPT_STEPS,'energy','Energy (Hartree)','#3794ff',null);
         }else if(field==='force'){
             cv.style.height='110px';
-            drawDualChart(cv,OPT_STEPS,['maxForce','rmsForce'],['Max Force','RMS Force'],['#ff6b6b','#ffa94d'],OPT_IS_GAUSSIAN?0.000450:null,OPT_IS_GAUSSIAN?0.000300:null);
+            drawDualChart(cv,OPT_STEPS,['maxForce','rmsForce'],['Max Force','RMS Force'],['#ff6b6b','#ffa94d'],OPT_THRESHOLDS?OPT_THRESHOLDS.maxForce:null,OPT_THRESHOLDS?OPT_THRESHOLDS.rmsForce:null);
         }else if(field==='disp'){
             cv.style.height='110px';
-            drawDualChart(cv,OPT_STEPS,['maxDisplacement','rmsDisplacement'],['Max Disp','RMS Disp'],['#51cf66','#74c0fc'],OPT_IS_GAUSSIAN?0.001800:null,OPT_IS_GAUSSIAN?0.001200:null);
+            drawDualChart(cv,OPT_STEPS,['maxDisplacement','rmsDisplacement'],['Max Disp','RMS Disp'],['#51cf66','#74c0fc'],OPT_THRESHOLDS?OPT_THRESHOLDS.maxDisplacement:null,OPT_THRESHOLDS?OPT_THRESHOLDS.rmsDisplacement:null);
         }
     });
 }
@@ -7366,7 +7418,7 @@ function buildFreqPanel(){
 optReopenEl.addEventListener('click',function(){buildOptPanel()});
 freqReopenEl.addEventListener('click',function(){buildFreqPanel()});
 
-// ===== Route Keywords Panel (Gaussian log route cards) =====
+// ===== Route Keywords Panel (Gaussian route cards, ORCA simple input) =====
 var ROUTES=MD.routes||null;
 function rtEsc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 function buildRoutePanel(){
@@ -9776,7 +9828,8 @@ class MolecularDocument implements vscode.CustomDocument {
         public readonly logSource?: string,
         public readonly routes?: RouteSection[],
         public readonly vmdPayload?: VmdPayload,
-        public readonly autoBeta: boolean = false
+        public readonly autoBeta: boolean = false,
+        public readonly optThresholds?: OptThresholds
     ) {}
 
     dispose(): void {}
