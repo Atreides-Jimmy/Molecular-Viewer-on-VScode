@@ -1,4 +1,4 @@
-# Molecular Viewer
+# Molecular Viewer 3D
 
 **English** | [简体中文](README.zh-CN.md)
 
