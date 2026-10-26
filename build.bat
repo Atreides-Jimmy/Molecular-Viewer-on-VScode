@@ -41,7 +41,7 @@ if errorlevel 1 (
 
 echo.
 echo [3/3] Packaging extension...
-if exist molecular-viewer*.vsix del /q molecular-viewer*.vsix
+if exist molecular-viewer-3d*.vsix del /q molecular-viewer-3d*.vsix
 call npx vsce package --no-dependencies
 if errorlevel 1 (
     echo.
@@ -55,12 +55,12 @@ if errorlevel 1 (
     echo ========================================
     echo   BUILD SUCCESS!
     echo ========================================
-    echo Output: molecular-viewer-0.1.0.vsix
+    echo Output: molecular-viewer-3d-*.vsix
     echo.
     echo Install in Trae/VS Code:
     echo   1. Ctrl+Shift+P
     echo   2. Extensions: Install from VSIX...
-    echo   3. Select molecular-viewer-0.1.0.vsix
+    echo   3. Select molecular-viewer-3d-*.vsix
     echo   4. For Remote-SSH: Install on Remote
     echo ========================================
 )

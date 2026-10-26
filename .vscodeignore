@@ -10,6 +10,10 @@ build.sh
 test/**
 media/icon.svg
 
+# 原尺寸图标（1254×1254）只作素材留档，不进 VSIX：
+# 发布用的是 media/icon.png（256×256，Marketplace 图标上限 1024 KB）
+media/icon-source-1254.png
+
 # CI / 开发辅助文件，不应打进 VSIX
 .github/**
 .trae/**

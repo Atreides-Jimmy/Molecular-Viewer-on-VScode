@@ -1330,10 +1330,11 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
 *{margin:0;padding:0;box-sizing:border-box}
 html{width:100%;height:100%;overflow:hidden}
 body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;background:var(--vscode-editor-background,#1e1e1e);font-family:var(--vscode-font-family,sans-serif);color:var(--vscode-editor-foreground,#ccc)}
-#toolbar{height:36px;flex-shrink:0;background:var(--vscode-editor-background,#1e1e1e);border-bottom:1px solid var(--vscode-panel-border,#444);display:flex;align-items:center;padding:0 8px;z-index:20;gap:2px;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
-#toolbar::-webkit-scrollbar{height:3px}
-#toolbar::-webkit-scrollbar-track{background:transparent}
-#toolbar::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.15);border-radius:2px}
+#toolbar{flex-shrink:0;background:var(--vscode-editor-background,#1e1e1e);border-bottom:1px solid var(--vscode-panel-border,#444);display:flex;flex-direction:column;padding:2px 0;z-index:20}
+#toolbar .trow{display:flex;align-items:center;gap:2px;min-height:34px;padding:0 8px;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
+#toolbar .trow::-webkit-scrollbar{height:3px}
+#toolbar .trow::-webkit-scrollbar-track{background:transparent}
+#toolbar .trow::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.15);border-radius:2px}
 .tbtn{background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#fff);border:1px solid var(--vscode-panel-border,#444);padding:3px 10px;border-radius:3px;cursor:pointer;font-size:11px;white-space:nowrap;flex-shrink:0}
 .tbtn:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e)}
 .tbtn.active{background:var(--vscode-button-background,#0e639c);border-color:var(--vscode-button-background,#0e639c)}
@@ -1508,9 +1509,38 @@ canvas{display:block}
 #freq-panel .freq-idx{width:28px;color:var(--vscode-descriptionForeground,#999)}
 #freq-panel .freq-val{flex:1;font-family:monospace}
 #freq-panel .freq-sym{width:30px;text-align:right;color:var(--vscode-descriptionForeground,#999)}
+/* A mode has two independent affordances: the circle selects it for the
+   manual-displacement slider, the ▶ plays it. They are separate controls on
+   purpose — watching a mode must never arm the slider, and picking one must
+   never start a playback. */
+#freq-panel .freq-pick{width:11px;height:11px;flex:0 0 11px;margin:0 6px 0 2px;border-radius:50%;border:1px solid #767676;cursor:pointer;box-sizing:border-box;align-self:center}
+#freq-panel .freq-pick:hover{border-color:#ffb86b;box-shadow:0 0 0 2px rgba(255,159,67,0.18)}
+#freq-panel .freq-pick.on{border-color:#ff9f43;background:#ff9f43;box-shadow:inset 0 0 0 2px rgba(18,18,18,0.85)}
 #freq-panel .freq-play{width:18px;text-align:center}
 #freq-panel .freq-stop{margin-top:6px;width:100%;padding:4px;border-radius:3px;border:1px solid var(--vscode-button-border,#555);background:var(--vscode-button-background,#0e639c);color:#fff;cursor:pointer;font-size:11px}
 #freq-panel .freq-stop:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
+/* Manual displacement: one mode written into the coordinates. The block is a
+   fixed-height footer of the panel (the mode list scrolls above it), so moving
+   the slider cannot resize the panel and make it fight the layout. */
+#freq-panel .freq-dis{margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.15);flex:0 0 auto}
+#freq-panel .vd-head{display:flex;justify-content:space-between;align-items:baseline;gap:6px;font-size:10px;letter-spacing:0.4px;text-transform:uppercase;color:var(--vscode-descriptionForeground,#999)}
+#freq-panel .vd-mode{font-family:monospace;text-transform:none;letter-spacing:0;color:#ffb86b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:168px}
+/* The traceability line: every mode that is in the distortion, and the largest
+   displacement of the whole combination. */
+#freq-panel .vd-comps{margin-top:2px;font-family:monospace;font-size:10px;color:#c99a5b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#freq-panel .vd-slider{width:100%;margin:5px 0 3px;accent-color:#ff9f43}
+#freq-panel .vd-slider:disabled{opacity:0.35}
+#freq-panel .vd-row{display:flex;align-items:baseline;gap:6px}
+#freq-panel .vd-val{flex:0 0 auto;font-family:monospace;font-size:11px;color:#ffb86b}
+#freq-panel .vd-max{flex:1 1 auto;font-size:10px;color:var(--vscode-descriptionForeground,#999);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#freq-panel .vd-reset{flex:0 0 auto;padding:2px 9px;border-radius:3px;border:1px solid var(--vscode-button-border,#555);background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#ccc);font-size:10px;cursor:pointer}
+#freq-panel .vd-reset:hover:not(:disabled){background:var(--vscode-button-secondaryHoverBackground,#45494e)}
+#freq-panel .vd-reset:disabled{opacity:0.4;cursor:default}
+#freq-panel .vd-hint{margin-top:3px;font-size:10px;line-height:1.35;color:var(--vscode-descriptionForeground,#999);min-height:27px}
+/* A mode row carries a second, independent state: playing (the animation that
+   borrows the geometry) and displaced (the session that writes it). */
+#freq-panel .freq-row.displaced{box-shadow:inset 2px 0 0 #ff9f43}
+#freq-panel .freq-row.displaced .freq-idx{color:#ffb86b}
 #freq-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
 #freq-reopen.show{display:block}
 #freq-reopen:hover{background:var(--vscode-button-background,#0e639c)}
@@ -1530,11 +1560,12 @@ canvas{display:block}
 #route-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
 #route-reopen.show{display:block}
 #route-reopen:hover{background:var(--vscode-button-background,#0e639c)}
-@media (max-width:600px){.tbtn{padding:3px 6px;font-size:10px}#frame-info{font-size:10px}#toolbar{gap:1px}}
+@media (max-width:600px){.tbtn{padding:3px 6px;font-size:10px}#frame-info{font-size:10px}#toolbar .trow{gap:1px}}
 </style>
 </head>
 <body>
 <div id="toolbar">
+<div class="trow" id="toolbar-modes">
 <button class="tbtn active" data-mode="view">View</button>
 <button class="tbtn" data-mode="bondLength">Bond Length</button>
 <button class="tbtn" data-mode="bondAngle">Bond Angle</button>
@@ -1548,7 +1579,8 @@ canvas{display:block}
 <button class="tbtn" data-mode="replaceAtom">Replace Atom</button>
 <button class="tbtn" data-mode="addH">Add H</button>
 <button class="tbtn" id="import-btn">Import Structure</button>
-<div class="tsep"></div>
+</div>
+<div class="trow" id="toolbar-actions">
 <button class="tbtn" data-mode="selectAtoms">Select Atoms</button>
 <button class="tbtn" data-mode="boxSelect">Box Select</button>
 <div class="tsep"></div>
@@ -1571,6 +1603,7 @@ canvas{display:block}
 <button class="tbtn" id="prev-mol">◀</button>
 <span id="mol-label">1/1</span>
 <button class="tbtn" id="next-mol">▶</button>
+</div>
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
@@ -2020,6 +2053,7 @@ function rebuildCrystal(){
 function removeDisorder(){
     if(!CRY)return;
     pushUndo();
+    var baseCountBefore=CRY.baseAtoms.length;
     var newBaseAtoms=[];
     var oldToNew={};
     CRY.baseAtoms.forEach(function(ba,i){
@@ -2040,6 +2074,7 @@ function removeDisorder(){
         return{atom1:oldToNew[b.atom1],atom2:oldToNew[b.atom2],order:b.order,shift:b.shift};
     });
     CRY.baseAtoms=newBaseAtoms;
+    if(CRY.baseAtoms.length<baseCountBefore)provMark('disorder',1);
     rebuildCrystal();
     rebuildScene();
 }
@@ -3202,7 +3237,7 @@ function endMoveDrag(){
     // A Ctrl+click without any displacement pushes a redundant snapshot — drop it.
     if(!moveDragMoved&&undoStack.length>0){undoStack.pop();updateUndoBtn()}
     // Re-detect connectivity once on release (not per frame during the drag).
-    if(moveDragMoved)refreshMovedBondsAndMeshes();
+    if(moveDragMoved){provMark('translate',1);refreshMovedBondsAndMeshes();}
     else refreshVmdSurfaces();
     document.body.style.cursor='';
     if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
@@ -3213,7 +3248,7 @@ function endFragRot(){
     // A Ctrl+click without any rotation pushes a redundant snapshot — drop it.
     if(!fragRotMoved&&undoStack.length>0){undoStack.pop();updateUndoBtn()}
     // Re-detect connectivity once on release (not per frame during the drag).
-    if(fragRotMoved)refreshMovedBondsAndMeshes();
+    if(fragRotMoved){provMark('rotate',1);refreshMovedBondsAndMeshes();}
     else refreshVmdSurfaces();
     document.body.style.cursor='';
     if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
@@ -3227,6 +3262,10 @@ function stopMoveSession(){
     // clears once all keys are released.
     if(bakeActive)endBakeSession();
     if(moveDragActive||moveKeyActive||fragRotActive){
+        // The geometry these sessions produced stays; the session is only
+        // ended, so what it did is still part of the structure that gets saved.
+        if(moveDragActive&&moveDragMoved)provMark('translate',1);
+        if((fragRotActive||moveKeyActive)&&fragRotMoved)provMark('rotate',1);
         moveDragActive=false;moveKeyActive=false;fragRotActive=false;
         moveKeyLatch=true;
         moveDragOrig=null;
@@ -3930,10 +3969,13 @@ function startMmOptimization(){
     // structure every frame, and a Move Atoms drag is mid-session on it. Each is
     // stopped *before* the starting geometry is captured, so what the run calls
     // "where it began" is the geometry on screen at the click, not a half-drawn
-    // vibration amplitude.
+    // vibration amplitude. A manual displacement is closed the same way — the
+    // run writes those very coordinates, so its slider must not stay armed over
+    // them (the run's own undo snapshot is taken in front of its first write).
     if(vibActive||vibPaused)stopVibration();
     if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
     stopFrameAutoPlay();
+    vdCommit();
     var i,indices=selectedAtoms.slice(),origin=new Array(indices.length);
     for(i=0;i<indices.length;i++){
         var a=MD.atoms[indices[i]];
@@ -4078,6 +4120,7 @@ function applyMmResult(msg){
     mmApplyLiveCoords(msg.coords);
     mmRun.state='done';
     mmEndLiveRefresh();
+    if(mmRun.movedCount>0)provMark('mmOpt',1);
     mmRun.last={
         step:typeof msg.iterations==='number'?msg.iterations:(mmRun.last?mmRun.last.step:0),
         energy:typeof msg.energyAfter==='number'?msg.energyAfter:(mmRun.last?mmRun.last.energy:0),
@@ -4133,6 +4176,9 @@ function mmRestoreInitial(){
     var origin=mmRun.origin;
     if(mmRunActive())vscodeApi.postMessage({command:'mmCancel',runId:mmRun.id});
     pushUndo();
+    // The run's geometry is being taken back, so its clause comes off the title
+    // as well (an Undo of this restore puts the run back, clause included).
+    provUnmark('mmOpt');
     var moved=[];
     for(var k=0;k<origin.indices.length;k++){
         var c=origin.coords[k];
@@ -4422,6 +4468,7 @@ function commitRotAngle(newAngle){
         restoreOriginal();
         applyGroupRotation(rotCommittedAngle);
         pushUndo();
+        provMark('rotate',1);
         undoStack[undoStack.length-1].rotAngle=rotCommittedAngle;
         restoreOriginal();
         applyGroupRotation(newAngle);
@@ -4555,12 +4602,30 @@ document.getElementById('reset-btn').addEventListener('click',function(){
     updateTransform();
 });
 var undoStack=[];var MAX_UNDO=50;
+// What a saved file's title line says about where the structure came from and
+// what was done to it (the functions that build and record it are at "Save
+// provenance", next to doSave). Declared here, with the other view state, so it
+// is never undefined when an edit path reads it.
+var PROV_PREFIX='MV: ';   // our own marker, so re-saving a file never stacks lines
+var PROV_MAX=190;         // characters — a title line, not a paragraph
+var provSource=provBaseName(MD.filePath);
+var provMerged=[];        // files merged into this structure, in order
+var provEdits=[];         // [{k,n}] — what changed it, in the order it happened
+var provModes={};         // mode index -> {freq,scale}: displacement kept in the geometry
+
 function pushUndo(){
+    // Every coordinate edit opens with a snapshot. An open manual displacement
+    // is a *pending* rewrite of the whole structure — its next slider move would
+    // put every atom back onto base + amplitude — so it is closed here, once,
+    // for every edit path at the one door they all pass through. The geometry it
+    // produced stays exactly as it is, and the snapshot below therefore captures
+    // the displaced structure the edit is about to change.
+    if(vdActive&&!vdSuppress)vdCommit();
     // hasExplicitBonds is part of the restore state: an Import can flip it
     // false→true, and an undo of that import must restore it, otherwise Move
     // Atoms would keep using the explicit-bonds (deletion-only) path on what
     // is an auto-detected structure again.
-    var snap={atoms:JSON.parse(JSON.stringify(MD.atoms)),bonds:JSON.parse(JSON.stringify(MD.bonds)),hasExplicitBonds:!!MD.hasExplicitBonds};
+    var snap={atoms:JSON.parse(JSON.stringify(MD.atoms)),bonds:JSON.parse(JSON.stringify(MD.bonds)),hasExplicitBonds:!!MD.hasExplicitBonds,prov:provClone()};
     if(CRY){snap.baseAtoms=JSON.parse(JSON.stringify(CRY.baseAtoms));snap.baseBonds=JSON.parse(JSON.stringify(CRY.baseBonds))}
     undoStack.push(snap);
     if(undoStack.length>MAX_UNDO)undoStack.shift();
@@ -4573,9 +4638,15 @@ function doUndo(){
     if(vibActive||vibPaused)stopVibration();
     if(moveDragActive||moveKeyActive||fragRotActive)stopMoveSession();
     if(bakeActive)endBakeSession();
+    // The snapshot replaces every coordinate, so a displacement session has
+    // nothing left to be measured from — it is dropped, not committed.
+    vdEnd();
     var snap=undoStack.pop();
     MD.atoms=snap.atoms;MD.bonds=snap.bonds;
     MD.hasExplicitBonds=!!snap.hasExplicitBonds;
+    // The provenance belongs to the geometry: an undone edit is not in the
+    // structure any more, so its clause comes off the title with it.
+    provRestore(snap.prov);
     if(CRY&&snap.baseAtoms){CRY.baseAtoms=snap.baseAtoms;CRY.baseBonds=snap.baseBonds}
     if(CRY){rebuildCrystal()}rebuildScene();updateUndoBtn();
     if(diffMode)resetSelection();
@@ -4784,6 +4855,7 @@ function importStructure(msg){
     var need=maxD*2.5+5;
     if(camDist<need){camDist=need;camera.position.set(0,0,camDist);camera.lookAt(0,0,0)}
     needsRender=true;
+    provAddSource(msg.fileName);
     modeInfoEl.textContent='Imported '+newAtoms.length+' atoms from '+(msg.fileName||'file')+' - placed beside the existing structure';
 }
 
@@ -4839,6 +4911,7 @@ function applyHydrogenResult(msg){
     stopMoveSession();
     mmCancelRun();
     pushUndo();
+    provMark('addH',newAtoms.length);
     var N0=MD.atoms.length;
     newAtoms.forEach(function(a){
         MD.atoms.push({element:'H',x:a.x,y:a.y,z:a.z,color:(MD.atomColors&&MD.atomColors.H)||'#FFFFFF'});
@@ -5198,6 +5271,10 @@ function startDiff(msg){
         modeInfoEl.textContent='Diff Mode (skeletons differ)';
         updateBakeHint();
         enterDiffRender();
+        // The displacement slider acts on one structure; a comparison shows
+        // two, so it is switched off (the session itself survives — the left
+        // side is still the geometry the user displaced).
+        vdSyncPanel();
         layoutPanels();
         return;
     }
@@ -5220,6 +5297,7 @@ function startDiff(msg){
     modeInfoEl.textContent='Diff Mode ('+totalDiff+' differences)';
 
     enterDiffRender(diffs,mapping);
+    vdSyncPanel();
     layoutPanels();
 }
 
@@ -5554,6 +5632,8 @@ function exitDiff(){
     stopSpin();
     diffMode=false;
     updateBakeHint();
+    // One structure again: the displacement block takes its mode back.
+    vdSyncPanel();
     // A molecular-mechanics session survives the comparison: its panel comes
     // back with the same selection once the second structure is gone.
     if(currentMode==='mmOpt')showMmPanel();
@@ -5710,6 +5790,11 @@ var currentFrame=0;
 var totalFrames=MD.frames?MD.frames.length:0;
 var autoPlayTimer=null;
 var isAutoPlaying=false;
+// How long each structure of a trajectory is held while it plays. A frame is a
+// still, not a film frame: every step is a whole scene rebuild, and it has to
+// stay on screen long enough to be read as one structure — but short enough
+// that a run of a few hundred steps is watchable rather than a slideshow.
+var FRAME_PLAY_MS=350;
 var frameNavEl=document.getElementById('frame-nav');
 var frameSepEl=document.getElementById('frame-sep');
 if(totalFrames>1){
@@ -5751,6 +5836,9 @@ function switchFrame(idx){
     if(vibActive||vibPaused)stopVibration();
     stopMoveSession();
     mmCancelRun();
+    // A frame is a structure of its own: the equilibrium a displacement session
+    // was measured from belongs to the frame being left.
+    vdEnd();
     currentFrame=idx;
     var f=MD.frames[idx];
     MD.atoms=f.atoms.map(function(a,i){a.index=i;return a});
@@ -5775,6 +5863,9 @@ function switchFrame(idx){
     // convergence charts: the point of the step now on screen gets highlighted
     // (renderOptCharts is a no-op while the panel is closed).
     if(typeof renderOptCharts==='function')renderOptCharts();
+    // A frame is a structure of its own: whatever was done to the one before
+    // is not part of this one, so the saved title starts from the frame again.
+    provReset();
 }
 
 // ===== VMD molecules =====
@@ -5798,10 +5889,11 @@ function switchMolecule(idx){
     if(diffMode){modeInfoEl.textContent='Molecule switching is not available in diff mode';return}
     if(CRY){modeInfoEl.textContent='Molecule switching is not available for crystal structures';return}
     // Same rule as a frame change: every writer of the current structure ends
-    // before it is replaced (see switchFrame).
+    // before it is replaced (see switchFrame), a displacement session included.
     if(vibActive||vibPaused)stopVibration();
     stopMoveSession();
     mmCancelRun();
+    vdEnd();
     vmdMolIdx=idx;
     var m=VMD.molecules[idx];
     MD.atoms=m.atoms;
@@ -5824,6 +5916,7 @@ function switchMolecule(idx){
     rotQuat.identity();panX=0;panY=0;
     updateTransform();
     modeInfoEl.textContent=MODE_INFO[currentMode]||currentMode;
+    provReset();
 }
 
 // ===== Bond perception (client side) =====
@@ -5841,7 +5934,7 @@ function detectBondsFromAtoms(atoms,charge){
     return BP.perceiveBonds(atoms,(typeof charge==='number')?{charge:charge}:undefined).bonds;
 }
 // Stopping auto-play is its own step because more than the button needs it: a
-// frame auto-play replaces the structure every 500 ms, and any operation that
+// frame auto-play replaces the structure on every tick, and any operation that
 // needs the structure to hold still — a Molecular Mechanics run, an edit, a
 // normal-mode playback — has to end it first rather than be cancelled by it a
 // moment later.
@@ -5859,17 +5952,27 @@ document.getElementById('auto-play').addEventListener('click',function(){
     if(isAutoPlaying){
         stopFrameAutoPlay();
     }else{
-        // The loop replaces the structure every 500 ms, so everything else
+        // Playback replaces the structure on every tick, so everything else
         // writing it ends now rather than on the first tick — the same rule the
         // other starters follow, applied at the moment the user asks for it.
         if(vibActive||vibPaused)stopVibration();
         stopMoveSession();
         mmCancelRun();
+        // Playback stops on the last structure instead of wrapping around, so
+        // asking for it while that structure is on screen means "run the
+        // trajectory again": restart from the first one. Without this the
+        // button would do nothing at all there.
+        if(totalFrames>1&&currentFrame>=totalFrames-1)switchFrame(0);
         isAutoPlaying=true;this.textContent='⏸ Stop';this.classList.add('playing');
         autoPlayTimer=setInterval(function(){
-            var next=currentFrame+1;if(next>=totalFrames)next=0;
+            var next=currentFrame+1;
+            // The last structure is where a trajectory ends, and that is
+            // usually the one worth stopping to look at — the geometry the run
+            // converged to. Wrapping back to the first one would hide it, so
+            // playback stops here and the button returns to Play.
+            if(next>=totalFrames){stopFrameAutoPlay();return}
             switchFrame(next);
-        },500);
+        },FRAME_PLAY_MS);
     }
 });
 
@@ -6489,6 +6592,9 @@ function updateVibrationPositions(){
 function startVibration(modeIdx){
     stopVibration();
     if(!NORMAL_MODES||modeIdx<0||modeIdx>=NORMAL_MODES.length)return;
+    // Playing a mode is the animation half of a mode's selection and nothing
+    // else: the manual-displacement target (vdTarget) is set by its own circle
+    // in the list, so watching a mode can never re-aim the slider.
     // A normal mode is a playback, not the user's geometry: it rewrites every
     // atom's position on each frame and puts the geometry it started from back
     // when it stops. A Molecular Mechanics run writing coordinates into the same
@@ -6500,7 +6606,7 @@ function startVibration(modeIdx){
     mmCancelRun();
     if(hadRun)modeInfoEl.textContent='Molecular Mechanics: the run was ended so the normal mode can play';
     // The two other loops that write the structure end here as well. A frame
-    // auto-play replaces the structure every 500 ms — and since a frame change
+    // auto-play replaces the structure on every tick — and since a frame change
     // stops a playback, leaving it on would kill this one a moment after it
     // started — and a Move Atoms session is mid-edit on the selection the
     // playback is about to rewrite.
@@ -6509,7 +6615,14 @@ function startVibration(modeIdx){
     if(totalFrames>0&&currentFrame!==totalFrames-1){switchFrame(totalFrames-1)}
     var mode=NORMAL_MODES[modeIdx];
     if(!mode.displacements||mode.displacements.length!==MD.atoms.length)return;
-    vibBasePositions=MD.atoms.map(function(a){return{x:a.x,y:a.y,z:a.z}});
+    // A manual displacement is the user's structure, not a pose: the playback
+    // always swings from the *undisplaced* equilibrium, so a mode looks the same
+    // whatever number the slider was left at, and stopping puts the displaced
+    // geometry back (see stopVibration). Without a session the geometry on
+    // screen already is the equilibrium.
+    vibBasePositions=(vdActive&&vdBase&&vdBase.length===MD.atoms.length)
+        ?vdBase.map(function(p){return{x:p.x,y:p.y,z:p.z}})
+        :MD.atoms.map(function(a){return{x:a.x,y:a.y,z:a.z}});
     var maxMag=0;
     mode.displacements.forEach(function(d){var m=Math.sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]);if(m>maxMag)maxMag=m});
     if(maxMag<1e-8)maxMag=1;
@@ -6564,6 +6677,10 @@ function stopVibration(){
             MD.atoms[i].z=vibBasePositions[i].z;
         }
         vibBasePositions=null;
+        // A manual displacement is the geometry the user left the structure in;
+        // the playback only borrowed it, so it is written back before the
+        // animation disappears. Without a session this is a no-op.
+        vdWriteAtoms();
         updateVibrationPositions();
     }
     vibActive=false;vibPaused=false;vibModeIdx=-1;
@@ -6572,6 +6689,363 @@ function stopVibration(){
     var rows=freqPanelEl.querySelectorAll('.freq-row');
     rows.forEach(function(r){r.classList.remove('playing')});
     updateFreqButton('pause');
+}
+
+// ===== Manual displacement along normal modes =====
+// The playback above is a *view* of a mode: it borrows the geometry for one
+// sine cycle and puts it back. Manual displacement is the other half — modes
+// written into the coordinates, so the structure can be pulled along them and
+// then measured, rotated, edited or saved like any other.
+//
+// The distortion is a *combination* of modes, not one at a time. The normal
+// modes of one frequency job are an orthogonal basis of the 3N-6 displacements
+// (orthogonal under the mass-weighted inner product, which the printed vectors
+// already carry), so
+//     x = x0 + sum_k (scale_k * dir_k)
+// is exactly a point in normal-coordinate space: displacing along a second mode
+// is the same arithmetic as a scan along a line in that space, and every
+// component keeps the per-atom weights and phases the calculation produced. A
+// component is added by dragging the slider of a picked mode and removed by
+// dragging it back to 0, so nothing accumulates invisibly — the block lists
+// every component that is in the structure, and every contributing row is
+// marked.
+//
+// State:
+//   * vdBase — the equilibrium geometry the whole combination is measured
+//     from, captured once when the first component is added. Every write is
+//     rebuilt from it (base + sum), never from the previous frame, so dragging
+//     back and forth cannot accumulate drift.
+//   * vdComp — the components, as {idx, scale, dir}, where dir is that mode's
+//     unit displacement (largest per-atom magnitude 1 Å).
+//   * vdTarget — the mode the slider points at (the one whose circle is
+//     filled). The slider edits *that* component; it plays nothing.
+//
+// The slider is a *fraction* of one mode, not a distance: -1.00 to +1.00, where
+// 1.00 moves that mode's most-moving atom by 1 Å. The block prints what each
+// component comes to and the largest displacement of the whole combination
+// (which is not the sum of the parts — vectors can cancel), so a number is
+// never the only thing on offer.
+//
+// A session is a *pending* rewrite of every atom. Anything that edits the
+// structure closes it first (vdCommit, called from pushUndo, which every
+// coordinate edit opens with), and anything that replaces the structure drops
+// it (vdEnd). The playback is the one deliberate exception: it swings around
+// the *pure* vdBase — the mode it shows is the mode the calculation produced,
+// not that mode on top of an arbitrary offset — and writes the combination back
+// when it stops.
+var VD_MAX_SCALE=1.0;    // slider range: -1 … +1 of one mode's displacement
+var vdActive=false;      // a displacement session holds the geometry
+var vdTarget=-1;         // mode the slider points at (its circle is filled)
+var vdComp=[];           // components: {idx, scale, dir}
+var vdBase=null;         // equilibrium coordinates [{x,y,z}, ...]
+var vdMaxDisp=0;         // largest atomic displacement of the combination, Å
+var vdUndoDepth=-1;      // undoStack length right after the session's snapshot
+var vdSuppress=false;    // the session's own pushUndo must not close it
+var vdMarkedSig='';      // component list the row markers were last built for
+var vdPickedRow=-1;      // row whose pick circle is currently filled
+
+function vdAvailable(){
+    return !CRY&&!diffMode&&!!NORMAL_MODES&&NORMAL_MODES.length>0&&MD.atoms.length>0;
+}
+/** Whether one mode can be written into the current structure at all. */
+function vdUsable(idx){
+    if(!NORMAL_MODES||idx<0||idx>=NORMAL_MODES.length)return false;
+    var m=NORMAL_MODES[idx];
+    return !!(m&&m.displacements&&m.displacements.length===MD.atoms.length);
+}
+/** Unit displacement vectors of one mode, scaled so the largest per-atom
+ *  magnitude is 1 Å — that is what makes the slider's 1.00 mean "the
+ *  most-moving atom travels 1 Å". Null when the mode carries no usable vector
+ *  for this structure. */
+function vdDirFor(idx){
+    if(!vdUsable(idx))return null;
+    var d=NORMAL_MODES[idx].displacements,n=MD.atoms.length;
+    var maxSq=0,i,v,q;
+    for(i=0;i<n;i++){
+        v=d[i];
+        q=v[0]*v[0]+v[1]*v[1]+v[2]*v[2];
+        if(q>maxSq)maxSq=q;
+    }
+    if(!(maxSq>1e-24))return null;
+    var inv=1/Math.sqrt(maxSq);
+    var dir=new Array(n);
+    for(i=0;i<n;i++){
+        v=d[i];
+        dir[i]=[v[0]*inv,v[1]*inv,v[2]*inv];
+    }
+    return dir;
+}
+/** The component of one mode (null when that mode is not in the distortion). */
+function vdFindComp(idx){
+    for(var i=0;i<vdComp.length;i++)if(vdComp[i].idx===idx)return vdComp[i];
+    return null;
+}
+/** The share of the picked mode: what the slider shows and edits. */
+function vdCurScale(){
+    var c=vdFindComp(vdTarget);
+    return c?c.scale:0;
+}
+/** Rebuild every atom from the equilibrium plus every component. Returns false
+ *  (and writes nothing) when the session and the structure no longer describe
+ *  the same atom list. */
+function vdWriteAtoms(){
+    var n=MD.atoms.length,i,c;
+    vdMaxDisp=0;
+    if(!vdActive||!vdBase||vdBase.length!==n)return false;
+    // Every component must describe this atom list before anything is written:
+    // a half-applied combination would be a structure nobody asked for.
+    for(c=0;c<vdComp.length;c++){
+        var cd=vdComp[c].dir;
+        if(!cd||cd.length!==n)return false;
+    }
+    for(i=0;i<n;i++){
+        var a=MD.atoms[i],b=vdBase[i];
+        a.x=b.x;a.y=b.y;a.z=b.z;
+    }
+    for(c=0;c<vdComp.length;c++){
+        var comp=vdComp[c],dir=comp.dir,sc=comp.scale;
+        for(i=0;i<n;i++){
+            var a2=MD.atoms[i],v=dir[i];
+            a2.x+=v[0]*sc;a2.y+=v[1]*sc;a2.z+=v[2]*sc;
+        }
+    }
+    // The largest displacement of the *combination* is not the sum of the
+    // components' own (vectors can cancel), so it is measured on the result.
+    var maxSq=0;
+    for(i=0;i<n;i++){
+        var a3=MD.atoms[i],b3=vdBase[i];
+        var dx=a3.x-b3.x,dy=a3.y-b3.y,dz=a3.z-b3.z;
+        var q=dx*dx+dy*dy+dz*dz;
+        if(q>maxSq)maxSq=q;
+    }
+    vdMaxDisp=Math.sqrt(maxSq);
+    return true;
+}
+/** Add a mode to the distortion or change its share; false when the mode
+ *  carries no usable displacement for this structure. */
+function vdSetComp(idx,scale){
+    var c=vdFindComp(idx);
+    if(c){c.scale=scale;return true}
+    var dir=vdDirFor(idx);
+    if(!dir)return false;
+    vdComp.push({idx:idx,scale:scale,dir:dir});
+    return true;
+}
+/** Take one mode out of the distortion. */
+function vdDropComp(idx){
+    for(var i=0;i<vdComp.length;i++){
+        if(vdComp[i].idx===idx){vdComp.splice(i,1);return true}
+    }
+    return false;
+}
+/** The combination as the block states it, so the structure is always
+ *  traceable to the modes it was built from. */
+function vdCompsText(){
+    if(!vdComp.length)return 'no displacement yet';
+    var parts=[];
+    for(var i=0;i<vdComp.length;i++){
+        var c=vdComp[i];
+        parts.push('#'+(c.idx+1)+' '+(c.scale>=0?'+':'')+c.scale.toFixed(2));
+    }
+    return parts.join(' · ')+' · total '+vdMaxDisp.toFixed(2)+' Å';
+}
+/** Signature of the component list, for the row markers. */
+function vdCompSig(){
+    var s='';
+    for(var i=0;i<vdComp.length;i++)s+=vdComp[i].idx+',';
+    return s;
+}
+/** End the session bookkeeping; the atoms are left exactly as they are. */
+function vdDropSession(popUndo){
+    // The snapshot belongs to the session: when the geometry is back at the
+    // equilibrium it is not an edit any more, unless something else pushed on
+    // top of it in the meantime.
+    if(popUndo&&vdUndoDepth===undoStack.length&&undoStack.length>0){undoStack.pop();updateUndoBtn()}
+    vdActive=false;vdBase=null;vdComp.length=0;vdMaxDisp=0;vdUndoDepth=-1;
+}
+/** Open a session: the equilibrium snapshot and the one undo step it owns. */
+function vdBegin(){
+    vdBase=MD.atoms.map(function(a){return{x:a.x,y:a.y,z:a.z}});
+    vdComp.length=0;vdActive=true;
+    // One undo step per session, taken in front of the first coordinate it
+    // writes — the same rule an Alt-drag follows.
+    vdSuppress=true;pushUndo();vdSuppress=false;
+    vdUndoDepth=undoStack.length;
+}
+/** Back to the equilibrium: every component is removed and the atoms return to
+ *  the snapshot, so the session's own undo step goes with it. */
+function vdClearAll(msg){
+    if(!vdActive){vdSyncPanel();return}
+    vdComp.length=0;
+    vdWriteAtoms();            // nothing left to add: the atoms become vdBase
+    updateVibrationPositions();
+    vdDropSession(true);
+    updateRotationCenter();
+    vdSyncPanel();
+    modeInfoEl.textContent=msg||'Manual displacement cleared - back to the equilibrium geometry';
+}
+/** Drop the session without touching the geometry: the structure it was
+ *  measured from is being replaced (a frame, a molecule, an Undo). */
+function vdEnd(){
+    vdDropSession(false);
+    vdSyncPanel();
+}
+/** Close the session and keep the geometry it produced. Called in front of
+ *  every coordinate edit, so the edit starts from a structure nothing else is
+ *  holding a rewrite for, and the rotation centre describes what is on screen. */
+function vdCommit(){
+    if(!vdActive)return;
+    if(vibActive||vibPaused)stopVibration();
+    // The components are about to be cleared, but the displacement stays in the
+    // coordinates — so it is kept for the title line before the session closes.
+    provCommitModes();
+    vdDropSession(false);
+    // The centre follows the geometry; meshes are stored relative to it, so
+    // this re-centres without moving the picture a pixel.
+    updateRotationCenter();
+    vdSyncPanel();
+}
+function vdReset(){
+    if(vibActive||vibPaused)stopVibration();
+    vdClearAll();
+}
+/** The manual half of a mode's selection: the circle in the list points the
+ *  displacement slider at that mode. It plays nothing and writes nothing — the
+ *  first slider move is what applies it — so picking a mode to adjust can never
+ *  start an animation, and watching one can never re-aim the slider. */
+function vdPick(idx){
+    if(!NORMAL_MODES||idx<0||idx>=NORMAL_MODES.length)return;
+    vdTarget=idx;
+    vdSyncPanel();
+    var m=NORMAL_MODES[idx];
+    if(!vdUsable(idx)){
+        modeInfoEl.textContent='Manual displacement - this mode has no displacements for the current structure';
+        return;
+    }
+    modeInfoEl.textContent='Manual displacement: mode '+(idx+1)+
+        (m&&m.frequency!=null?(' ('+m.frequency.toFixed(2)+' cm⁻¹)'):'')+
+        ' - drag the slider to move the structure along it';
+}
+/** The one entry point of the slider: one mode's fraction, -1 … +1. */
+function vdSetScale(scale){
+    if(!vdAvailable()){vdSyncPanel();return}
+    // Two writers may already own the coordinates. A Molecular Mechanics run
+    // streams them chunk by chunk and a Move Atoms session is mid-edit; a slider
+    // move under either would be overwritten (or would overwrite the run), so it
+    // is refused and the thumb is put back where the geometry actually is. The
+    // run keeps going — a slider is not a reason to end it.
+    if(mmRunActive()){
+        modeInfoEl.textContent='Manual displacement - a Molecular Mechanics run is using these coordinates';
+        vdSyncPanel();return;
+    }
+    if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
+    if(!isFinite(scale))scale=0;
+    if(scale>VD_MAX_SCALE)scale=VD_MAX_SCALE;
+    if(scale<-VD_MAX_SCALE)scale=-VD_MAX_SCALE;
+    // A playback owns the coordinates while it runs; ending it first puts the
+    // combination back, which is the geometry this edit is measured from.
+    if(vibActive||vibPaused)stopVibration();
+    var idx=vdTarget;
+    if(idx<0){vdSyncPanel();return}
+    // A repeated event with the same value (input + change, a keyboard repeat)
+    // is not a new edit and writes nothing.
+    if(Math.abs(scale-vdCurScale())<1e-12){vdSyncPanel();return}
+    var zero=Math.abs(scale)<1e-9;
+    if(zero&&!vdActive){vdSyncPanel();return}
+    if(!vdActive){
+        if(!vdUsable(idx)){vdSyncPanel();return}
+        vdBegin();
+    }
+    if(zero){
+        // Dragging a component back to 0 takes that mode out of the
+        // combination; when it was the last one the structure is back at the
+        // equilibrium and the session is over.
+        vdDropComp(idx);
+        if(!vdComp.length){
+            vdClearAll('Manual displacement cleared - back to the equilibrium geometry');
+            return;
+        }
+    }else if(!vdSetComp(idx,scale)){
+        if(!vdComp.length)vdDropSession(true);
+        vdSyncPanel();return;
+    }
+    vdWriteAtoms();
+    updateVibrationPositions();
+    modeInfoEl.textContent='Manual displacement: #'+(idx+1)+' '+(scale>=0?'+':'')+scale.toFixed(2)+
+        ' - '+vdComp.length+' mode'+(vdComp.length===1?'':'s')+', total max '+vdMaxDisp.toFixed(2)+' Å';
+    vdSyncPanel();
+}
+/** One place that keeps the panel's displacement block honest: the mode the
+ *  slider points at, the component list, whether the slider can be moved at
+ *  all, the value, the reset button and the row markers. Safe to call when the
+ *  panel is not open, and cheap enough to call on every slider event: nothing
+ *  is written to the DOM unless it actually changed. */
+function vdSyncPanel(){
+    var panel=freqPanelEl;
+    if(!panel)return;
+    var slider=panel.querySelector('#vd-slider');
+    if(!slider)return;
+    var modeEl=panel.querySelector('#vd-mode');
+    var compsEl=panel.querySelector('#vd-comps');
+    var valEl=panel.querySelector('#vd-val');
+    var maxEl=panel.querySelector('#vd-max');
+    var resetBtn=panel.querySelector('#vd-reset');
+    var hintEl=panel.querySelector('#vd-hint');
+    var m=(NORMAL_MODES&&vdTarget>=0&&vdTarget<NORMAL_MODES.length)?NORMAL_MODES[vdTarget]:null;
+    var usable=vdUsable(vdTarget);
+    var enabled=usable&&vdAvailable();
+    var off=!enabled;
+    if(slider.disabled!==off)slider.disabled=off;
+    var cur=vdCurScale();
+    // Only write the value when it actually differs: this runs on every input
+    // event of a drag, and re-assigning the thumb's own value is pointless work.
+    if(parseFloat(slider.value)!==cur)slider.value=String(cur);
+    var noReset=!vdActive;
+    if(resetBtn&&resetBtn.disabled!==noReset)resetBtn.disabled=noReset;
+    if(valEl){
+        var valTxt=(cur<0?'-':'+')+Math.abs(cur).toFixed(2);
+        if(valEl.textContent!==valTxt)valEl.textContent=valTxt;
+    }
+    // The fraction alone does not say how big the distortion is, so the same
+    // row spells out what this mode's share comes to for the atom that moves
+    // most within it (the unit vector makes that exactly |share| Å).
+    if(maxEl){
+        var maxTxt='max '+Math.abs(cur).toFixed(2)+' Å';
+        if(maxEl.textContent!==maxTxt)maxEl.textContent=maxTxt;
+    }
+    if(compsEl){
+        var compsTxt=vdCompsText();
+        if(compsEl.textContent!==compsTxt)compsEl.textContent=compsTxt;
+    }
+    if(modeEl){
+        var modeTxt=m?('mode '+(vdTarget+1)+' · '+m.frequency.toFixed(2)+' cm⁻¹'):'no mode selected';
+        if(modeEl.textContent!==modeTxt)modeEl.textContent=modeTxt;
+    }
+    if(hintEl){
+        var hintTxt;
+        if(!NORMAL_MODES||!NORMAL_MODES.length)hintTxt='No normal modes in this document.';
+        else if(!vdAvailable())hintTxt=diffMode?'Not available in diff mode.':'Not available for crystal structures.';
+        else if(!m)hintTxt='Pick a mode with the circle, then drag to move the structure along it.';
+        else if(!usable)hintTxt='This mode has no displacements for the current structure.';
+        else if(vdComp.length&&Math.abs(cur)>1e-9)hintTxt='In the distortion: drag to change its share, 0 takes it out.';
+        else if(vdComp.length)hintTxt='Drag to add this mode to the distortion.';
+        else hintTxt='Drag along the mode: 1.00 moves the most-moving atom by 1 Å.';
+        if(hintEl.textContent!==hintTxt)hintEl.textContent=hintTxt;
+    }
+    // The markers change only when the set of components or the picked mode
+    // changes, so the row list is walked on that transition and not on every
+    // slider event.
+    var sig=vdCompSig();
+    var picked=vdTarget;
+    if(sig!==vdMarkedSig||picked!==vdPickedRow){
+        vdMarkedSig=sig;vdPickedRow=picked;
+        panel.querySelectorAll('.freq-row').forEach(function(r){
+            var idx=parseInt(r.dataset.idx,10);
+            r.classList.toggle('displaced',!!vdFindComp(idx));
+            var pick=r.querySelector('.freq-pick');
+            if(pick)pick.classList.toggle('on',idx===picked);
+        });
+    }
 }
 
 function buildFreqPanel(){
@@ -6584,19 +7058,33 @@ function buildFreqPanel(){
             '<span class="freq-idx">'+(idx+1)+'</span>'+
             '<span class="freq-val">'+sign+freqStr+' cm⁻¹</span>'+
             '<span class="freq-sym">'+symStr+'</span>'+
-            '<span class="freq-play">▶</span></div>';
+            '<span class="freq-pick" data-idx="'+idx+'" data-pick="1" title="Select this mode for manual displacement"></span>'+
+            '<span class="freq-play" title="Play this vibration">▶</span></div>';
     }).join('');
     freqPanelEl.innerHTML=
         '<div class="freq-head"><span class="freq-title">Normal Modes ('+NORMAL_MODES.length+')</span>'+
         '<span class="freq-close">×</span></div>'+
         '<div class="freq-body">'+rowsHTML+'</div>'+
-        '<button class="freq-stop" id="freq-stop">⏸ Pause</button>';
+        '<button class="freq-stop" id="freq-stop">⏸ Pause</button>'+
+        '<div class="freq-dis">'+
+        '<div class="vd-head"><span>Manual Displacement</span><span class="vd-mode" id="vd-mode">no mode selected</span></div>'+
+        '<div class="vd-comps" id="vd-comps">no displacement yet</div>'+
+        '<input type="range" class="vd-slider" id="vd-slider" min="-'+VD_MAX_SCALE+'" max="'+VD_MAX_SCALE+'" step="0.01" value="0">'+
+        '<div class="vd-row"><span class="vd-val" id="vd-val">+0.00</span>'+
+        '<span class="vd-max" id="vd-max">max 0.00 Å</span>'+
+        '<button class="vd-reset" id="vd-reset" disabled>Reset all</button></div>'+
+        '<div class="vd-hint" id="vd-hint">Pick a mode with the circle, then drag to move the structure along it.</div>'+
+        '</div>';
     freqPanelEl.classList.add('show');
     freqReopenEl.classList.remove('show');
 
     var rows=freqPanelEl.querySelectorAll('.freq-row');
     rows.forEach(function(r){
-        r.addEventListener('click',function(){
+        r.addEventListener('click',function(e){
+            // The circle inside the row is the manual-selection control; its
+            // own handler stops the event, and this guard keeps the two apart
+            // even if it does not.
+            if(e&&e.target&&e.target.dataset&&e.target.dataset.pick)return;
             var idx=parseInt(r.dataset.idx);
             if(isNaN(idx))return;
             if((vibActive||vibPaused)&&vibModeIdx===idx){
@@ -6609,6 +7097,16 @@ function buildFreqPanel(){
                     r.classList.add('playing');
                 }
             }
+        });
+    });
+    // The other half of the selection: pick a mode for the displacement slider.
+    // It plays nothing and writes nothing; the first slider move does.
+    freqPanelEl.querySelectorAll('.freq-pick').forEach(function(p){
+        p.addEventListener('click',function(e){
+            if(e&&typeof e.stopPropagation==='function')e.stopPropagation();
+            var idx=parseInt(this.dataset.idx,10);
+            if(isNaN(idx))return;
+            vdPick(idx);
         });
     });
     var closeBtn=freqPanelEl.querySelector('.freq-close');
@@ -6627,6 +7125,20 @@ function buildFreqPanel(){
             else if(vibPaused){resumeVibration()}
         });
     }
+    // Manual displacement: the slider writes the mode currently named in the
+    // block. 'input' covers a drag, a click on the track and an arrow key on a
+    // focused slider; the handler itself drops repeated identical values.
+    var vdSlider=freqPanelEl.querySelector('#vd-slider');
+    if(vdSlider){
+        vdSlider.addEventListener('input',function(){vdSetScale(parseFloat(this.value))});
+        vdSlider.addEventListener('change',function(){vdSetScale(parseFloat(this.value))});
+    }
+    var vdResetBtn=freqPanelEl.querySelector('#vd-reset');
+    if(vdResetBtn)vdResetBtn.addEventListener('click',function(){vdReset()});
+    // The rows were just recreated, so the marker caches start empty.
+    vdMarkedSig='';
+    vdPickedRow=-1;
+    vdSyncPanel();
     layoutPanels();
 }
 
@@ -7198,7 +7710,7 @@ function showBondLengthModal(){
             rebuildScene();
         }
     });
-    document.getElementById('m-ok').addEventListener('click',function(){hideModal();originalCoords=null;resetSelection()});
+    document.getElementById('m-ok').addEventListener('click',function(){provMarkIfMoved('bondLen');hideModal();originalCoords=null;resetSelection()});
     document.getElementById('m-cancel').addEventListener('click',function(){
         if(existingBond&&originalCoords){existingBond.order=curOrder}
         restoreOriginal();rebuildScene();undoStack.pop();updateUndoBtn();hideModal();originalCoords=null;resetSelection()
@@ -7222,7 +7734,7 @@ function showBondAngleModal(){
     valEl.addEventListener('input',function(){sliderEl.value=this.value;applyBondAngle(parseFloat(this.value),fixEl.value==='1',moveEl.value)});
     fixEl.addEventListener('change',function(){applyBondAngle(parseFloat(valEl.value),this.value==='1',moveEl.value)});
     moveEl.addEventListener('change',function(){applyBondAngle(parseFloat(valEl.value),fixEl.value==='1',this.value)});
-    document.getElementById('m-ok').addEventListener('click',function(){hideModal();originalCoords=null;resetSelection()});
+    document.getElementById('m-ok').addEventListener('click',function(){provMarkIfMoved('bondAngle');hideModal();originalCoords=null;resetSelection()});
     document.getElementById('m-cancel').addEventListener('click',function(){restoreOriginal();rebuildScene();undoStack.pop();updateUndoBtn();hideModal();originalCoords=null;resetSelection()});
 }
 
@@ -7243,7 +7755,7 @@ function showDihedralModal(){
     valEl.addEventListener('input',function(){sliderEl.value=this.value;applyDihedral(parseFloat(this.value),fixEl.value==='1',moveEl.value)});
     fixEl.addEventListener('change',function(){applyDihedral(parseFloat(valEl.value),this.value==='1',moveEl.value)});
     moveEl.addEventListener('change',function(){applyDihedral(parseFloat(valEl.value),fixEl.value==='1',this.value)});
-    document.getElementById('m-ok').addEventListener('click',function(){hideModal();originalCoords=null;resetSelection()});
+    document.getElementById('m-ok').addEventListener('click',function(){provMarkIfMoved('dihedral');hideModal();originalCoords=null;resetSelection()});
     document.getElementById('m-cancel').addEventListener('click',function(){restoreOriginal();rebuildScene();undoStack.pop();updateUndoBtn();hideModal();originalCoords=null;resetSelection()});
 }
 
@@ -7309,6 +7821,7 @@ function showAddAtomModal(){
     });
     document.getElementById('m-ok').addEventListener('click',function(){
         pushUndo();
+        provMark('addAtoms',1);
         var el=document.getElementById('m-elem').value;
         var bl=parseFloat(document.getElementById('m-val').value)||1.5;
         var bondOrder=parseFloat(document.getElementById('m-bond-order').value)||1;
@@ -7381,6 +7894,7 @@ function showReplaceAtomModal(){
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok" id="m-ok">Replace</button></div>',null);
     document.getElementById('m-ok').addEventListener('click',function(){
         pushUndo();
+        provMark('replaceAtoms',selectedAtoms.length);
         var el=document.getElementById('m-elem').value;
         selectedAtoms.forEach(function(idx){
             var a=MD.atoms[idx];
@@ -7410,6 +7924,7 @@ function showDeleteAtomModal(){
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok mbtn-danger" id="m-ok">Delete</button></div>',null);
     document.getElementById('m-ok').addEventListener('click',function(){
         pushUndo();
+        provMark('delAtoms',1);
         if(CRY){
             var baseIdx=a.baseIdx!=null?a.baseIdx:idx;
             CRY.baseAtoms.splice(baseIdx,1);
@@ -7437,7 +7952,7 @@ function showBatchDeleteModal(){
     showModal('<h3>Delete Atoms</h3>'+
         '<div class="current-val">Delete '+selectedAtoms.length+' atoms: '+names+'?</div>'+
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok mbtn-danger" id="m-ok">Delete</button></div>',null);
-    document.getElementById('m-ok').addEventListener('click',function(){pushUndo();batchDeleteSelected()});
+    document.getElementById('m-ok').addEventListener('click',function(){pushUndo();provMark('delAtoms',selectedAtoms.length);batchDeleteSelected()});
     document.getElementById('m-cancel').addEventListener('click',function(){hideModal();resetSelection()});
 }
 
@@ -7492,22 +8007,268 @@ function batchDeleteSelected(){
     }
 }
 
+// ===== Save provenance =====
+// A saved file's title line states where the structure came from and what has
+// been done to it here: the file it was opened from, the frame of a trajectory
+// it was taken out of, and the edits that changed it — atoms added or deleted,
+// the structure translated or turned, an optimisation, a displacement along a
+// normal mode — with the numbers a reader would otherwise have to reconstruct.
+//
+// The record is written where the change happens, not inferred at save time,
+// because "was this structure edited?" cannot be answered from the coordinates
+// alone, and it travels in the undo snapshot, so undoing an edit also takes its
+// clause off the title. Only formats that own a title or comment line get it;
+// every other format is written exactly as before.
+// The state itself is declared with the rest of the view state, above
+// pushUndo, because the undo snapshot is the first thing that reads it; the
+// functions that fill it in are the ones below.
+
+// Basename without a regex: the separator escape is the one thing in this page
+// that is easy to get wrong when the code itself lives in a template literal.
+function provBaseName(p){
+    var s=String(p||'');
+    var cut=-1;
+    for(var i=0;i<s.length;i++){
+        var c=s.charAt(i);
+        if(c==='/'||c===String.fromCharCode(92))cut=i;
+    }
+    return s.substring(cut+1);
+}
+function provClone(){
+    var edits=[],modes={},i,k;
+    for(i=0;i<provEdits.length;i++)edits.push({k:provEdits[i].k,n:provEdits[i].n});
+    for(k in provModes){if(provModes.hasOwnProperty(k))modes[k]={freq:provModes[k].freq,scale:provModes[k].scale}}
+    return {edits:edits,merged:provMerged.slice(),modes:modes};
+}
+function provRestore(p){
+    var i,k;
+    provEdits=[];provMerged=[];provModes={};
+    if(!p)return;
+    if(p.edits)for(i=0;i<p.edits.length;i++)provEdits.push({k:p.edits[i].k,n:p.edits[i].n});
+    if(p.merged)provMerged=p.merged.slice();
+    if(p.modes)for(k in p.modes){if(p.modes.hasOwnProperty(k))provModes[k]={freq:p.modes[k].freq,scale:p.modes[k].scale}}
+}
+/** The structure itself was replaced (another frame, another molecule): the
+ *  edits and the merged files belong to the structure that is gone. */
+function provReset(){provEdits=[];provMerged=[];provModes={}}
+/** Record one kind of change. Counted kinds add up, so ten single deletions
+ *  read as "10 atoms deleted" rather than ten clauses. */
+function provMark(kind,n){
+    for(var i=0;i<provEdits.length;i++){
+        if(provEdits[i].k===kind){provEdits[i].n=(provEdits[i].n||0)+(n||1);return}
+    }
+    provEdits.push({k:kind,n:n||1});
+}
+/** A change that was taken back without an Undo (MM "Restore initial", a
+ *  displacement dragged back to zero) is not an edit any more. */
+function provUnmark(kind){
+    for(var i=0;i<provEdits.length;i++){
+        if(provEdits[i].k===kind){provEdits.splice(i,1);return}
+    }
+}
+function provAddSource(name){
+    if(!name)return;
+    if(provMerged.indexOf(name)<0)provMerged.push(name);
+}
+function provFreqOf(idx){
+    var m=(typeof NORMAL_MODES!=='undefined'&&NORMAL_MODES)?NORMAL_MODES[idx]:null;
+    return (m&&typeof m.frequency==='number')?m.frequency:null;
+}
+/** Keep a displacement the slider committed: once the session closes it is no
+ *  longer in vdComp, but it is still in the coordinates and must still be said. */
+function provCommitModes(){
+    if(typeof vdComp==='undefined'||!vdComp)return;
+    for(var i=0;i<vdComp.length;i++){
+        var c=vdComp[i];
+        if(Math.abs(c.scale)<1e-9){delete provModes[c.idx];continue}
+        provModes[c.idx]={freq:provFreqOf(c.idx),scale:c.scale};
+    }
+}
+function provDropModes(){provModes={}}
+function provModesText(){
+    var seen={},k,i;
+    for(k in provModes){if(provModes.hasOwnProperty(k))seen[k]={freq:provModes[k].freq,scale:provModes[k].scale}}
+    // The live session is not committed yet, but its displacement is on screen.
+    if(typeof vdActive!=='undefined'&&vdActive&&typeof vdComp!=='undefined'&&vdComp){
+        for(i=0;i<vdComp.length;i++){
+            var c=vdComp[i];
+            if(Math.abs(c.scale)<1e-9)delete seen[c.idx];
+            else seen[c.idx]={freq:provFreqOf(c.idx),scale:c.scale};
+        }
+    }
+    var keys=[];
+    for(k in seen){if(seen.hasOwnProperty(k))keys.push(k)}
+    keys.sort(function(a,b){return a-b});
+    var parts=[];
+    for(i=0;i<keys.length;i++){
+        var e=seen[keys[i]];
+        var txt='mode '+(Number(keys[i])+1);
+        if(e.freq!=null){
+            txt+=' ('+Math.abs(e.freq).toFixed(1)+(e.freq<0?'i':'')+' cm-1)';
+        }
+        txt+=' '+(e.scale>=0?'+':'-')+Math.abs(e.scale).toFixed(2)+' A';
+        parts.push(txt);
+    }
+    return parts.join(' + ');
+}
+/** The three geometry dialogs preview live and keep the result on OK; nothing
+ *  moved means nothing to report, however many times the slider was touched. */
+function provMarkIfMoved(kind){
+    if(!originalCoords)return;
+    for(var i=0;i<originalCoords.length;i++){
+        var oc=originalCoords[i],a=MD.atoms[i];
+        if(!oc||!a)continue;
+        if(Math.abs(a.x-oc.x)>1e-9||Math.abs(a.y-oc.y)>1e-9||Math.abs(a.z-oc.z)>1e-9){provMark(kind,1);return}
+    }
+}
+/** The supercell is a property of the crystal on screen, not an edit that can be
+ *  undone, so it is read from the bounds at save time instead of being marked. */
+function provSupercellText(){
+    if(typeof CRY==='undefined'||!CRY||typeof boundary==='undefined'||!boundary)return '';
+    var ax=[];
+    if(boundary.aMin!==0||boundary.aMax!==1)ax.push('a['+boundary.aMin+','+boundary.aMax+']');
+    if(boundary.bMin!==0||boundary.bMax!==1)ax.push('b['+boundary.bMin+','+boundary.bMax+']');
+    if(boundary.cMin!==0||boundary.cMax!==1)ax.push('c['+boundary.cMin+','+boundary.cMax+']');
+    return ax.length?('supercell '+ax.join(' ')):'';
+}
+/** The title as PDB TITLE records: 60 characters per record, with PDB's
+ *  continuation number in columns 9-10 rather than one over-long line. */
+function provPdbTitle(text){
+    var s=String(text||''),out='',serial=1,i=0;
+    while(i<s.length){
+        var head=(serial<10)?('TITLE   '+serial+' '):('TITLE  '+serial+' ');
+        out+=head+s.substring(i,i+60)+'\\n';
+        i+=60;serial++;
+    }
+    return out;
+}
+function provEditText(e){
+    var n=e.n||1;
+    switch(e.k){
+        case 'addAtoms':return n===1?'1 atom added':n+' atoms added';
+        case 'delAtoms':return n===1?'1 atom deleted':n+' atoms deleted';
+        case 'replaceAtoms':return n===1?'1 atom replaced':n+' atoms replaced';
+        case 'addH':return n===1?'1 H added':n+' H added';
+        case 'translate':return 'translated';
+        case 'rotate':return 'rotated';
+        case 'mmOpt':return 'MM-optimized';
+        case 'bondLen':return 'bond length adjusted';
+        case 'bondAngle':return 'bond angle adjusted';
+        case 'dihedral':return 'dihedral adjusted';
+        case 'disorder':return 'disorder removed';
+        case 'supercell':return 'supercell rebuilt';
+    }
+    return '';
+}
+/** Join as many whole clauses as fit, never cutting one in half. */
+function provJoinText(head,parts,max){
+    if(!parts.length)return head;
+    var whole=(head?head+'; ':'')+parts.join(', ');
+    if(whole.length<=max)return whole;
+    var used=[];
+    for(var i=0;i<parts.length;i++){
+        var cand=used.concat([parts[i]]);
+        var txt=(head?head+'; ':'')+cand.join(', ');
+        if(txt.length>max-6){
+            if(used.length)return (head?head+'; ':'')+used.join(', ')+', ...';
+            return txt.substring(0,max-4)+' ...';
+        }
+        used=cand;
+    }
+    return (head?head+'; ':'')+used.join(', ');
+}
+/** The file's own title, when it says something the provenance does not. */
+function provOriginalTitle(){
+    if(typeof MD==='undefined'||!MD)return '';
+    // A trajectory's title belongs to its *first* structure — a log's title is
+    // the comment of the geometry the file opens on, and switching frames does
+    // not rewrite it. The frame clause already names the structure on screen, so
+    // appending this would state the opposite of it ("frame 79 of 79 ... | Step
+    // 1"): the tail is dropped rather than contradicting the line.
+    if(typeof totalFrames!=='undefined'&&totalFrames>1)return '';
+    // Same for a script's molecule list: the title describes the first molecule,
+    // and the molecule clause names the one on screen.
+    if(typeof VMD!=='undefined'&&VMD&&VMD.molecules&&VMD.molecules.length>1&&vmdMolIdx>0)return '';
+    var t=String(MD.title||'');
+    t=t.split('\\n').join(' ').split('\\r').join(' ').split('\\t').join(' ');
+    t=t.trim();
+    if(t.indexOf(PROV_PREFIX)===0)return '';
+    if(t===''||t==='Modified structure'||t==='Empty'||t==='No structures found')return '';
+    return t;
+}
+function provTitle(fallback,keepOriginal){
+    var merged=provMerged.slice();
+    var src=provSource;
+    if(!src&&merged.length)src=merged.shift();
+    var head=[];
+    if(src)head.push('from '+src);
+    if(totalFrames>1){
+        var fr='frame '+(currentFrame+1)+' of '+totalFrames;
+        var fl=(MD.frames&&MD.frames[currentFrame]&&MD.frames[currentFrame].stepLabel)?String(MD.frames[currentFrame].stepLabel):'';
+        if(fl)fr+=', '+fl;
+        head.push(fr);
+    }else if(VMD&&VMD.molecules&&VMD.molecules.length>1){
+        head.push('molecule '+(vmdMolIdx+1)+' of '+VMD.molecules.length);
+    }
+    // Merged files come after the frame: the frame belongs to the source file.
+    if(merged.length)head.push('merged with '+merged.join(', '));
+    var body=[];
+    for(var i=0;i<provEdits.length;i++){
+        var t=provEditText(provEdits[i]);
+        if(t)body.push(t);
+    }
+    var modeTxt=provModesText();
+    if(modeTxt)body.push('displaced along '+modeTxt);
+    var scTxt=provSupercellText();
+    if(scTxt)body.push(scTxt);
+    var line=provJoinText(head.join(', '),body,PROV_MAX);
+    if(keepOriginal!==false){
+        var orig=provOriginalTitle();
+        if(orig){
+            if(!line){
+                // Nothing to add provenance to: the file's own title stands in.
+                line=orig.length>PROV_MAX?(orig.substring(0,PROV_MAX-3)+'...'):orig;
+            }else{
+                var room=PROV_MAX-line.length-3;
+                if(room>=14)line+=' | '+(orig.length>room?orig.substring(0,room-3)+'...':orig);
+            }
+        }
+    }
+    if(!line)line=fallback||'Modified structure';
+    return PROV_PREFIX+line;
+}
+
 function doSave(){
     if(!MD.atoms||MD.atoms.length===0){alert('No atoms to save');return}
     for(var ci=0;ci<MD.atoms.length;ci++){var ca=MD.atoms[ci];if(isNaN(ca.x)||isNaN(ca.y)||isNaN(ca.z)){alert('Atom '+(ci+1)+' has invalid coordinates (NaN). Cannot save.');return}}
     if(CRY&&!CRY_INV){alert('Crystal lattice is degenerate (zero determinant). Cannot save crystal formats.');return}
     try{
-    var xyz=MD.atoms.length+'\\n'+(MD.title||'Modified structure')+'\\n';
+    // The line every format below is titled with: where this structure came
+    // from and what has been done to it since (see "Save provenance" above).
+    // A GJF title section can hold several lines, so it takes the provenance
+    // line and then the file's original title lines verbatim; every other
+    // format gets one line, with the original title kept after a '|'.
+    var saveTitle=provTitle(MD.title||'Modified structure',true);
+    var gjfTitle=provTitle(MD.title||'Modified structure',false);
+    var xyz=MD.atoms.length+'\\n'+saveTitle+'\\n';
     MD.atoms.forEach(function(a){xyz+=a.element+'  '+a.x.toFixed(6)+'  '+a.y.toFixed(6)+'  '+a.z.toFixed(6)+'\\n'});
     var gjf='';
     var meta=MD.gjfMeta;
     if(meta){
         meta.link0Lines.forEach(function(l){gjf+=l+'\\n'});
         gjf+=meta.routeLine+'\\n\\n';
-        meta.titleLines.forEach(function(l){gjf+=l+'\\n'});
+        gjf+=gjfTitle+'\\n';
+        // The file's own title card is kept, minus any line an earlier save of
+        // ours wrote there: the provenance is rebuilt, never accumulated.
+        meta.titleLines.forEach(function(l){
+            var t=String(l);
+            if(t.indexOf(PROV_PREFIX)===0)return;
+            if(t.trim()==='')return;
+            gjf+=t+'\\n';
+        });
         gjf+='\\n'+meta.chargeMultLine+'\\n';
     }else{
-        gjf='%chk=molecule.chk\\n%mem=4GB\\n%nproc=4\\n# B3LYP/6-31G(d)\\n\\n'+(MD.title||'Modified structure')+'\\n\\n0 1\\n';
+        gjf='%chk=molecule.chk\\n%mem=4GB\\n%nproc=4\\n# B3LYP/6-31G(d)\\n\\n'+saveTitle+'\\n\\n0 1\\n';
     }
     MD.atoms.forEach(function(a){
         var el=a.element; while(el.length<2) el+=' ';
@@ -7550,11 +8311,13 @@ function doSave(){
     if(chrg!==0)coord+='$chrg '+chrg+'\\n';
     if(mult!==1)coord+='$spin '+(mult-1)/2+'\\n';
 
-    var orcaInp='! B3LYP def2-SVP\\n\\n* xyz '+chrg+' '+mult+'\\n';
+    // ORCA's first line is a comment line, so the provenance is one there and
+    // the keywords keep their own line below it.
+    var orcaInp='# '+saveTitle+'\\n! B3LYP def2-SVP\\n\\n* xyz '+chrg+' '+mult+'\\n';
     MD.atoms.forEach(function(a){orcaInp+=a.element+' '+a.x.toFixed(6)+' '+a.y.toFixed(6)+' '+a.z.toFixed(6)+'\\n'});
     orcaInp+='*\\n';
 
-    var mol2='@<TRIPOS>MOLECULE\\n'+(MD.title||'Modified structure')+'\\n'+MD.atoms.length+' '+MD.bonds.length+' 0 0 0\\nSMALL\\nNO_CHARGES\\n\\n';
+    var mol2='@<TRIPOS>MOLECULE\\n'+saveTitle+'\\n'+MD.atoms.length+' '+MD.bonds.length+' 0 0 0\\nSMALL\\nNO_CHARGES\\n\\n';
     mol2+='@<TRIPOS>ATOM\\n';
     MD.atoms.forEach(function(a,i){mol2+=(i+1)+' '+a.element+' '+a.x.toFixed(6)+' '+a.y.toFixed(6)+' '+a.z.toFixed(6)+' '+a.element+' 1 UNK 0.000\\n'});
     mol2+='@<TRIPOS>BOND\\n';
@@ -7568,7 +8331,7 @@ function doSave(){
         bondIdx++;
     });
 
-    var mol='\\n '+MD.atoms.length+'  '+MD.bonds.length+'  0  0  0  0  0  0  0  0999 V2000\\n';
+    var mol=saveTitle+'\\n '+MD.atoms.length+'  '+MD.bonds.length+'  0  0  0  0  0  0  0  0999 V2000\\n';
     MD.atoms.forEach(function(a){
         var z=AN2[a.element]||0;
         var sx=(a.x*10).toFixed(4);
@@ -7593,7 +8356,9 @@ function doSave(){
     });
     mol+='M  END\\n';
 
-    var pdb='';
+    // PDB owns a TITLE record, so the provenance goes in there (wrapped at 60
+    // characters per record with a continuation number) instead of being lost.
+    var pdb=provPdbTitle(saveTitle);
     MD.atoms.forEach(function(a,i){
         var serial=(i+1).toString();while(serial.length<5)serial=' '+serial;
         var name;
@@ -7614,7 +8379,7 @@ function doSave(){
     });
     pdb+='END\\n';
 
-    var mopac=(MD.title||'Modified structure')+'\\n';
+    var mopac=saveTitle+'\\n';
     var chrgStr=chrg!==0?' CHARGE='+chrg:'';
     var multStr=mult!==1?' MS='+mult:'';
     mopac+='PM7'+chrgStr+multStr+'\\n\\n';
@@ -7658,7 +8423,7 @@ function doSave(){
             if(elemCounts[a.element]===undefined){elemOrder.push(a.element);elemCounts[a.element]=0}
             elemCounts[a.element]++;
         });
-        vaspContent=(MD.title||'Modified structure')+'\\n';
+        vaspContent=saveTitle+'\\n';
         vaspContent+='1.0\\n';
         for(var ii=0;ii<3;ii++){
             vaspContent+='  '+lv[ii][0].toFixed(8)+'  '+lv[ii][1].toFixed(8)+'  '+lv[ii][2].toFixed(8)+'\\n';
@@ -7679,7 +8444,9 @@ function doSave(){
         var clv=CRY.latticeVectors;
         var nGrid=2;
         cubeContent='Molecular Viewer export\\n';
-        cubeContent+='Generated from '+(MD.title||'structure')+'\\n';
+        // The cube format has exactly two comment lines before the atom count:
+        // the provenance takes the second one, it does not add a third.
+        cubeContent+=saveTitle+'\\n';
         cubeContent+='-'+MD.atoms.length+'  0.000000  0.000000  0.000000\\n';
         cubeContent+=nGrid+'  '+(clv[0][0]/nGrid).toFixed(8)+'  '+(clv[0][1]/nGrid).toFixed(8)+'  '+(clv[0][2]/nGrid).toFixed(8)+'\\n';
         cubeContent+=nGrid+'  '+(clv[1][0]/nGrid).toFixed(8)+'  '+(clv[1][1]/nGrid).toFixed(8)+'  '+(clv[1][2]/nGrid).toFixed(8)+'\\n';
@@ -7698,7 +8465,7 @@ function doSave(){
     var vestaContent='';
     if(CRY){
         var vInv=CRY_INV;
-        vestaContent='#VESTA_FORMAT_VERSION 3.5.4\\n\\n\\nCRYSTAL\\n\\nTITLE\\n'+(MD.title||'Modified structure')+'\\n\\nGROUP\\n    1   1 P 1\\n\\nSYMOP\\n 0.000000  0.000000  0.000000  1  0  0   0  1  0   0  0  1   1\\n-1.0 -1.0 -1.0  1 0 0  0 0 0  0 0 0\\n\\nTRANM 0\\n 0.000000  0.000000  0.000000  1  0  0   0  1  0   0  0  1\\n\\nLTRANSL\\n -1\\n 0.000000  0.000000  0.000000  0.000000  0.000000  0.000000\\n\\nLORIENT\\n -1   0   0   0   0\\n 1.000000  0.000000  0.000000  1.000000  0.000000  0.000000\\n 0.000000  0.000000  1.000000  0.000000  0.000000  1.000000\\n\\nLMATRIX\\n 1.000000  0.000000  0.000000  0.000000\\n 0.000000  1.000000  0.000000  0.000000\\n 0.000000  0.000000  1.000000  0.000000\\n 0.000000  0.000000  0.000000  1.000000\\n 0.000000  0.000000  0.000000\\n\\nCELLP\\n';
+        vestaContent='#VESTA_FORMAT_VERSION 3.5.4\\n\\n\\nCRYSTAL\\n\\nTITLE\\n'+saveTitle+'\\n\\nGROUP\\n    1   1 P 1\\n\\nSYMOP\\n 0.000000  0.000000  0.000000  1  0  0   0  1  0   0  0  1   1\\n-1.0 -1.0 -1.0  1 0 0  0 0 0  0 0 0\\n\\nTRANM 0\\n 0.000000  0.000000  0.000000  1  0  0   0  1  0   0  0  1\\n\\nLTRANSL\\n -1\\n 0.000000  0.000000  0.000000  0.000000  0.000000  0.000000\\n\\nLORIENT\\n -1   0   0   0   0\\n 1.000000  0.000000  0.000000  1.000000  0.000000  0.000000\\n 0.000000  0.000000  1.000000  0.000000  0.000000  1.000000\\n\\nLMATRIX\\n 1.000000  0.000000  0.000000  0.000000\\n 0.000000  1.000000  0.000000  0.000000\\n 0.000000  0.000000  1.000000  0.000000\\n 0.000000  0.000000  0.000000  1.000000\\n 0.000000  0.000000  0.000000\\n\\nCELLP\\n';
         vestaContent+=' '+CRY.a.toFixed(6)+'  '+CRY.b.toFixed(6)+'  '+CRY.c.toFixed(6)+'  '+CRY.alpha.toFixed(6)+'  '+CRY.beta.toFixed(6)+'  '+CRY.gamma.toFixed(6)+'\\n';
         vestaContent+=' 0.000000  0.000000  0.000000  0.000000  0.000000  0.000000\\n\\nSTRUC\\n';
         CRY.baseAtoms.forEach(function(ba,i){
@@ -7719,7 +8486,14 @@ function doSave(){
         return;
     }
 
-    showModal('<h3>Save File</h3>'+
+    // Saving a displaced structure is exactly what the feature is for, so the
+    // dialog says which modes the geometry is built from instead of leaving the
+    // composition to be discovered in the file.
+    var vdNote=vdActive
+        ?'<div class="current-val">Coordinates include a manual displacement: '+
+            vdCompsText()+'.</div>'
+        :'';
+    showModal('<h3>Save File</h3>'+vdNote+
         '<label>Format:</label><select id="m-fmt">'+
         '<option value="xyz">XYZ (.xyz)</option>'+
         '<option value="gjf">Gaussian Input (.gjf)</option>'+
@@ -7996,11 +8770,13 @@ function startBakeSession(kind,button){
         bakeOrigX[i]=a.x;bakeOrigY[i]=a.y;bakeOrigZ[i]=a.z;
     }
     bakeActive=true;bakeKind=kind;bakeButton=button;bakeMoved=false;
-    bakeCx=CX;bakeCy=CY;bakeCz=CZ;
     bakeQTotal.identity();bakeLocalDelta.set(0,0,0);
     bakePan0.x=panX;bakePan0.y=panY;
     bakePanTgt.x=panX;bakePanTgt.y=panY;
     pushUndo();
+    // The snapshot may close a manual displacement, which re-centres the
+    // structure, so the pivot is read after it rather than before.
+    bakeCx=CX;bakeCy=CY;bakeCz=CZ;
     modeInfoEl.textContent=(kind==='rot'?'Alt: rotating ':'Alt: moving ')+n+
         ' atom(s) in the file - release to commit, Undo reverts';
     return true;
@@ -8060,6 +8836,7 @@ function endBakeSession(){
         // reached makes the two cancel on screen: the picture stays where the
         // drag put it while the coordinates carry the movement. Then the new
         // centroid becomes the rotation pivot again.
+        provMark(bakeKind==='pan'?'translate':'rotate',1);
         if(bakeKind==='pan'){panX=bakePanTgt.x;panY=bakePanTgt.y}
         updateRotationCenter();
         if(bakeKind==='pan')updateTransform();

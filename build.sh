@@ -30,7 +30,7 @@ npx tsc -p ./ --pretty
 
 echo ""
 echo "[3/3] Packaging extension..."
-rm -f molecular-viewer*.vsix
+rm -f molecular-viewer-3d*.vsix
 npx vsce package --no-dependencies 2>/dev/null || {
     echo ""
     echo "WARNING: vsce packaging failed."
@@ -45,11 +45,11 @@ echo ""
 echo "========================================"
 echo "  BUILD SUCCESS!"
 echo "========================================"
-echo "Output: molecular-viewer-0.1.0.vsix"
+echo "Output: molecular-viewer-3d-*.vsix"
 echo ""
 echo "Install in VS Code / Trae:"
 echo "  1. Ctrl+Shift+P"
 echo "  2. Extensions: Install from VSIX..."
-echo "  3. Select molecular-viewer-0.1.0.vsix"
+echo "  3. Select molecular-viewer-3d-*.vsix"
 echo "  4. For Remote-SSH: Install on Remote"
 echo "========================================"
