@@ -208,10 +208,19 @@ The list mirrors the extensions the viewer registers; `.dat` is MOPAC's alternat
 | Middle / Right mouse drag | Pan view (cursor-locked; in Diff mode pans the structure on the grabbed half only) |
 | Hover over atom | Show element + coordinates tooltip |
 | Arrow keys | Rotate molecule (←/→ around Y, ↑/↓ around X); with Auto Rotate on, a held key spins the view up instead — longer hold, faster spin |
+| `Esc` | Back out of one level, and only one: close the open dialog through its own **Cancel** (a previewed geometry is put back), abandon a box-select rectangle, leave the current tool for View, or clear the selection — a second press can only take back a smaller thing |
+| `Ctrl+Z` (`Cmd+Z` on macOS) | Undo, same as the Undo button. Left alone while a dialog is open (it previews geometry on top of an undo step of its own) and inside a text field (that is the field's text undo) |
+| `Ctrl+S` (`Cmd+S` on macOS) | Open the Save dialog, same as **Save As**; with that dialog already up, press it again to save the format already chosen |
+| `Ctrl+A` (`Cmd+A` on macOS) | Select every atom on screen — in Diff mode, both halves. Nothing else in the view is selectable text, so the key can only mean this (a text field keeps its own select-all) |
+| `Ctrl+C` (`Cmd+C` on macOS) | Copy the selected atoms and the bonds among them to the viewer's own clipboard |
+| `Ctrl+X` (`Cmd+X` on macOS) | Cut: copy, then delete through the same path as Delete, as one undo step |
+| `Ctrl+V` (`Cmd+V` on macOS) | Paste the clipboard beside the structure — the same 7 Å bounding-sphere spacing Import uses — and select what arrived, as one undo step. Not available for crystal structures or in Diff mode |
 | ◀ ▶ (molecule selector) | Switch between the molecules a VMD TCL script creates (`mol new`), shown only when a script defines more than one |
 | Color by Beta | Toggle scalar colouring for structures whose PDB columns 61-66 carry a scalar — each atom's sphere and the bond halves that meet it take that atom's scalar colour, so a force-error picture reads as one gradient rather than gradient spheres between element-coloured bonds; starts active when such a file was coloured automatically at load, and is hidden when a script is driving the view |
 | Auto Rotate button | In the panel that appears in View mode (bottom-right): toggle flick-to-spin. With it on, a left-drag that rotates the molecule keeps turning after release, at the direction and speed it was released with (farther/faster drag → faster spin), and a held arrow key spins the view up — the longer the hold, the faster — handing over the reached speed on release; the next left press stops it and a right/middle press pans while leaving it running |
 | Reset View button | Return to default view |
+
+These shortcuts are handled by the viewer itself — nothing is added to the editor's keybindings, so no VS Code or Trae shortcut is taken over — and they work whenever the 3D view has focus. Keystrokes typed into a field still belong to the field, Esc excepted. The view is not a document: apart from the form fields, nothing on the page is selectable text (Ctrl+A therefore always means Select All of the structure, and a drag that ends over a panel leaves no selection behind) — only the load-error message stays selectable, so a failure can be copied. The fragment clipboard is the viewer's own, not the system one: copying never replaces text you copied in another application, and nothing is ever read back from it. A copy is mirrored into the panel's local storage on a best-effort basis, so a fragment copied in one panel can be pasted in another.
 
 ### Editing Workflow
 

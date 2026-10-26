@@ -1330,6 +1330,16 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
 *{margin:0;padding:0;box-sizing:border-box}
 html{width:100%;height:100%;overflow:hidden}
 body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;background:var(--vscode-editor-background,#1e1e1e);font-family:var(--vscode-font-family,sans-serif);color:var(--vscode-editor-foreground,#ccc)}
+/* The viewer is not a document: nothing on the page is text to be selected, so
+   Ctrl+A can only mean Select All of the *structure*, and a drag that starts on
+   the canvas and ends over a panel never paints the toolbar blue on the way.
+   This is a structural guarantee — it holds even where the key never reaches the
+   page's own handler. user-select inherits, so one rule covers every panel;
+   form fields get their text behaviour back, and the load-error block is
+   deliberately selectable so a failure can be copied into a bug report. */
+body{-webkit-user-select:none;user-select:none}
+input,textarea{-webkit-user-select:text;user-select:text}
+#error-msg{-webkit-user-select:text;user-select:text}
 #toolbar{flex-shrink:0;background:var(--vscode-editor-background,#1e1e1e);border-bottom:1px solid var(--vscode-panel-border,#444);display:flex;flex-direction:column;padding:2px 0;z-index:20}
 #toolbar .trow{display:flex;align-items:center;gap:2px;min-height:34px;padding:0 8px;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
 #toolbar .trow::-webkit-scrollbar{height:3px}
@@ -4310,6 +4320,46 @@ function resetSelection(){
     selInfoEl.textContent='';
     mmSelectionChanged();
 }
+/**
+ * Select every atom on screen — the keyboard's counterpart to dragging a box
+ * over the whole view, which in Diff mode means both halves.
+ *
+ * Nothing here changes the structure, so it is allowed in every mode and takes
+ * no undo step; the only thing it waits for is a closed dialog, whose preview
+ * was captured for the selection it opened with. A move/rotate session owns the
+ * selection it started with, so one in flight is ended first (exactly as
+ * releasing the mouse would) rather than being handed a different atom set
+ * halfway through.
+ */
+function selectAllAtoms(){
+    if(modalOpen()){
+        modeInfoEl.textContent='Select All: close the open dialog first';
+        return false;
+    }
+    if(!MD.atoms||MD.atoms.length===0){
+        modeInfoEl.textContent='Select All: the structure is empty';
+        return false;
+    }
+    if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
+    selectedAtoms=[];
+    for(var i=0;i<MD.atoms.length;i++)selectedAtoms.push(i);
+    if(diffMode){
+        diffSelectedAtoms=[];
+        var dn=(diffData&&diffData.atoms)?diffData.atoms.length:0;
+        for(var j=0;j<dn;j++)diffSelectedAtoms.push(j);
+        updateDiffSelInfo();
+    }else if(currentMode==='selectAtoms'||currentMode==='replaceAtom'||currentMode==='addH'||currentMode==='mmOpt'){
+        // These modes word a finished selection themselves, and their label
+        // path opens nothing (a two-atom structure must not pop a dialog here).
+        checkSelectionComplete();
+    }else{
+        selInfoEl.textContent='Selected: '+formatAtomList(selectedAtoms)+' ('+selectedAtoms.length+' atoms)';
+    }
+    highlightSelected();
+    mmSelectionChanged();
+    modeInfoEl.textContent='Selected all '+selectedAtoms.length+' atom'+(selectedAtoms.length===1?'':'s');
+    return true;
+}
 
 document.querySelectorAll('.tbtn[data-mode]').forEach(function(b){b.addEventListener('click',function(){
     var mode=this.dataset.mode;
@@ -4783,6 +4833,45 @@ window.addEventListener('message',function(event){
     }
 });
 
+/**
+ * Where a block of incoming atoms goes so that it cannot overlap anything on
+ * screen: its centroid is put one bounding-sphere radius plus a buffer away from
+ * the existing structure's, along +X.
+ *
+ * A bounding sphere contains every atom, so this single O(n) test guarantees no
+ * incoming atom overlaps ANY existing atom — including blocks added earlier,
+ * which are part of "existing" by now. Rotation-invariant, no overlap iterations
+ * needed. The two user-visible placements (Import, and paste of a copied
+ * fragment) share it, so a pasted copy lands where an import would.
+ */
+function placeBlockBeside(newAtoms){
+    var n=newAtoms.length,i,a;
+    var c2x=0,c2y=0,c2z=0;
+    for(i=0;i<n;i++){a=newAtoms[i];c2x+=a.x;c2y+=a.y;c2z+=a.z}
+    if(n>0){c2x/=n;c2y/=n;c2z/=n}
+    var N0=MD.atoms.length;
+    if(N0===0)return{x:-c2x,y:-c2y,z:-c2z};
+    var c1x=0,c1y=0,c1z=0,R1=0,R2=0;
+    for(i=0;i<N0;i++){a=MD.atoms[i];c1x+=a.x;c1y+=a.y;c1z+=a.z}
+    c1x/=N0;c1y/=N0;c1z/=N0;
+    for(i=0;i<N0;i++){
+        a=MD.atoms[i];
+        var d1=Math.sqrt((a.x-c1x)*(a.x-c1x)+(a.y-c1y)*(a.y-c1y)+(a.z-c1z)*(a.z-c1z));
+        if(d1>R1)R1=d1;
+    }
+    for(i=0;i<n;i++){
+        a=newAtoms[i];
+        var d2=Math.sqrt((a.x-c2x)*(a.x-c2x)+(a.y-c2y)*(a.y-c2y)+(a.z-c2z)*(a.z-c2z));
+        if(d2>R2)R2=d2;
+    }
+    // buf=2.5 Å per side covers any atom radius, so the closest two atoms of the
+    // two blocks end up 2*2.5+2.0 = 7.0 Å apart (the import has always spaced
+    // them exactly this way) — visibly separate, and never bonded by accident.
+    var BUF=2.5,GAP=2.0;
+    var D=(R1+BUF)+(R2+BUF)+GAP;
+    return{x:c1x+D-c2x,y:c1y-c2y,z:c1z-c2z};
+}
+
 function importStructure(msg){
     // Append an imported structure (parsed by the extension host) beside the
     // current structure at a guaranteed non-overlapping position. One undo
@@ -4796,35 +4885,13 @@ function importStructure(msg){
     if(newAtoms.length===0)return;
     pushUndo();
     var N0=MD.atoms.length;
-    // --- Non-overlap placement via bounding spheres ---
-    // Place the incoming structure on the +X side of the existing structure:
-    // centroid distance = (R1+buf) + (R2+buf) + gap, where R is each
-    // structure's max distance from its own centroid and buf=2.5 Å covers
-    // any atom radius. A bounding sphere contains every atom, so this single
-    // O(n) check guarantees no imported atom overlaps ANY existing atom —
-    // including previously imported structures, which are part of
-    // "existing" by now. Rotation-invariant, no overlap iterations needed.
-    var i,a;
-    var c1x=0,c1y=0,c1z=0;
-    if(N0>0){
-        for(i=0;i<N0;i++){a=MD.atoms[i];c1x+=a.x;c1y+=a.y;c1z+=a.z}
-        c1x/=N0;c1y/=N0;c1z/=N0;
-    }
-    var c2x=0,c2y=0,c2z=0;
-    for(i=0;i<newAtoms.length;i++){a=newAtoms[i];c2x+=a.x;c2y+=a.y;c2z+=a.z}
-    c2x/=newAtoms.length;c2y/=newAtoms.length;c2z/=newAtoms.length;
-    var R1=0,R2=0;
-    if(N0>0){
-        for(i=0;i<N0;i++){a=MD.atoms[i];var d1=Math.sqrt((a.x-c1x)*(a.x-c1x)+(a.y-c1y)*(a.y-c1y)+(a.z-c1z)*(a.z-c1z));if(d1>R1)R1=d1}
-    }
-    for(i=0;i<newAtoms.length;i++){a=newAtoms[i];var d2=Math.sqrt((a.x-c2x)*(a.x-c2x)+(a.y-c2y)*(a.y-c2y)+(a.z-c2z)*(a.z-c2z));if(d2>R2)R2=d2}
-    var BUF=2.5,GAP=2.0;
-    var tx,ty,tz;
-    if(N0===0){tx=-c2x;ty=-c2y;tz=-c2z}
-    else{var D=(R1+BUF)+(R2+BUF)+GAP;tx=c1x+D-c2x;ty=c1y-c2y;tz=c1z-c2z}
-    for(i=0;i<newAtoms.length;i++){
-        a=newAtoms[i];
-        MD.atoms.push({element:a.element,x:a.x+tx,y:a.y+ty,z:a.z+tz,color:a.color||((MD.atomColors&&MD.atomColors[a.element])||'#FF1493')});
+    // --- Non-overlap placement ---
+    // The geometry lives in placeBlockBeside, which the fragment paste uses too:
+    // one rule, so a pasted copy lands exactly where an imported structure would.
+    var t=placeBlockBeside(newAtoms);
+    for(var i=0;i<newAtoms.length;i++){
+        var a=newAtoms[i];
+        MD.atoms.push({element:a.element,x:a.x+t.x,y:a.y+t.y,z:a.z+t.z,color:a.color||((MD.atomColors&&MD.atomColors[a.element])||'#FF1493')});
     }
     // --- Bonds ---
     if(!MD.hasExplicitBonds&&!msg.hasExplicitBonds){
@@ -4857,6 +4924,160 @@ function importStructure(msg){
     needsRender=true;
     provAddSource(msg.fileName);
     modeInfoEl.textContent='Imported '+newAtoms.length+' atoms from '+(msg.fileName||'file')+' - placed beside the existing structure';
+}
+
+// ===== Fragment clipboard (Ctrl+C / Ctrl+X / Ctrl+V) =====
+// The clipboard holds one fragment, in coordinates relative to its own centroid,
+// so it carries no position: pasting is a translation to a free spot, and the
+// same fragment can be pasted again and again. The bonds *inside* the fragment
+// travel with it verbatim — a copy must be a copy, bond orders included — and no
+// bond is invented between the copy and whatever it lands beside, which is why a
+// paste does not re-detect the combined system the way an import does.
+//
+// It is the viewer's own clipboard: the system clipboard is left alone, because
+// reading it would need a permission the webview may refuse and writing it would
+// replace text the user copied elsewhere. A copy is also mirrored into
+// localStorage, best effort and re-validated on the way back, so a fragment can
+// be pasted into another panel; if storage is unavailable the fragment simply
+// stays in memory for this panel.
+var CLIP_KEY='molecularViewer3d.fragment';
+var PASTE_ATOM_LIMIT=20000;   // the ceiling a single imported block is held to
+var clipFrag=null;
+
+function clipStore(){
+    if(!clipFrag)return;
+    try{window.localStorage.setItem(CLIP_KEY,JSON.stringify(clipFrag))}catch(e){}
+}
+function clipLoad(){
+    clipFrag=null;
+    try{
+        var raw=window.localStorage.getItem(CLIP_KEY);
+        if(raw)clipFrag=clipSanitize(JSON.parse(raw));
+    }catch(e){clipFrag=null}
+    return clipFrag;
+}
+/** Whatever comes back from storage is data, not a fragment: it may have been
+ *  written by an older version, by another tab, or be something else entirely.
+ *  Anything that is not a complete, finite, in-range fragment is discarded
+ *  rather than half-used. */
+function clipSanitize(c){
+    if(!c||typeof c!=='object')return null;
+    var src=c.atoms;
+    if(!Array.isArray(src)||src.length===0||src.length>PASTE_ATOM_LIMIT)return null;
+    var atoms=[],i,a;
+    for(i=0;i<src.length;i++){
+        a=src[i];
+        if(!a||typeof a.element!=='string'||!/^[A-Z][a-z]?$/.test(a.element))return null;
+        if(typeof a.x!=='number'||typeof a.y!=='number'||typeof a.z!=='number')return null;
+        if(!isFinite(a.x)||!isFinite(a.y)||!isFinite(a.z))return null;
+        atoms.push({element:a.element,x:a.x,y:a.y,z:a.z});
+    }
+    var bonds=[],srcB=Array.isArray(c.bonds)?c.bonds:[];
+    for(i=0;i<srcB.length;i++){
+        var b=srcB[i];
+        if(!b||typeof b.a!=='number'||typeof b.b!=='number')continue;
+        if(b.a<0||b.b<0||b.a>=atoms.length||b.b>=atoms.length||b.a===b.b)continue;
+        bonds.push({a:b.a,b:b.b,order:(typeof b.order==='number'&&isFinite(b.order))?b.order:1});
+    }
+    return {v:1,atoms:atoms,bonds:bonds};
+}
+/** Copy the selected atoms and the bonds among them. False means there was
+ *  nothing to copy, so the caller can leave the key to the browser. */
+function copySelection(){
+    if(selectedAtoms.length===0){
+        modeInfoEl.textContent='Copy: select atoms first - click atoms, or use Select Atoms / Box Select';
+        return false;
+    }
+    var idx=selectedAtoms.slice().sort(function(a,b){return a-b});
+    var map={},atoms=[],sx=0,sy=0,sz=0,i,a;
+    for(i=0;i<idx.length;i++){
+        a=MD.atoms[idx[i]];
+        if(!a)continue;
+        // A selection should not repeat an index, but a repeated one would make
+        // the fragment hold the same atom twice and bond the copy to the wrong
+        // end, so it is dropped here rather than trusted.
+        if(map[idx[i]]!==undefined)continue;
+        map[idx[i]]=atoms.length;
+        atoms.push({element:a.element,x:a.x,y:a.y,z:a.z});
+        sx+=a.x;sy+=a.y;sz+=a.z;
+    }
+    if(atoms.length===0)return false;
+    var cx=sx/atoms.length,cy=sy/atoms.length,cz=sz/atoms.length;
+    atoms.forEach(function(q){q.x-=cx;q.y-=cy;q.z-=cz});
+    var bonds=[];
+    MD.bonds.forEach(function(b){
+        var p=map[b.atom1],q=map[b.atom2];
+        if(p===undefined||q===undefined)return;
+        bonds.push({a:p,b:q,order:b.order});
+    });
+    clipFrag={v:1,atoms:atoms,bonds:bonds};
+    clipStore();
+    modeInfoEl.textContent='Copied '+atoms.length+' atom(s)'+(bonds.length?' and '+bonds.length+' bond(s)':'');
+    return true;
+}
+/** Cut = copy, then the same deletion the toolbar's batch delete uses (so a
+ *  crystal loses its base atoms and its base bonds exactly as a plain Delete
+ *  does), with one undo step for the pair. */
+function cutSelection(){
+    if(diffMode){modeInfoEl.textContent='Cut is not available in diff mode';return false}
+    var n=selectedAtoms.length;
+    if(n===0){
+        modeInfoEl.textContent='Cut: select atoms first - click atoms, or use Select Atoms / Box Select';
+        return false;
+    }
+    if(!copySelection())return false;
+    pushUndo();
+    provMark('cutAtoms',n);
+    batchDeleteSelected();
+    modeInfoEl.textContent='Cut '+n+' atom(s) - Ctrl+V pastes them back';
+    return true;
+}
+/** Paste the clipboard beside the current structure, as one undo step, and
+ *  select what arrived. Refused where appending atoms cannot be kept: a
+ *  periodic cell (its contents are regenerated from the base atoms, so the copy
+ *  would vanish on the next rebuild) and a two-structure comparison (which has
+ *  no single structure to grow). */
+function pasteClipboard(){
+    if(diffMode){modeInfoEl.textContent='Paste is not available in diff mode';return false}
+    if(CRY){modeInfoEl.textContent='Paste is not available for crystal structures';return false}
+    if(!clipFrag)clipLoad();
+    if(!clipFrag){modeInfoEl.textContent='Paste: nothing copied yet';return false}
+    var frag=clipFrag;
+    if(MD.atoms.length+frag.atoms.length>PASTE_ATOM_LIMIT){
+        modeInfoEl.textContent='Paste: the structure would exceed '+PASTE_ATOM_LIMIT+' atoms - nothing was pasted';
+        return false;
+    }
+    if(vibActive||vibPaused)stopVibration();
+    if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
+    stopFrameAutoPlay();
+    pushUndo();
+    provMark('pasteAtoms',frag.atoms.length);
+    var t=placeBlockBeside(frag.atoms);
+    var N0=MD.atoms.length;
+    frag.atoms.forEach(function(a){
+        MD.atoms.push({element:a.element,x:a.x+t.x,y:a.y+t.y,z:a.z+t.z,
+            color:(MD.atomColors&&MD.atomColors[a.element])||'#FF1493'});
+    });
+    frag.bonds.forEach(function(b){
+        MD.bonds.push({atom1:N0+b.a,atom2:N0+b.b,order:b.order});
+    });
+    rebuildScene();
+    // Select what just arrived, so it can be moved, cut or copied straight away.
+    selectedAtoms=[];
+    for(var i=N0;i<MD.atoms.length;i++)selectedAtoms.push(i);
+    highlightSelected();
+    selInfoEl.textContent='Selected: '+formatAtomList(selectedAtoms)+' ('+selectedAtoms.length+' atoms)';
+    // Zoom out when the copy lands outside the current view (the import's rule).
+    var maxD=0;
+    MD.atoms.forEach(function(a){
+        var dx=a.x-CX,dy=a.y-CY,dz=a.z-CZ,dd=Math.sqrt(dx*dx+dy*dy+dz*dz);
+        if(dd>maxD)maxD=dd;
+    });
+    var need=maxD*2.5+5;
+    if(camDist<need){camDist=need;camera.position.set(0,0,camDist);camera.lookAt(0,0,0)}
+    needsRender=true;
+    modeInfoEl.textContent='Pasted '+frag.atoms.length+' atom(s) beside the existing structure';
+    return true;
 }
 
 // ===== Add H (hydrogen completion) =====
@@ -7368,12 +7589,21 @@ function layoutPanels(){
 // atom with the same colour and state draws with the same material, and a
 // per-atom material would be one material per atom again.
 function highlightSelected(){
+    // One lookup for the whole pass instead of one scan per atom: Select All
+    // makes the selection the entire structure, and an indexOf per mesh would
+    // pay for that with a quadratic walk (135 ms at 20 000 atoms measured).
+    // Same answer as before — an index the structure does not have never
+    // matches, exactly as indexOf returned -1.
+    var sel={},i;
+    for(i=0;i<selectedAtoms.length;i++)sel[selectedAtoms[i]]=true;
     atomMeshes.forEach(function(m,i){
-        setAtomHighlight(m,selectedAtoms.indexOf(i)>=0?1:(m.userData.diffHi?2:0));
+        setAtomHighlight(m,sel[i]===true?1:(m.userData.diffHi?2:0));
     });
     if(diffMode){
+        var dsel={};
+        for(i=0;i<diffSelectedAtoms.length;i++)dsel[diffSelectedAtoms[i]]=true;
         diffAtomMeshes.forEach(function(m,i){
-            setDiffAtomHighlight(m,diffSelectedAtoms.indexOf(i)>=0?1:(m.userData.diffHi?2:0));
+            setDiffAtomHighlight(m,dsel[i]===true?1:(m.userData.diffHi?2:0));
         });
     }
     needsRender=true;
@@ -8147,6 +8377,8 @@ function provEditText(e){
     switch(e.k){
         case 'addAtoms':return n===1?'1 atom added':n+' atoms added';
         case 'delAtoms':return n===1?'1 atom deleted':n+' atoms deleted';
+        case 'cutAtoms':return n===1?'1 atom cut':n+' atoms cut';
+        case 'pasteAtoms':return n===1?'1 atom pasted':n+' atoms pasted';
         case 'replaceAtoms':return n===1?'1 atom replaced':n+' atoms replaced';
         case 'addH':return n===1?'1 H added':n+' H added';
         case 'translate':return 'translated';
@@ -9253,8 +9485,100 @@ canvas.addEventListener('touchmove',function(e){e.preventDefault();
 },{passive:false});
 canvas.addEventListener('touchend',function(e){if(e.touches.length===0&&isRot)spinLaunch();isRot=false;if(e.touches.length<2)touchSD=0});
 
+// ===== Keyboard shortcuts =====
+// The page keeps one keyboard door. Esc, Ctrl/Cmd+Z, Ctrl/Cmd+S and the
+// selection/clipboard keys Ctrl/Cmd+A and Ctrl/Cmd+X/C/V are the keys a hand
+// reaches for before the mouse, so they are settled here, in front of the
+// viewer's own key handling (arrows, Delete). A keystroke that belongs to a text
+// field stays the field's own — Ctrl+Z there is the browser's text undo, Ctrl+A
+// its select-all, Ctrl+V its paste — with Esc as the one exception, because Esc
+// is how a user gets out of a dialog that a field sits in.
+var IS_MAC=/^(Mac|iPhone|iPad|iPod)/.test(navigator.platform||'');
+var KEY_MOD=IS_MAC?'Cmd':'Ctrl';
+function keyTargetEditable(t){if(!t)return false;var n=t.tagName;return n==='INPUT'||n==='TEXTAREA'||n==='SELECT'||t.isContentEditable===true}
+function modalOpen(){return !!(modalOverlay&&modalOverlay.classList.contains('show'))}
+/**
+ * Esc: back out of exactly one state, in the order the user built them up.
+ * Every step takes back something the user started and nothing else — a
+ * dismissed dialog, an abandoned rectangle, a tool left for View, a selection
+ * let go — so a second press can only undo a smaller thing, never the structure.
+ */
+function escapeOneLevel(){
+    if(modalOpen()){
+        // The dialog's own Cancel button is the path that knows what
+        // cancelling means (some of them put back the geometry they were
+        // previewing); only a dialog without one falls back to plain hiding.
+        var cancel=modalEl.querySelector('.mbtn-cancel');
+        if(cancel){cancel.click();return true}
+        hideModal();return true;
+    }
+    if(isBoxSelecting){
+        // A rectangle still being dragged is thrown away: it has selected
+        // nothing yet, so there is nothing to take back.
+        isBoxSelecting=false;boxRectEl.style.display='none';boxStart=null;
+        needsRender=true;layoutPanels();return true;
+    }
+    if(currentMode!=='view'){setMode('view');return true}
+    if(selectedAtoms.length>0||diffSelectedAtoms.length>0){resetSelection();return true}
+    return false;
+}
+(function(){
+    // The two mouse-free actions say their own keys, on the buttons that do them.
+    var ub=document.getElementById('undo-btn');if(ub)ub.title='Undo ('+KEY_MOD+'+Z)';
+    var sb=document.getElementById('save-btn');if(sb)sb.title='Save As ('+KEY_MOD+'+S)';
+})();
 document.addEventListener('keydown',function(e){
-    if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'||e.target.tagName==='SELECT')return;
+    if(e.key==='Escape'&&!e.ctrlKey&&!e.metaKey&&!e.altKey){
+        if(escapeOneLevel()){e.preventDefault();return}
+    }
+    var editable=keyTargetEditable(e.target);
+    var mod=e.ctrlKey||e.metaKey;
+    if(mod&&!e.altKey&&!e.shiftKey){
+        // e.key follows the layout (on AZERTY Ctrl+Z arrives as 'z'), e.code
+        // does not (on a Cyrillic layout it arrives as 'я'), so a shortcut
+        // answers to either: one physical press, one action, any keyboard.
+        var lk=(e.key||'').toLowerCase();
+        if(lk==='z'||e.code==='KeyZ'){
+            // Not while a dialog is open: it previews geometry on top of an
+            // undo step of its own, and an undo behind its back would split
+            // the two apart — its Cancel would then pop someone else's step.
+            if(!editable&&!modalOpen()){e.preventDefault();doUndo();return}
+        }else if(lk==='s'||e.code==='KeyS'){
+            if(modalOpen()){
+                // The Save dialog is the one dialog that can finish its own
+                // job from the keyboard: a second Ctrl+S presses its Save
+                // button, keeping the format already chosen.
+                var fmtEl=document.getElementById('m-fmt'),okEl=document.getElementById('m-ok');
+                if(fmtEl&&okEl){e.preventDefault();okEl.click();return}
+            }else if(!editable){
+                e.preventDefault();doSave();return;
+            }
+        }else if(lk==='a'||e.code==='KeyA'){
+            // Select every atom. Outside a text field the page has no use for
+            // select-all, so the key is consumed either way: a refusal (a dialog
+            // is open) must not quietly select the page's text instead. Auto-
+            // repeat is ignored — each repeat would rebuild the whole selection
+            // and re-highlight every atom.
+            if(!editable&&!e.repeat){e.preventDefault();selectAllAtoms();return}
+        }else if(lk==='c'||e.code==='KeyC'){
+            // Copy is read-only, so it is allowed wherever there is a selection
+            // — a dialog or a comparison on screen does not make it unsafe.
+            // Auto-repeat is ignored: a held key would re-copy the same atoms
+            // dozens of times. The page has no selectable text (see the
+            // user-select rules in the stylesheet), so there is nothing for the
+            // browser's own copy to take here; a field's text is excluded above.
+            if(!editable&&!e.repeat&&copySelection()){e.preventDefault();return}
+        }else if(lk==='x'||e.code==='KeyX'){
+            // Cut deletes, so it waits until no dialog is previewing the
+            // structure it is about to change.
+            if(!editable&&!e.repeat&&!modalOpen()&&cutSelection()){e.preventDefault();return}
+        }else if(lk==='v'||e.code==='KeyV'){
+            // Paste grows the structure: never behind a dialog, and never on a
+            // key repeat, or holding the key would paste again and again.
+            if(!editable&&!e.repeat&&!modalOpen()&&pasteClipboard()){e.preventDefault();return}
+        }
+    }
+    if(editable)return;
     ctrlDown=e.ctrlKey;
     // The first arrow key of a hold-session stops whatever spin is running, so
     // the key takes over; keys pressed while another is already held (and the
