@@ -93,7 +93,13 @@ export function parsePdb(content: string): MolecularData {    const lines = cont
                 // writes an arbitrary per-atom scalar into the latter (unit
                 // index, force error, …) rather than a B-factor, and the viewer
                 // can colour the structure by it.
-                const atom: Atom = { element, x, y, z, index: atomIndex };
+                const isDummy = element === 'X' || element === 'Xx' || element === 'XX' ||
+                    element === 'Du' || element === 'DUM';
+                const atom: Atom = { element: isDummy ? 'X' : element, x, y, z, index: atomIndex };
+                // PDB has no ghost atom, so a dummy is written with the element
+                // column `X` (the standard "unknown/dummy" symbol) — the same
+                // spelling the viewer uses for a bare dummy point.
+                if (isDummy) atom.ghost = true;
                 const occupancy = parseFloat(line.substring(54, 60).trim());
                 if (!isNaN(occupancy) && line.length > 59) {
                     atom.occupancy = occupancy;

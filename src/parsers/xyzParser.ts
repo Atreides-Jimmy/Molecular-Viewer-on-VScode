@@ -1,4 +1,5 @@
 import { Atom, Bond, MolecularData } from '../types';
+import { ghostFromLabel } from './ghostAtoms';
 
 const ATOMIC_NUMBER_MAP: { [key: number]: string } = {
     1: 'H', 2: 'He', 3: 'Li', 4: 'Be', 5: 'B', 6: 'C', 7: 'N', 8: 'O', 9: 'F', 10: 'Ne',
@@ -49,13 +50,20 @@ export function parseXyz(content: string): MolecularData {
 
         const parts = line.split(/\s+/);
         if (parts.length >= 4) {
-            const element = resolveElement(parts[0]);
+            // A ghost marker in the element field (`X`, `Bq`, `C-Bq`, `Du`, …)
+            // is read before the ordinary element resolution: `resolveElement`
+            // would turn `C-Bq` into the element "C-bq" and the atom would then
+            // be a real, unknown, freely bonding centre.
+            const ghost = ghostFromLabel(parts[0]);
+            const element = ghost ? ghost.element : resolveElement(parts[0]);
             const x = parseFloat(parts[1]);
             const y = parseFloat(parts[2]);
             const z = parseFloat(parts[3]);
 
             if (element && !isNaN(x) && !isNaN(y) && !isNaN(z)) {
-                atoms.push({ element, x, y, z, index: atomIndex });
+                const atom: Atom = { element, x, y, z, index: atomIndex };
+                if (ghost) atom.ghost = true;
+                atoms.push(atom);
                 atomIndex++;
             }
         }
@@ -140,12 +148,15 @@ export function parseXyzTrajectory(content: string): XyzTrajectory {
             const row = lines[start + k].trim();
             const parts = row.split(/\s+/);
             if (parts.length < 4) { atoms.length = 0; break; }
-            const element = resolveElement(parts[0]);
+            const ghost = ghostFromLabel(parts[0]);
+            const element = ghost ? ghost.element : resolveElement(parts[0]);
             const x = parseFloat(parts[1]);
             const y = parseFloat(parts[2]);
             const z = parseFloat(parts[3]);
             if (!element || isNaN(x) || isNaN(y) || isNaN(z)) { atoms.length = 0; break; }
-            atoms.push({ element, x, y, z, index: atoms.length });
+            const atom: Atom = { element, x, y, z, index: atoms.length };
+            if (ghost) atom.ghost = true;
+            atoms.push(atom);
         }
         // A frame that did not read completely ends the file; the partial frame
         // is dropped rather than shown as a truncated molecule.

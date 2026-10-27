@@ -34,13 +34,19 @@ export function parseCoord(content: string): MolecularData {
                 const z = parseFloat(parts[2]);
                 const elem = parts[3];
                 if (!isNaN(x) && !isNaN(y) && !isNaN(z) && /^[A-Za-z]{1,2}$/.test(elem)) {
-                    atoms.push({
-                        element: elem.charAt(0).toUpperCase() + elem.slice(1).toLowerCase(),
+                    // TURBOMOLE marks a dummy atom with `q` in `$coord` (and
+                    // accepts `x` as well); both are the viewer's dummy point,
+                    // which carries no element of its own.
+                    const isDummy = elem.toLowerCase() === 'q' || elem.toLowerCase() === 'x';
+                    const atom: Atom = {
+                        element: isDummy ? 'X' : elem.charAt(0).toUpperCase() + elem.slice(1).toLowerCase(),
                         x: x * BOHR_TO_ANG,
                         y: y * BOHR_TO_ANG,
                         z: z * BOHR_TO_ANG,
                         index: atomIndex
-                    });
+                    };
+                    if (isDummy) atom.ghost = true;
+                    atoms.push(atom);
                     atomIndex++;
                 }
             }

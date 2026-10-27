@@ -1,5 +1,6 @@
 import { Atom, Bond, MolecularData } from '../types';
 import { perceiveBonds } from './bondPerception';
+import { stripGhostBonds } from '../parsers/ghostAtoms';
 
 /**
  * Bond detection for structures that arrive without a bond table.
@@ -31,10 +32,18 @@ export function detectBonds(atoms: Atom[], charge?: number): Bond[] {
  * `CONECT` records, a SMILES import — are never re-derived: the file said what
  * the bonds are, so the detector has nothing to add, and re-deriving them
  * could only lose information the parser had.
+ *
+ * A bond that touches a ghost atom is dropped either way: the ghost has no
+ * valence, so a file's bond table naming one (a `CONECT` record, a MOL2 bond
+ * block) describes something the viewer cannot draw and the force field cannot
+ * use. This is the one place every load path passes through, so no parser has
+ * to remember it.
  */
 export function ensureBonds(data: MolecularData): MolecularData {
+    const authored = stripGhostBonds(data.atoms, data.bonds);
     if (data.hasExplicitBonds && data.bonds.length > 0) {
-        return data;
+        if (authored === data.bonds) return data;
+        return { ...data, bonds: authored };
     }
 
     const bonds = detectBonds(data.atoms, data.charge);

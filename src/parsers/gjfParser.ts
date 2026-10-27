@@ -1,4 +1,5 @@
 import { Atom, Bond, MolecularData, GjfMeta } from '../types';
+import { ghostFromLabel } from './ghostAtoms';
 
 const ATOMIC_NUMBER_MAP: { [key: number]: string } = {
     1: 'H', 2: 'He', 3: 'Li', 4: 'Be', 5: 'B', 6: 'C', 7: 'N', 8: 'O', 9: 'F', 10: 'Ne',
@@ -29,15 +30,23 @@ function resolveElement(raw: string): string {
     return cleaned;
 }
 
-function parseAtomLine(parts: string[]): { element: string; x: number; y: number; z: number } | null {
+function parseAtomLine(parts: string[]): { element: string; x: number; y: number; z: number; ghost?: boolean } | null {
     if (parts.length < 4) return null;
-    const element = resolveElement(parts[0]);
+    // Gaussian writes a ghost as `<element>-Bq` (and a bare dummy as `Bq`).
+    // The marker has to be read before the element is resolved: the ordinary
+    // path strips digits and would hand back the meaningless symbol `C-bq`.
+    const ghost = ghostFromLabel(parts[0].replace(/\(.*?\)/g, ''));
+    const element = ghost ? ghost.element : resolveElement(parts[0]);
 
     if (parts.length === 4) {
         const x = parseFloat(parts[1]);
         const y = parseFloat(parts[2]);
         const z = parseFloat(parts[3]);
-        if (!isNaN(x) && !isNaN(y) && !isNaN(z)) return { element, x, y, z };
+        if (!isNaN(x) && !isNaN(y) && !isNaN(z)) {
+            const out: { element: string; x: number; y: number; z: number; ghost?: boolean } = { element, x, y, z };
+            if (ghost) out.ghost = true;
+            return out;
+        }
         return null;
     }
 
@@ -59,7 +68,10 @@ function parseAtomLine(parts: string[]): { element: string; x: number; y: number
     }
 
     if (coords.length >= 3) {
-        return { element, x: coords[0], y: coords[1], z: coords[2] };
+        const out: { element: string; x: number; y: number; z: number; ghost?: boolean } =
+            { element, x: coords[0], y: coords[1], z: coords[2] };
+        if (ghost) out.ghost = true;
+        return out;
     }
 
     // Fallback: all values were plain integers — use positional logic.
@@ -70,10 +82,16 @@ function parseAtomLine(parts: string[]): { element: string; x: number; y: number
         if (!isNaN(v)) allNums.push(v);
     }
     if (allNums.length >= 4 && (allNums[0] === 0 || allNums[0] === -1 || allNums[0] === 1)) {
-        return { element, x: allNums[1], y: allNums[2], z: allNums[3] };
+        const out: { element: string; x: number; y: number; z: number; ghost?: boolean } =
+            { element, x: allNums[1], y: allNums[2], z: allNums[3] };
+        if (ghost) out.ghost = true;
+        return out;
     }
     if (allNums.length >= 3) {
-        return { element, x: allNums[0], y: allNums[1], z: allNums[2] };
+        const out: { element: string; x: number; y: number; z: number; ghost?: boolean } =
+            { element, x: allNums[0], y: allNums[1], z: allNums[2] };
+        if (ghost) out.ghost = true;
+        return out;
     }
 
     return null;
@@ -137,7 +155,9 @@ export function parseGjf(content: string): MolecularData {
         const parts = line.split(/\s+/);
         const result = parseAtomLine(parts);
         if (result) {
-            atoms.push({ element: result.element, x: result.x, y: result.y, z: result.z, index: atomIndex });
+            const atom: Atom = { element: result.element, x: result.x, y: result.y, z: result.z, index: atomIndex };
+            if (result.ghost) atom.ghost = true;
+            atoms.push(atom);
             atomIndex++;
         }
         i++;

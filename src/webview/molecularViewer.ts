@@ -107,6 +107,8 @@ interface VmdAtomPayload {
     color: string;
     beta?: number;
     occupancy?: number;
+    /** A ghost/dummy atom of the loaded structure (see `Atom.ghost`). */
+    ghost?: boolean;
     /** Sphere size as a multiplier on the viewer's own radius; 0 = not drawn. */
     vmdScale?: number;
     /** van der Waals radius in Å — the reference length a `Surf` probe adds to. */
@@ -353,6 +355,7 @@ function resolveVmdSource(scriptUri: vscode.Uri, sourceFile: string): vscode.Uri
         };
         if (typeof a.beta === 'number') item.beta = a.beta;
         if (typeof a.occupancy === 'number') item.occupancy = a.occupancy;
+        if (a.ghost === true) item.ghost = true;
         if (typeof resolved.atomScales[i] === 'number') item.vmdScale = resolved.atomScales[i] as number;
         return item;
     });
@@ -927,7 +930,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         };
                         const diffAtoms = diffData.atoms.map((a, i) => ({
                             element: a.element, x: a.x, y: a.y, z: a.z,
-                            color: (diffVmdColors && diffVmdColors[i]) || diffAtomColors[a.element] || '#FF1493'
+                            color: (diffVmdColors && diffVmdColors[i]) || diffAtomColors[a.element] || '#FF1493',
+                            ghost: a.ghost === true ? true : undefined
                         }));
                         if (diffData.atomGroups && diffData.atomGroups.length > 0) {
                             const override: { [key: number]: string } = {};
@@ -936,7 +940,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         }
                         const diffBonds = diffData.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order }));
                         const diffFramesData = diffFrames.map(f => ({
-                            atoms: f.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: diffAtomColors[a.element] || '#FF1493' })),
+                            atoms: f.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: diffAtomColors[a.element] || '#FF1493', ghost: a.ghost === true ? true : undefined })),
                             bonds: f.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order })),
                             stepLabel: f.stepLabel
                         }));
@@ -1106,7 +1110,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             break;
                         }
 
-                        const impAtoms = impData.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: ATOM_COLORS[a.element] || '#FF1493' }));
+                        const impAtoms = impData.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: ATOM_COLORS[a.element] || '#FF1493', ghost: a.ghost === true ? true : undefined }));
                         const impBonds = impData.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order }));
                         postImportCopies(webviewPanel.webview, impFileName,
                                          impAtoms, impBonds, !!impData.hasExplicitBonds, choice.copies);
@@ -1280,6 +1284,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                 color: color,
                 beta: a.beta,
                 occupancy: a.occupancy,
+                ghost: a.ghost === true ? true : undefined,
                 baseIdx: a.baseIdx,
                 cellI: a.cellI, cellJ: a.cellJ, cellK: a.cellK
             };
@@ -1304,7 +1309,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         }));
 
         const framesData = frames.map(f => ({
-            atoms: f.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: atomColors[a.element] || '#FF1493' })),
+            atoms: f.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: atomColors[a.element] || '#FF1493', ghost: a.ghost === true ? true : undefined })),
             bonds: f.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order })),
             stepLabel: f.stepLabel,
             // Single-point energy of this frame's structure (opt logs only), used
@@ -1675,6 +1680,27 @@ try{
 var MD=${jsonData};
 var BP=${bondPerceptionSource};
 var AN={H:1,He:2,Li:3,Be:4,B:5,C:6,N:7,O:8,F:9,Ne:10,Na:11,Mg:12,Al:13,Si:14,P:15,S:16,Cl:17,Ar:18,K:19,Ca:20,Sc:21,Ti:22,V:23,Cr:24,Mn:25,Fe:26,Co:27,Ni:28,Cu:29,Zn:30,Ga:31,Ge:32,As:33,Se:34,Br:35,Kr:36,Rb:37,Sr:38,Y:39,Zr:40,Nb:41,Mo:42,Tc:43,Ru:44,Rh:45,Pd:46,Ag:47,Cd:48,In:49,Sn:50,Sb:51,Te:52,I:53,Xe:54,Cs:55,Ba:56,La:57,Ce:58,Pr:59,Nd:60,Pm:61,Sm:62,Eu:63,Gd:64,Tb:65,Dy:66,Ho:67,Er:68,Tm:69,Yb:70,Lu:71,Hf:72,Ta:73,W:74,Re:75,Os:76,Ir:77,Pt:78,Au:79,Hg:80,Tl:81,Pb:82,Bi:83,Po:84,At:85,Rn:86};
+// ===== Ghost atoms =====
+// A ghost is a position without a nucleus, electrons or bonds: the marker a
+// counterpoise calculation puts where the other fragment's atoms are. It keeps
+// the element it stands for (the 'element' field), because that is what decides
+// its basis functions in the two programs that have a ghost concept at all; a
+// bare dummy point is element 'X'.
+//
+// One predicate decides everything below - drawing, formula, electron count,
+// label, bond guards - and it is the same expression as isGhostAtom in
+// src/types.ts (the page's script is inlined and cannot import it, so the two
+// are kept identical by hand). Nothing in this page may test element 'X' or the
+// ghost flag on its own: a structure loaded from a file carries either.
+var GHOST_COLOR='#8FA8BF';   // grey-blue, deliberately unlike any element
+var GHOST_RADIUS=0.28;       // sphere radius in A (a real atom is 0.3-1.0)
+function isGhostAtom(a){return !!a&&(a.ghost===true||a.element==='X')}
+/** One atom's label everywhere the page names an atom: C3, or C*3 / X5. */
+function atomLabel(a,i){
+    if(!a)return '?';
+    var el=isGhostAtom(a)?(a.element==='X'?'X':a.element+'*'):a.element;
+    return el+((typeof i==='number')?(i+1):'');
+}
 var CRY=MD.crystal||null;
 // ===== VMD visualization script =====
 // Present when the document is a .tcl script: every molecule the script
@@ -1715,7 +1741,10 @@ function computeCrystalInv(){
 computeCrystalInv();
 function formulaFromAtoms(arr){
     var counts={};
-    arr.forEach(function(a){counts[a.element]=(counts[a.element]||0)+1});
+    // A ghost contributes no atom to the formula: it has no nucleus, so the
+    // composition of a counterpoise structure is the composition of its real
+    // atoms (the ghosts are the *other* fragment, already counted there).
+    arr.forEach(function(a){if(isGhostAtom(a))return;counts[a.element]=(counts[a.element]||0)+1});
     var keys=Object.keys(counts);
     var hasC=counts.C!==undefined;
     keys.sort(function(a,b){
@@ -1738,9 +1767,20 @@ function updateMolInfo(){
     var chrg=MD.charge!=null?MD.charge:'-';
     var mult=MD.multiplicity!=null?MD.multiplicity:'-';
     var nElectrons=0;
-    MD.atoms.forEach(function(a){nElectrons+=(AN[a.element]||0)});
+    var nGhosts=0;
+    MD.atoms.forEach(function(a){
+        // A ghost has no nucleus and no electrons, so it adds neither to the
+        // electron count nor to the formula below.
+        if(isGhostAtom(a)){nGhosts++;return}
+        nElectrons+=(AN[a.element]||0);
+    });
     if(typeof chrg==='number')nElectrons-=chrg;
-    var html='Formula: '+formulaFromAtoms(MD.atoms)+'<br>Atoms: '+nAtoms+'<br>Charge: '+chrg+'<br>Electrons: '+nElectrons+'<br>Multiplicity: '+mult;
+    var html='Formula: '+formulaFromAtoms(MD.atoms)+'<br>Atoms: '+nAtoms+
+        (nGhosts>0?' ('+nGhosts+' ghost'+(nGhosts===1?'':'s')+')':'')+
+        '<br>Charge: '+chrg+'<br>Electrons: '+nElectrons+'<br>Multiplicity: '+mult;
+    if(nGhosts>0){
+        html+='<br>Ghosts: '+nGhosts+' (no bonds, no basis, not in the formula)';
+    }
     if(CRY){
         var sa=boundary.aMax-boundary.aMin,sb=boundary.bMax-boundary.bMin,sc=boundary.cMax-boundary.cMin;
         html+='<br>Unit Cell: '+formulaFromAtoms(CRY.baseAtoms);
@@ -1850,8 +1890,11 @@ var CR={H:0.31,He:0.28,Li:1.28,Be:0.96,B:0.84,C:0.76,N:0.71,O:0.66,F:0.57,Na:1.6
 function getR(el){return(CR[el]||1.50)*0.5}
 // Sphere radius of one atom. A VMD script scales the viewer's own radius (so a
 // structure always keeps its ball-and-stick look, and 0 means "not drawn");
-// without a script the plain default applies.
+// without a script the plain default applies. A ghost has no element to take a
+// radius from — it is drawn as the same small marker whatever it stands for, so
+// the picture says "point, not atom" before any label is read.
 function atomRadius(a){
+    if(isGhostAtom(a))return typeof a.vmdScale==='number'?(GHOST_RADIUS*a.vmdScale):GHOST_RADIUS;
     var r=getR(a.element);
     return typeof a.vmdScale==='number'?r*a.vmdScale:r;
 }
@@ -2244,13 +2287,19 @@ function sphereGeoFor(r,segs){
 // An atom's colour follows the scalar-colour toggle (a scene rebuild), and its
 // highlight is a *state*: plain, selected, or diff-highlighted. Both used to be
 // written into the atom's own material, which is exactly why every atom needed
-// one. Keying the pool by (colour, occupancy, state) keeps the same three
+// one. Keying the pool by (colour, occupancy, state, ghost) keeps the same three
 // appearances while a whole structure shares a handful of materials.
-function atomMaterial(col,occ,state){
+//
+// A ghost is a fourth appearance: faint, and drawn without writing depth, so a
+// ghost standing exactly on a real atom (the usual counterpoise layout) reads as
+// a shadow *around* that atom instead of hiding it.
+function atomMaterial(col,occ,state,ghost){
     var o=(occ!=null&&occ<0.999)?occ.toFixed(3):'1';
-    return pooledMat('a|'+col+'|'+o+'|'+state,function(){
+    var g=ghost?1:0;
+    return pooledMat('a|'+col+'|'+o+'|'+state+'|'+g,function(){
         var m;
-        if(o!=='1')m=new THREE.MeshPhongMaterial({color:0xffffff,map:getOccupancyTexture(col,occ),shininess:80,specular:0x444444});
+        if(g)m=new THREE.MeshPhongMaterial({color:new THREE.Color(col),shininess:20,specular:0x222222,transparent:true,opacity:0.45,depthWrite:false});
+        else if(o!=='1')m=new THREE.MeshPhongMaterial({color:0xffffff,map:getOccupancyTexture(col,occ),shininess:80,specular:0x444444});
         else m=new THREE.MeshPhongMaterial({color:new THREE.Color(col),shininess:80,specular:0x444444});
         if(state===1){m.emissive=new THREE.Color(0xffff00);m.emissiveIntensity=0.6}
         else if(state===2){m.emissive=new THREE.Color(0xff6600);m.emissiveIntensity=0.4}
@@ -2262,14 +2311,18 @@ function atomMaterial(col,occ,state){
 // for the atoms it is shared with.
 function setAtomHighlight(mesh,state){
     if(!mesh||!mesh.userData)return;
-    mesh.material=atomMaterial(mesh.userData.baseColor!=null?mesh.userData.baseColor:'#FF1493',mesh.userData.occ,state);
+    mesh.material=atomMaterial(mesh.userData.baseColor!=null?mesh.userData.baseColor:'#FF1493',mesh.userData.occ,state,mesh.userData.ghost);
 }
 // The comparison's atoms follow the same idea, with the diff highlight being a
 // colour of its own (0xff6600, the way the comparison has always marked a
-// difference) rather than a glow over the structure's colour.
-function diffAtomMaterial(col,state){
-    return pooledMat('d|'+col+'|'+state,function(){
-        var m=new THREE.MeshPhongMaterial({color:new THREE.Color(state===2?0xff6600:col),shininess:80,specular:0x444444});
+// difference) rather than a glow over the structure's colour. A ghost on either
+// side is drawn the same faint marker the main structure uses.
+function diffAtomMaterial(col,state,ghost){
+    var g=ghost?1:0;
+    return pooledMat('d|'+col+'|'+state+'|'+g,function(){
+        var m;
+        if(g)m=new THREE.MeshPhongMaterial({color:new THREE.Color(col),shininess:20,specular:0x222222,transparent:true,opacity:0.45,depthWrite:false});
+        else m=new THREE.MeshPhongMaterial({color:new THREE.Color(state===2?0xff6600:col),shininess:80,specular:0x444444});
         if(state===1){m.emissive=new THREE.Color(0xffff00);m.emissiveIntensity=0.6}
         else if(state===2){m.emissive=new THREE.Color(0xff6600);m.emissiveIntensity=0.4}
         return m;
@@ -2277,7 +2330,7 @@ function diffAtomMaterial(col,state){
 }
 function setDiffAtomHighlight(mesh,state){
     if(!mesh||!mesh.userData)return;
-    mesh.material=diffAtomMaterial(mesh.userData.baseColor!=null?mesh.userData.baseColor:'#FF1493',state);
+    mesh.material=diffAtomMaterial(mesh.userData.baseColor!=null?mesh.userData.baseColor:'#FF1493',state,mesh.userData.ghost);
 }
 
 function disposeMesh(ch){
@@ -2760,18 +2813,22 @@ function rebuildScene(){
     if(Object.keys(matPool).length>8192)matPool={};
     MD.atoms.forEach(function(a,i){
         a.index=i;
+        var gh=isGhostAtom(a);
         var r=atomRadius(a);
         var drawn=r>0.0005;
         // 标量配色是视图状态: 在这里按原子现算, a.color 保持元素颜色不变。
-        var col=betaColorOf(a)||a.color;
+        // A ghost has no element colour and no scalar to show: it keeps the one
+        // marker colour, so a counterpoise ghost never looks like the atom it
+        // stands for.
+        var col=gh?GHOST_COLOR:(betaColorOf(a)||a.color);
         var occ=a.occupancy!=null?a.occupancy:1;
         // Geometry and material come from the pools: atoms of the same radius
         // (and colour/occupancy) draw with the very same objects, so a
         // structure of any size costs a handful of GPU buffers and materials
         // instead of one of each per atom.
-        var mesh=new THREE.Mesh(sphereGeoFor(drawn?r:0.001,segs),atomMaterial(col,occ,0));
+        var mesh=new THREE.Mesh(sphereGeoFor(drawn?r:0.001,segs),atomMaterial(col,occ,0,gh));
         mesh.position.set(a.x-CX,a.y-CY,a.z-CZ);
-        mesh.userData={element:a.element,index:i,baseColor:col,occ:occ};
+        mesh.userData={element:a.element,index:i,baseColor:col,occ:occ,ghost:gh};
         mesh.visible=drawn;
         moleculeGroup.add(mesh);
         atomMeshes.push(mesh);
@@ -3418,6 +3475,12 @@ function planAromaticDashes(){
 function createBond(b){
     var a1=MD.atoms[b.atom1],a2=MD.atoms[b.atom2];
     if(!a1||!a2)return;
+    // A ghost has no valence and no bonds: every path that makes or keeps a
+    // bond drops the ones that touch one (bond perception, loading, editing,
+    // pasting). This is the last door - a bond list restored from an older
+    // snapshot, or one built before an atom became a ghost, must not draw a
+    // stick into a point either.
+    if(isGhostAtom(a1)||isGhostAtom(a2))return;
     // A VMD script sets the bond radius per bond (the representation that
     // covers both endpoints); 0 means the script does not draw it at all.
     var br=typeof b.vmdR==='number'?b.vmdR:0.12;
@@ -4426,6 +4489,16 @@ function startMmOptimization(){
         modeInfoEl.textContent='Molecular Mechanics - select atoms first: click atoms here, or use Select Atoms / Box Select';
         return;
     }
+    // A ghost is a position, not a particle: it has no bonds and no electrons,
+    // so there is nothing in it to relax. It is left out of the mobile set (the
+    // reference geometry keeps its place) and handed to the force field as the
+    // dummy element, whose well depth is zero - so it neither moves nor pulls
+    // the atoms around it towards a point that is not there.
+    var movable=selectedAtoms.filter(function(idx){return !isGhostAtom(MD.atoms[idx])});
+    if(movable.length===0){
+        modeInfoEl.textContent='Molecular Mechanics - the selection holds no real atom (ghosts are not particles)';
+        return;
+    }
     // Anything else that owns the coordinates has to let go before the run
     // starts: a playing normal mode and a frame auto-play both write the
     // structure every frame, and a Move Atoms drag is mid-session on it. Each is
@@ -4438,7 +4511,7 @@ function startMmOptimization(){
     if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
     stopFrameAutoPlay();
     vdCommit();
-    var i,indices=selectedAtoms.slice(),origin=new Array(indices.length);
+    var i,indices=movable,origin=new Array(indices.length);
     for(i=0;i<indices.length;i++){
         var a=MD.atoms[indices[i]];
         origin[i]=a?[a.x,a.y,a.z]:null;
@@ -4468,7 +4541,7 @@ function startMmOptimization(){
     vscodeApi.postMessage({
         command:'mmOptimize',
         runId:mmRun.id,
-        atoms:MD.atoms.map(function(a){return{element:a.element,x:a.x,y:a.y,z:a.z}}),
+        atoms:MD.atoms.map(function(a){return{element:isGhostAtom(a)?'X':a.element,x:a.x,y:a.y,z:a.z}}),
         bonds:MD.bonds.map(function(b){return{atom1:b.atom1,atom2:b.atom2,order:b.order}}),
         selected:indices.slice(),
         options:mmOptionSnapshot()
@@ -5343,7 +5416,11 @@ function importStructure(msg){
     var t=placeBlockBeside(newAtoms);
     for(var i=0;i<newAtoms.length;i++){
         var a=newAtoms[i];
-        MD.atoms.push({element:a.element,x:a.x+t.x,y:a.y+t.y,z:a.z+t.z,color:a.color||((MD.atomColors&&MD.atomColors[a.element])||'#FF1493')});
+        var item={element:a.element,x:a.x+t.x,y:a.y+t.y,z:a.z+t.z,color:a.color||((MD.atomColors&&MD.atomColors[a.element])||'#FF1493')};
+        // An imported ghost stays a ghost - its element is what says which basis
+        // it stands for, and the flag is what keeps it unbonded.
+        if(a.ghost===true||a.element==='X')item.ghost=true;
+        MD.atoms.push(item);
     }
     // --- Bonds ---
     if(!MD.hasExplicitBonds&&!msg.hasExplicitBonds){
@@ -5357,6 +5434,10 @@ function importStructure(msg){
         MD.hasExplicitBonds=true;
         if(msg.hasExplicitBonds){
             newBonds.forEach(function(b){
+                // A ghost can carry no bond: an authored bond naming one in the
+                // imported file is dropped here as it is on load.
+                if(newAtoms[b.atom1]&&isGhostAtom(newAtoms[b.atom1]))return;
+                if(newAtoms[b.atom2]&&isGhostAtom(newAtoms[b.atom2]))return;
                 if(b.atom1<newAtoms.length&&b.atom2<newAtoms.length)
                     MD.bonds.push({atom1:N0+b.atom1,atom2:N0+b.atom2,order:b.order==null?1:b.order});
             });
@@ -5422,13 +5503,22 @@ function clipSanitize(c){
         if(!a||typeof a.element!=='string'||!/^[A-Z][a-z]?$/.test(a.element))return null;
         if(typeof a.x!=='number'||typeof a.y!=='number'||typeof a.z!=='number')return null;
         if(!isFinite(a.x)||!isFinite(a.y)||!isFinite(a.z))return null;
-        atoms.push({element:a.element,x:a.x,y:a.y,z:a.z});
+        // The ghost flag is carried through the clipboard, but only as a real
+        // boolean: anything else in that field is data from an older version or
+        // another tab and is dropped rather than trusted.
+        var item={element:a.element,x:a.x,y:a.y,z:a.z};
+        if(a.ghost===true)item.ghost=true;
+        atoms.push(item);
     }
     var bonds=[],srcB=Array.isArray(c.bonds)?c.bonds:[];
     for(i=0;i<srcB.length;i++){
         var b=srcB[i];
         if(!b||typeof b.a!=='number'||typeof b.b!=='number')continue;
         if(b.a<0||b.b<0||b.a>=atoms.length||b.b>=atoms.length||b.a===b.b)continue;
+        // A ghost cannot carry a bond, so a stored fragment that has one is
+        // stripped of it here rather than pasted as something the viewer would
+        // refuse to draw.
+        if(isGhostAtom(atoms[b.a])||isGhostAtom(atoms[b.b]))continue;
         bonds.push({a:b.a,b:b.b,order:(typeof b.order==='number'&&isFinite(b.order))?b.order:1});
     }
     return {v:1,atoms:atoms,bonds:bonds};
@@ -5450,7 +5540,9 @@ function copySelection(){
         // end, so it is dropped here rather than trusted.
         if(map[idx[i]]!==undefined)continue;
         map[idx[i]]=atoms.length;
-        atoms.push({element:a.element,x:a.x,y:a.y,z:a.z});
+        var item={element:a.element,x:a.x,y:a.y,z:a.z};
+        if(isGhostAtom(a))item.ghost=true;
+        atoms.push(item);
         sx+=a.x;sy+=a.y;sz+=a.z;
     }
     if(atoms.length===0)return false;
@@ -5507,10 +5599,15 @@ function pasteClipboard(){
     var t=placeBlockBeside(frag.atoms);
     var N0=MD.atoms.length;
     frag.atoms.forEach(function(a){
-        MD.atoms.push({element:a.element,x:a.x+t.x,y:a.y+t.y,z:a.z+t.z,
-            color:(MD.atomColors&&MD.atomColors[a.element])||'#FF1493'});
+        var item={element:a.element,x:a.x+t.x,y:a.y+t.y,z:a.z+t.z,
+            color:(MD.atomColors&&MD.atomColors[a.element])||'#FF1493'};
+        if(a.ghost===true||a.element==='X')item.ghost=true;
+        MD.atoms.push(item);
     });
     frag.bonds.forEach(function(b){
+        // A fragment read back from storage may still name a ghost in a bond;
+        // a ghost has no valence, so such a bond is not pasted at all.
+        if(isGhostAtom(frag.atoms[b.a])||isGhostAtom(frag.atoms[b.b]))return;
         MD.bonds.push({atom1:N0+b.a,atom2:N0+b.b,order:b.order});
     });
     rebuildScene();
@@ -5549,13 +5646,21 @@ function startAddHydrogens(){
     }
     if(vibActive||vibPaused)stopVibration();
     if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
+    // A ghost has no valence, so it can be neither a centre (nothing to
+    // complete) nor a neighbour (no bond to count). It goes to the engine as the
+    // dummy element, and out of the selection.
+    var hSel=selectedAtoms.filter(function(i){return !isGhostAtom(MD.atoms[i])});
+    if(hSel.length===0){
+        modeInfoEl.textContent='Add H - the selection holds no real atom (ghosts have no valence)';
+        return;
+    }
     addHPending=true;
-    modeInfoEl.textContent='Add H: completing '+selectedAtoms.length+' selected atom(s)...';
+    modeInfoEl.textContent='Add H: completing '+hSel.length+' selected atom(s)...';
     vscodeApi.postMessage({
         command:'addHydrogens',
-        atoms:MD.atoms.map(function(a){return{element:a.element,x:a.x,y:a.y,z:a.z}}),
+        atoms:MD.atoms.map(function(a){return{element:isGhostAtom(a)?'X':a.element,x:a.x,y:a.y,z:a.z}}),
         bonds:MD.bonds.map(function(b){return{atom1:b.atom1,atom2:b.atom2,order:b.order}}),
-        selected:selectedAtoms.slice()
+        selected:hSel
     });
 }
 function applyHydrogenResult(msg){
@@ -6001,7 +6106,7 @@ function buildDiffListHTML(diffs,totalDiff){
             html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Bond Length Differences ('+diffs.bonds.length+')</b></div>';
             diffs.bonds.sort(function(a,b){return b.pct-a.pct});
             diffs.bonds.forEach(function(d){
-                html+='<div class="diff-row">  '+MD.atoms[d.i1].element+(d.i1+1)+'-'+MD.atoms[d.i2].element+(d.i2+1)+
+                html+='<div class="diff-row">  '+atomLabel(MD.atoms[d.i1],d.i1)+'-'+atomLabel(MD.atoms[d.i2],d.i2)+
                     ': '+d.d1.toFixed(3)+' vs '+d.d2.toFixed(3)+' Å (Δ='+d.diff.toFixed(3)+', '+d.pct.toFixed(2)+'%)</div>';
             });
         }
@@ -6009,7 +6114,7 @@ function buildDiffListHTML(diffs,totalDiff){
             html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Bond Angle Differences ('+diffs.angles.length+')</b></div>';
             diffs.angles.sort(function(a,b){return b.pct-a.pct});
             diffs.angles.forEach(function(d){
-                html+='<div class="diff-row">  '+MD.atoms[d.i1].element+(d.i1+1)+'-'+MD.atoms[d.i2].element+(d.i2+1)+'-'+MD.atoms[d.i3].element+(d.i3+1)+
+                html+='<div class="diff-row">  '+atomLabel(MD.atoms[d.i1],d.i1)+'-'+atomLabel(MD.atoms[d.i2],d.i2)+'-'+atomLabel(MD.atoms[d.i3],d.i3)+
                     ': '+d.a1.toFixed(1)+'° vs '+d.a2.toFixed(1)+'° (Δ='+d.diff.toFixed(1)+'°, '+d.pct.toFixed(2)+'%)</div>';
             });
         }
@@ -6017,7 +6122,7 @@ function buildDiffListHTML(diffs,totalDiff){
             html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Dihedral Differences ('+diffs.dihedrals.length+')</b></div>';
             diffs.dihedrals.sort(function(a,b){return b.pct-a.pct});
             diffs.dihedrals.forEach(function(d){
-                html+='<div class="diff-row">  '+MD.atoms[d.i1].element+(d.i1+1)+'-'+MD.atoms[d.i2].element+(d.i2+1)+'-'+MD.atoms[d.i3].element+(d.i3+1)+'-'+MD.atoms[d.i4].element+(d.i4+1)+
+                html+='<div class="diff-row">  '+atomLabel(MD.atoms[d.i1],d.i1)+'-'+atomLabel(MD.atoms[d.i2],d.i2)+'-'+atomLabel(MD.atoms[d.i3],d.i3)+'-'+atomLabel(MD.atoms[d.i4],d.i4)+
                     ': '+d.d1.toFixed(1)+'° vs '+d.d2.toFixed(1)+'° (Δ='+d.diff.toFixed(1)+'°, '+d.pct.toFixed(2)+'%)</div>';
             });
         }
@@ -6237,14 +6342,17 @@ function enterDiffRender(diffs,mapping){
 
     var dSegs=sphereSegs(diffData.atoms.length);
     diffData.atoms.forEach(function(a,i){
-        var r=getR(a.element);
+        var gh=isGhostAtom(a);
+        var r=gh?GHOST_RADIUS:getR(a.element);
         var isHi=highlightAtoms[mapping?mapping.indexOf(i):-1];
         // Same pooled geometry and material scheme as the left-hand structure:
         // a comparison of two large structures draws its two sides from a
-        // handful of objects instead of one per atom.
-        var mesh=new THREE.Mesh(sphereGeoFor(r,dSegs),diffAtomMaterial(a.color,isHi?2:0));
+        // handful of objects instead of one per atom. A ghost is the small
+        // faint marker it is on the left, so the two halves read the same way.
+        var diffCol=gh?GHOST_COLOR:a.color;
+        var mesh=new THREE.Mesh(sphereGeoFor(r,dSegs),diffAtomMaterial(diffCol,isHi?2:0,gh));
         mesh.position.set(a.x-diffCX,a.y-diffCY,a.z-diffCZ);
-        mesh.userData={element:a.element,index:i,diffHi:isHi?true:false,baseColor:a.color};
+        mesh.userData={element:a.element,index:i,diffHi:isHi?true:false,baseColor:diffCol,ghost:gh};
         diffMolGroup.add(mesh);
         diffAtomMeshes.push(mesh);
     });
@@ -7879,7 +7987,9 @@ layoutPanels();
 function formatAtomList(indices,atoms){
     atoms=atoms||MD.atoms;
     if(indices.length===0)return '';
-    var list=indices.slice(0,15).map(function(i){var a=atoms[i];return(a?a.element:'?')+(i+1)});
+    // atomLabel marks a ghost with a star (C*3, X5), so a selection that is
+    // about to be ghosted - or one that already is - reads as points, not atoms.
+    var list=indices.slice(0,15).map(function(i){return atomLabel(atoms[i],i)});
     var str=list.join(', ');
     if(indices.length>15)str+=' ... ('+indices.length+' atoms)';
     return str;
@@ -8191,17 +8301,17 @@ function fmtMeasurement(kind,sel,atomsArr){
     if(kind==='bondLength'&&sel.length===2){
         var a1=atomsArr[sel[0]],a2=atomsArr[sel[1]];
         var d=dist(a1,a2);
-        return {label:a1.element+(sel[0]+1)+' - '+a2.element+(sel[1]+1),value:d.toFixed(4)+' A',num:d};
+        return {label:atomLabel(a1,sel[0])+' - '+atomLabel(a2,sel[1]),value:d.toFixed(4)+' A',num:d};
     }
     if(kind==='bondAngle'&&sel.length===3){
         var a1=atomsArr[sel[0]],a2=atomsArr[sel[1]],a3=atomsArr[sel[2]];
         var ang=angle(a1,a2,a3);
-        return {label:a1.element+(sel[0]+1)+' - '+a2.element+(sel[1]+1)+' - '+a3.element+(sel[2]+1),value:ang.toFixed(2)+' deg',num:ang};
+        return {label:atomLabel(a1,sel[0])+' - '+atomLabel(a2,sel[1])+' - '+atomLabel(a3,sel[2]),value:ang.toFixed(2)+' deg',num:ang};
     }
     if(kind==='dihedral'&&sel.length===4){
         var a1=atomsArr[sel[0]],a2=atomsArr[sel[1]],a3=atomsArr[sel[2]],a4=atomsArr[sel[3]];
         var dih=dihedral(a1,a2,a3,a4);
-        return {label:a1.element+(sel[0]+1)+' - '+a2.element+(sel[1]+1)+' - '+a3.element+(sel[2]+1)+' - '+a4.element+(sel[3]+1),value:dih.toFixed(2)+' deg',num:dih};
+        return {label:atomLabel(a1,sel[0])+' - '+atomLabel(a2,sel[1])+' - '+atomLabel(a3,sel[2])+' - '+atomLabel(a4,sel[3]),value:dih.toFixed(2)+' deg',num:dih};
     }
     return null;
 }
@@ -8381,7 +8491,7 @@ function showBondLengthModal(){
     var existingBond=MD.bonds.find(function(b){return(b.atom1===selectedAtoms[0]&&b.atom2===selectedAtoms[1])||(b.atom1===selectedAtoms[1]&&b.atom2===selectedAtoms[0])});
     var curOrder=existingBond?existingBond.order:1;
     saveOriginal();
-    var n1=a1.element+(selectedAtoms[0]+1),n2=a2.element+(selectedAtoms[1]+1);
+    var n1=atomLabel(a1,selectedAtoms[0]),n2=atomLabel(a2,selectedAtoms[1]);
     showModal('<h3>Adjust Bond Length</h3>'+
         '<div class="current-val">Current: '+cur.toFixed(4)+' A, Bond order: '+curOrder+'</div>'+
         '<label>Fix atom:</label><select id="m-fix"><option value="1">Fix '+n1+' (move '+n2+')</option><option value="2">Fix '+n2+' (move '+n1+')</option></select>'+
@@ -8401,6 +8511,17 @@ function showBondLengthModal(){
             if(existingBond){MD.bonds=MD.bonds.filter(function(b){return b!==existingBond});existingBond=null;rebuildScene()}
         }else{
             if(!existingBond){
+                // A ghost has no valence, so this pair cannot be given a bond
+                // even from here: the dialog is the one place a bond can be
+                // created by hand, and a ghost would otherwise leave with one
+                // (which the drawing refuses and a saved connect section would
+                // carry into a calculation). The control goes back to None so it
+                // never claims a bond that does not exist.
+                if(isGhostAtom(a1)||isGhostAtom(a2)){
+                    this.value='0';
+                    modeInfoEl.textContent='A ghost atom cannot be bonded - no bond was created';
+                    return;
+                }
                 existingBond={atom1:selectedAtoms[0],atom2:selectedAtoms[1],order:newOrder};
                 MD.bonds.push(existingBond);
             }else{existingBond.order=newOrder}
@@ -8418,7 +8539,7 @@ function showBondAngleModal(){
     var a1=MD.atoms[selectedAtoms[0]],a2=MD.atoms[selectedAtoms[1]],a3=MD.atoms[selectedAtoms[2]];
     var cur=angle(a1,a2,a3);
     saveOriginal();
-    var n1=a1.element+(selectedAtoms[0]+1),n2=a2.element+(selectedAtoms[1]+1),n3=a3.element+(selectedAtoms[2]+1);
+    var n1=atomLabel(a1,selectedAtoms[0]),n2=atomLabel(a2,selectedAtoms[1]),n3=atomLabel(a3,selectedAtoms[2]);
     showModal('<h3>Adjust Bond Angle</h3>'+
         '<div class="current-val">Current: '+cur.toFixed(2)+' deg</div>'+
         '<label>Fix side:</label><select id="m-fix"><option value="1">Fix '+n1+'-'+n2+' (move '+n3+')</option><option value="2">Fix '+n2+'-'+n3+' (move '+n1+')</option></select>'+
@@ -8439,7 +8560,7 @@ function showDihedralModal(){
     var a1=MD.atoms[selectedAtoms[0]],a2=MD.atoms[selectedAtoms[1]],a3=MD.atoms[selectedAtoms[2]],a4=MD.atoms[selectedAtoms[3]];
     var cur=dihedral(a1,a2,a3,a4);
     saveOriginal();
-    var n1=a1.element+(selectedAtoms[0]+1),n2=a2.element+(selectedAtoms[1]+1),n3=a3.element+(selectedAtoms[2]+1),n4=a4.element+(selectedAtoms[3]+1);
+    var n1=atomLabel(a1,selectedAtoms[0]),n2=atomLabel(a2,selectedAtoms[1]),n3=atomLabel(a3,selectedAtoms[2]),n4=atomLabel(a4,selectedAtoms[3]);
     showModal('<h3>Adjust Dihedral Angle</h3>'+
         '<div class="current-val">Current: '+cur.toFixed(2)+' deg</div>'+
         '<label>Fix side:</label><select id="m-fix"><option value="1">Fix '+n1+'-'+n2+'-'+n3+' (move '+n4+')</option><option value="2">Fix '+n2+'-'+n3+'-'+n4+' (move '+n1+')</option></select>'+
@@ -8488,7 +8609,8 @@ function showAddAtomModal(){
     if(!anchor)return;
     showModal('<h3>Add Atom</h3>'+
         '<label>Element:</label><select id="m-elem">'+
-        '<option>H</option><option>He</option>'+
+        '<option value="X">X (dummy point)</option>'+
+        '<option selected>H</option><option>He</option>'+
         '<option>Li</option><option>Be</option><option>B</option><option>C</option><option>N</option><option>O</option><option>F</option><option>Ne</option>'+
         '<option>Na</option><option>Mg</option><option>Al</option><option>Si</option><option>P</option><option>S</option><option>Cl</option><option>Ar</option>'+
         '<option>K</option><option>Ca</option><option>Sc</option><option>Ti</option><option>V</option><option>Cr</option><option>Mn</option><option>Fe</option>'+
@@ -8502,7 +8624,21 @@ function showAddAtomModal(){
         '</select>'+
         '<label>Bond order:</label><select id="m-bond-order"><option value="1">Single (1.0)</option><option value="1.5">Aromatic (1.5)</option><option value="2">Double (2.0)</option><option value="3">Triple (3.0)</option></select>'+
         '<label>Bond length (A):</label><input type="number" id="m-val" value="1.09" step="0.01" min="0.3" max="5">'+
+        '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">'+
+        '<input type="checkbox" id="m-ghost" style="flex:0 0 auto;width:auto">'+
+        '<span>Ghost atom - no nucleus, no electrons, no bond</span></label>'+
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok" id="m-ok">OK</button></div>',null);
+    // A ghost carries no bond, and a dummy point has no element to bond with:
+    // the two controls that describe the new bond are turned off rather than
+    // silently ignored, so the dialog says what it will do.
+    var ghostSync=function(){
+        var g=document.getElementById('m-ghost');
+        var el=document.getElementById('m-elem');
+        if(!g||!el)return;
+        var isG=g.checked||el.value==='X';
+        var bo=document.getElementById('m-bond-order');
+        if(bo){bo.disabled=isG;bo.title=isG?'A ghost atom is never bonded':''}
+    };
     document.getElementById('m-elem').addEventListener('change',function(){
         var defaults={H:1.09,He:1.30,Li:2.12,Be:1.67,B:1.58,C:1.54,N:1.47,O:1.43,F:1.36,Ne:1.35,
             Na:1.88,Mg:1.63,Al:1.84,Si:1.87,P:1.80,S:1.82,Cl:1.77,Ar:1.74,
@@ -8515,13 +8651,25 @@ function showAddAtomModal(){
             Tm:2.26,Yb:2.26,Lu:2.26,Hf:2.23,Ta:2.22,W:2.18,Re:2.20,Os:2.19,
             Ir:2.16,Pt:2.13,Au:2.14,Hg:2.14,Tl:2.20,Pb:2.22,Bi:2.23};
         document.getElementById('m-val').value=defaults[this.value]||1.5;
+        ghostSync();
     });
+    document.getElementById('m-ghost').addEventListener('change',ghostSync);
     document.getElementById('m-ok').addEventListener('click',function(){
-        pushUndo();
-        provMark('addAtoms',1);
         var el=document.getElementById('m-elem').value;
         var bl=parseFloat(document.getElementById('m-val').value)||1.5;
         var bondOrder=parseFloat(document.getElementById('m-bond-order').value)||1;
+        var ghost=document.getElementById('m-ghost').checked||el==='X';
+        // Ghosts are refused in a periodic cell: every crystal format this
+        // viewer writes (CIF, POSCAR, VESTA, cube) states a species per site
+        // and has no way to say "this one has no nucleus", so a ghost would
+        // come back as a real atom on the next load.
+        if(ghost&&CRY){
+            hideModal();resetSelection();
+            modeInfoEl.textContent='Ghost atoms are not available for crystal structures';
+            return;
+        }
+        pushUndo();
+        provMark(ghost?'addGhostAtoms':'addAtoms',1);
         var dir={x:0,y:0,z:1};
         if(CRY){
             var baseAnchorIdx=anchor.baseIdx!=null?anchor.baseIdx:anchorIdx;
@@ -8562,9 +8710,21 @@ function showAddAtomModal(){
                 dir=pickFreeDirection(nbrs);
             }
             var newIdx=MD.atoms.length;
-            MD.atoms.push({element:el,x:anchor.x+dir.x*bl,y:anchor.y+dir.y*bl,z:anchor.z+dir.z*bl,color:MD.atomColors[el]||'#FF1493',index:newIdx});
-            MD.bonds.push({atom1:anchorIdx,atom2:newIdx,order:bondOrder});
+            var newAtom={element:el,x:anchor.x+dir.x*bl,y:anchor.y+dir.y*bl,z:anchor.z+dir.z*bl,color:MD.atomColors[el]||'#FF1493',index:newIdx};
+            if(ghost)newAtom.ghost=true;
+            MD.atoms.push(newAtom);
+            // The bond is the one thing a ghost does not get: a ghost has no
+            // valence, and bonding one to its anchor would make the bond
+            // perception, the force field and every saved format disagree about
+            // what it is. The anchor being a ghost is refused for the same
+            // reason - a point has nothing to bond with.
+            if(!ghost&&!isGhostAtom(anchor))MD.bonds.push({atom1:anchorIdx,atom2:newIdx,order:bondOrder});
             rebuildScene();hideModal();originalCoords=null;resetSelection();
+            if(ghost){
+                modeInfoEl.textContent='Added a ghost atom of '+(el==='X'?'no element (dummy point)':el)+' - not bonded';
+            }else if(isGhostAtom(anchor)){
+                modeInfoEl.textContent='Added '+el+' - not bonded: the anchor is a ghost atom';
+            }
         }
     });
     document.getElementById('m-cancel').addEventListener('click',function(){hideModal();originalCoords=null;resetSelection()});
@@ -8573,10 +8733,15 @@ function showAddAtomModal(){
 function showReplaceAtomModal(){
     if(selectedAtoms.length===0)return;
     var names=formatAtomList(selectedAtoms);
+    // Pre-ticking the box when everything selected is already a ghost makes the
+    // dialog show the state it will keep, so "Replace" on a ghost selection is
+    // not a silent un-ghosting.
+    var allGhost=selectedAtoms.every(function(i){return isGhostAtom(MD.atoms[i])});
     showModal('<h3>Replace Atom</h3>'+
         '<div class="current-val">Replace '+selectedAtoms.length+' atom(s): '+names+'</div>'+
         '<label>New element:</label><select id="m-elem">'+
-        '<option>H</option><option>He</option>'+
+        '<option value="X">X (dummy point)</option>'+
+        '<option selected>H</option><option>He</option>'+
         '<option>Li</option><option>Be</option><option>B</option><option>C</option><option>N</option><option>O</option><option>F</option><option>Ne</option>'+
         '<option>Na</option><option>Mg</option><option>Al</option><option>Si</option><option>P</option><option>S</option><option>Cl</option><option>Ar</option>'+
         '<option>K</option><option>Ca</option><option>Sc</option><option>Ti</option><option>V</option><option>Cr</option><option>Mn</option><option>Fe</option>'+
@@ -8588,34 +8753,130 @@ function showReplaceAtomModal(){
         '<option>Tm</option><option>Yb</option><option>Lu</option><option>Hf</option><option>Ta</option><option>W</option><option>Re</option><option>Os</option>'+
         '<option>Ir</option><option>Pt</option><option>Au</option><option>Hg</option><option>Tl</option><option>Pb</option><option>Bi</option>'+
         '</select>'+
+        '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">'+
+        '<input type="checkbox" id="m-ghost"'+(allGhost?' checked':'')+' style="flex:0 0 auto;width:auto">'+
+        '<span>Ghost - keep each atom\\'s element, drop its bonds</span></label>'+
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok" id="m-ok">Replace</button></div>',null);
+    var ghostSync=function(){
+        var g=document.getElementById('m-ghost');
+        var el=document.getElementById('m-elem');
+        if(!g||!el)return;
+        // Ticked: the element list has no say - every atom stays the element it
+        // already is and merely loses its nucleus. That is the gesture a
+        // counterpoise setup needs ("make this whole fragment ghosts"), and it
+        // is the only reading under which a mixed selection makes sense.
+        el.disabled=g.checked;
+        el.title=g.checked?'A ghost keeps each atom\\'s own element':'';
+    };
+    document.getElementById('m-ghost').addEventListener('change',ghostSync);
+    ghostSync();
     document.getElementById('m-ok').addEventListener('click',function(){
-        pushUndo();
-        provMark('replaceAtoms',selectedAtoms.length);
+        var ghost=document.getElementById('m-ghost').checked;
         var el=document.getElementById('m-elem').value;
+        if(ghost&&CRY){
+            hideModal();resetSelection();
+            modeInfoEl.textContent='Ghost atoms are not available for crystal structures';
+            return;
+        }
+        // Counted before the change so the title records what actually happened:
+        // a Replace that re-declares atoms already in the state asked for is not
+        // an edit and does not get a clause. Choosing X keeps an atom a ghost
+        // whatever the switch says - the dummy element *is* one - so a real
+        // conversion needs both the switch off and a real element.
+        var n=selectedAtoms.length,changedGhost=0,changedReal=0;
         selectedAtoms.forEach(function(idx){
             var a=MD.atoms[idx];
-            a.element=el;
-            a.color=MD.atomColors[el]||'#FF1493';
+            if(!a)return;
+            var was=isGhostAtom(a);
+            if(ghost&&!was)changedGhost++;
+            else if(!ghost&&was&&el!=='X')changedReal++;
+        });
+        pushUndo();
+        if(ghost){
+            if(changedGhost>0)provMark('ghostAtoms',changedGhost);
+        }else{
+            provMark('replaceAtoms',n);
+            if(changedReal>0)provMark('unghostAtoms',changedReal);
+        }
+        var becameReal=[];
+        selectedAtoms.forEach(function(idx){
+            var a=MD.atoms[idx];
+            if(!a)return;
+            if(ghost){
+                a.ghost=true;
+            }else{
+                if(isGhostAtom(a)&&el!=='X')becameReal.push(idx);
+                a.element=el;
+                a.ghost=false;
+                a.color=MD.atomColors[el]||'#FF1493';
+            }
             if(CRY){
                 var bi=a.baseIdx!=null?a.baseIdx:idx;
                 if(CRY.baseAtoms[bi]){
-                    CRY.baseAtoms[bi].element=el;
+                    CRY.baseAtoms[bi].element=a.element;
                     CRY.baseAtoms[bi].color=a.color;
+                    CRY.baseAtoms[bi].ghost=a.ghost;
                 }
             }
         });
+        // A ghost has no bonds, so becoming one takes the atom's bonds with it;
+        // becoming real again is the reverse - the atom is re-derived from the
+        // geometry the same way a load would, and only the bonds that touch a
+        // converted atom are added, so no existing bond changes.
+        dropGhostBonds();
+        if(becameReal.length>0)rebondAtoms(becameReal);
         if(CRY){rebuildCrystal();}
         rebuildScene();hideModal();originalCoords=null;resetSelection();
     });
     document.getElementById('m-cancel').addEventListener('click',function(){hideModal();originalCoords=null;resetSelection()});
 }
 
+/** Remove every bond that touches a ghost atom of the structure on screen. */
+function dropGhostBonds(){
+    if(MD.bonds.length===0)return;
+    var kept=MD.bonds.filter(function(b){
+        var a1=MD.atoms[b.atom1],a2=MD.atoms[b.atom2];
+        if(!a1||!a2)return false;
+        return !isGhostAtom(a1)&&!isGhostAtom(a2);
+    });
+    if(kept.length!==MD.bonds.length)MD.bonds=kept;
+}
+
+/**
+ * Give the named atoms the bonds a fresh perception would derive for them.
+ *
+ * Used when a ghost is turned back into a real atom: the ghost had no bonds, so
+ * the atom is left isolated by the change, and no other pass would reconnect it
+ * (the viewer only re-derives bonds for a moved region). The orders come from
+ * the same detector a load uses, and only bonds that touch one of the converted
+ * atoms and do not exist yet are added — a bond the structure already had is
+ * never rewritten by this.
+ */
+function rebondAtoms(indices){
+    if(!indices||indices.length===0)return;
+    var want={};
+    indices.forEach(function(i){want[i]=1});
+    var have={};
+    MD.bonds.forEach(function(b){
+        if(b.atom1==null||b.atom2==null)return;
+        have[Math.min(b.atom1,b.atom2)+'-'+Math.max(b.atom1,b.atom2)]=1;
+    });
+    var derived;
+    try{derived=detectBondsFromAtoms(MD.atoms,MD.charge)}catch(e){return}
+    derived.forEach(function(b){
+        if(!want[b.atom1]&&!want[b.atom2])return;
+        var key=Math.min(b.atom1,b.atom2)+'-'+Math.max(b.atom1,b.atom2);
+        if(have[key])return;
+        have[key]=1;
+        MD.bonds.push({atom1:Math.min(b.atom1,b.atom2),atom2:Math.max(b.atom1,b.atom2),order:b.order});
+    });
+}
+
 function showDeleteAtomModal(){
     var idx=selectedAtoms[0];
     var a=MD.atoms[idx];
     if(!a)return;
-    var name=a.element+(idx+1);
+    var name=atomLabel(a,idx);
     showModal('<h3>Delete Atom</h3>'+
         '<div class="current-val">Delete '+name+'?</div>'+
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok mbtn-danger" id="m-ok">Delete</button></div>',null);
@@ -8843,6 +9104,9 @@ function provEditText(e){
     var n=e.n||1;
     switch(e.k){
         case 'addAtoms':return n===1?'1 atom added':n+' atoms added';
+        case 'addGhostAtoms':return n===1?'1 ghost atom added':n+' ghost atoms added';
+        case 'ghostAtoms':return n===1?'1 atom made a ghost':n+' atoms made ghosts';
+        case 'unghostAtoms':return n===1?'1 ghost made real':n+' ghosts made real';
         case 'delAtoms':return n===1?'1 atom deleted':n+' atoms deleted';
         case 'cutAtoms':return n===1?'1 atom cut':n+' atoms cut';
         case 'pasteAtoms':return n===1?'1 atom pasted':n+' atoms pasted';
@@ -8949,8 +9213,20 @@ function doSave(){
     // format gets one line, with the original title kept after a '|'.
     var saveTitle=provTitle(MD.title||'Modified structure',true);
     var gjfTitle=provTitle(MD.title||'Modified structure',false);
+    var nGhosts=0;
+    MD.atoms.forEach(function(a){if(isGhostAtom(a))nGhosts++});
+    // How each format spells a ghost, and how it spells one that stands for a
+    // named element. The two programs that have a ghost concept at all take the
+    // element with them - Gaussian's C-Bq and ORCA's C: both mean "the basis
+    // functions of a carbon, no nucleus" - and every other format here can only
+    // say "a point", so it gets the dummy spelling. That is deliberate: a ghost
+    // must never come back as a real atom, and X (or Du, q, *, XX) is
+    // the one thing those readers agree is not one.
+    var xyzEl=function(a){return isGhostAtom(a)?'X':a.element};
+    var gjfEl=function(a){return isGhostAtom(a)?(a.element==='X'?'Bq':a.element+'-Bq'):a.element};
+    var orcaEl=function(a){return isGhostAtom(a)?(a.element==='X'?'X':a.element+':'):a.element};
     var xyz=MD.atoms.length+'\\n'+saveTitle+'\\n';
-    MD.atoms.forEach(function(a){xyz+=a.element+'  '+a.x.toFixed(6)+'  '+a.y.toFixed(6)+'  '+a.z.toFixed(6)+'\\n'});
+    MD.atoms.forEach(function(a){xyz+=xyzEl(a)+'  '+a.x.toFixed(6)+'  '+a.y.toFixed(6)+'  '+a.z.toFixed(6)+'\\n'});
     var gjf='';
     var meta=MD.gjfMeta;
     if(meta){
@@ -8970,7 +9246,7 @@ function doSave(){
         gjf='%chk=molecule.chk\\n%mem=4GB\\n%nproc=4\\n# B3LYP/6-31G(d)\\n\\n'+saveTitle+'\\n\\n0 1\\n';
     }
     MD.atoms.forEach(function(a){
-        var el=a.element; while(el.length<2) el+=' ';
+        var el=gjfEl(a); while(el.length<2) el+=' ';
         var sx=a.x.toFixed(8); while(sx.length<17) sx=' '+sx;
         var sy=a.y.toFixed(8); while(sy.length<17) sy=' '+sy;
         var sz=a.z.toFixed(8); while(sz.length<17) sz=' '+sz;
@@ -9005,20 +9281,28 @@ function doSave(){
 
     var coord='$coord\\n';
     var ANG_TO_BOHR=1.8897259886;
-    MD.atoms.forEach(function(a){coord+='  '+(a.x*ANG_TO_BOHR).toFixed(8)+'  '+(a.y*ANG_TO_BOHR).toFixed(8)+'  '+(a.z*ANG_TO_BOHR).toFixed(8)+' '+a.element.toLowerCase()+'\\n'});
+    // TURBOMOLE's dummy atom is q in $coord; it has no way to say which
+    // element a ghost stands for, so an elemental ghost is written the same way.
+    MD.atoms.forEach(function(a){coord+='  '+(a.x*ANG_TO_BOHR).toFixed(8)+'  '+(a.y*ANG_TO_BOHR).toFixed(8)+'  '+(a.z*ANG_TO_BOHR).toFixed(8)+' '+(isGhostAtom(a)?'q':a.element.toLowerCase())+'\\n'});
     coord+='$end\\n';
     if(chrg!==0)coord+='$chrg '+chrg+'\\n';
     if(mult!==1)coord+='$spin '+(mult-1)/2+'\\n';
 
     // ORCA's first line is a comment line, so the provenance is one there and
-    // the keywords keep their own line below it.
+    // the keywords keep their own line below it. ORCA spells a ghost with a
+    // colon after the element and a dummy with X.
     var orcaInp='# '+saveTitle+'\\n! B3LYP def2-SVP\\n\\n* xyz '+chrg+' '+mult+'\\n';
-    MD.atoms.forEach(function(a){orcaInp+=a.element+' '+a.x.toFixed(6)+' '+a.y.toFixed(6)+' '+a.z.toFixed(6)+'\\n'});
+    MD.atoms.forEach(function(a){orcaInp+=orcaEl(a)+' '+a.x.toFixed(6)+' '+a.y.toFixed(6)+' '+a.z.toFixed(6)+'\\n'});
     orcaInp+='*\\n';
 
+    // Tripos knows one dummy: atom type Du, which is also the only field a
+    // MOL2 atom line can carry it in.
     var mol2='@<TRIPOS>MOLECULE\\n'+saveTitle+'\\n'+MD.atoms.length+' '+MD.bonds.length+' 0 0 0\\nSMALL\\nNO_CHARGES\\n\\n';
     mol2+='@<TRIPOS>ATOM\\n';
-    MD.atoms.forEach(function(a,i){mol2+=(i+1)+' '+a.element+' '+a.x.toFixed(6)+' '+a.y.toFixed(6)+' '+a.z.toFixed(6)+' '+a.element+' 1 UNK 0.000\\n'});
+    MD.atoms.forEach(function(a,i){
+        if(isGhostAtom(a)){mol2+=(i+1)+' X'+(i+1)+' '+a.x.toFixed(6)+' '+a.y.toFixed(6)+' '+a.z.toFixed(6)+' Du 1 UNK 0.000\\n';return}
+        mol2+=(i+1)+' '+a.element+' '+a.x.toFixed(6)+' '+a.y.toFixed(6)+' '+a.z.toFixed(6)+' '+a.element+' 1 UNK 0.000\\n';
+    });
     mol2+='@<TRIPOS>BOND\\n';
     var bondIdx=1;
     MD.bonds.forEach(function(b){
@@ -9032,14 +9316,16 @@ function doSave(){
 
     var mol=saveTitle+'\\n '+MD.atoms.length+'  '+MD.bonds.length+'  0  0  0  0  0  0  0  0999 V2000\\n';
     MD.atoms.forEach(function(a){
-        var z=AN2[a.element]||0;
+        // MDL's dummy is the * wildcard atom (a ghost has no element to name
+        // and no nuclear charge to write, which is exactly what * says).
+        var sym=isGhostAtom(a)?'*':a.element;
         var sx=(a.x*10).toFixed(4);
         var sy=(a.y*10).toFixed(4);
         var sz=(a.z*10).toFixed(4);
         while(sx.length<10)sx=' '+sx;
         while(sy.length<10)sy=' '+sy;
         while(sz.length<10)sz=' '+sz;
-        mol+=sx+sy+sz+' '+a.element+' 0  0  0  0  0  0  0  0  0  0  0  0\\n';
+        mol+=sx+sy+sz+' '+sym+' 0  0  0  0  0  0  0  0  0  0  0  0\\n';
     });
     MD.bonds.forEach(function(b){
         var bt=1;
@@ -9057,19 +9343,24 @@ function doSave(){
 
     // PDB owns a TITLE record, so the provenance goes in there (wrapped at 60
     // characters per record with a continuation number) instead of being lost.
+    // A ghost is written with the element column X (the standard unknown/dummy
+    // symbol) and the residue DUM, so a PDB reader shows a dummy instead of
+    // reading a ghost as the atom it stands for.
     var pdb=provPdbTitle(saveTitle);
     MD.atoms.forEach(function(a,i){
+        var gh=isGhostAtom(a);
         var serial=(i+1).toString();while(serial.length<5)serial=' '+serial;
+        var sym=gh?'X':a.element;
         var name;
-        if(a.element.length===1){name=' '+a.element+'  '}
-        else{name=a.element+'  '}
+        if(sym.length===1){name=' '+sym+'  '}
+        else{name=sym+'  '}
         var sx=a.x.toFixed(3);while(sx.length<8)sx=' '+sx;
         var sy=a.y.toFixed(3);while(sy.length<8)sy=' '+sy;
         var sz=a.z.toFixed(3);while(sz.length<8)sz=' '+sz;
-        var el=a.element.charAt(0).toUpperCase();
-        if(a.element.length>1)el+=a.element.charAt(1).toLowerCase();
+        var el=sym.charAt(0).toUpperCase();
+        if(sym.length>1)el+=sym.charAt(1).toLowerCase();
         while(el.length<2)el=' '+el;
-        pdb+='ATOM  '+serial+name+'UNK A   1    '+sx+sy+sz+'  1.00  0.00          '+el+'\\n';
+        pdb+=(gh?'HETATM':'ATOM  ')+serial+name+(gh?'DUM':'UNK')+' A   1    '+sx+sy+sz+'  1.00  0.00          '+el+'\\n';
     });
     MD.bonds.forEach(function(b){
         var a1=(b.atom1+1).toString();while(a1.length<5)a1=' '+a1;
@@ -9082,9 +9373,11 @@ function doSave(){
     var chrgStr=chrg!==0?' CHARGE='+chrg:'';
     var multStr=mult!==1?' MS='+mult:'';
     mopac+='PM7'+chrgStr+multStr+'\\n\\n';
+    // MOPAC's dummy atom is XX (X on newer versions); a ghost has no parameters
+    // to run with, so it is only a geometry point there.
     MD.atoms.forEach(function(a){
         var sx=a.x.toFixed(5);var sy=a.y.toFixed(5);var sz=a.z.toFixed(5);
-        mopac+=a.element+' '+sx+' 1 '+sy+' 1 '+sz+' 1\\n';
+        mopac+=(isGhostAtom(a)?'XX':a.element)+' '+sx+' 1 '+sy+' 1 '+sz+' 1\\n';
     });
     mopac+='\\n';
 
@@ -9192,7 +9485,17 @@ function doSave(){
         ?'<div class="current-val">Coordinates include a manual displacement: '+
             vdCompsText()+'.</div>'
         :'';
-    showModal('<h3>Save File</h3>'+vdNote+
+    // A ghost survives the trip into every format, but not in the same words -
+    // and in the formats that have no ghost concept it can only survive as a
+    // dummy point. Saying which is which is the difference between a counterpoise
+    // input and a file that quietly contains an extra atom.
+    var ghostNote=nGhosts>0
+        ?'<div class="current-val"><b>'+nGhosts+' ghost atom'+(nGhosts===1?'':'s')+'</b>: '+
+            'written as <code>C-Bq</code> in the Gaussian input and <code>C:</code> in the ORCA input '+
+            '(element kept), and as a dummy point - <code>X</code> / <code>Du</code> / <code>q</code> / '+
+            '<code>*</code> / <code>XX</code> - in the formats that have no ghost atom.</div>'
+        :'';
+    showModal('<h3>Save File</h3>'+vdNote+ghostNote+
         '<label>Format:</label><select id="m-fmt">'+
         '<option value="xyz">XYZ (.xyz)</option>'+
         '<option value="gjf">Gaussian Input (.gjf)</option>'+
@@ -9825,7 +10128,7 @@ canvas.addEventListener('mousemove',function(e){
         if(hitsD&&hitsD.length>0){
             var o=hitsD[0].object,i=o.userData.index;
             var a=diffMode&&o.userData.diffHi!==undefined&&localX>=halfW?diffData.atoms[i]:MD.atoms[i];
-            tooltipEl.textContent=a.element+(i+1)+' ('+a.x.toFixed(4)+', '+a.y.toFixed(4)+', '+a.z.toFixed(4)+')';
+            tooltipEl.textContent=atomLabel(a,i)+(isGhostAtom(a)?' (ghost)':'')+' ('+a.x.toFixed(4)+', '+a.y.toFixed(4)+', '+a.z.toFixed(4)+')';
             tooltipEl.style.display='block';
             tooltipEl.style.left=(e.clientX-container.getBoundingClientRect().left+15)+'px';
             tooltipEl.style.top=(e.clientY-container.getBoundingClientRect().top-10)+'px';
@@ -9837,7 +10140,7 @@ canvas.addEventListener('mousemove',function(e){
     raycaster.setFromCamera(mouse,camera);
     var hits=raycaster.intersectObjects(atomMeshes);
     if(hits.length>0){var o=hits[0].object,i=o.userData.index,a=MD.atoms[i];
-        tooltipEl.textContent=a.element+(i+1)+' ('+a.x.toFixed(4)+', '+a.y.toFixed(4)+', '+a.z.toFixed(4)+')';
+        tooltipEl.textContent=atomLabel(a,i)+(isGhostAtom(a)?' (ghost)':'')+' ('+a.x.toFixed(4)+', '+a.y.toFixed(4)+', '+a.z.toFixed(4)+')';
         tooltipEl.style.display='block';
         tooltipEl.style.left=(e.clientX-container.getBoundingClientRect().left+15)+'px';
         tooltipEl.style.top=(e.clientY-container.getBoundingClientRect().top-10)+'px';

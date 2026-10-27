@@ -55,7 +55,12 @@ export function parseMopac(content: string): MolecularData {
                 const y = parseFloat(parts[2]);
                 const z = parseFloat(parts[3]);
                 if (!isNaN(x) && !isNaN(y) && !isNaN(z)) {
-                    fallbackAtoms.push({ element: elem, x, y, z, index: fallbackAtoms.length });
+                    const atom: Atom = { element: elem, x, y, z, index: fallbackAtoms.length };
+                    if (elem === 'X' || elem === 'Xx' || elem === 'XX') {
+                        atom.element = 'X';
+                        atom.ghost = true;
+                    }
+                    fallbackAtoms.push(atom);
                 }
             }
         }
@@ -115,7 +120,6 @@ export function parseMopac(content: string): MolecularData {
         const zVal = parseFloat(parts[5]);
 
         if (isNaN(xVal) || isNaN(yVal) || isNaN(zVal)) continue;
-
         let x: number, y: number, z: number;
         const xLabel = parts.length > 2 ? parts[2] : '';
         const yLabel = parts.length > 4 ? parts[4] : '';
@@ -134,7 +138,14 @@ export function parseMopac(content: string): MolecularData {
             x = xVal; y = yVal; z = zVal;
         }
 
-        atoms.push({ element: elem, x, y, z, index: atomIndex });
+        // MOPAC's dummy atom is `XX` (and `X` on newer versions); both resolve
+        // to the element `X` here, which is the viewer's dummy spelling.
+        const atom: Atom = { element: elem, x, y, z, index: atomIndex };
+        if (elem === 'X' || elem === 'Xx' || elem === 'XX') {
+            atom.element = 'X';
+            atom.ghost = true;
+        }
+        atoms.push(atom);
         atomIndex++;
     }
 
