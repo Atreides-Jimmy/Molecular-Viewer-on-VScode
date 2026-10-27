@@ -35,6 +35,44 @@ export interface Bond {
     shift?: [number, number, number];
 }
 
+/**
+ * One atom site exactly as the file lists it — the asymmetric unit — together
+ * with the symmetry operations that actually placed an image of it.
+ *
+ * `baseAtoms` is the *expanded* cell: every site multiplied by every operation
+ * and deduplicated. That is what the viewer draws, but it cannot answer "what
+ * does the file itself contain", which is the question a save-back to CIF has
+ * to answer (writing the expanded cell under the full operation list would
+ * expand it again on the next read). Keeping the original sites alongside makes
+ * that answerable without re-reading the file.
+ *
+ * Nothing but the parser writes this. Every other pass may read it; a pass that
+ * edits coordinates must keep editing `baseAtoms`, because the asymmetric unit
+ * is a record of the file, not of the session.
+ */
+export interface AsymAtom {
+    element: string;
+    /** Site label as written (`C12`, `O1W`); empty when the file has none. */
+    label: string;
+    /** Cartesian position of the site (the identity image), in Angstrom. */
+    x: number;
+    y: number;
+    z: number;
+    /** Fractional position as listed, wrapped into [0, 1). */
+    frac: [number, number, number];
+    /** Position in `asymAtoms` — the index an `asymBonds` entry refers to. */
+    index: number;
+    occupancy?: number;
+    /**
+     * Indices into `CrystalData.symmetryOps` whose image of this site survived
+     * deduplication, in increasing order. A site on a special position lists
+     * fewer operations than the file declares; a site whose images all landed
+     * on atoms already placed (a duplicate site) lists none. Identity is index 0
+     * only when the file happens to list it first.
+     */
+    symmetryOps: number[];
+}
+
 export interface CrystalData {
     a: number;
     b: number;
@@ -47,6 +85,18 @@ export interface CrystalData {
     symmetryOps: string[];
     baseAtoms: Atom[];
     baseBonds: Bond[];
+    /**
+     * The asymmetric unit the file lists (see `AsymAtom`). Optional because
+     * only the formats that state symmetry fill it: a POSCAR or a VESTA file is
+     * already one cell with no operations, and a cube file has no cell at all.
+     */
+    asymAtoms?: AsymAtom[];
+    /**
+     * Bonds among `asymAtoms`, by their `index`. Present only when a format
+     * states bonds for the asymmetric unit itself; a CIF's `_geom_bond` loop is
+     * not read yet, so this stays undefined rather than being invented.
+     */
+    asymBonds?: Bond[];
 }
 
 export interface GjfMeta {
@@ -154,6 +204,17 @@ export interface MolecularData {
     charge?: number;
     multiplicity?: number;
     atomGroups?: AtomGroup[];
+    /**
+     * Things the parser had to work around, in the file's own terms ("no
+     * symmetry operations in the file: read as P1"). The viewer shows them as
+     * one line in the structure panel; they are never a substitute for the
+     * structure itself, only an explanation of what it is.
+     *
+     * A parser reports a problem here instead of throwing or silently
+     * substituting a default: a CIF whose cell is missing comes back as an
+     * empty structure with a warning, not as a structure with a 1 A cube.
+     */
+    warnings?: string[];
     /** Present when the structure was loaded through a VMD visualization script. */
     vmd?: VmdScene;
     crystal?: CrystalData;

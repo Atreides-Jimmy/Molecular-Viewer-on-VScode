@@ -1360,7 +1360,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             maxDisplacement: optThresholds.maxDisplacement, rmsDisplacement: optThresholds.rmsDisplacement
         } : null;
 
-        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, optThresholds: optThresholdsData, routes: routesData, vmd: vmdData, autoBeta: !!(autoBeta && !vmdData), hasExplicitBonds: !!data.hasExplicitBonds, mmParams: describeForceField() });
+        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, optThresholds: optThresholdsData, routes: routesData, vmd: vmdData, autoBeta: !!(autoBeta && !vmdData), hasExplicitBonds: !!data.hasExplicitBonds, warnings: data.warnings || [], mmParams: describeForceField() });
 
         // The bond perception module, as source. Both sides run this text —
         // the host calls the compiled function directly, the webview evaluates
@@ -1837,7 +1837,7 @@ function updateMolInfo(){
         html+='<br>Unit Cell: '+formulaFromAtoms(CRY.baseAtoms);
         html+='<br>Cell: '+CRY.a.toFixed(3)+' × '+CRY.b.toFixed(3)+' × '+CRY.c.toFixed(3);
         html+='<br>Angles: '+CRY.alpha.toFixed(1)+'°, '+CRY.beta.toFixed(1)+'°, '+CRY.gamma.toFixed(1)+'°';
-        if(CRY.spaceGroup)html+='<br>SG: '+CRY.spaceGroup;
+        if(CRY.spaceGroup)html+='<br>SG: '+escapeHtml(CRY.spaceGroup);
         html+='<br>Supercell: '+sa.toFixed(2)+'×'+sb.toFixed(2)+'×'+sc.toFixed(2);
     }
     if(VMD&&VMD.molecules[vmdMolIdx]){
@@ -1850,6 +1850,17 @@ function updateMolInfo(){
         if(vm.segments.length)html+='<br>Surfaces: '+vm.segments.length;
         var warns=(VMD.warnings||[]).concat(vm.warnings||[]);
         if(warns.length)html+='<br><span style="color:#e8a33d">⚠ '+warns.length+' script warning'+(warns.length===1?'':'s')+'</span>';
+    }
+    // What the parser had to work around ("read as P1", "unit cell incomplete"),
+    // one line: the first warning verbatim plus how many others there are. It
+    // sits last so it never pushes the composition off the panel, and the text
+    // is escaped because a file's own words (a site label, a space-group name)
+    // can contain anything. Nothing is added when the parser was happy, so an
+    // ordinary structure reads exactly as it always did.
+    var parseWarn=MD.warnings||[];
+    if(parseWarn.length){
+        html+='<br><span style="color:#e8a33d">⚠ '+escapeHtml(parseWarn[0])+
+            (parseWarn.length>1?' (+'+(parseWarn.length-1)+' more)':'')+'</span>';
     }
     infoEl.innerHTML=html;
 }
