@@ -1481,6 +1481,10 @@ input,textarea{-webkit-user-select:text;user-select:text}
 #view-panel .vp-title,#bake-panel .vp-title{font-size:12px;font-weight:bold;margin-bottom:6px}
 #view-panel .tbtn,#bake-panel .tbtn{width:100%;text-align:center}
 #view-panel .vp-hint,#bake-panel .vp-hint{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:6px;line-height:1.4}
+/* The drawing style is the second section of the View card, under Auto Rotate;
+   its own title needs the top margin the shared .vp-title does not carry. */
+#view-panel .vp-sub{margin-top:10px}
+#view-panel select{width:100%;padding:3px 4px;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:3px;font-size:11px;box-sizing:border-box;cursor:pointer}
 canvas{display:block}
 #atom-tooltip{position:absolute;display:none;color:var(--vscode-editor-foreground,#ccc);font-size:12px;background:var(--vscode-editor-background,#1e1e1e);padding:4px 8px;border-radius:3px;border:1px solid var(--vscode-panel-border,#444);pointer-events:none;z-index:30}
 #box-select-rect{position:fixed;display:none;border:1px dashed #ffeb3b;background:rgba(255,235,59,0.12);pointer-events:none;z-index:40}
@@ -1666,7 +1670,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="vp-title">Auto Rotate</div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div></div><div id="bake-panel"><div class="vp-title">Edit Coordinates</div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="vp-title">Auto Rotate</div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div><div class="vp-title vp-sub">Display</div><select id="style-select" title="How the structure is drawn: ball and stick (the default), van der Waals spheres, or sticks without the atom spheres"><option value="ball">Ball &amp; Stick</option><option value="spacefill">Space-filling</option><option value="stick">Stick</option></select></div><div id="bake-panel"><div class="vp-title">Edit Coordinates</div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="box-select-rect"></div>
@@ -1700,6 +1704,53 @@ function atomLabel(a,i){
     if(!a)return '?';
     var el=isGhostAtom(a)?(a.element==='X'?'X':a.element+'*'):a.element;
     return el+((typeof i==='number')?(i+1):'');
+}
+// ===== Display style =====
+// A structure can be drawn three ways, and the choice belongs to the view, not
+// to a mode: it is one variable here, above every block that reads it, and the
+// toolbar switching tools never touches it - which is what makes a style chosen
+// in View still be there in Bond Length, Move Atoms, MM Optimize or Diff, and
+// what makes a frame, molecule or undo switch keep it too.
+//
+//   'ball'      the drawing this viewer has always produced: a sphere of half
+//               the covalent radius per atom, cylinders between them.
+//   'spacefill' each atom as its van der Waals sphere, and no sticks at all -
+//               the model space-filling/CPK means.
+//   'stick'     the sticks stay, and every sphere shrinks to the thickness of
+//               the sticks that meet at it, so the model reads as tubes with no
+//               beads (and no notch at a bend, because the joint fills it).
+//
+// Only two places in the page read it - the atom radius of rebuildScene (and of
+// the comparison's right half) and the piece builder createBond - so one part
+// of the picture cannot be drawn in one style and another part in another.
+var displayStyle='ball';
+var DISPLAY_STYLES={ball:1,spacefill:1,stick:1};
+// van der Waals radii: the same table the host resolves a script's Surf probe
+// and the VDW representation against (src/parsers/vmdVisualization.ts). It is
+// copied rather than injected because the page's HTML is a template literal
+// whose substitution list the test harnesses pin; verify_display_style.js
+// compares the two copies element by element, so a drift fails a test rather
+// than silently drawing atoms at the wrong size.
+var VDW_R={H:1.00,He:1.40,Li:1.82,Be:1.53,B:1.92,C:1.70,N:1.55,O:1.52,
+    F:1.47,Ne:1.54,Na:2.27,Mg:1.73,Al:1.84,Si:2.10,P:1.80,S:1.80,Cl:1.75,
+    Ar:1.88,K:2.75,Ca:2.31,Sc:2.30,Ti:2.15,V:2.05,Cr:2.05,Mn:2.05,Fe:2.05,
+    Co:2.00,Ni:2.00,Cu:2.00,Zn:2.10,Ga:1.87,Ge:2.11,As:1.85,Se:1.90,Br:1.85,
+    Kr:2.02,Rb:3.03,Sr:2.49,Y:2.40,Zr:2.30,Nb:2.15,Mo:2.10,Ru:2.05,Rh:2.00,
+    Pd:2.05,Ag:2.10,Cd:2.20,In:2.20,Sn:2.25,Sb:2.20,Te:2.06,I:1.98,Xe:2.16,
+    Cs:3.43,Ba:2.68,La:2.50,Ce:2.48,Hf:2.25,Ta:2.20,W:2.10,Re:2.05,Os:2.00,
+    Ir:2.00,Pt:2.05,Au:2.10,Hg:2.05,Tl:2.20,Pb:2.30,Bi:2.30,Th:2.40,U:2.30};
+var DEFAULT_VDW_R=1.50;
+// The viewer's own bond radius: the radius of a cylinder whose bond carries
+// none, and the reference a script's bond radius is rebased against on the host
+// (VIEWER_BOND_RADIUS there, the same 0.12). It is also the joint a stick model
+// puts at an atom that has nothing thicker to match.
+var BOND_R=0.12;
+var STICK_JOINT_R=BOND_R;
+// Radius of one bond's cylinders: what a script asked for, or the default. The
+// stick model's joints read the same number, so a joint is exactly as thick as
+// the sticks it caps and a script that draws thin lines does not grow beads.
+function bondPieceRadius(b){
+    return (b&&typeof b.vmdR==='number')?b.vmdR:BOND_R;
 }
 var CRY=MD.crystal||null;
 // ===== VMD visualization script =====
@@ -1897,6 +1948,46 @@ function atomRadius(a){
     if(isGhostAtom(a))return typeof a.vmdScale==='number'?(GHOST_RADIUS*a.vmdScale):GHOST_RADIUS;
     var r=getR(a.element);
     return typeof a.vmdScale==='number'?r*a.vmdScale:r;
+}
+// Radius the *current display style* draws one atom with. 'ball' is exactly
+// atomRadius, so the default drawing cannot drift from what it always was, and
+// the value is returned unchanged - not multiplied by 1. A ghost is the same
+// small marker in every style: it is a point without a nucleus, so neither a
+// van der Waals sphere nor a stick joint is a meaningful size for it.
+//
+// A space-filling sphere is the element's van der Waals radius, which is the one
+// length in the picture that is a property of the atom rather than of the
+// drawing. A script's per-atom sphere scale is deliberately *not* applied here:
+// that scale is a ratio inside its ball-and-stick recipe (and a zero means "this
+// representation draws no sphere for it"), so applying it would keep a
+// space-filling model relative to a drawing it is replacing, and would let a
+// subset selection empty the picture - the spheres and the sticks are the two
+// things the style decides, and the script's colours and surfaces still apply.
+//
+// A stick joint is jointR, the thickest stick meeting at that atom (see
+// stickJointRadii); an atom with no sticks at all is drawn at the default stick
+// thickness instead, so an isolated ion does not vanish.
+function drawnRadius(a,jointR){
+    if(displayStyle==='ball')return atomRadius(a);
+    if(isGhostAtom(a))return atomRadius(a);
+    if(displayStyle==='spacefill')return VDW_R[a.element]||DEFAULT_VDW_R;
+    return jointR>0?jointR:STICK_JOINT_R;
+}
+// Thickness of the sticks meeting at each atom, in one pass over the bond list:
+// the stick style's joint is exactly as thick as the bond it caps, so a script
+// that draws thin lines (or a structure whose bonds are thin) does not end up
+// with beads at its atoms. Bonds a script draws at radius 0 do not thicken
+// anything - nothing is drawn there to fill.
+function stickJointRadii(){
+    var out=new Float32Array(MD.atoms.length);
+    for(var i=0;i<MD.bonds.length;i++){
+        var b=MD.bonds[i];
+        var r=bondPieceRadius(b);
+        if(!(r>0))continue;
+        if(b.atom1<out.length&&r>out[b.atom1])out[b.atom1]=r;
+        if(b.atom2<out.length&&r>out[b.atom2])out[b.atom2]=r;
+    }
+    return out;
 }
 
 function getOccupancyTexture(color,occupancy){
@@ -2811,10 +2902,14 @@ function rebuildScene(){
     // no real structure reaches. Only the cache is emptied: the meshes on
     // screen hold their own references, so nothing about the picture changes.
     if(Object.keys(matPool).length>8192)matPool={};
+    // The stick style's joints are the thickness of the sticks meeting at each
+    // atom, read off the bond list once for the whole build. The other two
+    // styles do not consult it, so the pass is skipped rather than paid for.
+    var stickR=(displayStyle==='stick')?stickJointRadii():null;
     MD.atoms.forEach(function(a,i){
         a.index=i;
         var gh=isGhostAtom(a);
-        var r=atomRadius(a);
+        var r=drawnRadius(a,stickR?stickR[i]:0);
         var drawn=r>0.0005;
         // 标量配色是视图状态: 在这里按原子现算, a.color 保持元素颜色不变。
         // A ghost has no element colour and no scalar to show: it keeps the one
@@ -3481,13 +3576,19 @@ function createBond(b){
     // snapshot, or one built before an atom became a ghost, must not draw a
     // stick into a point either.
     if(isGhostAtom(a1)||isGhostAtom(a2))return;
+    // A space-filling model has no sticks: its spheres are van der Waals
+    // spheres, which already touch, so a cylinder between two atom centres would
+    // only show where it pokes out of them. This is the one door a piece is
+    // declared through - the scene build, a moved region's rebuild and a
+    // comparison's halves all come here - so no path can leave a stick behind.
+    if(displayStyle==='spacefill')return;
     // A VMD script sets the bond radius per bond (the representation that
     // covers both endpoints); 0 means the script does not draw it at all.
-    var br=typeof b.vmdR==='number'?b.vmdR:0.12;
+    var br=bondPieceRadius(b);
     if(br<=0.0005)return;
     var ord=b.order||1;
     // Multiple-bond line offsets keep their proportions to the bond radius.
-    var offK=br/0.12;
+    var offK=br/BOND_R;
     // 键的两半跟随它连的原子: 标量 (Beta) 配色下原子球是按标量画视图色, 这里
     // 让半键读同一个颜色, 一根键两半就与两端原子一致。betaColorOf 在配色关闭
     // (或原子没有标量) 时返回 null, 退化成元素颜色, 非 Beta 文件的行为不变。
@@ -6312,6 +6413,86 @@ diffReopenEl.addEventListener('click',function(){
     layoutPanels();
 });
 
+// Build the comparison's right-hand model: one sphere per atom and two cylinder
+// pieces per bond, drawn in the current display style exactly as the left-hand
+// half is (that half is the ordinary scene, which rebuildScene rebuilds).
+//
+// hiAtom is keyed by right-hand atom index and hiBond by the pair of
+// left-hand indices a bond maps to - the key this half has always used for its
+// bond marks - so a caller can hand over either the sets the difference
+// computation just produced or the ones already on screen.
+//
+// The model is built in place rather than by re-entering the comparison, so the
+// two view states, the camera and the pan stay where the user put them.
+function buildDiffModel(hiAtom,hiBond){
+    if(!diffMolGroup||!diffData)return;
+    var i;
+    for(i=0;i<diffAtomMeshes.length;i++){
+        diffMolGroup.remove(diffAtomMeshes[i]);
+        disposeMesh(diffAtomMeshes[i]);
+    }
+    diffAtomMeshes=[];
+    var dSegs=sphereSegs(diffData.atoms.length);
+    diffData.atoms.forEach(function(a,i){
+        var gh=isGhostAtom(a);
+        // The same radius rule as the left half — the default balls, van der
+        // Waals spheres, or a joint as thick as the sticks. A comparison's atoms
+        // carry no script scale, so there is none to apply.
+        var r=drawnRadius({element:a.element,ghost:gh},0);
+        var isHi=hiAtom[i]===true;
+        // Same pooled geometry and material scheme as the left-hand structure:
+        // a comparison of two large structures draws its two sides from a
+        // handful of objects instead of one per atom. A ghost is the small
+        // faint marker it is on the left, so the two halves read the same way.
+        var diffCol=gh?GHOST_COLOR:a.color;
+        var mesh=new THREE.Mesh(sphereGeoFor(r,dSegs),diffAtomMaterial(diffCol,isHi?2:0,gh));
+        mesh.position.set(a.x-diffCX,a.y-diffCY,a.z-diffCZ);
+        mesh.userData={element:a.element,index:i,diffHi:isHi,baseColor:diffCol,ghost:gh};
+        diffMolGroup.add(mesh);
+        diffAtomMeshes.push(mesh);
+    });
+
+    // The right-hand bonds: two pieces per bond (one per half), each carrying
+    // the transform it is drawn with. The comparison's structure never moves,
+    // so a piece stores its own numbers and the highlight can be re-applied by
+    // refilling the two pools rather than editing a material per mesh. A
+    // space-filling model draws no sticks at all; this half has its own piece
+    // list, so it takes the same decision as createBond rather than inheriting
+    // it.
+    diffBondPieces.length=0;
+    if(displayStyle!=='spacefill')diffData.bonds.forEach(function(b){
+        var a1=diffData.atoms[b.atom1],a2=diffData.atoms[b.atom2];
+        if(!a1||!a2)return;
+        var sx=a1.x-diffCX,sy=a1.y-diffCY,sz=a1.z-diffCZ;
+        var ex=a2.x-diffCX,ey=a2.y-diffCY,ez=a2.z-diffCZ;
+        var dx=ex-sx,dy=ey-sy,dz=ez-sz;
+        var l=Math.sqrt(dx*dx+dy*dy+dz*dz);
+        if(l<0.001)return;
+        var mpx=(sx+ex)*0.5,mpy=(sy+ey)*0.5,mpz=(sz+ez)*0.5;
+        var origI1=diffReverseMapping?diffReverseMapping[b.atom1]:-1;
+        var origI2=diffReverseMapping?diffReverseMapping[b.atom2]:-1;
+        var bondKey=Math.min(origI1,origI2)+'-'+Math.max(origI1,origI2);
+        var isHi=hiBond[bondKey]===true;
+        addDiffBondPiece(sx,sy,sz,mpx-sx,mpy-sy,mpz-sz,l/2,BOND_R,new THREE.Color(a1.color),bondKey,isHi);
+        addDiffBondPiece(mpx,mpy,mpz,ex-mpx,ey-mpy,ez-mpz,l/2,BOND_R,new THREE.Color(a2.color),bondKey,isHi);
+    });
+    diffBuildBondPools();
+}
+
+// Rebuild that model from the state on screen, for a change of drawing style:
+// the marks the difference computation put on the two halves are read back off
+// the meshes and pieces before they are replaced, so restyling a comparison
+// keeps its differences marked and keeps the right-hand selection glowing.
+function rebuildDiffModel(){
+    if(!diffMode||!diffMolGroup)return;
+    var hiAtom={},hiBond={};
+    diffAtomMeshes.forEach(function(m,i){if(m.userData.diffHi)hiAtom[i]=true});
+    diffBondPieces.forEach(function(p){if(p.hi)hiBond[p.key]=true});
+    buildDiffModel(hiAtom,hiBond);
+    highlightSelected();
+    needsRender=true;
+}
+
 function enterDiffRender(diffs,mapping){
     if(vibActive||vibPaused)stopVibration();
     stopMoveSession();
@@ -6325,60 +6506,19 @@ function enterDiffRender(diffs,mapping){
     diffData.atoms.forEach(function(a){diffCX+=a.x;diffCY+=a.y;diffCZ+=a.z});
     if(diffData.atoms.length>0){diffCX/=diffData.atoms.length;diffCY/=diffData.atoms.length;diffCZ/=diffData.atoms.length}
 
-    var highlightAtoms={};
-    var highlightBonds={};
+    // The right-hand model is built from the marks the difference computation
+    // produced, keyed the way that half is addressed (see buildDiffModel).
+    var hiAtom={},hiBond={};
     if(diffs&&mapping){
+        var markHi=function(idx){var ri=mapping[idx];if(ri>=0)hiAtom[ri]=true};
         diffs.bonds.forEach(function(d){
-            highlightAtoms[d.i1]=true;highlightAtoms[d.i2]=true;
-            highlightBonds[Math.min(d.i1,d.i2)+'-'+Math.max(d.i1,d.i2)]=true;
+            markHi(d.i1);markHi(d.i2);
+            hiBond[Math.min(d.i1,d.i2)+'-'+Math.max(d.i1,d.i2)]=true;
         });
-        diffs.angles.forEach(function(d){
-            highlightAtoms[d.i1]=true;highlightAtoms[d.i2]=true;highlightAtoms[d.i3]=true;
-        });
-        diffs.dihedrals.forEach(function(d){
-            highlightAtoms[d.i1]=true;highlightAtoms[d.i2]=true;highlightAtoms[d.i3]=true;highlightAtoms[d.i4]=true;
-        });
+        diffs.angles.forEach(function(d){markHi(d.i1);markHi(d.i2);markHi(d.i3)});
+        diffs.dihedrals.forEach(function(d){markHi(d.i1);markHi(d.i2);markHi(d.i3);markHi(d.i4)});
     }
-
-    var dSegs=sphereSegs(diffData.atoms.length);
-    diffData.atoms.forEach(function(a,i){
-        var gh=isGhostAtom(a);
-        var r=gh?GHOST_RADIUS:getR(a.element);
-        var isHi=highlightAtoms[mapping?mapping.indexOf(i):-1];
-        // Same pooled geometry and material scheme as the left-hand structure:
-        // a comparison of two large structures draws its two sides from a
-        // handful of objects instead of one per atom. A ghost is the small
-        // faint marker it is on the left, so the two halves read the same way.
-        var diffCol=gh?GHOST_COLOR:a.color;
-        var mesh=new THREE.Mesh(sphereGeoFor(r,dSegs),diffAtomMaterial(diffCol,isHi?2:0,gh));
-        mesh.position.set(a.x-diffCX,a.y-diffCY,a.z-diffCZ);
-        mesh.userData={element:a.element,index:i,diffHi:isHi?true:false,baseColor:diffCol,ghost:gh};
-        diffMolGroup.add(mesh);
-        diffAtomMeshes.push(mesh);
-    });
-
-    // The right-hand bonds: two pieces per bond (one per half), each carrying
-    // the transform it is drawn with. The comparison's structure never moves,
-    // so a piece stores its own numbers and the highlight can be re-applied by
-    // refilling the two pools rather than editing a material per mesh.
-    diffBondPieces.length=0;
-    diffData.bonds.forEach(function(b){
-        var a1=diffData.atoms[b.atom1],a2=diffData.atoms[b.atom2];
-        if(!a1||!a2)return;
-        var sx=a1.x-diffCX,sy=a1.y-diffCY,sz=a1.z-diffCZ;
-        var ex=a2.x-diffCX,ey=a2.y-diffCY,ez=a2.z-diffCZ;
-        var dx=ex-sx,dy=ey-sy,dz=ez-sz;
-        var l=Math.sqrt(dx*dx+dy*dy+dz*dz);
-        if(l<0.001)return;
-        var mpx=(sx+ex)*0.5,mpy=(sy+ey)*0.5,mpz=(sz+ez)*0.5;
-        var origI1=mapping?mapping.indexOf(b.atom1):-1;
-        var origI2=mapping?mapping.indexOf(b.atom2):-1;
-        var bondKey=Math.min(origI1,origI2)+'-'+Math.max(origI1,origI2);
-        var isHi=highlightBonds[bondKey];
-        addDiffBondPiece(sx,sy,sz,mpx-sx,mpy-sy,mpz-sz,l/2,0.12,new THREE.Color(a1.color),bondKey,isHi);
-        addDiffBondPiece(mpx,mpy,mpz,ex-mpx,ey-mpy,ez-mpz,l/2,0.12,new THREE.Color(a2.color),bondKey,isHi);
-    });
-    diffBuildBondPools();
+    buildDiffModel(hiAtom,hiBond);
 
     if(diffs&&mapping){
         var leftHi={};
@@ -9709,6 +9849,45 @@ function updateSpinButton(){
     });
 })();
 
+// ===== Display style (ball and stick / space-filling / stick) =====
+// The control sits in the View card, but the state it sets does not belong to
+// View: the scene build and the bond builder read it, so a structure keeps the
+// style it was given when the toolbar moves on to another tool, when the frame
+// or the molecule changes, and when an undo rewrites the structure. One function
+// keeps the control in step with the state, so a value the page does not
+// recognise can never leave the two disagreeing.
+var styleSelectEl=document.getElementById('style-select');
+function syncStyleSelect(){
+    if(styleSelectEl&&styleSelectEl.value!==displayStyle)styleSelectEl.value=displayStyle;
+}
+// A style *is* the geometry - sphere radii live in the (pooled) sphere geometry
+// and a space-filling model draws no sticks - so it is applied by rebuilding the
+// scene, the same path a frame switch or an edit takes. That is also what keeps
+// everything else in step with it: the selection highlight, the comparison's
+// right half, the surface patches and the info panel are all parts of that one
+// rebuild.
+function setDisplayStyle(style){
+    // hasOwnProperty, not a plain lookup: 'constructor' and 'toString' are on
+    // every object, and a style is only ever one of the three keys.
+    if(!Object.prototype.hasOwnProperty.call(DISPLAY_STYLES,style)||style===displayStyle){syncStyleSelect();return}
+    displayStyle=style;
+    syncStyleSelect();
+    rebuildScene();
+    // In Diff mode the right-hand structure is a model of its own, built by
+    // buildDiffModel rather than by rebuildScene, so it is restyled here — with
+    // the marks it is already wearing, so the comparison does not lose them.
+    if(diffMode)rebuildDiffModel();
+    // The panels keep clear of the part of the view the structure occupies, and
+    // that box is measured from the drawn spheres: a space-filling model is
+    // several times the footprint of the ball model it replaced, so the layout
+    // is taken again rather than left around a structure that changed size.
+    layoutPanels();
+}
+if(styleSelectEl){
+    syncStyleSelect();
+    styleSelectEl.addEventListener('change',function(){setDisplayStyle(this.value)});
+}
+
 // ===== Alt-drag: write the view transform into the coordinates =====
 // A View-mode drag normally turns the view (rotQuat) or slides it (panX/panY)
 // and leaves the file alone. Holding Alt during the press turns the very same
@@ -9868,6 +10047,57 @@ function updateBakeHint(){
 }
 updateBakeHint();
 
+// ===== Picking =====
+// One door for "which atom is under the cursor": every click — the selection,
+// the three measurements, Replace Atom, Add H's anchor, Move Atoms' grab,
+// Delete — and the hover tooltip come through here, so the two can never
+// disagree about what is being pointed at.
+//
+// The spheres are the targets. The stick model, however, draws an atom no wider
+// than the tubes meeting at it (that is what the model is), which leaves a joint
+// a few pixels across once a structure is large enough to be zoomed out: a
+// 0.24 A joint is about 3 px on a 25 A cage, and that is not a target a hand can
+// aim at. A press or hover that misses every sphere is therefore re-tested
+// against a cone around each atom whose radius is fixed in *pixels*, so the
+// precision the pointer needs is the same at every zoom level. It applies to the
+// stick model only: the default balls and the van der Waals spheres are their own
+// targets, and picking in them is exactly what it has always been.
+var PICK_SLOP_PX=6;
+var _pickInv=new THREE.Matrix4();
+var _pickO=new THREE.Vector3();
+var _pickDir=new THREE.Vector3();
+function stickPick(atoms,meshes,cx,cy,cz,group){
+    if(displayStyle!=='stick'||!group||!atoms||atoms.length===0)return -1;
+    var h=canvas.clientHeight||0;
+    if(!(h>1))return -1;
+    // Radius of the cone per unit of depth: the canvas height spans
+    // 2*tan(fov/2) at depth 1, so PICK_SLOP_PX pixels are this fraction of it.
+    var perDepth=(2*Math.tan((camera.fov||60)*Math.PI/360)*PICK_SLOP_PX)/h;
+    // The ray is taken into the group's own frame, where the atoms are, so the
+    // test is the plain distance from a point to a line. The group's transform is
+    // a rotation and a translation, which preserve both lengths and the parameter
+    // along the ray, so the answer is the one the world-space ray would give.
+    group.updateWorldMatrix(true,false);
+    _pickInv.copy(group.matrixWorld).invert();
+    _pickO.copy(raycaster.ray.origin).applyMatrix4(_pickInv);
+    _pickDir.copy(raycaster.ray.direction).transformDirection(_pickInv);
+    var n=meshes?Math.min(atoms.length,meshes.length):atoms.length;
+    var best=-1,bestT=Infinity;
+    for(var i=0;i<n;i++){
+        // An atom that is not drawn is not a target, which is exactly what its
+        // mesh says (a VMD script hides an atom by giving it sphere scale 0).
+        if(meshes&&meshes[i]&&meshes[i].visible===false)continue;
+        var a=atoms[i];if(!a)continue;
+        var ox=a.x-cx-_pickO.x,oy=a.y-cy-_pickO.y,oz=a.z-cz-_pickO.z;
+        var t=ox*_pickDir.x+oy*_pickDir.y+oz*_pickDir.z;
+        if(!(t>0)||t>=bestT)continue;
+        var qx=ox-_pickDir.x*t,qy=oy-_pickDir.y*t,qz=oz-_pickDir.z*t;
+        var lim=t*perDepth;
+        if(qx*qx+qy*qy+qz*qz<=lim*lim){best=i;bestT=t}
+    }
+    return best;
+}
+
 function getClickedAtom(e){
     var rect=canvas.getBoundingClientRect();
     if(diffMode){
@@ -9886,6 +10116,8 @@ function getClickedAtom(e){
             raycaster.setFromCamera(mouse,camera);
             var hitsL=raycaster.intersectObjects(atomMeshes);
             if(hitsL.length>0)return hitsL[0].object.userData.index;
+            var stL=stickPick(MD.atoms,atomMeshes,CX,CY,CZ,moleculeGroup);
+            if(stL>=0)return stL;
         }else{
             diffActiveSide='right';
             mouse.x=((localX-halfW)/(w-halfW))*2-1;
@@ -9897,6 +10129,8 @@ function getClickedAtom(e){
             raycaster.setFromCamera(mouse,camera);
             var hitsR=raycaster.intersectObjects(diffAtomMeshes);
             if(hitsR.length>0)return hitsR[0].object.userData.index;
+            var stR=stickPick(diffData.atoms,diffAtomMeshes,diffCX,diffCY,diffCZ,diffMolGroup);
+            if(stR>=0)return stR;
         }
         return-1;
     }
@@ -9905,7 +10139,7 @@ function getClickedAtom(e){
     raycaster.setFromCamera(mouse,camera);
     var hits=raycaster.intersectObjects(atomMeshes);
     if(hits.length>0)return hits[0].object.userData.index;
-    return-1;
+    return stickPick(MD.atoms,atomMeshes,CX,CY,CZ,moleculeGroup);
 }
 
 canvas.addEventListener('mousedown',function(e){
@@ -10099,48 +10333,13 @@ canvas.addEventListener('mousemove',function(e){
         }
     }
     prevM={x:e.clientX,y:e.clientY};
-    var rect=canvas.getBoundingClientRect();
-    if(diffMode){
-        var w=rect.width;
-        var h=rect.height;
-        var halfW=Math.floor(w/2);
-        var localX=e.clientX-rect.left;
-        var hitsD;
-        if(localX<halfW){
-            mouse.x=(localX/halfW)*2-1;
-            mouse.y=-((e.clientY-rect.top)/h)*2+1;
-            camera.aspect=halfW/h;
-            camera.updateProjectionMatrix();
-            camera.position.set(0,0,camDist);
-            camera.updateMatrixWorld();
-            raycaster.setFromCamera(mouse,camera);
-            hitsD=raycaster.intersectObjects(atomMeshes);
-        }else{
-            mouse.x=((localX-halfW)/(w-halfW))*2-1;
-            mouse.y=-((e.clientY-rect.top)/h)*2+1;
-            camera.aspect=(w-halfW)/h;
-            camera.updateProjectionMatrix();
-            camera.position.set(0,0,diffCamDist);
-            camera.updateMatrixWorld();
-            raycaster.setFromCamera(mouse,camera);
-            hitsD=raycaster.intersectObjects(diffAtomMeshes);
-        }
-        if(hitsD&&hitsD.length>0){
-            var o=hitsD[0].object,i=o.userData.index;
-            var a=diffMode&&o.userData.diffHi!==undefined&&localX>=halfW?diffData.atoms[i]:MD.atoms[i];
-            tooltipEl.textContent=atomLabel(a,i)+(isGhostAtom(a)?' (ghost)':'')+' ('+a.x.toFixed(4)+', '+a.y.toFixed(4)+', '+a.z.toFixed(4)+')';
-            tooltipEl.style.display='block';
-            tooltipEl.style.left=(e.clientX-container.getBoundingClientRect().left+15)+'px';
-            tooltipEl.style.top=(e.clientY-container.getBoundingClientRect().top-10)+'px';
-        }else{tooltipEl.style.display='none'}
-        return;
-    }
-    mouse.x=((e.clientX-rect.left)/rect.width)*2-1;
-    mouse.y=-((e.clientY-rect.top)/rect.height)*2+1;
-    raycaster.setFromCamera(mouse,camera);
-    var hits=raycaster.intersectObjects(atomMeshes);
-    if(hits.length>0){var o=hits[0].object,i=o.userData.index,a=MD.atoms[i];
-        tooltipEl.textContent=atomLabel(a,i)+(isGhostAtom(a)?' (ghost)':'')+' ('+a.x.toFixed(4)+', '+a.y.toFixed(4)+', '+a.z.toFixed(4)+')';
+    // The hover probe and the press ask the same question through the same door,
+    // so they can never disagree about which atom is pointed at - and the stick
+    // model's wider pick target applies to both.
+    var hi=getClickedAtom(e);
+    if(hi>=0){
+        var a=(diffMode&&diffActiveSide==='right')?diffData.atoms[hi]:MD.atoms[hi];
+        tooltipEl.textContent=atomLabel(a,hi)+(isGhostAtom(a)?' (ghost)':'')+' ('+a.x.toFixed(4)+', '+a.y.toFixed(4)+', '+a.z.toFixed(4)+')';
         tooltipEl.style.display='block';
         tooltipEl.style.left=(e.clientX-container.getBoundingClientRect().left+15)+'px';
         tooltipEl.style.top=(e.clientY-container.getBoundingClientRect().top-10)+'px';
