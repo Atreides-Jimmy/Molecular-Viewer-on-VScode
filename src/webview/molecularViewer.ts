@@ -2849,6 +2849,9 @@ function updateRotationCenter(){
 // description, so building the list is cheap; the instanced mesh that draws
 // them is only ever recreated when the count outgrows the capacity it has.
 function rebuildBondPieces(){
+    // The aromatic dash sides belong to the structure and are planned before
+    // any piece is declared; every other piece is described by its bond alone.
+    planAromaticDashes();
     bondPool.pieces.length=0;
     for(var bi=0;bi<MD.bonds.length;bi++){currentBondIdx=bi;createBond(MD.bonds[bi])}
     reindexBondPieces();
@@ -2924,6 +2927,11 @@ function rebuildMovedBondMeshes(oldBonds,selSet){
             keep[i].bondIdx=key2idx[Math.min(ob2.atom1,ob2.atom2)+'-'+Math.max(ob2.atom1,ob2.atom2)];
         }
     }
+    // The moved region was re-derived, so the aromatic systems it touches have
+    // to be re-planned before the region's pieces are built (a piece reads its
+    // side and plane from the plan when it is placed). The kept pieces need no
+    // touching: they read the same, now current, plan.
+    planAromaticDashes();
     bondPool.pieces.length=0;
     for(i=0;i<keep.length;i++)bondPool.pieces.push(keep[i]);
     for(bi=0;bi<MD.bonds.length;bi++){
@@ -2964,12 +2972,36 @@ function placePiece(pool,slot){
         // perpendicular to it: cross the bond with y — or with x for a bond
         // that is itself nearly parallel to y, where that cross product would
         // vanish and the direction would be lost.
-        var upx=0,upy=1,upz=0;
-        if(Math.abs(dy)>=0.99){upx=1;upy=0;upz=0}
-        var qx=dy*upz-dz*upy,qy=dz*upx-dx*upz,qz=dx*upy-dy*upx;
-        var ql=Math.sqrt(qx*qx+qy*qy+qz*qz);
-        if(ql>0.0001){qx/=ql;qy/=ql;qz/=ql}
-        var off=p.perpMag*p.perpSign;
+        //
+        // An aromatic dash instead offsets inside the plane of its aromatic
+        // system, which the plan knows (see the section below): crossing the
+        // bond with that plane's normal keeps the offset perpendicular to the
+        // bond *and* inside the plane, which is what makes a ring show all its
+        // dashes on one side. The plane and the side are read from the plan
+        // here rather than stored in the piece, so a re-planned system — a
+        // fragment rotation turns every ring plane with it, an MM run relaxes
+        // it — reaches every piece that is placed from then on.
+        var nx=0,ny=0,nz=0,side=p.perpSign;
+        if(p.isDashed&&aromPlan.sign&&aromPlan.sign[p.bondIdx]){
+            nx=aromPlan.nx[p.bondIdx];ny=aromPlan.ny[p.bondIdx];nz=aromPlan.nz[p.bondIdx];
+            side=aromPlan.sign[p.bondIdx];
+        }
+        var qx=0,qy=0,qz=0,ql=0;
+        if(nx||ny||nz){
+            qx=ny*dz-nz*dy;qy=nz*dx-nx*dz;qz=nx*dy-ny*dx;
+            ql=Math.sqrt(qx*qx+qy*qy+qz*qz);
+            if(ql>0.0001){qx/=ql;qy/=ql;qz/=ql}
+        }
+        if(ql<=0.0001){
+            // No plane (or a bond that runs along the normal itself, where the
+            // projection would be zero): the world-up cross, as before.
+            var upx=0,upy=1,upz=0;
+            if(Math.abs(dy)>=0.99){upx=1;upy=0;upz=0}
+            qx=dy*upz-dz*upy;qy=dz*upx-dx*upz;qz=dx*upy-dy*upx;
+            ql=Math.sqrt(qx*qx+qy*qy+qz*qz);
+            if(ql>0.0001){qx/=ql;qy/=ql;qz/=ql}
+        }
+        var off=p.perpMag*side;
         px=qx*off;py=qy*off;pz=qz*off;
     }
     if(p.isDashed){
@@ -3003,7 +3035,10 @@ function addBondPiece(r,col,isDashed,dashT0,dashT1,perpSign,perpMag,half){
         dashT0:dashT0||0,dashT1:dashT1||0,perpSign:perpSign||0,perpMag:perpMag||0,half:half||0});
 }
 // The dashed line of an aromatic bond: six short cylinders along the bond,
-// shifted onto one side by the same kind of offset a double bond uses.
+// shifted onto one side by the same kind of offset a double bond uses. Which
+// side, and in which plane, comes from the plan below — read when the piece is
+// placed, so a plan that is recomputed (a fragment rotation turns every ring
+// plane with it) reaches every piece without touching one.
 function addDashPieces(r,col,off){
     var dashes=6,seg=1/dashes,gap=seg*0.35,dashLen=seg-gap;
     for(var k=0;k<dashes;k++){
@@ -3011,6 +3046,369 @@ function addDashPieces(r,col,off){
         var t1=t0+dashLen;
         if(t1>1)t1=1;
         addBondPiece(r,col,true,t0,t1,1,off,0);
+    }
+}
+
+// ===== Aromatic dashes: which side they sit on =====
+//
+// An aromatic bond is one solid line plus a six-dash line offset to one side.
+// That side used to fall out of the bond alone — the offset was the bond
+// direction crossed with the world up axis — so two aromatic bonds meeting at
+// an atom could put their dashes on opposite sides. Around a ring that reads
+// badly: seen from the face of the ring, half the bonds carry their dashes
+// inside and half outside, so only part of the ring looks aromatic, which is
+// exactly the cue a reader looks for.
+//
+// The side is now planned once per bond list, from the aromatic bonds
+// themselves, and every bond of one connected aromatic system offsets in that
+// system's own plane. The plan is a walk over the system, and a bond's sign
+// says which of its two sides the dash goes on:
+//
+//   * at a two-bond atom the band simply passes through — the second bond
+//     continues on the same side of the path (in sign space: one bond arrives,
+//     one leaves), which is what makes a ring or a chain show one continuous
+//     band;
+//   * a three-bond atom is a branch, where the band must pick a side for each
+//     arm: each arm takes the side that points most nearly the way the
+//     arriving dash points, so a fused ring keeps the arm that stays in its own
+//     ring, and the shared bond carries the band across;
+//   * crossing a bond that no ring runs through (a biaryl link) starts a new
+//     band on the far side — mirrored — because the arms there are a ring of
+//     their own and must not inherit the side the band arrived on.
+//
+// A fused system can still be left with one atom whose two dashes face
+// opposite ways (a shared bond belongs to two rings and the walk only knows the
+// one it came through); a bounded local repair settles those, flipping only
+// bonds whose flip leaves fewer contradicted atoms behind.
+//
+// Which of the two sides a system settled on is arbitrary — flipping every
+// sign of a system keeps it self-consistent and just moves all its dashes to
+// the other side — so the plan is flipped when the majority of its bonds would
+// then point away from the system's own centre. A ring therefore keeps its
+// dashes **inside**, the way it is drawn on paper.
+//
+// Nothing here reads the atom order a file happens to use: a bond stored the
+// other way round has its direction — and so its "left" — flipped, and sigma
+// (which endpoint is atom1) accounts for that when the sign is written.
+var aromPlan={sign:null,nx:null,ny:null,nz:null};
+function isAromaticOrder(o){return o>=1.25&&o<1.75}
+// The far endpoint of a bond as it is drawn, with the periodic shift applied
+// exactly as placePiece() applies it, so a crystal's wrapped bond is planned
+// along the line it is actually drawn on.
+function bondEnd(b,out){
+    var a2=MD.atoms[b.atom2];
+    if(!a2)return false;
+    var ex=a2.x,ey=a2.y,ez=a2.z;
+    if(b.shift&&CRY){
+        var lv=CRY.latticeVectors;
+        ex+=b.shift[0]*lv[0][0]+b.shift[1]*lv[1][0]+b.shift[2]*lv[2][0];
+        ey+=b.shift[0]*lv[0][1]+b.shift[1]*lv[1][1]+b.shift[2]*lv[2][1];
+        ez+=b.shift[0]*lv[0][2]+b.shift[1]*lv[1][2]+b.shift[2]*lv[2][2];
+    }
+    out[0]=ex;out[1]=ey;out[2]=ez;
+    return true;
+}
+// Unit direction of one bond.
+var _bondScratch=[0,0,0];
+function bondUnitDir(b,out){
+    var a1=MD.atoms[b.atom1];
+    if(!a1||!bondEnd(b,_bondScratch))return false;
+    var dx=_bondScratch[0]-a1.x,dy=_bondScratch[1]-a1.y,dz=_bondScratch[2]-a1.z;
+    var l=Math.sqrt(dx*dx+dy*dy+dz*dz);
+    if(l<0.0001)return false;
+    out[0]=dx/l;out[1]=dy/l;out[2]=dz/l;
+    return true;
+}
+// One connected aromatic system: find its plane, then walk it and write a side
+// (±1) and that plane into every bond it contains.
+function planAromaticComponent(comp,adj,dx,dy,dz,sign,nx,ny,nz,mark,stamp,isBridge){
+    var bonds=MD.bonds,i,k,p,q;
+    // The bonds of the system span its plane, so the cross product of two bonds
+    // meeting at an atom is the plane normal (up to sign). Take the pair that
+    // is least collinear as the reference — one distorted bond should not tilt
+    // a plane it is drawn in — and average every pair aligned to it.
+    var atoms=[];
+    for(i=0;i<comp.length;i++){
+        var cb=bonds[comp[i]];
+        if(mark[cb.atom1]!==stamp){mark[cb.atom1]=stamp;atoms.push(cb.atom1)}
+        if(mark[cb.atom2]!==stamp){mark[cb.atom2]=stamp;atoms.push(cb.atom2)}
+    }
+    var rx=0,ry=0,rz=0,refLen=0;
+    for(i=0;i<atoms.length;i++){
+        var al=adj[atoms[i]];
+        if(!al||al.length<2)continue;
+        for(p=0;p<al.length-1;p++)for(q=p+1;q<al.length;q++){
+            var A=al[p],B=al[q];
+            var cx=dy[A]*dz[B]-dz[A]*dy[B],
+                cy=dz[A]*dx[B]-dx[A]*dz[B],
+                cz=dx[A]*dy[B]-dy[A]*dx[B];
+            var cl=cx*cx+cy*cy+cz*cz;
+            if(cl>refLen){refLen=cl;rx=cx;ry=cy;rz=cz}
+        }
+    }
+    if(refLen>1e-12){
+        var rl=Math.sqrt(refLen);rx/=rl;ry/=rl;rz/=rl;
+        var sx=0,sy=0,sz=0;
+        for(i=0;i<atoms.length;i++){
+            var al2=adj[atoms[i]];
+            if(!al2||al2.length<2)continue;
+            for(p=0;p<al2.length-1;p++)for(q=p+1;q<al2.length;q++){
+                var A2=al2[p],B2=al2[q];
+                var cx2=dy[A2]*dz[B2]-dz[A2]*dy[B2],
+                    cy2=dz[A2]*dx[B2]-dx[A2]*dz[B2],
+                    cz2=dx[A2]*dy[B2]-dy[A2]*dx[B2];
+                if(cx2*rx+cy2*ry+cz2*rz<0){cx2=-cx2;cy2=-cy2;cz2=-cz2}
+                sx+=cx2;sy+=cy2;sz+=cz2;
+            }
+        }
+        var sl=Math.sqrt(sx*sx+sy*sy+sz*sz);
+        if(sl>1e-9){rx=sx/sl;ry=sy/sl;rz=sz/sl}
+    }else{
+        // Every bond of the system is collinear (a straight chain), so the
+        // bonds name no plane: any perpendicular to the chain is as good, and
+        // one fixed axis keeps the dashes on one side of it.
+        var ax=dx[comp[0]],ay=dy[comp[0]],az=dz[comp[0]];
+        var ux=0,uy=1,uz=0;
+        if(Math.abs(ay)>0.9){ux=1;uy=0;uz=0}
+        rx=ay*uz-az*uy;ry=az*ux-ax*uz;rz=ax*uy-ay*ux;
+        var vl=Math.sqrt(rx*rx+ry*ry+rz*rz);
+        if(vl<1e-9){rx=1;ry=0;rz=0}else{rx/=vl;ry/=vl;rz/=vl}
+    }
+    // Walk: sign = +1 puts the dash on the left of atom1 -> atom2, -1 on the
+    // other side. At an atom, a bond that arrives there (its dash already on
+    // the left of the travel direction) sends every other bond of that atom out
+    // on the left of its own direction; at a two-bond atom, a bond that leaves
+    // takes the arriving one's place, so the band stays on one side of the path
+    // through the whole walk.
+    //
+    // A three-bond atom is a branch, and there the band cannot simply continue
+    // (a bond has two sides and the arm must pick one), so each arm takes the
+    // side that keeps the band's own direction: the dash that points most
+    // nearly the way the arriving dash points. That is what keeps a fused ring
+    // whole — the perimeter arm stays on the side the band was already on,
+    // while the shared bond takes whichever of its two sides that is, and the
+    // ring on the far side then starts from there.
+    //
+    // One case is the opposite: when the band arrives over a bond that no ring
+    // runs through (a biaryl link) and the arms are ring bonds, the arms are a
+    // ring of their own and must not inherit the band's side — that would draw
+    // the second ring's dashes on the outside. Those arms are mirrored instead,
+    // which puts them on the inside of their own ring. A bridge whose arms are
+    // bridges too is a branch of a chain, where there is no inside to prefer,
+    // so it keeps the band's direction like any other branch.
+    var seed=comp[0],stack=[seed];
+    sign[seed]=1;
+    while(stack.length){
+        var cur=stack.pop();
+        var b2=bonds[cur];
+        for(var e=0;e<2;e++){
+            var X=e===0?b2.atom1:b2.atom2;
+            var sg=e===0?1:-1;                    // +1 when X is the bond's atom1
+            var incoming=sign[cur]===-sg;
+            var alx=adj[X];
+            if(!alx)continue;
+            var deg=alx.length;
+            // The arriving dash's direction, for the branch rule below.
+            var oex=0,oey=0,oez=0;
+            if(deg>2&&incoming){
+                oex=sign[cur]*(ry*dz[cur]-rz*dy[cur]);
+                oey=sign[cur]*(rz*dx[cur]-rx*dz[cur]);
+                oez=sign[cur]*(rx*dy[cur]-ry*dx[cur]);
+            }
+            var acrossBridge=deg>2&&incoming&&isBridge&&isBridge[cur];
+            for(k=0;k<alx.length;k++){
+                var f=alx[k];
+                if(f===cur||sign[f])continue;
+                var sgF=bonds[f].atom1===X?1:-1;
+                if(deg>2&&incoming){
+                    var cx3=ry*dz[f]-rz*dy[f],cy3=rz*dx[f]-rx*dz[f],cz3=rx*dy[f]-ry*dx[f];
+                    var ahead=(oex*cx3+oey*cy3+oez*cz3)>=0;
+                    if(acrossBridge&&!isBridge[f])ahead=!ahead;
+                    sign[f]=ahead?sgF:-sgF;
+                }else{
+                    sign[f]=(incoming||deg>2)?sgF:-sgF;
+                }
+                stack.push(f);
+            }
+        }
+    }
+    // A bond shared by two rings belongs to both, and the walk only knows the
+    // ring it came through, so a fused system can be left with one atom whose
+    // two dashes face opposite ways. In sign space the rule at a two-bond atom
+    // is exactly "one bond in, one bond out" (a bond that leaves offsets to the
+    // left of its own direction, a bond that arrives offsets to the left of the
+    // direction it came from, which is the same side of the path), and flipping
+    // a bond flips only its own two ends — so a violated atom is settled
+    // locally, by taking whichever of its two bonds leaves fewer violated atoms
+    // behind. A flip is only taken when it strictly reduces that count, so a
+    // ring that is already consistent is never touched.
+    var stateOf=function(bi,X){return sign[bi]===(bonds[bi].atom1===X?1:-1)?1:-1};
+    var badAt=function(X){
+        var a=adj[X];
+        if(!a||a.length!==2)return 0;
+        var be=bonds[a[0]];
+        if(be.atom1===be.atom2)return 0;
+        return stateOf(a[0],X)===stateOf(a[1],X)?1:0;
+    };
+    for(var pass=0;pass<3;pass++){
+        var flipped=false;
+        for(i=0;i<atoms.length;i++){
+            var vx=atoms[i];
+            if(!badAt(vx))continue;
+            var pair=adj[vx];
+            var pick=-1,pickGain=0;
+            for(k=0;k<2;k++){
+                var cand=pair[k],cb2=bonds[cand];
+                var was=badAt(cb2.atom1)+badAt(cb2.atom2);
+                sign[cand]=-sign[cand];
+                var now=badAt(cb2.atom1)+badAt(cb2.atom2);
+                sign[cand]=-sign[cand];
+                if(was-now>pickGain){pickGain=was-now;pick=cand}
+            }
+            if(pick>=0){sign[pick]=-sign[pick];flipped=true}
+        }
+        if(!flipped)break;
+    }
+    // Which side the walk settled on is arbitrary until it is compared with
+    // where the system sits: a ring's bonds outvote a chain's, whose own vote
+    // means nothing (a chain's centre lies on the chain itself).
+    var centreX=0,centreY=0,centreZ=0;
+    for(i=0;i<atoms.length;i++){
+        var ca=MD.atoms[atoms[i]];
+        centreX+=ca.x;centreY+=ca.y;centreZ+=ca.z;
+    }
+    centreX/=atoms.length;centreY/=atoms.length;centreZ/=atoms.length;
+    var vote=0,e3=[0,0,0];
+    for(i=0;i<comp.length;i++){
+        var bi=comp[i],bb=bonds[bi];
+        var ba1=MD.atoms[bb.atom1];
+        if(!sign[bi])sign[bi]=1;
+        if(!ba1||!bondEnd(bb,e3))continue;
+        vote+=sign[bi]*((ry*dz[bi]-rz*dy[bi])*((ba1.x+e3[0])*0.5-centreX)+
+                        (rz*dx[bi]-rx*dz[bi])*((ba1.y+e3[1])*0.5-centreY)+
+                        (rx*dy[bi]-ry*dx[bi])*((ba1.z+e3[2])*0.5-centreZ));
+    }
+    if(vote>0){for(i=0;i<comp.length;i++)sign[comp[i]]=-sign[comp[i]]}
+    for(i=0;i<comp.length;i++){
+        var si=comp[i];
+        nx[si]=rx;ny[si]=ry;nz[si]=rz;
+    }
+}
+// Which aromatic bonds no ring runs through (the bridges of the aromatic
+// subgraph). Only asked for when some atom has three aromatic bonds, which is
+// the only place the answer is used, so a structure of separate rings and
+// chains pays nothing for it. One iterative DFS, disc/low as usual.
+function markAromaticBridges(adj,disc,low,isBridge,na){
+    var time=0,a,v,bi,b,w,i;
+    for(a=0;a<na;a++){
+        if(!adj[a]||disc[a])continue;
+        var st=[a],stEdge=[-1],stIdx=[0];
+        disc[a]=low[a]=++time;
+        while(st.length){
+            v=st[st.length-1];
+            i=stIdx[stIdx.length-1];
+            var list=adj[v];
+            if(i<list.length){
+                stIdx[stIdx.length-1]=i+1;
+                bi=list[i];b=MD.bonds[bi];
+                w=b.atom1===v?b.atom2:b.atom1;
+                if(w===v)continue;
+                if(!disc[w]){
+                    disc[w]=low[w]=++time;
+                    st.push(w);stEdge.push(bi);stIdx.push(0);
+                }else if(bi!==stEdge[stEdge.length-1]&&disc[w]<low[v]){
+                    low[v]=disc[w];
+                }
+            }else{
+                st.pop();stIdx.pop();
+                var pe=stEdge.pop();
+                if(st.length){
+                    var parent=st[st.length-1];
+                    if(low[v]<low[parent])low[parent]=low[v];
+                    if(low[v]>disc[parent]&&pe>=0)isBridge[pe]=1;
+                }
+            }
+        }
+    }
+}
+// Plan every aromatic bond of the current bond list. Called wherever the bond
+// list is (re)built — the scene build, a frame or molecule switch, an edit, an
+// Undo, an Import, an MM commit and a Move Atoms release — and never on a path
+// that only re-places existing pieces, because a bond's side is a property of
+// the structure, not of the instant it is drawn. Cost is one pass over the
+// bonds, one walk per aromatic system, and a bridge search that is only taken
+// when some atom has three aromatic bonds (the one place its answer is used).
+function planAromaticDashes(){
+    var bonds=MD.bonds,nb=bonds.length,i,na=MD.atoms.length;
+    aromPlan={sign:null,nx:null,ny:null,nz:null};
+    if(nb===0)return;
+    // A structure without a single aromatic bond pays one scan and nothing
+    // else — no arrays, no adjacency, no walk — which is what the overwhelming
+    // majority of files (any protein, any alkane) get from this feature.
+    var any=false;
+    for(i=0;i<nb;i++){
+        if(isAromaticOrder(bonds[i].order)){any=true;break}
+    }
+    if(!any)return;
+    var sign=new Int8Array(nb),nx=new Float32Array(nb),ny=new Float32Array(nb),nz=new Float32Array(nb);
+    aromPlan={sign:sign,nx:nx,ny:ny,nz:nz};
+    var dx=new Float32Array(nb),dy=new Float32Array(nb),dz=new Float32Array(nb);
+    // Atom -> its aromatic bonds, as a plain indexed array: this is walked once
+    // per atom per component and once more inside the repair, and an array of
+    // arrays stays on the fast path where an object keyed by atom index does
+    // not (a structure of tens of thousands of atoms turns that object into a
+    // dictionary). Both this and the mark array below are only created once an
+    // aromatic bond has actually been seen, so a structure without any pays
+    // nothing for the plan.
+    var adj=null,mark=null,list=[],d3=[0,0,0],maxDeg=0;
+    for(i=0;i<nb;i++){
+        var b=bonds[i];
+        if(!isAromaticOrder(b.order))continue;
+        if(!bondUnitDir(b,d3))continue;
+        if(!adj)adj=new Array(na);
+        dx[i]=d3[0];dy[i]=d3[1];dz[i]=d3[2];
+        var a1=b.atom1,a2=b.atom2;
+        if(a1!==a2){
+            var l1=adj[a1];if(!l1)l1=adj[a1]=[];
+            l1.push(i);
+            if(l1.length>maxDeg)maxDeg=l1.length;
+        }
+        var l2=adj[a2];if(!l2)l2=adj[a2]=[];
+        l2.push(i);
+        if(l2.length>maxDeg)maxDeg=l2.length;
+        list.push(i);
+    }
+    if(list.length===0)return;
+    var isBridge=null;
+    if(maxDeg>2){
+        isBridge=new Uint8Array(nb);
+        markAromaticBridges(adj,new Int32Array(na),new Int32Array(na),isBridge,na);
+    }
+    var seen=new Uint8Array(nb),stack=[];
+    // One mark array for the whole pass, stamped per component, so a structure
+    // made of many small aromatic fragments does not allocate one set per ring.
+    mark=new Int32Array(na);
+    var stamp=0;
+    for(var s=0;s<list.length;s++){
+        var seed=list[s];
+        if(seen[seed])continue;
+        var comp=[];
+        stack.length=0;stack.push(seed);seen[seed]=1;
+        while(stack.length){
+            var cur=stack.pop();
+            comp.push(cur);
+            var cb=bonds[cur];
+            for(var e=0;e<2;e++){
+                var al=adj[e===0?cb.atom1:cb.atom2];
+                if(!al)continue;
+                for(var k=0;k<al.length;k++){
+                    var nb2=al[k];
+                    if(!seen[nb2]){seen[nb2]=1;stack.push(nb2)}
+                }
+            }
+        }
+        stamp++;
+        planAromaticComponent(comp,adj,dx,dy,dz,sign,nx,ny,nz,mark,stamp,isBridge);
     }
 }
 
@@ -3362,6 +3760,12 @@ function applyFragRotDelta(ax,ay){
         a.x=fragRotCx+v.x;a.y=fragRotCy+v.y;a.z=fragRotCz+v.z;
     });
     updateAtomMeshPositions();
+    // A rotation turns each ring's plane with the fragment, and an aromatic
+    // dash is offset inside that plane: re-plan before re-placing, or the
+    // dashes would tilt out of their ring for the length of the drag. The plan
+    // is linear in the aromatic bonds and every piece reads it when it is
+    // placed, so this costs one pass and touches no piece.
+    planAromaticDashes();
     rebuildBondsTouching(selectedAtoms);
 }
 function screenPointOnPlane(e,planeZ){
@@ -3685,6 +4089,10 @@ function mmApplyLiveCoords(coords){
         if(!mmRun.movedAll[i]){mmRun.movedAll[i]=true;mmRun.movedCount++}
     }
     updateAtomMeshPositions();
+    // A run relaxes the geometry, so a ring's plane turns with it: the plan is
+    // refreshed once per chunk (never per frame) and every piece reads it when
+    // it is placed, so the dashes stay in their ring while the run streams.
+    planAromaticDashes();
     rebuildBondsTouching(moved);
     return true;
 }
@@ -7092,6 +7500,13 @@ function vdWriteAtoms(){
         if(q>maxSq)maxSq=q;
     }
     vdMaxDisp=Math.sqrt(maxSq);
+    // A displaced geometry is a different geometry: the aromatic sides are
+    // re-planned from it (a displaced ring is still a ring, and its plane may
+    // have tilted), which the pieces then read when they are placed. Playback
+    // of a mode deliberately keeps the equilibrium plan: it borrows the
+    // geometry for one cycle and puts it back, and a plan that changed 60 times
+    // a second could flip a side mid-animation.
+    planAromaticDashes();
     return true;
 }
 /** Add a mode to the distortion or change its share; false when the mode
@@ -9085,7 +9500,11 @@ function bakeWriteAtoms(){
     }
     bakeMoved=true;
     // Spheres and bond pieces only: the geometry itself never changes, and CX is
-    // frozen for the drag, so both are a re-placement of existing objects.
+    // frozen for the drag, so both are a re-placement of existing objects. A
+    // rotation bake turns the ring planes with the atoms, so the aromatic sides
+    // are re-planned first — the same rule the fragment-rotation drag follows,
+    // and a translation bake leaves every direction (and the plan) untouched.
+    if(bakeKind==='rot')planAromaticDashes();
     updateAtomMeshPositions();
     placeBondPieces();
     needsRender=true;
