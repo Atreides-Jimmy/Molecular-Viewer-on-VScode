@@ -25,6 +25,14 @@ export interface Atom {
     cellI?: number;
     cellJ?: number;
     cellK?: number;
+    /**
+     * The atom-site label the file gave the asymmetric-unit site this atom was
+     * expanded from (`C12`, `O1W`). Only the CIF parser writes it — the other
+     * formats have no labels — and it travels on the atom, so the passes that
+     * rebuild `baseAtoms` (delete, disorder removal) keep site and label
+     * together instead of relying on a parallel array staying aligned.
+     */
+    siteLabel?: string;
 }
 
 export interface Bond {
@@ -97,6 +105,15 @@ export interface CrystalData {
      * not read yet, so this stays undefined rather than being invented.
      */
     asymBonds?: Bond[];
+    /**
+     * How many whole molecules (finite connected components) the unit cell
+     * contains — the crystallographic Z for a molecular crystal. Written only
+     * by the page's `rebuildCrystal` as a session observation on its own copy;
+     * it is never part of the payload and the host never reads it. A cell whose
+     * only component is an infinite network (a framework, diamond) stays
+     * without a meaningful Z, which the page shows by omitting the line.
+     */
+    moleculeCount?: number;
 }
 
 export interface GjfMeta {

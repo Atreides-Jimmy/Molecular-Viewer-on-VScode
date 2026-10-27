@@ -1330,7 +1330,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             symmetryOps: data.crystal.symmetryOps,
             baseAtoms: data.crystal.baseAtoms.map(a => ({
                 element: a.element, x: a.x, y: a.y, z: a.z,
-                index: a.index, occupancy: a.occupancy, baseIdx: a.baseIdx
+                index: a.index, occupancy: a.occupancy, baseIdx: a.baseIdx,
+                siteLabel: a.siteLabel || undefined
             })),
             baseBonds: data.crystal.baseBonds.map(b => ({
                 atom1: b.atom1, atom2: b.atom2, order: b.order
@@ -1440,6 +1441,9 @@ input,textarea{-webkit-user-select:text;user-select:text}
 #crystal-panel .bnd-row input{width:48px;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;padding:1px 3px;font-size:11px;text-align:center}
 #crystal-panel .bnd-btn{margin-top:6px;width:100%;background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff);border:none;border-radius:3px;padding:4px 6px;font-size:11px;cursor:pointer}
 #crystal-panel .bnd-btn:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
+#crystal-panel .bnd-presets{display:flex;gap:4px;margin-top:6px}
+#crystal-panel .bnd-mini{flex:1;background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#fff);border:1px solid var(--vscode-panel-border,#444);border-radius:3px;padding:3px 4px;font-size:11px;cursor:pointer;white-space:nowrap;min-width:0}
+#crystal-panel .bnd-mini:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e)}
 #egg-panel{position:absolute;top:8px;right:8px;background:rgba(0,0,0,0.6);border:1px solid var(--vscode-panel-border,#444);border-radius:4px;padding:8px 10px;font-size:11px;color:var(--vscode-editor-foreground,#ccc);z-index:25;display:none;min-width:200px;max-width:calc(100% - 16px);max-height:calc(100% - 70px);overflow-y:auto}
 #egg-panel.show{display:block}
 #egg-panel .ep-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:5px;font-weight:600}
@@ -1670,7 +1674,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="vp-title">Auto Rotate</div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div><div class="vp-title vp-sub">Display</div><select id="style-select" title="How the structure is drawn: ball and stick (the default), van der Waals spheres, or sticks without the atom spheres"><option value="ball">Ball &amp; Stick</option><option value="spacefill">Space-filling</option><option value="stick">Stick</option></select></div><div id="bake-panel"><div class="vp-title">Edit Coordinates</div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-p2" title="Eight unit cells, 0..2 along every axis">2×2×2</button><button class="bnd-mini" id="bnd-p3" title="Twenty-seven unit cells, 0..3 along every axis">3×3×3</button><button class="bnd-mini" id="bnd-p4" title="Sixty-four unit cells, 0..4 along every axis">4×4×4</button></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-reset" title="Back to the single unit cell, 0..1 along every axis">Reset</button><button class="bnd-mini" id="bnd-origin" title="Keep the spans, move the low corner onto the lattice origin">Align Origin</button></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="vp-title">Auto Rotate</div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div><div class="vp-title vp-sub">Display</div><select id="style-select" title="How the structure is drawn: ball and stick (the default), van der Waals spheres, or sticks without the atom spheres"><option value="ball">Ball &amp; Stick</option><option value="spacefill">Space-filling</option><option value="stick">Stick</option></select></div><div id="bake-panel"><div class="vp-title">Edit Coordinates</div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="box-select-rect"></div>
@@ -1684,6 +1688,20 @@ try{
 var MD=${jsonData};
 var BP=${bondPerceptionSource};
 var AN={H:1,He:2,Li:3,Be:4,B:5,C:6,N:7,O:8,F:9,Ne:10,Na:11,Mg:12,Al:13,Si:14,P:15,S:16,Cl:17,Ar:18,K:19,Ca:20,Sc:21,Ti:22,V:23,Cr:24,Mn:25,Fe:26,Co:27,Ni:28,Cu:29,Zn:30,Ga:31,Ge:32,As:33,Se:34,Br:35,Kr:36,Rb:37,Sr:38,Y:39,Zr:40,Nb:41,Mo:42,Tc:43,Ru:44,Rh:45,Pd:46,Ag:47,Cd:48,In:49,Sn:50,Sb:51,Te:52,I:53,Xe:54,Cs:55,Ba:56,La:57,Ce:58,Pr:59,Nd:60,Pm:61,Sm:62,Eu:63,Gd:64,Tb:65,Dy:66,Ho:67,Er:68,Tm:69,Yb:70,Lu:71,Hf:72,Ta:73,W:74,Re:75,Os:76,Ir:77,Pt:78,Au:79,Hg:80,Tl:81,Pb:82,Bi:83,Po:84,At:85,Rn:86};
+// Standard atomic weights (IUPAC 2021, abridged), the one table the density
+// line of the structure panel needs: a cell's occupancy-weighted mass over its
+// volume. It sits beside the atomic numbers it mirrors, above every reader; an
+// element the table does not know leaves the density line out rather than
+// guessing a mass for it.
+var MASS={H:1.008,He:4.0026,Li:6.94,Be:9.0122,B:10.81,C:12.011,N:14.007,O:15.999,F:18.998,Ne:20.180,
+    Na:22.990,Mg:24.305,Al:26.982,Si:28.085,P:30.974,S:32.06,Cl:35.45,Ar:39.948,K:39.098,Ca:40.078,
+    Sc:44.956,Ti:47.867,V:50.942,Cr:51.996,Mn:54.938,Fe:55.845,Co:58.933,Ni:58.693,Cu:63.546,Zn:65.38,
+    Ga:69.723,Ge:72.630,As:74.922,Se:78.971,Br:79.904,Kr:83.798,Rb:85.468,Sr:87.62,Y:88.906,Zr:91.224,
+    Nb:92.906,Mo:95.95,Tc:98,Ru:101.07,Rh:102.91,Pd:106.42,Ag:107.87,Cd:112.41,In:114.82,Sn:118.71,
+    Sb:121.76,Te:127.60,I:126.90,Xe:131.29,Cs:132.91,Ba:137.33,La:138.91,Ce:140.12,Pr:140.91,Nd:144.24,
+    Pm:145,Sm:150.36,Eu:151.96,Gd:157.25,Tb:158.93,Dy:162.50,Ho:164.93,Er:167.26,Tm:168.93,Yb:173.05,
+    Lu:174.97,Hf:178.49,Ta:180.95,W:183.84,Re:186.21,Os:190.23,Ir:192.22,Pt:195.08,Au:196.97,Hg:200.59,
+    Tl:204.38,Pb:207.2,Bi:208.98,Po:209,At:210,Rn:222};
 // ===== Ghost atoms =====
 // A ghost is a position without a nucleus, electrons or bonds: the marker a
 // counterpoise calculation puts where the other fragment's atoms are. It keeps
@@ -1775,6 +1793,18 @@ if(VMD){
     MD.bonds.forEach(function(b,i){b.index=i});
 }
 var boundary={aMin:0,aMax:1,bMin:0,bMax:1,cMin:0,cMax:1};
+// The most atoms a supercell may build. The bounds inputs alone can ask for
+// 11x11x11 cells of a large structure, which would be minutes of mesh building
+// for a picture nobody asked for — the same ceiling the clipboard refuses
+// fragments over, applied before the first sphere is made.
+var MAX_CRYSTAL_ATOMS=20000;
+// How far outside the bounds a whole molecule's centre may sit and still be
+// drawn (Angstrom, converted per axis with the lattice vector's length). Zero
+// is the strict reading: only images centred inside the boundary are drawn.
+var CRYSTAL_COPY_MARGIN=0;
+// A bond the page itself added (Add Atom) carries no periodic image shift;
+// this stands in wherever one is read.
+var ZERO_SHIFT=[0,0,0];
 var occTextureCache={};
 var CRY_INV=null;
 function computeCrystalInv(){
@@ -1839,6 +1869,32 @@ function updateMolInfo(){
         html+='<br>Angles: '+CRY.alpha.toFixed(1)+'°, '+CRY.beta.toFixed(1)+'°, '+CRY.gamma.toFixed(1)+'°';
         if(CRY.spaceGroup)html+='<br>SG: '+escapeHtml(CRY.spaceGroup);
         html+='<br>Supercell: '+sa.toFixed(2)+'×'+sb.toFixed(2)+'×'+sc.toFixed(2);
+        // Crystallographic constants of the unit cell itself: its volume, the
+        // number of whole molecules it holds (Z — the count rebuildCrystal's
+        // unwrap pass produces; a cell whose only component is an infinite
+        // network has no meaningful Z, and the line stays out rather than
+        // showing a number that would be one), and the density the cell's
+        // occupancy-weighted mass implies. Everything reads only what the page
+        // already carries, so a harness that runs this function on a stub
+        // crystal without a lattice simply sees none of these lines.
+        if(CRY.latticeVectors){
+            var crV=CRY.latticeVectors;
+            var crDet=crV[0][0]*(crV[1][1]*crV[2][2]-crV[1][2]*crV[2][1])-crV[0][1]*(crV[1][0]*crV[2][2]-crV[1][2]*crV[2][0])+crV[0][2]*(crV[1][0]*crV[2][1]-crV[1][1]*crV[2][0]);
+            var crVol=Math.abs(crDet);
+            if(crVol>0){
+                html+='<br>Volume: '+crVol.toFixed(2)+' Å³';
+                if(CRY.moleculeCount>0)html+='<br>Z: '+CRY.moleculeCount+' (molecules)';
+                if(typeof MASS!=='undefined'&&MASS){
+                    var crMass=0,crMassOk=true;
+                    for(var crI=0;crI<CRY.baseAtoms.length;crI++){
+                        var crM=MASS[CRY.baseAtoms[crI].element];
+                        if(crM==null){crMassOk=false;break}
+                        crMass+=crM*(CRY.baseAtoms[crI].occupancy!=null?CRY.baseAtoms[crI].occupancy:1);
+                    }
+                    if(crMassOk&&crMass>0)html+='<br>Density: '+(crMass/(0.602214*crVol)).toFixed(3)+' g/cm³';
+                }
+            }
+        }
     }
     if(VMD&&VMD.molecules[vmdMolIdx]){
         var vm=VMD.molecules[vmdMolIdx];
@@ -2082,26 +2138,60 @@ function rebuildCrystal(){
         baseBonds=CRY.baseBonds;
     }
 
+    // ===== Connected components, unwrapped =====
+    //
+    // The old grouping test was "does any bond of this component cross a cell
+    // face" (hasShift). In a molecular crystal the file wraps every atom into
+    // the cell first, so a molecule that straddles a face owns such a bond
+    // whatever its chemistry — CCDC 142619 put all ten of its molecules on the
+    // wrong side of that test and every one of them was drawn cut. The test
+    // that actually separates a molecule from an infinite chain is whether the
+    // component's bond cycles are consistent: walking any cycle of real bonds
+    // must come back to the same periodic image. So each component is walked
+    // once with an image offset per atom (the unwrap), and a cycle that comes
+    // back shifted marks the whole component periodic.
+    //
+    //   finite component  — a molecule: copied whole, see pass 2 below;
+    //   periodic component (diamond, a polymer chain) — the old behaviour:
+    //                       per-atom boundary test and bonds cut at the face,
+    //                       because drawing it "whole" has no meaning.
+    //
+    // Bond (a1,a2,shift s) means the image of a2 in cell c+s bonds with the
+    // image of a1 in cell c, so walking the edge a1->a2 adds s to the image
+    // offset and a2->a1 subtracts it. Offsets are exact integers, so the
+    // consistency check cannot drift.
     var adj={};var groupOf={};var groups=[];
     baseBonds.forEach(function(bb){
         if(!adj[bb.atom1])adj[bb.atom1]=[];
         if(!adj[bb.atom2])adj[bb.atom2]=[];
-        adj[bb.atom1].push({nb:bb.atom2,shift:bb.shift});
-        adj[bb.atom2].push({nb:bb.atom1,shift:bb.shift});
+        adj[bb.atom1].push({nb:bb.atom2,s:bb.shift,sign:1});
+        adj[bb.atom2].push({nb:bb.atom1,s:bb.shift,sign:-1});
     });
     baseAtoms.forEach(function(ba,bi){
         if(groupOf[bi]!==undefined)return;
         if(!adj[bi]){groupOf[bi]=-1;return}
         var gid=groups.length;var queue=[bi];groupOf[bi]=gid;
-        var hasShift=false;
-        while(queue.length){
-            var cur=queue.shift();
-            (adj[cur]||[]).forEach(function(e){
-                if(e.shift&&(e.shift[0]||e.shift[1]||e.shift[2]))hasShift=true;
-                if(groupOf[e.nb]===undefined){groupOf[e.nb]=gid;queue.push(e.nb)}
-            });
+        var offset={};offset[bi]=[0,0,0];
+        var periodic=false;
+        for(var qi=0;qi<queue.length;qi++){
+            var cur=queue[qi];
+            var oc=offset[cur];
+            var nbrs=adj[cur]||[];
+            for(var ni=0;ni<nbrs.length;ni++){
+                var e=nbrs[ni];
+                var s=e.s||ZERO_SHIFT;
+                var no=[oc[0]+e.sign*s[0],oc[1]+e.sign*s[1],oc[2]+e.sign*s[2]];
+                if(offset[e.nb]!==undefined){
+                    var po=offset[e.nb];
+                    if(no[0]!==po[0]||no[1]!==po[1]||no[2]!==po[2])periodic=true;
+                    continue;
+                }
+                offset[e.nb]=no;
+                groupOf[e.nb]=gid;
+                queue.push(e.nb);
+            }
         }
-        groups.push({hasShift:hasShift});
+        groups.push({members:queue.slice(),offset:offset,periodic:periodic});
     });
 
     var iMin=Math.floor(aMin),iMax=Math.ceil(aMax);
@@ -2109,12 +2199,36 @@ function rebuildCrystal(){
     var kMin=Math.floor(cMin),kMax=Math.ceil(cMax);
     var EPS=1e-9;
 
+    // The whole-molecule copy test expands the boundary by this margin
+    // (Angstrom, converted per axis with that lattice vector's length), so a
+    // molecule whose centre sits just outside can still be drawn complete.
+    var marginA=CRYSTAL_COPY_MARGIN/Math.sqrt(lv[0][0]*lv[0][0]+lv[0][1]*lv[0][1]+lv[0][2]*lv[0][2]);
+    var marginB=CRYSTAL_COPY_MARGIN/Math.sqrt(lv[1][0]*lv[1][0]+lv[1][1]*lv[1][1]+lv[1][2]*lv[1][2]);
+    var marginC=CRYSTAL_COPY_MARGIN/Math.sqrt(lv[2][0]*lv[2][0]+lv[2][1]*lv[2][1]+lv[2][2]*lv[2][2]);
+    // Anchor cells are scanned a cell past the boundary on every side: the
+    // centroid test does the actual filtering, and the extra ring only makes
+    // the scan independent of where unwrapping put each molecule's coordinates.
+    var extA=1+Math.ceil(marginA),extB=1+Math.ceil(marginB),extC=1+Math.ceil(marginC);
+
     var atoms=[];
     var bonds=[];
     var idx=0;
     var cellMap={};
+    // base atom index -> its placed image cells, in placement order. The bond
+    // pass walks these instead of the boundary's cell range, because a whole
+    // molecule's atoms may sit outside it.
+    var placedCells={};
+    function rememberCell(bi,ci,cj,ck){
+        if(!placedCells[bi])placedCells[bi]=[];
+        placedCells[bi].push([ci,cj,ck]);
+    }
 
+    // Pass 1 — periodic components and unbonded atoms: the per-image boundary
+    // test, exactly as it always was. Copying a network "whole" has no meaning,
+    // and a lone atom has nothing to complete.
     baseAtoms.forEach(function(ba,bi){
+        var g=groupOf[bi];
+        if(g>=0&&!groups[g].periodic)return;
         var fx=inv[0][0]*ba.x+inv[0][1]*ba.y+inv[0][2]*ba.z;
         var fy=inv[1][0]*ba.x+inv[1][1]*ba.y+inv[1][2]*ba.z;
         var fz=inv[2][0]*ba.x+inv[2][1]*ba.y+inv[2][2]*ba.z;
@@ -2140,108 +2254,150 @@ function rebuildCrystal(){
                         cellI:ci,cellJ:cj,cellK:ck
                     });
                     cellMap[bi+'_'+ci+'_'+cj+'_'+ck]=idx;
+                    rememberCell(bi,ci,cj,ck);
                     idx++;
                 }
             }
         }
     });
 
-    var activeGroups={};
-    atoms.forEach(function(a){
-        var g=groupOf[a.baseIdx];
-        if(g!==undefined&&g>=0&&!groups[g].hasShift){
-            activeGroups[g+'_'+a.cellI+'_'+a.cellJ+'_'+a.cellK]=true;
+    // Pass 2 — finite molecules, whole: every image whose unwrapped centroid
+    // lands inside the boundary (plus the margin) is placed complete, atoms
+    // outside included, so a molecule straddling a face is drawn as the
+    // molecule it is instead of as two fragments. The BFS offsets already put
+    // the component's atoms into one image; the centroid is that image's
+    // centre, and the whole component is shifted by the same integer vector so
+    // the centroid sits in [0,1)^3 and the anchor scan can stay within the
+    // boundary's own cell range. Each atom's cell label records which periodic
+    // image of its base site is on screen, so different images of one site stay
+    // tellable apart and a selection can find the same atom again.
+    groups.forEach(function(g){
+        if(g.periodic)return;
+        var members=g.members,n=members.length;
+        var u={};
+        var ucx=0,ucy=0,ucz=0;
+        for(var t=0;t<n;t++){
+            var bi=members[t];
+            var ba=baseAtoms[bi];
+            var o=g.offset[bi];
+            var ux=inv[0][0]*ba.x+inv[0][1]*ba.y+inv[0][2]*ba.z+o[0];
+            var uy=inv[1][0]*ba.x+inv[1][1]*ba.y+inv[1][2]*ba.z+o[1];
+            var uz=inv[2][0]*ba.x+inv[2][1]*ba.y+inv[2][2]*ba.z+o[2];
+            u[bi]=[ux,uy,uz];
+            ucx+=ux;ucy+=uy;ucz+=uz;
         }
-    });
-    baseAtoms.forEach(function(ba,bi){
-        var g=groupOf[bi];
-        if(g===undefined||g<0||groups[g].hasShift)return;
-        var fx=inv[0][0]*ba.x+inv[0][1]*ba.y+inv[0][2]*ba.z;
-        var fy=inv[1][0]*ba.x+inv[1][1]*ba.y+inv[1][2]*ba.z;
-        var fz=inv[2][0]*ba.x+inv[2][1]*ba.y+inv[2][2]*ba.z;
-        fx-=Math.floor(fx);fy-=Math.floor(fy);fz-=Math.floor(fz);
-        for(var ci=iMin;ci<=iMax;ci++){
-            for(var cj=jMin;cj<=jMax;cj++){
-                for(var ck=kMin;ck<=kMax;ck++){
-                    if(!activeGroups[g+'_'+ci+'_'+cj+'_'+ck])continue;
-                    if(cellMap[bi+'_'+ci+'_'+cj+'_'+ck]!==undefined)continue;
-                    var ax=fx+ci,ay=fy+cj,az=fz+ck;
-                    var ox=ax*lv[0][0]+ay*lv[1][0]+az*lv[2][0];
-                    var oy=ax*lv[0][1]+ay*lv[1][1]+az*lv[2][1];
-                    var oz=ax*lv[0][2]+ay*lv[1][2]+az*lv[2][2];
-                    var color=ba.color||((MD.atomColors&&MD.atomColors[ba.element])||'#FF1493');
-                    atoms.push({
-                        element:ba.element,
-                        x:ox,y:oy,z:oz,
-                        index:idx,
-                        occupancy:ba.occupancy,
-                        color:color,
-                        baseIdx:ba.baseIdx!=null?ba.baseIdx:bi,
-                        cellI:ci,cellJ:cj,cellK:ck
-                    });
-                    cellMap[bi+'_'+ci+'_'+cj+'_'+ck]=idx;
-                    idx++;
+        ucx/=n;ucy/=n;ucz/=n;
+        var tx=Math.floor(ucx),ty=Math.floor(ucy),tz=Math.floor(ucz);
+        ucx-=tx;ucy-=ty;ucz-=tz;
+        for(var t2=0;t2<n;t2++){
+            var uu=u[members[t2]];
+            uu[0]-=tx;uu[1]-=ty;uu[2]-=tz;
+        }
+        for(var ci=iMin-extA;ci<=iMax+extA;ci++){
+            for(var cj=jMin-extB;cj<=jMax+extB;cj++){
+                for(var ck=kMin-extC;ck<=kMax+extC;ck++){
+                    var cx=ucx+ci,cy=ucy+cj,cz=ucz+ck;
+                    // Half-open on the max side: a molecule whose centre sits
+                    // exactly on the upper face (a centrosymmetric molecule on
+                    // 0, for instance) is one image, not two — the closed test
+                    // would draw the face molecule at both ends of the range.
+                    if(cx<aMin-marginA-EPS||cx>=aMax+marginA-EPS)continue;
+                    if(cy<bMin-marginB-EPS||cy>=bMax+marginB-EPS)continue;
+                    if(cz<cMin-marginC-EPS||cz>=cMax+marginC-EPS)continue;
+                    for(var t3=0;t3<n;t3++){
+                        var bi3=members[t3];
+                        var ba3=baseAtoms[bi3];
+                        var uu3=u[bi3];
+                        var ax=uu3[0]+ci,ay=uu3[1]+cj,az=uu3[2]+ck;
+                        var ox=ax*lv[0][0]+ay*lv[1][0]+az*lv[2][0];
+                        var oy=ax*lv[0][1]+ay*lv[1][1]+az*lv[2][1];
+                        var oz=ax*lv[0][2]+ay*lv[1][2]+az*lv[2][2];
+                        var o3=g.offset[bi3];
+                        var ci3=o3[0]-tx+ci,cj3=o3[1]-ty+cj,ck3=o3[2]-tz+ck;
+                        var color=ba3.color||((MD.atomColors&&MD.atomColors[ba3.element])||'#FF1493');
+                        atoms.push({
+                            element:ba3.element,
+                            x:ox,y:oy,z:oz,
+                            index:idx,
+                            occupancy:ba3.occupancy,
+                            color:color,
+                            baseIdx:ba3.baseIdx!=null?ba3.baseIdx:bi3,
+                            cellI:ci3,cellJ:cj3,cellK:ck3
+                        });
+                        cellMap[bi3+'_'+ci3+'_'+cj3+'_'+ck3]=idx;
+                        rememberCell(bi3,ci3,cj3,ck3);
+                        idx++;
+                    }
                 }
             }
         }
     });
 
+    // Bonds: for every bond, walk the images actually placed (placedCells)
+    // rather than the boundary's cell range — a whole molecule's atoms can sit
+    // outside it. A finite component's offsets are consistent by construction
+    // (offset of the bonded image = offset of this one + shift), so every one
+    // of its bonds finds both endpoints and none is cut; only a periodic
+    // component's bonds lose an endpoint at the boundary and become split
+    // bonds (shift tells the renderer to draw the stub towards the image).
     var seenPairs={};
     var seenSplits={};
     baseBonds.forEach(function(bb){
         var b1=bb.atom1,b2=bb.atom2;
-        var s=bb.shift||[0,0,0];
-        var hasShift=s[0]||s[1]||s[2];
-        for(var ci1=iMin;ci1<=iMax;ci1++){
-            for(var cj1=jMin;cj1<=jMax;cj1++){
-                for(var ck1=kMin;ck1<=kMax;ck1++){
-                    var idx1=cellMap[b1+'_'+ci1+'_'+cj1+'_'+ck1];
-                    if(idx1==null)continue;
-                    var ci2=ci1+s[0],cj2=cj1+s[1],ck2=ck1+s[2];
-                    var idx2=cellMap[b2+'_'+ci2+'_'+cj2+'_'+ck2];
-                    if(idx2!=null){
-                        var key=idx1<idx2?idx1+'_'+idx2:idx2+'_'+idx1;
-                        if(!seenPairs[key]){
-                            seenPairs[key]=true;
-                            bonds.push({atom1:idx1,atom2:idx2,order:bb.order});
-                        }
-                    }else{
-                        var idx2s=cellMap[b2+'_'+ci1+'_'+cj1+'_'+ck1];
-                        if(idx2s!=null){
-                            var skey='F_'+idx1+'_'+idx2s+'_'+s[0]+'_'+s[1]+'_'+s[2];
-                            if(!seenSplits[skey]){
-                                seenSplits[skey]=true;
-                                bonds.push({atom1:idx1,atom2:idx2s,order:bb.order,shift:s});
-                            }
-                        }
+        var s=bb.shift||ZERO_SHIFT;
+        var cells1=placedCells[b1]||[];
+        var cells2=placedCells[b2]||[];
+        for(var p=0;p<cells1.length;p++){
+            var c1=cells1[p];
+            var idx1=cellMap[b1+'_'+c1[0]+'_'+c1[1]+'_'+c1[2]];
+            if(idx1==null)continue;
+            var idx2=cellMap[b2+'_'+(c1[0]+s[0])+'_'+(c1[1]+s[1])+'_'+(c1[2]+s[2])];
+            if(idx2!=null){
+                var key=idx1<idx2?idx1+'_'+idx2:idx2+'_'+idx1;
+                if(!seenPairs[key]){
+                    seenPairs[key]=true;
+                    bonds.push({atom1:idx1,atom2:idx2,order:bb.order});
+                }
+            }else{
+                var idx2s=cellMap[b2+'_'+c1[0]+'_'+c1[1]+'_'+c1[2]];
+                if(idx2s!=null){
+                    var skey='F_'+idx1+'_'+idx2s+'_'+s[0]+'_'+s[1]+'_'+s[2];
+                    if(!seenSplits[skey]){
+                        seenSplits[skey]=true;
+                        bonds.push({atom1:idx1,atom2:idx2s,order:bb.order,shift:s});
                     }
                 }
             }
         }
-        if(hasShift){
+        if(s[0]||s[1]||s[2]){
             var rs=[-s[0],-s[1],-s[2]];
-            for(var ci2=iMin;ci2<=iMax;ci2++){
-                for(var cj2=jMin;cj2<=jMax;cj2++){
-                    for(var ck2=kMin;ck2<=kMax;ck2++){
-                        var idx2r=cellMap[b2+'_'+ci2+'_'+cj2+'_'+ck2];
-                        if(idx2r==null)continue;
-                        var ri1=ci2+rs[0],rj1=cj2+rs[1],rk1=ck2+rs[2];
-                        var ridx1=cellMap[b1+'_'+ri1+'_'+rj1+'_'+rk1];
-                        if(ridx1==null){
-                            var idx1r=cellMap[b1+'_'+ci2+'_'+cj2+'_'+ck2];
-                            if(idx1r!=null){
-                                var skey='R_'+idx2r+'_'+idx1r+'_'+rs[0]+'_'+rs[1]+'_'+rs[2];
-                                if(!seenSplits[skey]){
-                                    seenSplits[skey]=true;
-                                    bonds.push({atom1:idx2r,atom2:idx1r,order:bb.order,shift:rs});
-                                }
-                            }
+            for(var q=0;q<cells2.length;q++){
+                var c2=cells2[q];
+                var idx2r=cellMap[b2+'_'+c2[0]+'_'+c2[1]+'_'+c2[2]];
+                if(idx2r==null)continue;
+                var ridx1=cellMap[b1+'_'+(c2[0]+rs[0])+'_'+(c2[1]+rs[1])+'_'+(c2[2]+rs[2])];
+                if(ridx1==null){
+                    var idx1r=cellMap[b1+'_'+c2[0]+'_'+c2[1]+'_'+c2[2]];
+                    if(idx1r!=null){
+                        var skey2='R_'+idx2r+'_'+idx1r+'_'+rs[0]+'_'+rs[1]+'_'+rs[2];
+                        if(!seenSplits[skey2]){
+                            seenSplits[skey2]=true;
+                            bonds.push({atom1:idx2r,atom2:idx1r,order:bb.order,shift:rs});
                         }
                     }
                 }
             }
         }
     });
+
+    // Z for a molecular crystal: the whole molecules the cell contains — the
+    // finite components plus the unbonded single atoms. A cell whose only
+    // component is periodic leaves the count at zero and the panel leaves the
+    // line out.
+    var nMol=0;
+    for(var gi=0;gi<groups.length;gi++){if(!groups[gi].periodic)nMol++}
+    for(var bl=0;bl<baseAtoms.length;bl++){if(groupOf[bl]===-1)nMol++}
+    CRY.moleculeCount=nMol;
 
     MD.atoms=atoms;
     MD.bonds=bonds;
@@ -2264,7 +2420,8 @@ function removeDisorder(){
         var color=ba.color||((MD.atomColors&&MD.atomColors[ba.element])||'#FF1493');
         newBaseAtoms.push({
             element:ba.element,x:ba.x,y:ba.y,z:ba.z,
-            index:newIdx,occupancy:newOcc,baseIdx:newIdx,color:color
+            index:newIdx,occupancy:newOcc,baseIdx:newIdx,color:color,
+            siteLabel:ba.siteLabel
         });
     });
     CRY.baseBonds=CRY.baseBonds.filter(function(b){
@@ -2278,33 +2435,122 @@ function removeDisorder(){
     rebuildScene();
 }
 
-var cellWireframe=null;
+var cellWireframe=null;      // the bounds' outer box
+var cellGridLines=null;      // the interior unit-cell division lines
+var cellEdgeLabels=[];       // the a/b/c sprites on the low corner's three edges
+// One text sprite per call: the letter is drawn onto a small canvas (no font
+// file, no image load — the page's CSP allows nothing else) and the sprite
+// always faces the camera.
+function makeEdgeLabelSprite(text,color){
+    var canvas=document.createElement('canvas');
+    canvas.width=64;canvas.height=64;
+    var ctx=canvas.getContext('2d');
+    ctx.font='bold 44px sans-serif';
+    ctx.textAlign='center';
+    ctx.textBaseline='middle';
+    ctx.fillStyle=color;
+    ctx.fillText(text,32,34);
+    var tex=new THREE.CanvasTexture(canvas);
+    var mat=new THREE.SpriteMaterial({map:tex,transparent:true,depthTest:false,depthWrite:false});
+    return new THREE.Sprite(mat);
+}
 function buildCellWireframe(){
-    if(cellWireframe){moleculeGroup.remove(cellWireframe);cellWireframe=null}
+    if(cellWireframe){moleculeGroup.remove(cellWireframe);disposeMesh(cellWireframe);cellWireframe=null}
+    if(cellGridLines){moleculeGroup.remove(cellGridLines);disposeMesh(cellGridLines);cellGridLines=null}
+    cellEdgeLabels.forEach(function(sp){
+        moleculeGroup.remove(sp);
+        // The sprite's own plane geometry is three.js's shared one — only the
+        // material and its canvas texture are this sprite's to release.
+        if(sp.material){if(sp.material.map)sp.material.map.dispose();sp.material.dispose()}
+    });
+    cellEdgeLabels=[];
     if(!CRY)return;
     var lv=CRY.latticeVectors;
     var aMin=boundary.aMin,aMax=boundary.aMax;
     var bMin=boundary.bMin,bMax=boundary.bMax;
     var cMin=boundary.cMin,cMax=boundary.cMax;
-    var corners=[];
-    for(var i=0;i<2;i++)for(var j=0;j<2;j++)for(var k=0;k<2;k++){
-        var ai=i?aMax:aMin,aj=j?bMax:bMin,ak=k?cMax:cMin;
+    // One corner of the subdivision grid, in world space relative to the centre.
+    function cellPt(ai,aj,ak){
         var x=ai*lv[0][0]+aj*lv[1][0]+ak*lv[2][0];
         var y=ai*lv[0][1]+aj*lv[1][1]+ak*lv[2][1];
         var z=ai*lv[0][2]+aj*lv[1][2]+ak*lv[2][2];
-        corners.push(new THREE.Vector3(x-CX,y-CY,z-CZ));
+        return new THREE.Vector3(x-CX,y-CY,z-CZ);
     }
-    var edges=[[0,4],[1,5],[2,6],[3,7],[0,2],[1,3],[4,6],[5,7],[0,1],[2,3],[4,5],[6,7]];
-    var positions=[];
-    edges.forEach(function(e){
-        positions.push(corners[e[0]].x,corners[e[0]].y,corners[e[0]].z);
-        positions.push(corners[e[1]].x,corners[e[1]].y,corners[e[1]].z);
+    // The planes the supercell is divided at: its two faces per axis plus every
+    // integer plane between them — the unit-cell boundaries themselves. 0..1
+    // therefore yields exactly the twelve box edges this always drew, and a
+    // 3x3x3 supercell shows its 27 cells instead of one outer shell.
+    function gridVals(mn,mx){
+        var vals=[mn,mx];
+        for(var v=Math.ceil(mn+1e-9);v<=mx-1e-9;v++)vals.push(v);
+        return vals;
+    }
+    function onFace(v,mn,mx){return Math.abs(v-mn)<1e-9||Math.abs(v-mx)<1e-9}
+    var aG=gridVals(aMin,aMax),bG=gridVals(bMin,bMax),cG=gridVals(cMin,cMax);
+    var outer=[],inner=[];
+    function addLine(p0,p1,bucket){
+        bucket.push(p0.x,p0.y,p0.z,p1.x,p1.y,p1.z);
+    }
+    // Lines run along one axis at every grid plane of the other two; only the
+    // lines whose both cross planes are boundary faces belong to the box.
+    bG.forEach(function(bj){
+        cG.forEach(function(ck){
+            addLine(cellPt(aMin,bj,ck),cellPt(aMax,bj,ck),(onFace(bj,bMin,bMax)&&onFace(ck,cMin,cMax))?outer:inner);
+        });
     });
-    var geo=new THREE.BufferGeometry();
-    geo.setAttribute('position',new THREE.Float32BufferAttribute(positions,3));
-    var mat=new THREE.LineBasicMaterial({color:0x88aaff});
-    cellWireframe=new THREE.LineSegments(geo,mat);
-    moleculeGroup.add(cellWireframe);
+    aG.forEach(function(ai){
+        cG.forEach(function(ck){
+            addLine(cellPt(ai,bMin,ck),cellPt(ai,bMax,ck),(onFace(ai,aMin,aMax)&&onFace(ck,cMin,cMax))?outer:inner);
+        });
+    });
+    aG.forEach(function(ai){
+        bG.forEach(function(bj){
+            addLine(cellPt(ai,bj,cMin),cellPt(ai,bj,cMax),(onFace(ai,aMin,aMax)&&onFace(bj,bMin,bMax))?outer:inner);
+        });
+    });
+    function lineSegmentsFor(arr){
+        if(arr.length===0)return null;
+        var geo=new THREE.BufferGeometry();
+        geo.setAttribute('position',new THREE.Float32BufferAttribute(arr,3));
+        return geo;
+    }
+    var outerGeo=lineSegmentsFor(outer);
+    if(outerGeo){
+        cellWireframe=new THREE.LineSegments(outerGeo,new THREE.LineBasicMaterial({color:0x88aaff}));
+        moleculeGroup.add(cellWireframe);
+    }
+    var innerGeo=lineSegmentsFor(inner);
+    if(innerGeo){
+        // The interior division lines stay one step quieter than the outer box,
+        // so a 3x3x3 grid reads as structure rather than as a cage over atoms.
+        cellGridLines=new THREE.LineSegments(innerGeo,new THREE.LineBasicMaterial({color:0x88aaff,transparent:true,opacity:0.3}));
+        moleculeGroup.add(cellGridLines);
+    }
+    // a/b/c on the three edges that meet at the bounds' low corner, nudged
+    // outside the box along the other two axes. The colours are the axes
+    // indicator's (a red, b green, c blue), so both readings of "which
+    // direction is a" agree.
+    var la=Math.sqrt(lv[0][0]*lv[0][0]+lv[0][1]*lv[0][1]+lv[0][2]*lv[0][2]);
+    var lb=Math.sqrt(lv[1][0]*lv[1][0]+lv[1][1]*lv[1][1]+lv[1][2]*lv[1][2]);
+    var lc=Math.sqrt(lv[2][0]*lv[2][0]+lv[2][1]*lv[2][1]+lv[2][2]*lv[2][2]);
+    var minEdge=Math.min(la,lb,lc);
+    if(minEdge>1e-9){
+        var ua=[lv[0][0]/la,lv[0][1]/la,lv[0][2]/la];
+        var ub=[lv[1][0]/lb,lv[1][1]/lb,lv[1][2]/lb];
+        var uc=[lv[2][0]/lc,lv[2][1]/lc,lv[2][2]/lc];
+        var dOut=minEdge*0.12;
+        var labS=minEdge*0.16;
+        function edgeLabel(text,color,mid,off){
+            var sp=makeEdgeLabelSprite(text,color);
+            sp.position.set(mid.x+off[0],mid.y+off[1],mid.z+off[2]);
+            sp.scale.set(labS,labS,1);
+            moleculeGroup.add(sp);
+            cellEdgeLabels.push(sp);
+        }
+        edgeLabel('a','#FF4444',cellPt((aMin+aMax)/2,bMin,cMin),[-dOut*(ub[0]+uc[0]),-dOut*(ub[1]+uc[1]),-dOut*(ub[2]+uc[2])]);
+        edgeLabel('b','#44FF44',cellPt(aMin,(bMin+bMax)/2,cMin),[-dOut*(ua[0]+uc[0]),-dOut*(ua[1]+uc[1]),-dOut*(ua[2]+uc[2])]);
+        edgeLabel('c','#4488FF',cellPt(aMin,bMin,(cMin+cMax)/2),[-dOut*(ua[0]+ub[0]),-dOut*(ua[1]+ub[1]),-dOut*(ua[2]+ub[2])]);
+    }
 }
 
 function updateAxesIndicator(){
@@ -2888,7 +3134,7 @@ function wireEggPanelButton(){
     btn.addEventListener('click',function(){rebuildEggPanel()});
 }
 
-function rebuildScene(){
+function rebuildScene(keepCenter){
     // The surface group rides inside the molecule group (so that it keeps
     // following the view transform); lift it out before the clear, drop its
     // meshes here, and put it back — refreshVmdSurfaces rebuilds them below.
@@ -2899,10 +3145,19 @@ function rebuildScene(){
     if(vmdSurfaceGroup)moleculeGroup.add(vmdSurfaceGroup);
     atomMeshes.length=0;
     cellWireframe=null;
+    cellGridLines=null;
+    cellEdgeLabels=[];
     rotAxisLineMesh=null;
-    CX=0;CY=0;CZ=0;
-    MD.atoms.forEach(function(a){CX+=a.x;CY+=a.y;CZ+=a.z});
-    if(MD.atoms.length>0){CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length}
+    // Recomputing the centroid is the default (the structure changed, the
+    // centre follows it). A supercell bounds change passes keepCenter: the
+    // atoms the old bounds already showed keep their exact screen positions
+    // and the new material appears around them, instead of the whole picture
+    // jumping to the enlarged structure's new centroid.
+    if(!keepCenter){
+        CX=0;CY=0;CZ=0;
+        MD.atoms.forEach(function(a){CX+=a.x;CY+=a.y;CZ+=a.z});
+        if(MD.atoms.length>0){CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length}
+    }
     var segs=sphereSegs();
     // The pools are caches: an entry outlives the meshes that drew with it, so
     // a rebuild after an edit or a colour toggle does not re-create every
@@ -4052,6 +4307,81 @@ if(CRY){
     var crystalPanel=document.getElementById('crystal-panel');
     if(crystalPanel)crystalPanel.style.display='block';
     layoutPanels();
+    // One door for every way the bounds change: the six inputs, the N×N×N
+    // presets, Reset and Align Origin all go through applyBoundary, so the size
+    // guard, the steady centre and the selection remap behave the same no
+    // matter which one moved.
+    function crystalCellEstimate(nb){
+        var na=Math.ceil(nb.aMax)-Math.floor(nb.aMin);
+        var nbv=Math.ceil(nb.bMax)-Math.floor(nb.bMin);
+        var nc=Math.ceil(nb.cMax)-Math.floor(nb.cMin);
+        if(na<1)na=1;
+        if(nbv<1)nbv=1;
+        if(nc<1)nc=1;
+        return na*nbv*nc;
+    }
+    function syncBndInputs(){
+        [['bnd-a-min','aMin'],['bnd-a-max','aMax'],['bnd-b-min','bMin'],
+         ['bnd-b-max','bMax'],['bnd-c-min','cMin'],['bnd-c-max','cMax']].forEach(function(pr){
+            var el=document.getElementById(pr[0]);
+            if(el)el.value=boundary[pr[1]];
+        });
+    }
+    function boundsEqual(a,b){
+        return a.aMin===b.aMin&&a.aMax===b.aMax&&a.bMin===b.bMin&&a.bMax===b.bMax&&a.cMin===b.cMin&&a.cMax===b.cMax;
+    }
+    function applyBoundary(nb){
+        if(!CRY)return false;
+        if(boundsEqual(nb,boundary)){syncBndInputs();return true}
+        // Scale guard: refuse, say so, and leave the structure (and the six
+        // inputs, which keep showing the bounds still in force) as they were.
+        var est=CRY.baseAtoms.length*crystalCellEstimate(nb);
+        if(est>MAX_CRYSTAL_ATOMS){
+            syncBndInputs();
+            showModal('<h3>Supercell Too Large</h3><div class="current-val">These bounds would build about '+est+' atoms; the limit is '+MAX_CRYSTAL_ATOMS+'.<br>Narrow the boundary range.</div><div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">OK</button></div>',null);
+            document.getElementById('m-cancel').addEventListener('click',hideModal);
+            return false;
+        }
+        // The atoms are about to be re-indexed: record each selected atom by
+        // its lattice identity (base site + image cell), then re-find that same
+        // atom after the rebuild. An image the new bounds no longer contain
+        // drops out of the selection — its base site stays selected wherever it
+        // is still on screen.
+        var selKeys=selectedAtoms.map(function(i){
+            var a=MD.atoms[i];
+            return (a&&a.baseIdx!=null&&a.cellI!=null)?(a.baseIdx+'_'+a.cellI+'_'+a.cellJ+'_'+a.cellK):null;
+        });
+        boundary.aMin=nb.aMin;boundary.aMax=nb.aMax;
+        boundary.bMin=nb.bMin;boundary.bMax=nb.bMax;
+        boundary.cMin=nb.cMin;boundary.cMax=nb.cMax;
+        syncBndInputs();
+        rebuildCrystal();
+        var newIdx={};
+        MD.atoms.forEach(function(a,i){
+            if(a.baseIdx!=null&&a.cellI!=null){
+                var k=a.baseIdx+'_'+a.cellI+'_'+a.cellJ+'_'+a.cellK;
+                if(newIdx[k]===undefined)newIdx[k]=i;
+            }
+        });
+        selectedAtoms=selKeys.filter(function(k){
+            return k!=null&&newIdx[k]!==undefined;
+        }).map(function(k){return newIdx[k]});
+        // The old centre stays the rotation centre (rebuildScene(true)): the
+        // picture does not jump when the bounds move.
+        rebuildScene(true);
+        refreshSelectionText();
+        mmSelectionChanged();
+        layoutPanels();
+        return true;
+    }
+    function refreshSelectionText(){
+        if(selectedAtoms.length===0){selInfoEl.textContent='';return}
+        var names=formatAtomList(selectedAtoms);
+        if(currentMode==='replaceAtom')selInfoEl.textContent='Selected to replace: '+names+' (click Replace Atom button to confirm)';
+        else if(currentMode==='addH')selInfoEl.textContent='Selected for Add H: '+names+' (click Add H button to complete)';
+        else if(currentMode==='mmOpt')selInfoEl.textContent='Selected for MM optimization: '+names+' ('+selectedAtoms.length+' atoms, click Start Optimization)';
+        else selInfoEl.textContent='Selected: '+names;
+    }
     ['bnd-a-min','bnd-a-max','bnd-b-min','bnd-b-max','bnd-c-min','bnd-c-max'].forEach(function(id){
         var inp=document.getElementById(id);
         if(inp){
@@ -4060,19 +4390,38 @@ if(CRY){
                 if(isNaN(v))v=0;
                 v=Math.max(-5,Math.min(5,v));
                 inp.value=v;
-                if(id==='bnd-a-min')boundary.aMin=v;
-                else if(id==='bnd-a-max')boundary.aMax=v;
-                else if(id==='bnd-b-min')boundary.bMin=v;
-                else if(id==='bnd-b-max')boundary.bMax=v;
-                else if(id==='bnd-c-min')boundary.cMin=v;
-                else if(id==='bnd-c-max')boundary.cMax=v;
-                if(boundary.aMax<boundary.aMin)boundary.aMax=boundary.aMin;
-                if(boundary.bMax<boundary.bMin)boundary.bMax=boundary.bMin;
-                if(boundary.cMax<boundary.cMin)boundary.cMax=boundary.cMin;
-                rebuildCrystal();
-                rebuildScene();
+                var nb={aMin:boundary.aMin,aMax:boundary.aMax,bMin:boundary.bMin,bMax:boundary.bMax,cMin:boundary.cMin,cMax:boundary.cMax};
+                if(id==='bnd-a-min')nb.aMin=v;
+                else if(id==='bnd-a-max')nb.aMax=v;
+                else if(id==='bnd-b-min')nb.bMin=v;
+                else if(id==='bnd-b-max')nb.bMax=v;
+                else if(id==='bnd-c-min')nb.cMin=v;
+                else if(id==='bnd-c-max')nb.cMax=v;
+                if(nb.aMax<nb.aMin)nb.aMax=nb.aMin;
+                if(nb.bMax<nb.bMin)nb.bMax=nb.bMin;
+                if(nb.cMax<nb.cMin)nb.cMax=nb.cMin;
+                applyBoundary(nb);
             });
         }
+    });
+    // N×N×N presets: the standard origin-aligned supercell, 0..N along every
+    // axis (a 2×2×2 preset is eight unit cells, not nine).
+    [['bnd-p2',2],['bnd-p3',3],['bnd-p4',4]].forEach(function(pr){
+        var btn=document.getElementById(pr[0]);
+        if(btn)btn.addEventListener('click',function(){
+            applyBoundary({aMin:0,aMax:pr[1],bMin:0,bMax:pr[1],cMin:0,cMax:pr[1]});
+        });
+    });
+    var bndResetBtn=document.getElementById('bnd-reset');
+    if(bndResetBtn)bndResetBtn.addEventListener('click',function(){
+        applyBoundary({aMin:0,aMax:1,bMin:0,bMax:1,cMin:0,cMax:1});
+    });
+    var bndOriginBtn=document.getElementById('bnd-origin');
+    if(bndOriginBtn)bndOriginBtn.addEventListener('click',function(){
+        // Same spans, low corner moved onto the lattice origin: the supercell
+        // then starts at the crystallographic 0,0,0 instead of wherever the
+        // slab happened to be floating.
+        applyBoundary({aMin:0,aMax:boundary.aMax-boundary.aMin,bMin:0,bMax:boundary.bMax-boundary.bMin,cMin:0,cMax:boundary.cMax-boundary.cMin});
     });
     var rmDisorderBtn=document.getElementById('bnd-remove-disorder');
     if(rmDisorderBtn){
@@ -9088,7 +9437,8 @@ function batchDeleteSelected(){
             oldToNew[i]=newIdx;
             var color=ba.color||((MD.atomColors&&MD.atomColors[ba.element])||'#FF1493');
             newBaseAtoms.push({element:ba.element,x:ba.x,y:ba.y,z:ba.z,
-                index:newIdx,occupancy:ba.occupancy!=null?ba.occupancy:1,baseIdx:newIdx,color:color});
+                index:newIdx,occupancy:ba.occupancy!=null?ba.occupancy:1,baseIdx:newIdx,color:color,
+                siteLabel:ba.siteLabel});
         });
         CRY.baseBonds=CRY.baseBonds.filter(function(b){
             return !baseToDelete[b.atom1]&&!baseToDelete[b.atom2];
@@ -10349,8 +10699,25 @@ canvas.addEventListener('mousemove',function(e){
     // model's wider pick target applies to both.
     var hi=getClickedAtom(e);
     if(hi>=0){
-        var a=(diffMode&&diffActiveSide==='right')?diffData.atoms[hi]:MD.atoms[hi];
-        tooltipEl.textContent=atomLabel(a,hi)+(isGhostAtom(a)?' (ghost)':'')+' ('+a.x.toFixed(4)+', '+a.y.toFixed(4)+', '+a.z.toFixed(4)+')';
+        var diffRight=diffMode&&diffActiveSide==='right';
+        var a=diffRight?diffData.atoms[hi]:MD.atoms[hi];
+        var tip=atomLabel(a,hi)+(isGhostAtom(a)?' (ghost)':'')+' ('+a.x.toFixed(4)+', '+a.y.toFixed(4)+', '+a.z.toFixed(4)+')';
+        // A crystal atom also says where it sits in the lattice: its fractional
+        // coordinates, which periodic image (i,j,k) of its base site this is,
+        // the file's own site label and its occupancy. A molecular structure's
+        // tooltip reads exactly what it always read — none of these fields
+        // exist there, and the comparison's right half is another molecule.
+        if(!diffRight&&CRY&&CRY_INV&&a&&a.baseIdx!=null&&a.cellI!=null){
+            var tfx=CRY_INV[0][0]*a.x+CRY_INV[0][1]*a.y+CRY_INV[0][2]*a.z;
+            var tfy=CRY_INV[1][0]*a.x+CRY_INV[1][1]*a.y+CRY_INV[1][2]*a.z;
+            var tfz=CRY_INV[2][0]*a.x+CRY_INV[2][1]*a.y+CRY_INV[2][2]*a.z;
+            tip+=' · frac ('+tfx.toFixed(3)+', '+tfy.toFixed(3)+', '+tfz.toFixed(3)+')';
+            tip+=' · cell ('+a.cellI+','+a.cellJ+','+a.cellK+')';
+            var tba=CRY.baseAtoms[a.baseIdx];
+            if(tba&&tba.siteLabel)tip+=' · site '+tba.siteLabel;
+            if(a.occupancy!=null)tip+=' · occ '+a.occupancy;
+        }
+        tooltipEl.textContent=tip;
         tooltipEl.style.display='block';
         tooltipEl.style.left=(e.clientX-container.getBoundingClientRect().left+15)+'px';
         tooltipEl.style.top=(e.clientY-container.getBoundingClientRect().top-10)+'px';

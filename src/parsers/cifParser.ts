@@ -805,7 +805,10 @@ export function parseCif(content: string): MolecularData {
                 x: cx, y: cy, z: cz,
                 index: baseAtoms.length,
                 occupancy: raw.occupancy,
-                baseIdx: baseAtoms.length
+                baseIdx: baseAtoms.length,
+                // The file's own name for the site this image came from; empty
+                // labels stay undefined so a file without labels adds nothing.
+                siteLabel: raw.label || undefined
             });
             hitOps.push(opIdx);
         }
