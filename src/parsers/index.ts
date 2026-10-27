@@ -1,11 +1,11 @@
-import { MolecularData, AtomGroup, OptStep, NormalMode } from '../types';
+import { MolecularData, AtomGroup, OptStep, NormalMode, OptThresholds } from '../types';
 import { parseGjf } from './gjfParser';
-import { parseXyz } from './xyzParser';
+import { parseXyz, parseXyzTrajectory, XyzFrame, XyzTrajectory } from './xyzParser';
 import { parseMol2 } from './mol2Parser';
 import { parseGaussianLog, LogFrame, GaussianLogResult, RouteSection, RouteKeyword } from './logParser';
 import { parseCoord } from './coordParser';
 import { parseOrcainp } from './orcaInpParser';
-import { parseOrcaOut, OrcaFrame } from './orcaOutParser';
+import { parseOrcaOut, isOrcaOutput, OrcaFrame, OrcaLogResult } from './orcaOutParser';
 import { parsePdb } from './pdbParser';
 import { parseMopac } from './mopacParser';
 import { parseCif } from './cifParser';
@@ -17,7 +17,8 @@ import { parseTcl, TclParseResult, resolveVmdScene, VmdResolvedScene, hasScalarC
 
 export { parseGaussianLog, LogFrame, GaussianLogResult };
 export { RouteSection, RouteKeyword };
-export { parseOrcaOut, OrcaFrame };
+export { parseOrcaOut, isOrcaOutput, OrcaFrame, OrcaLogResult };
+export { parseXyzTrajectory, XyzFrame, XyzTrajectory };
 export { parseCif };
 export { parseVasp };
 export { parseCube };
@@ -36,13 +37,16 @@ export interface LogFileResult {
     title: string;
     optSteps?: OptStep[];
     normalModes?: NormalMode[];
-    // Gaussian route-card sections (keywords lines), one per --Link1-- job —
+    // Route-card sections (Gaussian's keywords lines, ORCA's simple-input line),
     // shown in the webview's Route panel. Other formats leave it undefined.
     routes?: RouteSection[];
-    // Which log format produced this result. The webview uses it to decide
-    // whether Gaussian's own convergence thresholds (0.000450/0.000300 force,
-    // 0.001800/0.001200 displacement) apply to the charts — they are
-    // meaningless for other programs (e.g. xtb's gnorm criterion).
+    // The convergence targets the file itself states, when it states them.
+    // The panel draws them as dashed target lines; a program that states none
+    // (xtb's gnorm criterion, a trajectory with no table) gets no lines rather
+    // than a borrowed scale.
+    optThresholds?: OptThresholds;
+    // Which log format produced this result. The webview uses it to label the
+    // panel; the numeric scales come from `optThresholds`.
     source?: 'gaussian' | 'xtb' | 'orca';
 }
 
@@ -65,8 +69,16 @@ export function parseFile(content: string, fileName: string): MolecularData {
             return parseLogAsSingleFrame(content);
         case 'coord':
             return parseCoord(content);
-        case 'inp':
-            return parseOrcainp(content);
+        case 'inp': {
+            // `.inp` is ORCA's input extension, but Gaussian users name their
+            // inputs that way too. ORCA's own syntax is unambiguous (`* xyz` /
+            // `* xyzfile` / `%coords`); anything else that starts with a route
+            // card is read as a Gaussian input instead of coming back empty.
+            const orca = parseOrcainp(content);
+            if (orca.atoms.length > 0) return orca;
+            if (/^\s*#/m.test(content)) return parseGjf(content);
+            return orca;
+        }
         case 'pdb':
         case 'ent':
             return parsePdb(content);
@@ -89,14 +101,30 @@ export function parseFile(content: string, fileName: string): MolecularData {
     }
 }
 
+/**
+ * Parse a log/trajectory file into the frames and the analysis data the viewer
+ * needs.
+ *
+ * The format is decided by the CONTENT, not by the extension: Gaussian and ORCA
+ * are both routinely told to write `.out`, and xTB shares `.log` with Gaussian.
+ * Every detector below matches a string only one program writes, so the sniffing
+ * cannot pick the wrong parser; the extension is not consulted at all, which
+ * means a mis-named file (an ORCA run saved as `.log`, a Gaussian log saved as
+ * `.out`) still opens correctly.
+ */
 export function parseLogFile(content: string, fileName?: string): LogFileResult {
-    const ext = (fileName || '').toLowerCase().split('.').pop() || '';
-    if (ext === 'out') {
+    if (isOrcaOutput(content)) {
         const result = parseOrcaOut(content);
-        return { frames: result.frames, title: result.title, source: 'orca' };
+        return {
+            frames: result.frames,
+            title: result.title,
+            optSteps: result.optSteps,
+            normalModes: result.normalModes,
+            routes: result.routes,
+            optThresholds: result.optThresholds,
+            source: 'orca'
+        };
     }
-    // Content-based sniffing: xtb trajectories share the .log extension with
-    // Gaussian logs but are structurally unrelated (extended multi-frame XYZ).
     if (isXtbLog(content)) {
         const xResult = parseXtbLog(content);
         return {
@@ -119,31 +147,22 @@ export function parseLogFile(content: string, fileName?: string): LogFileResult 
 }
 
 function parseLogAsSingleFrame(content: string): MolecularData {
-    if (isXtbLog(content)) {
-        const result = parseXtbLog(content);
-        if (result.frames.length > 0) {
-            return {
-                atoms: result.frames[0].atoms,
-                bonds: result.frames[0].bonds,
-                title: result.frames[0].title,
-                hasExplicitBonds: result.frames[0].hasExplicitBonds
-            };
-        }
-        return { atoms: [], bonds: [], title: 'Empty', hasExplicitBonds: false };
-    }
-    const result = parseGaussianLog(content);
+    const result = parseLogFile(content);
     if (result.frames.length > 0) {
+        const f = result.frames[0];
         return {
-            atoms: result.frames[0].atoms,
-            bonds: result.frames[0].bonds,
-            title: result.frames[0].title,
-            hasExplicitBonds: result.frames[0].hasExplicitBonds
+            atoms: f.atoms,
+            bonds: f.bonds,
+            title: f.title,
+            hasExplicitBonds: f.hasExplicitBonds,
+            charge: f.charge,
+            multiplicity: f.multiplicity
         };
     }
     return { atoms: [], bonds: [], title: 'Empty', hasExplicitBonds: false };
 }
 
-function tryAutoParse(content: string, fileName: string = ''): MolecularData {
+export function tryAutoParse(content: string, fileName: string = ''): MolecularData {
     const lines = content.split(/\r?\n/).filter(l => l.trim() !== '');
 
     if (content.includes('$coord')) {
@@ -178,7 +197,7 @@ function tryAutoParse(content: string, fileName: string = ''): MolecularData {
         return parseVesta(content);
     }
 
-    if (content.includes('CARTESIAN COORDINATES (ANGSTROEM)')) {
+    if (isOrcaOutput(content)) {
         const result = parseOrcaOut(content);
         if (result.frames.length > 0) {
             return {

@@ -632,6 +632,14 @@ function improperForce(el: string): number {
 }
 
 function ljEpsilon(el: string): number {
+    // A ghost atom (`X`) is a position, not a particle: it has no electrons, so
+    // no dispersion well and no Pauli wall. Zeroing its well depth is what makes
+    // a counterpoise ghost stand in the force field without pulling the real
+    // atoms towards it — the same reason a ghost is never bonded and never
+    // moved (the panel leaves it out of the mobile set).
+    if (el === 'X') {
+        return 0;
+    }
     const v = LJ_EPSILON[el];
     return v === undefined ? LJ_DEFAULT : v;
 }

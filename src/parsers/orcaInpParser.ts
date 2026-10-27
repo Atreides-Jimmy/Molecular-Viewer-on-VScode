@@ -1,4 +1,19 @@
 import { Atom, Bond, MolecularData } from '../types';
+import { ghostFromLabel } from './ghostAtoms';
+
+/**
+ * One atom label of an ORCA coordinate block.
+ *
+ * ORCA spells a dummy `DA` / `X` / `Xx` and a ghost `<element>:` (a colon right
+ * after the symbol), so the ghost reading comes first; everything else keeps
+ * the old rule — a one- or two-letter element symbol.
+ */
+function orcaAtomLabel(raw: string): { element: string; ghost: boolean } | null {
+    const ghost = ghostFromLabel(raw);
+    if (ghost) return { element: ghost.element, ghost: true };
+    if (!/^[A-Za-z]{1,2}$/.test(raw)) return null;
+    return { element: raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase(), ghost: false };
+}
 
 export function parseOrcainp(content: string): MolecularData {
     const lines = content.split(/\r?\n/);
@@ -42,15 +57,14 @@ export function parseOrcainp(content: string): MolecularData {
         if (inXyz && line !== '') {
             const parts = line.split(/\s+/);
             if (parts.length >= 4) {
-                const elem = parts[0];
+                const label = orcaAtomLabel(parts[0]);
                 const x = parseFloat(parts[1]);
                 const y = parseFloat(parts[2]);
                 const z = parseFloat(parts[3]);
-                if (!isNaN(x) && !isNaN(y) && !isNaN(z) && /^[A-Za-z]{1,2}$/.test(elem)) {
-                    atoms.push({
-                        element: elem.charAt(0).toUpperCase() + elem.slice(1).toLowerCase(),
-                        x, y, z, index: atomIndex
-                    });
+                if (label && !isNaN(x) && !isNaN(y) && !isNaN(z)) {
+                    const atom: Atom = { element: label.element, x, y, z, index: atomIndex };
+                    if (label.ghost) atom.ghost = true;
+                    atoms.push(atom);
                     atomIndex++;
                 }
             }
@@ -86,19 +100,18 @@ export function parseOrcainp(content: string): MolecularData {
             if (line !== '' && !line.startsWith('%')) {
                 const parts = line.split(/\s+/);
                 if (parts.length >= 4) {
-                    const elem = parts[0];
+                    const label = orcaAtomLabel(parts[0]);
                     let x = parseFloat(parts[1]);
                     let y = parseFloat(parts[2]);
                     let z = parseFloat(parts[3]);
-                    if (!isNaN(x) && !isNaN(y) && !isNaN(z) && /^[A-Za-z]{1,2}$/.test(elem)) {
+                    if (label && !isNaN(x) && !isNaN(y) && !isNaN(z)) {
                         if (inCoordsBohr) {
                             const BOHR = 0.529177249;
                             x *= BOHR; y *= BOHR; z *= BOHR;
                         }
-                        atoms.push({
-                            element: elem.charAt(0).toUpperCase() + elem.slice(1).toLowerCase(),
-                            x, y, z, index: atomIndex
-                        });
+                        const atom: Atom = { element: label.element, x, y, z, index: atomIndex };
+                        if (label.ghost) atom.ghost = true;
+                        atoms.push(atom);
                         atomIndex++;
                     }
                 }

@@ -243,6 +243,26 @@ function bpZOf(el: string): number {
     return z === undefined ? -1 : z;
 }
 
+/**
+ * Whether an atom is a ghost (a position with no nucleus, electrons or bonds).
+ *
+ * Bond perception must answer this before anything else: a ghost that was
+ * allowed into the connectivity pass would be a centre of unknown radius
+ * (the 1.5 Å fallback), so it would bond to whatever sits within ~3.5 Å of it,
+ * take a share of the valence solver's attention and — in a counterpoise
+ * structure, where the ghosts stand exactly on the other fragment's atoms —
+ * draw a full set of sticks into points that have no atom at all.
+ *
+ * Both spellings mean the same thing: the `ghost` flag, and the dummy element
+ * `X` every parser normalises a dummy to. Kept identical to `isGhostAtom` in
+ * `types.ts`; this copy exists because the module is serialised into the page
+ * as source, where nothing can be imported.
+ */
+function bpIsGhost(a: Atom | null | undefined): boolean {
+    if (!a) return true;
+    return a.ghost === true || a.element === 'X';
+}
+
 // ---------------------------------------------------------------------------
 // 2. Connectivity and geometric bond orders
 // ---------------------------------------------------------------------------
@@ -383,6 +403,7 @@ function bpConnectivity(atoms: Atom[]): Map<number, Map<number, number>> {
     const cellY = new Int32Array(n);
     const cellZ = new Int32Array(n);
     for (let i = 0; i < n; i++) {
+        if (bpIsGhost(atoms[i])) continue;
         const cx = Math.floor(atoms[i].x / CELL);
         const cy = Math.floor(atoms[i].y / CELL);
         const cz = Math.floor(atoms[i].z / CELL);
@@ -402,6 +423,7 @@ function bpConnectivity(atoms: Atom[]): Map<number, Map<number, number>> {
 
     const candidates: number[] = [];
     for (let i = 0; i < n; i++) {
+        if (bpIsGhost(atoms[i])) continue;
         const range = rangeFor[normEls[i]];
         const cx = cellX[i];
         const cy = cellY[i];
@@ -1803,6 +1825,30 @@ export interface PerceptionResult {
 }
 
 /**
+ * The atom list the passes below see: ghosts are read as the dummy element.
+ *
+ * A ghost has no valence to satisfy, so leaving it with the element its basis
+ * belongs to would make it a permanent valence violation — a ghost carbon with
+ * no bonds is a carbon four bonds short — and the solver would spend its budget
+ * on a component that cannot be fixed. As `X` it has no target valence at all,
+ * which is exactly true. The copy is made only when the structure has a ghost.
+ */
+function bpGhostView(rawAtoms: Atom[]): Atom[] {
+    let has = false;
+    for (let i = 0; i < rawAtoms.length; i++) {
+        const a = rawAtoms[i];
+        if (a && a.ghost === true && a.element !== 'X') { has = true; break; }
+    }
+    if (!has) return rawAtoms;
+    const out: Atom[] = new Array(rawAtoms.length);
+    for (let i = 0; i < rawAtoms.length; i++) {
+        const a = rawAtoms[i];
+        out[i] = (a && a.ghost === true) ? { ...a, element: 'X' } : a;
+    }
+    return out;
+}
+
+/**
  * Perceive bonds, orders and formal charges for a bare coordinate set.
  *
  * The geometric check runs first — the element-pair length table, the order
@@ -1816,8 +1862,13 @@ export interface PerceptionResult {
  * the finished orders and write none, and they are where the result can be
  * inspected — how many atoms the geometric check left off their allowed
  * valence, and how many components the valence check could settle if asked.
+ *
+ * A ghost atom is not part of any of it: it is left out of the connectivity
+ * pass, so it ends up with no bond and every other atom's bonds are exactly
+ * what they would be without it (see `bpGhostView`).
  */
-export function perceiveBonds(atoms: Atom[], opts?: PerceptionOptions): PerceptionResult {
+export function perceiveBonds(rawAtoms: Atom[], opts?: PerceptionOptions): PerceptionResult {
+    const atoms = bpGhostView(rawAtoms);
     const options = opts || {};
     const n = atoms.length;
     const diagnostics: PerceptionDiagnostics = {
@@ -1993,7 +2044,7 @@ export function perceiveBonds(atoms: Atom[], opts?: PerceptionOptions): Percepti
  * has to appear here, or the client copy would reference something undefined.
  */
 const MODULE_FUNCTIONS: Array<(...args: never[]) => unknown> = [
-    bpNorm, bpPairKey, bpSpecKey, bpDist, bpIsTerminal, bpCeiling, bpZOf,
+    bpNorm, bpPairKey, bpSpecKey, bpDist, bpIsTerminal, bpCeiling, bpZOf, bpIsGhost,
     bpPairCutoff, bpGeometricOrder, bpConnectivity,
     bpAllowedOrders, bpNearestAllowed, bpFixOrders,
     bpMaximumMatching,
@@ -2003,6 +2054,7 @@ const MODULE_FUNCTIONS: Array<(...args: never[]) => unknown> = [
     bpValenceOf, bpComponentGap, bpRestoreAromatic,
     bpSupportedOrder, bpSpecDev, bpRefineValences,
     bpComponents, bpHasViolation, bpSolveComponent,
+    bpGhostView,
     perceiveBonds
 ];
 

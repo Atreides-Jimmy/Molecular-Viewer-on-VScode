@@ -4,6 +4,18 @@ export interface Atom {
     y: number;
     z: number;
     index: number;
+    /**
+     * A ghost atom: the coordinates of an atom without a nucleus, electrons or
+     * bonds. `element` still names the atom the ghost stands for, because that
+     * is what a counterpoise calculation needs (`C-Bq` in Gaussian, `C:` in
+     * ORCA); a bare dummy point has `element === 'X'`.
+     *
+     * A ghost never carries a bond, never counts in a formula or an electron
+     * count and is skipped by bond perception — every one of those rules is
+     * keyed off `isGhostAtom`, so a structure cannot end up with a ghost that
+     * some pass treats as a real atom and another does not.
+     */
+    ghost?: boolean;
     occupancy?: number;
     // PDB columns 61-66. Not a B-factor: the visualization toolchain writes an
     // arbitrary per-atom scalar (unit index, force error, …) into that column,
@@ -101,6 +113,27 @@ export interface OptStep {
     rmsDisplacement?: number;
 }
 
+/**
+ * The convergence targets the program itself states in its output.
+ *
+ * The convergence panel draws them as dashed target lines. They are read from
+ * the file instead of being hard-coded per program, because the same program
+ * can be told to converge tighter (ORCA's `TolMaxG`/`TolRMSD`, a Gaussian
+ * `opt=(tight)` route) and a chart that drew the default tolerances would then
+ * show a curve crossing the wrong line. A program that states none gets no
+ * lines at all rather than a borrowed scale.
+ */
+export interface OptThresholds {
+    /** Hartree/Bohr — largest single force component allowed at convergence. */
+    maxForce?: number;
+    /** Hartree/Bohr — RMS force allowed at convergence. */
+    rmsForce?: number;
+    /** Bohr — largest single displacement of the last step. */
+    maxDisplacement?: number;
+    /** Bohr — RMS displacement of the last step. */
+    rmsDisplacement?: number;
+}
+
 export interface NormalMode {
     index: number;
     frequency: number;
@@ -124,4 +157,20 @@ export interface MolecularData {
     /** Present when the structure was loaded through a VMD visualization script. */
     vmd?: VmdScene;
     crystal?: CrystalData;
+}
+
+/**
+ * Whether an atom is a ghost (a position with no nucleus, electrons or bonds).
+ *
+ * Two spellings mean the same thing, and every pass in the extension and in the
+ * page asks this one question rather than testing either: the `ghost` flag, and
+ * the dummy element `X` that every file format without a ghost concept writes
+ * (`X`, `Bq`, `Du`, `DA`, `Xx`, `q` — the parsers all normalise to `X`). The
+ * page carries the same predicate in its own script (the viewer's client code
+ * is inlined, so it cannot import this one); the two are kept identical.
+ */
+export function isGhostAtom(a: { element?: unknown; ghost?: unknown } | null | undefined): boolean {
+    if (!a) return false;
+    if (a.ghost === true) return true;
+    return a.element === 'X';
 }

@@ -1,12 +1,12 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { parseFile, parseLogFile, LogFrame, OrcaFrame, RouteSection, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg } from '../parsers/index';
+import { parseFile, parseLogFile, parseXyzTrajectory, LogFrame, OrcaFrame, RouteSection, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg } from '../parsers/index';
 import { ensureBonds } from '../tools/bondDetector';
 import { BOND_PERCEPTION_SOURCE } from '../tools/bondPerception';
 import { addHydrogens } from '../tools/addHydrogens';
 import { beginOptimization, describeForceField, MmHistoryPoint, MmOptimizeResult, MmSession } from '../tools/mmOptimizer';
 import { smilesTo3dSafe, validateSmiles } from '../tools/smilesTo3d';
-import { MolecularData, AtomGroup, OptStep, NormalMode, VmdScene, VmdMolecule } from '../types';
+import { MolecularData, AtomGroup, OptStep, NormalMode, OptThresholds, VmdScene, VmdMolecule } from '../types';
 
 const ATOM_COLORS: { [key: string]: string } = {
     H: '#FFFFFF', He: '#D9FFFF', Li: '#CC80FF', Be: '#C2FF00', B: '#FFB5B5',
@@ -107,6 +107,8 @@ interface VmdAtomPayload {
     color: string;
     beta?: number;
     occupancy?: number;
+    /** A ghost/dummy atom of the loaded structure (see `Atom.ghost`). */
+    ghost?: boolean;
     /** Sphere size as a multiplier on the viewer's own radius; 0 = not drawn. */
     vmdScale?: number;
     /** van der Waals radius in Å — the reference length a `Surf` probe adds to. */
@@ -166,6 +168,7 @@ interface LoadedStructure {
     optSteps?: OptStep[];
     normalModes?: NormalMode[];
     routes?: RouteSection[];
+    optThresholds?: OptThresholds;
     logSource?: string;
     error?: string;
 }
@@ -195,6 +198,7 @@ async function loadStructureFile(uri: vscode.Uri): Promise<LoadedStructure> {
             optSteps: logResult.optSteps,
             normalModes: logResult.normalModes,
             routes: logResult.routes,
+            optThresholds: logResult.optThresholds,
             logSource: logResult.source
         };
     }
@@ -351,6 +355,7 @@ function resolveVmdSource(scriptUri: vscode.Uri, sourceFile: string): vscode.Uri
         };
         if (typeof a.beta === 'number') item.beta = a.beta;
         if (typeof a.occupancy === 'number') item.occupancy = a.occupancy;
+        if (a.ghost === true) item.ghost = true;
         if (typeof resolved.atomScales[i] === 'number') item.vmdScale = resolved.atomScales[i] as number;
         return item;
     });
@@ -417,6 +422,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         let optSteps: OptStep[] | undefined;
         let normalModes: NormalMode[] | undefined;
         let routes: RouteSection[] | undefined;
+        let optThresholds: OptThresholds | undefined;
         let logSource: string | undefined;
         let vmdPayload: VmdPayload | undefined;
         let autoBeta = false;
@@ -448,6 +454,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             optSteps = logResult.optSteps;
             normalModes = logResult.normalModes;
             routes = logResult.routes;
+            optThresholds = logResult.optThresholds;
             logSource = logResult.source;
             if (frames.length > 0) {
                 data = ensureBonds({
@@ -460,6 +467,40 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                 });
             } else {
                 data = { atoms: [], bonds: [], title: 'No structures found', hasExplicitBonds: false };
+            }
+        } else if (ext === 'xyz') {
+            // A multi-frame XYZ is a trajectory — ORCA writes one for every
+            // optimization as `<job>_trj.xyz`, with each frame's energy in its
+            // comment line — so it gets the same frame navigation (and, when the
+            // comment states an energy per frame, the same convergence chart) a
+            // log does. A single-frame file takes the ordinary structure path.
+            const traj = parseXyzTrajectory(textContent);
+            if (traj.frames.length > 1) {
+                frames = traj.frames.map((f, k) => ({
+                    atoms: f.atoms,
+                    bonds: [],
+                    title: f.title,
+                    hasExplicitBonds: false,
+                    stepLabel: 'Frame ' + (k + 1),
+                    energy: f.energy
+                }));
+                // The energy curve needs a value for every frame: a partial
+                // series would put step k at frame k of a different numbering.
+                const steps: OptStep[] = [];
+                for (let k = 0; k < traj.frames.length; k++) {
+                    const e = traj.frames[k].energy;
+                    if (e === undefined) { steps.length = 0; break; }
+                    steps.push({ step: k + 1, energy: e });
+                }
+                optSteps = steps.length > 1 ? steps : undefined;
+                data = ensureBonds({
+                    atoms: frames[0].atoms,
+                    bonds: [],
+                    title: frames[0].title,
+                    hasExplicitBonds: false
+                });
+            } else {
+                data = ensureBonds(parseFile(textContent, fileName));
             }
         } else {
             data = parseFile(textContent, fileName);
@@ -482,13 +523,14 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             frames = [];
             optSteps = undefined;
             normalModes = undefined;
+            optThresholds = undefined;
         }
 
         if (ext !== 'tcl') {
             data.filePath = uri.fsPath;
         }
 
-        return new MolecularDocument(uri, data, frames, optSteps, normalModes, logSource, routes, vmdPayload, autoBeta);
+        return new MolecularDocument(uri, data, frames, optSteps, normalModes, logSource, routes, vmdPayload, autoBeta, optThresholds);
     }
 
     /**
@@ -579,7 +621,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             enableScripts: true,
         };
 
-        webviewPanel.webview.html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes, document.vmdPayload, document.autoBeta);
+        webviewPanel.webview.html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes, document.vmdPayload, document.autoBeta, document.optThresholds);
 
         // The panel's Molecular Mechanics run (at most one at a time). The pump
         // steps it in chunks and yields between them, so the panel keeps
@@ -888,7 +930,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         };
                         const diffAtoms = diffData.atoms.map((a, i) => ({
                             element: a.element, x: a.x, y: a.y, z: a.z,
-                            color: (diffVmdColors && diffVmdColors[i]) || diffAtomColors[a.element] || '#FF1493'
+                            color: (diffVmdColors && diffVmdColors[i]) || diffAtomColors[a.element] || '#FF1493',
+                            ghost: a.ghost === true ? true : undefined
                         }));
                         if (diffData.atomGroups && diffData.atomGroups.length > 0) {
                             const override: { [key: number]: string } = {};
@@ -897,7 +940,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         }
                         const diffBonds = diffData.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order }));
                         const diffFramesData = diffFrames.map(f => ({
-                            atoms: f.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: diffAtomColors[a.element] || '#FF1493' })),
+                            atoms: f.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: diffAtomColors[a.element] || '#FF1493', ghost: a.ghost === true ? true : undefined })),
                             bonds: f.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order })),
                             stepLabel: f.stepLabel
                         }));
@@ -1067,7 +1110,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             break;
                         }
 
-                        const impAtoms = impData.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: ATOM_COLORS[a.element] || '#FF1493' }));
+                        const impAtoms = impData.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: ATOM_COLORS[a.element] || '#FF1493', ghost: a.ghost === true ? true : undefined }));
                         const impBonds = impData.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order }));
                         postImportCopies(webviewPanel.webview, impFileName,
                                          impAtoms, impBonds, !!impData.hasExplicitBonds, choice.copies);
@@ -1224,7 +1267,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         });
     }
 
-    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[], logSource?: string, routes?: RouteSection[], vmdPayload?: VmdPayload, autoBeta: boolean = false): Promise<string> {
+    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[], logSource?: string, routes?: RouteSection[], vmdPayload?: VmdPayload, autoBeta: boolean = false, optThresholds?: OptThresholds): Promise<string> {
         const nonce = getNonce();
 
         const threeJsBytes = await vscode.workspace.fs.readFile(
@@ -1241,6 +1284,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                 color: color,
                 beta: a.beta,
                 occupancy: a.occupancy,
+                ghost: a.ghost === true ? true : undefined,
                 baseIdx: a.baseIdx,
                 cellI: a.cellI, cellJ: a.cellJ, cellK: a.cellK
             };
@@ -1265,7 +1309,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         }));
 
         const framesData = frames.map(f => ({
-            atoms: f.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: atomColors[a.element] || '#FF1493' })),
+            atoms: f.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: atomColors[a.element] || '#FF1493', ghost: a.ghost === true ? true : undefined })),
             bonds: f.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order })),
             stepLabel: f.stepLabel,
             // Single-point energy of this frame's structure (opt logs only), used
@@ -1311,7 +1355,12 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
 
         const vmdData = vmdPayload && vmdPayload.molecules.length > 0 ? vmdPayload : null;
 
-        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, routes: routesData, vmd: vmdData, autoBeta: !!(autoBeta && !vmdData), hasExplicitBonds: !!data.hasExplicitBonds, mmParams: describeForceField() });
+        const optThresholdsData = optThresholds ? {
+            maxForce: optThresholds.maxForce, rmsForce: optThresholds.rmsForce,
+            maxDisplacement: optThresholds.maxDisplacement, rmsDisplacement: optThresholds.rmsDisplacement
+        } : null;
+
+        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, optThresholds: optThresholdsData, routes: routesData, vmd: vmdData, autoBeta: !!(autoBeta && !vmdData), hasExplicitBonds: !!data.hasExplicitBonds, mmParams: describeForceField() });
 
         // The bond perception module, as source. Both sides run this text —
         // the host calls the compiled function directly, the webview evaluates
@@ -1330,6 +1379,16 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
 *{margin:0;padding:0;box-sizing:border-box}
 html{width:100%;height:100%;overflow:hidden}
 body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;background:var(--vscode-editor-background,#1e1e1e);font-family:var(--vscode-font-family,sans-serif);color:var(--vscode-editor-foreground,#ccc)}
+/* The viewer is not a document: nothing on the page is text to be selected, so
+   Ctrl+A can only mean Select All of the *structure*, and a drag that starts on
+   the canvas and ends over a panel never paints the toolbar blue on the way.
+   This is a structural guarantee — it holds even where the key never reaches the
+   page's own handler. user-select inherits, so one rule covers every panel;
+   form fields get their text behaviour back, and the load-error block is
+   deliberately selectable so a failure can be copied into a bug report. */
+body{-webkit-user-select:none;user-select:none}
+input,textarea{-webkit-user-select:text;user-select:text}
+#error-msg{-webkit-user-select:text;user-select:text}
 #toolbar{flex-shrink:0;background:var(--vscode-editor-background,#1e1e1e);border-bottom:1px solid var(--vscode-panel-border,#444);display:flex;flex-direction:column;padding:2px 0;z-index:20}
 #toolbar .trow{display:flex;align-items:center;gap:2px;min-height:34px;padding:0 8px;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
 #toolbar .trow::-webkit-scrollbar{height:3px}
@@ -1422,6 +1481,10 @@ body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;b
 #view-panel .vp-title,#bake-panel .vp-title{font-size:12px;font-weight:bold;margin-bottom:6px}
 #view-panel .tbtn,#bake-panel .tbtn{width:100%;text-align:center}
 #view-panel .vp-hint,#bake-panel .vp-hint{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:6px;line-height:1.4}
+/* The drawing style is the second section of the View card, under Auto Rotate;
+   its own title needs the top margin the shared .vp-title does not carry. */
+#view-panel .vp-sub{margin-top:10px}
+#view-panel select{width:100%;padding:3px 4px;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:3px;font-size:11px;box-sizing:border-box;cursor:pointer}
 canvas{display:block}
 #atom-tooltip{position:absolute;display:none;color:var(--vscode-editor-foreground,#ccc);font-size:12px;background:var(--vscode-editor-background,#1e1e1e);padding:4px 8px;border-radius:3px;border:1px solid var(--vscode-panel-border,#444);pointer-events:none;z-index:30}
 #box-select-rect{position:fixed;display:none;border:1px dashed #ffeb3b;background:rgba(255,235,59,0.12);pointer-events:none;z-index:40}
@@ -1607,7 +1670,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="vp-title">Auto Rotate</div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div></div><div id="bake-panel"><div class="vp-title">Edit Coordinates</div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="vp-title">Auto Rotate</div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div><div class="vp-title vp-sub">Display</div><select id="style-select" title="How the structure is drawn: ball and stick (the default), van der Waals spheres, or sticks without the atom spheres"><option value="ball">Ball &amp; Stick</option><option value="spacefill">Space-filling</option><option value="stick">Stick</option></select></div><div id="bake-panel"><div class="vp-title">Edit Coordinates</div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="box-select-rect"></div>
@@ -1621,6 +1684,74 @@ try{
 var MD=${jsonData};
 var BP=${bondPerceptionSource};
 var AN={H:1,He:2,Li:3,Be:4,B:5,C:6,N:7,O:8,F:9,Ne:10,Na:11,Mg:12,Al:13,Si:14,P:15,S:16,Cl:17,Ar:18,K:19,Ca:20,Sc:21,Ti:22,V:23,Cr:24,Mn:25,Fe:26,Co:27,Ni:28,Cu:29,Zn:30,Ga:31,Ge:32,As:33,Se:34,Br:35,Kr:36,Rb:37,Sr:38,Y:39,Zr:40,Nb:41,Mo:42,Tc:43,Ru:44,Rh:45,Pd:46,Ag:47,Cd:48,In:49,Sn:50,Sb:51,Te:52,I:53,Xe:54,Cs:55,Ba:56,La:57,Ce:58,Pr:59,Nd:60,Pm:61,Sm:62,Eu:63,Gd:64,Tb:65,Dy:66,Ho:67,Er:68,Tm:69,Yb:70,Lu:71,Hf:72,Ta:73,W:74,Re:75,Os:76,Ir:77,Pt:78,Au:79,Hg:80,Tl:81,Pb:82,Bi:83,Po:84,At:85,Rn:86};
+// ===== Ghost atoms =====
+// A ghost is a position without a nucleus, electrons or bonds: the marker a
+// counterpoise calculation puts where the other fragment's atoms are. It keeps
+// the element it stands for (the 'element' field), because that is what decides
+// its basis functions in the two programs that have a ghost concept at all; a
+// bare dummy point is element 'X'.
+//
+// One predicate decides everything below - drawing, formula, electron count,
+// label, bond guards - and it is the same expression as isGhostAtom in
+// src/types.ts (the page's script is inlined and cannot import it, so the two
+// are kept identical by hand). Nothing in this page may test element 'X' or the
+// ghost flag on its own: a structure loaded from a file carries either.
+var GHOST_COLOR='#8FA8BF';   // grey-blue, deliberately unlike any element
+var GHOST_RADIUS=0.28;       // sphere radius in A (a real atom is 0.3-1.0)
+function isGhostAtom(a){return !!a&&(a.ghost===true||a.element==='X')}
+/** One atom's label everywhere the page names an atom: C3, or C*3 / X5. */
+function atomLabel(a,i){
+    if(!a)return '?';
+    var el=isGhostAtom(a)?(a.element==='X'?'X':a.element+'*'):a.element;
+    return el+((typeof i==='number')?(i+1):'');
+}
+// ===== Display style =====
+// A structure can be drawn three ways, and the choice belongs to the view, not
+// to a mode: it is one variable here, above every block that reads it, and the
+// toolbar switching tools never touches it - which is what makes a style chosen
+// in View still be there in Bond Length, Move Atoms, MM Optimize or Diff, and
+// what makes a frame, molecule or undo switch keep it too.
+//
+//   'ball'      the drawing this viewer has always produced: a sphere of half
+//               the covalent radius per atom, cylinders between them.
+//   'spacefill' each atom as its van der Waals sphere, and no sticks at all -
+//               the model space-filling/CPK means.
+//   'stick'     the sticks stay, and every sphere shrinks to the thickness of
+//               the sticks that meet at it, so the model reads as tubes with no
+//               beads (and no notch at a bend, because the joint fills it).
+//
+// Only two places in the page read it - the atom radius of rebuildScene (and of
+// the comparison's right half) and the piece builder createBond - so one part
+// of the picture cannot be drawn in one style and another part in another.
+var displayStyle='ball';
+var DISPLAY_STYLES={ball:1,spacefill:1,stick:1};
+// van der Waals radii: the same table the host resolves a script's Surf probe
+// and the VDW representation against (src/parsers/vmdVisualization.ts). It is
+// copied rather than injected because the page's HTML is a template literal
+// whose substitution list the test harnesses pin; verify_display_style.js
+// compares the two copies element by element, so a drift fails a test rather
+// than silently drawing atoms at the wrong size.
+var VDW_R={H:1.00,He:1.40,Li:1.82,Be:1.53,B:1.92,C:1.70,N:1.55,O:1.52,
+    F:1.47,Ne:1.54,Na:2.27,Mg:1.73,Al:1.84,Si:2.10,P:1.80,S:1.80,Cl:1.75,
+    Ar:1.88,K:2.75,Ca:2.31,Sc:2.30,Ti:2.15,V:2.05,Cr:2.05,Mn:2.05,Fe:2.05,
+    Co:2.00,Ni:2.00,Cu:2.00,Zn:2.10,Ga:1.87,Ge:2.11,As:1.85,Se:1.90,Br:1.85,
+    Kr:2.02,Rb:3.03,Sr:2.49,Y:2.40,Zr:2.30,Nb:2.15,Mo:2.10,Ru:2.05,Rh:2.00,
+    Pd:2.05,Ag:2.10,Cd:2.20,In:2.20,Sn:2.25,Sb:2.20,Te:2.06,I:1.98,Xe:2.16,
+    Cs:3.43,Ba:2.68,La:2.50,Ce:2.48,Hf:2.25,Ta:2.20,W:2.10,Re:2.05,Os:2.00,
+    Ir:2.00,Pt:2.05,Au:2.10,Hg:2.05,Tl:2.20,Pb:2.30,Bi:2.30,Th:2.40,U:2.30};
+var DEFAULT_VDW_R=1.50;
+// The viewer's own bond radius: the radius of a cylinder whose bond carries
+// none, and the reference a script's bond radius is rebased against on the host
+// (VIEWER_BOND_RADIUS there, the same 0.12). It is also the joint a stick model
+// puts at an atom that has nothing thicker to match.
+var BOND_R=0.12;
+var STICK_JOINT_R=BOND_R;
+// Radius of one bond's cylinders: what a script asked for, or the default. The
+// stick model's joints read the same number, so a joint is exactly as thick as
+// the sticks it caps and a script that draws thin lines does not grow beads.
+function bondPieceRadius(b){
+    return (b&&typeof b.vmdR==='number')?b.vmdR:BOND_R;
+}
 var CRY=MD.crystal||null;
 // ===== VMD visualization script =====
 // Present when the document is a .tcl script: every molecule the script
@@ -1661,7 +1792,10 @@ function computeCrystalInv(){
 computeCrystalInv();
 function formulaFromAtoms(arr){
     var counts={};
-    arr.forEach(function(a){counts[a.element]=(counts[a.element]||0)+1});
+    // A ghost contributes no atom to the formula: it has no nucleus, so the
+    // composition of a counterpoise structure is the composition of its real
+    // atoms (the ghosts are the *other* fragment, already counted there).
+    arr.forEach(function(a){if(isGhostAtom(a))return;counts[a.element]=(counts[a.element]||0)+1});
     var keys=Object.keys(counts);
     var hasC=counts.C!==undefined;
     keys.sort(function(a,b){
@@ -1684,9 +1818,20 @@ function updateMolInfo(){
     var chrg=MD.charge!=null?MD.charge:'-';
     var mult=MD.multiplicity!=null?MD.multiplicity:'-';
     var nElectrons=0;
-    MD.atoms.forEach(function(a){nElectrons+=(AN[a.element]||0)});
+    var nGhosts=0;
+    MD.atoms.forEach(function(a){
+        // A ghost has no nucleus and no electrons, so it adds neither to the
+        // electron count nor to the formula below.
+        if(isGhostAtom(a)){nGhosts++;return}
+        nElectrons+=(AN[a.element]||0);
+    });
     if(typeof chrg==='number')nElectrons-=chrg;
-    var html='Formula: '+formulaFromAtoms(MD.atoms)+'<br>Atoms: '+nAtoms+'<br>Charge: '+chrg+'<br>Electrons: '+nElectrons+'<br>Multiplicity: '+mult;
+    var html='Formula: '+formulaFromAtoms(MD.atoms)+'<br>Atoms: '+nAtoms+
+        (nGhosts>0?' ('+nGhosts+' ghost'+(nGhosts===1?'':'s')+')':'')+
+        '<br>Charge: '+chrg+'<br>Electrons: '+nElectrons+'<br>Multiplicity: '+mult;
+    if(nGhosts>0){
+        html+='<br>Ghosts: '+nGhosts+' (no bonds, no basis, not in the formula)';
+    }
     if(CRY){
         var sa=boundary.aMax-boundary.aMin,sb=boundary.bMax-boundary.bMin,sc=boundary.cMax-boundary.cMin;
         html+='<br>Unit Cell: '+formulaFromAtoms(CRY.baseAtoms);
@@ -1796,10 +1941,53 @@ var CR={H:0.31,He:0.28,Li:1.28,Be:0.96,B:0.84,C:0.76,N:0.71,O:0.66,F:0.57,Na:1.6
 function getR(el){return(CR[el]||1.50)*0.5}
 // Sphere radius of one atom. A VMD script scales the viewer's own radius (so a
 // structure always keeps its ball-and-stick look, and 0 means "not drawn");
-// without a script the plain default applies.
+// without a script the plain default applies. A ghost has no element to take a
+// radius from — it is drawn as the same small marker whatever it stands for, so
+// the picture says "point, not atom" before any label is read.
 function atomRadius(a){
+    if(isGhostAtom(a))return typeof a.vmdScale==='number'?(GHOST_RADIUS*a.vmdScale):GHOST_RADIUS;
     var r=getR(a.element);
     return typeof a.vmdScale==='number'?r*a.vmdScale:r;
+}
+// Radius the *current display style* draws one atom with. 'ball' is exactly
+// atomRadius, so the default drawing cannot drift from what it always was, and
+// the value is returned unchanged - not multiplied by 1. A ghost is the same
+// small marker in every style: it is a point without a nucleus, so neither a
+// van der Waals sphere nor a stick joint is a meaningful size for it.
+//
+// A space-filling sphere is the element's van der Waals radius, which is the one
+// length in the picture that is a property of the atom rather than of the
+// drawing. A script's per-atom sphere scale is deliberately *not* applied here:
+// that scale is a ratio inside its ball-and-stick recipe (and a zero means "this
+// representation draws no sphere for it"), so applying it would keep a
+// space-filling model relative to a drawing it is replacing, and would let a
+// subset selection empty the picture - the spheres and the sticks are the two
+// things the style decides, and the script's colours and surfaces still apply.
+//
+// A stick joint is jointR, the thickest stick meeting at that atom (see
+// stickJointRadii); an atom with no sticks at all is drawn at the default stick
+// thickness instead, so an isolated ion does not vanish.
+function drawnRadius(a,jointR){
+    if(displayStyle==='ball')return atomRadius(a);
+    if(isGhostAtom(a))return atomRadius(a);
+    if(displayStyle==='spacefill')return VDW_R[a.element]||DEFAULT_VDW_R;
+    return jointR>0?jointR:STICK_JOINT_R;
+}
+// Thickness of the sticks meeting at each atom, in one pass over the bond list:
+// the stick style's joint is exactly as thick as the bond it caps, so a script
+// that draws thin lines (or a structure whose bonds are thin) does not end up
+// with beads at its atoms. Bonds a script draws at radius 0 do not thicken
+// anything - nothing is drawn there to fill.
+function stickJointRadii(){
+    var out=new Float32Array(MD.atoms.length);
+    for(var i=0;i<MD.bonds.length;i++){
+        var b=MD.bonds[i];
+        var r=bondPieceRadius(b);
+        if(!(r>0))continue;
+        if(b.atom1<out.length&&r>out[b.atom1])out[b.atom1]=r;
+        if(b.atom2<out.length&&r>out[b.atom2])out[b.atom2]=r;
+    }
+    return out;
 }
 
 function getOccupancyTexture(color,occupancy){
@@ -2190,13 +2378,19 @@ function sphereGeoFor(r,segs){
 // An atom's colour follows the scalar-colour toggle (a scene rebuild), and its
 // highlight is a *state*: plain, selected, or diff-highlighted. Both used to be
 // written into the atom's own material, which is exactly why every atom needed
-// one. Keying the pool by (colour, occupancy, state) keeps the same three
+// one. Keying the pool by (colour, occupancy, state, ghost) keeps the same three
 // appearances while a whole structure shares a handful of materials.
-function atomMaterial(col,occ,state){
+//
+// A ghost is a fourth appearance: faint, and drawn without writing depth, so a
+// ghost standing exactly on a real atom (the usual counterpoise layout) reads as
+// a shadow *around* that atom instead of hiding it.
+function atomMaterial(col,occ,state,ghost){
     var o=(occ!=null&&occ<0.999)?occ.toFixed(3):'1';
-    return pooledMat('a|'+col+'|'+o+'|'+state,function(){
+    var g=ghost?1:0;
+    return pooledMat('a|'+col+'|'+o+'|'+state+'|'+g,function(){
         var m;
-        if(o!=='1')m=new THREE.MeshPhongMaterial({color:0xffffff,map:getOccupancyTexture(col,occ),shininess:80,specular:0x444444});
+        if(g)m=new THREE.MeshPhongMaterial({color:new THREE.Color(col),shininess:20,specular:0x222222,transparent:true,opacity:0.45,depthWrite:false});
+        else if(o!=='1')m=new THREE.MeshPhongMaterial({color:0xffffff,map:getOccupancyTexture(col,occ),shininess:80,specular:0x444444});
         else m=new THREE.MeshPhongMaterial({color:new THREE.Color(col),shininess:80,specular:0x444444});
         if(state===1){m.emissive=new THREE.Color(0xffff00);m.emissiveIntensity=0.6}
         else if(state===2){m.emissive=new THREE.Color(0xff6600);m.emissiveIntensity=0.4}
@@ -2208,14 +2402,18 @@ function atomMaterial(col,occ,state){
 // for the atoms it is shared with.
 function setAtomHighlight(mesh,state){
     if(!mesh||!mesh.userData)return;
-    mesh.material=atomMaterial(mesh.userData.baseColor!=null?mesh.userData.baseColor:'#FF1493',mesh.userData.occ,state);
+    mesh.material=atomMaterial(mesh.userData.baseColor!=null?mesh.userData.baseColor:'#FF1493',mesh.userData.occ,state,mesh.userData.ghost);
 }
 // The comparison's atoms follow the same idea, with the diff highlight being a
 // colour of its own (0xff6600, the way the comparison has always marked a
-// difference) rather than a glow over the structure's colour.
-function diffAtomMaterial(col,state){
-    return pooledMat('d|'+col+'|'+state,function(){
-        var m=new THREE.MeshPhongMaterial({color:new THREE.Color(state===2?0xff6600:col),shininess:80,specular:0x444444});
+// difference) rather than a glow over the structure's colour. A ghost on either
+// side is drawn the same faint marker the main structure uses.
+function diffAtomMaterial(col,state,ghost){
+    var g=ghost?1:0;
+    return pooledMat('d|'+col+'|'+state+'|'+g,function(){
+        var m;
+        if(g)m=new THREE.MeshPhongMaterial({color:new THREE.Color(col),shininess:20,specular:0x222222,transparent:true,opacity:0.45,depthWrite:false});
+        else m=new THREE.MeshPhongMaterial({color:new THREE.Color(state===2?0xff6600:col),shininess:80,specular:0x444444});
         if(state===1){m.emissive=new THREE.Color(0xffff00);m.emissiveIntensity=0.6}
         else if(state===2){m.emissive=new THREE.Color(0xff6600);m.emissiveIntensity=0.4}
         return m;
@@ -2223,7 +2421,7 @@ function diffAtomMaterial(col,state){
 }
 function setDiffAtomHighlight(mesh,state){
     if(!mesh||!mesh.userData)return;
-    mesh.material=diffAtomMaterial(mesh.userData.baseColor!=null?mesh.userData.baseColor:'#FF1493',state);
+    mesh.material=diffAtomMaterial(mesh.userData.baseColor!=null?mesh.userData.baseColor:'#FF1493',state,mesh.userData.ghost);
 }
 
 function disposeMesh(ch){
@@ -2704,20 +2902,28 @@ function rebuildScene(){
     // no real structure reaches. Only the cache is emptied: the meshes on
     // screen hold their own references, so nothing about the picture changes.
     if(Object.keys(matPool).length>8192)matPool={};
+    // The stick style's joints are the thickness of the sticks meeting at each
+    // atom, read off the bond list once for the whole build. The other two
+    // styles do not consult it, so the pass is skipped rather than paid for.
+    var stickR=(displayStyle==='stick')?stickJointRadii():null;
     MD.atoms.forEach(function(a,i){
         a.index=i;
-        var r=atomRadius(a);
+        var gh=isGhostAtom(a);
+        var r=drawnRadius(a,stickR?stickR[i]:0);
         var drawn=r>0.0005;
         // 标量配色是视图状态: 在这里按原子现算, a.color 保持元素颜色不变。
-        var col=betaColorOf(a)||a.color;
+        // A ghost has no element colour and no scalar to show: it keeps the one
+        // marker colour, so a counterpoise ghost never looks like the atom it
+        // stands for.
+        var col=gh?GHOST_COLOR:(betaColorOf(a)||a.color);
         var occ=a.occupancy!=null?a.occupancy:1;
         // Geometry and material come from the pools: atoms of the same radius
         // (and colour/occupancy) draw with the very same objects, so a
         // structure of any size costs a handful of GPU buffers and materials
         // instead of one of each per atom.
-        var mesh=new THREE.Mesh(sphereGeoFor(drawn?r:0.001,segs),atomMaterial(col,occ,0));
+        var mesh=new THREE.Mesh(sphereGeoFor(drawn?r:0.001,segs),atomMaterial(col,occ,0,gh));
         mesh.position.set(a.x-CX,a.y-CY,a.z-CZ);
-        mesh.userData={element:a.element,index:i,baseColor:col,occ:occ};
+        mesh.userData={element:a.element,index:i,baseColor:col,occ:occ,ghost:gh};
         mesh.visible=drawn;
         moleculeGroup.add(mesh);
         atomMeshes.push(mesh);
@@ -2795,6 +3001,9 @@ function updateRotationCenter(){
 // description, so building the list is cheap; the instanced mesh that draws
 // them is only ever recreated when the count outgrows the capacity it has.
 function rebuildBondPieces(){
+    // The aromatic dash sides belong to the structure and are planned before
+    // any piece is declared; every other piece is described by its bond alone.
+    planAromaticDashes();
     bondPool.pieces.length=0;
     for(var bi=0;bi<MD.bonds.length;bi++){currentBondIdx=bi;createBond(MD.bonds[bi])}
     reindexBondPieces();
@@ -2870,6 +3079,11 @@ function rebuildMovedBondMeshes(oldBonds,selSet){
             keep[i].bondIdx=key2idx[Math.min(ob2.atom1,ob2.atom2)+'-'+Math.max(ob2.atom1,ob2.atom2)];
         }
     }
+    // The moved region was re-derived, so the aromatic systems it touches have
+    // to be re-planned before the region's pieces are built (a piece reads its
+    // side and plane from the plan when it is placed). The kept pieces need no
+    // touching: they read the same, now current, plan.
+    planAromaticDashes();
     bondPool.pieces.length=0;
     for(i=0;i<keep.length;i++)bondPool.pieces.push(keep[i]);
     for(bi=0;bi<MD.bonds.length;bi++){
@@ -2910,12 +3124,36 @@ function placePiece(pool,slot){
         // perpendicular to it: cross the bond with y — or with x for a bond
         // that is itself nearly parallel to y, where that cross product would
         // vanish and the direction would be lost.
-        var upx=0,upy=1,upz=0;
-        if(Math.abs(dy)>=0.99){upx=1;upy=0;upz=0}
-        var qx=dy*upz-dz*upy,qy=dz*upx-dx*upz,qz=dx*upy-dy*upx;
-        var ql=Math.sqrt(qx*qx+qy*qy+qz*qz);
-        if(ql>0.0001){qx/=ql;qy/=ql;qz/=ql}
-        var off=p.perpMag*p.perpSign;
+        //
+        // An aromatic dash instead offsets inside the plane of its aromatic
+        // system, which the plan knows (see the section below): crossing the
+        // bond with that plane's normal keeps the offset perpendicular to the
+        // bond *and* inside the plane, which is what makes a ring show all its
+        // dashes on one side. The plane and the side are read from the plan
+        // here rather than stored in the piece, so a re-planned system — a
+        // fragment rotation turns every ring plane with it, an MM run relaxes
+        // it — reaches every piece that is placed from then on.
+        var nx=0,ny=0,nz=0,side=p.perpSign;
+        if(p.isDashed&&aromPlan.sign&&aromPlan.sign[p.bondIdx]){
+            nx=aromPlan.nx[p.bondIdx];ny=aromPlan.ny[p.bondIdx];nz=aromPlan.nz[p.bondIdx];
+            side=aromPlan.sign[p.bondIdx];
+        }
+        var qx=0,qy=0,qz=0,ql=0;
+        if(nx||ny||nz){
+            qx=ny*dz-nz*dy;qy=nz*dx-nx*dz;qz=nx*dy-ny*dx;
+            ql=Math.sqrt(qx*qx+qy*qy+qz*qz);
+            if(ql>0.0001){qx/=ql;qy/=ql;qz/=ql}
+        }
+        if(ql<=0.0001){
+            // No plane (or a bond that runs along the normal itself, where the
+            // projection would be zero): the world-up cross, as before.
+            var upx=0,upy=1,upz=0;
+            if(Math.abs(dy)>=0.99){upx=1;upy=0;upz=0}
+            qx=dy*upz-dz*upy;qy=dz*upx-dx*upz;qz=dx*upy-dy*upx;
+            ql=Math.sqrt(qx*qx+qy*qy+qz*qz);
+            if(ql>0.0001){qx/=ql;qy/=ql;qz/=ql}
+        }
+        var off=p.perpMag*side;
         px=qx*off;py=qy*off;pz=qz*off;
     }
     if(p.isDashed){
@@ -2949,7 +3187,10 @@ function addBondPiece(r,col,isDashed,dashT0,dashT1,perpSign,perpMag,half){
         dashT0:dashT0||0,dashT1:dashT1||0,perpSign:perpSign||0,perpMag:perpMag||0,half:half||0});
 }
 // The dashed line of an aromatic bond: six short cylinders along the bond,
-// shifted onto one side by the same kind of offset a double bond uses.
+// shifted onto one side by the same kind of offset a double bond uses. Which
+// side, and in which plane, comes from the plan below — read when the piece is
+// placed, so a plan that is recomputed (a fragment rotation turns every ring
+// plane with it) reaches every piece without touching one.
 function addDashPieces(r,col,off){
     var dashes=6,seg=1/dashes,gap=seg*0.35,dashLen=seg-gap;
     for(var k=0;k<dashes;k++){
@@ -2960,19 +3201,394 @@ function addDashPieces(r,col,off){
     }
 }
 
+// ===== Aromatic dashes: which side they sit on =====
+//
+// An aromatic bond is one solid line plus a six-dash line offset to one side.
+// That side used to fall out of the bond alone — the offset was the bond
+// direction crossed with the world up axis — so two aromatic bonds meeting at
+// an atom could put their dashes on opposite sides. Around a ring that reads
+// badly: seen from the face of the ring, half the bonds carry their dashes
+// inside and half outside, so only part of the ring looks aromatic, which is
+// exactly the cue a reader looks for.
+//
+// The side is now planned once per bond list, from the aromatic bonds
+// themselves, and every bond of one connected aromatic system offsets in that
+// system's own plane. The plan is a walk over the system, and a bond's sign
+// says which of its two sides the dash goes on:
+//
+//   * at a two-bond atom the band simply passes through — the second bond
+//     continues on the same side of the path (in sign space: one bond arrives,
+//     one leaves), which is what makes a ring or a chain show one continuous
+//     band;
+//   * a three-bond atom is a branch, where the band must pick a side for each
+//     arm: each arm takes the side that points most nearly the way the
+//     arriving dash points, so a fused ring keeps the arm that stays in its own
+//     ring, and the shared bond carries the band across;
+//   * crossing a bond that no ring runs through (a biaryl link) starts a new
+//     band on the far side — mirrored — because the arms there are a ring of
+//     their own and must not inherit the side the band arrived on.
+//
+// A fused system can still be left with one atom whose two dashes face
+// opposite ways (a shared bond belongs to two rings and the walk only knows the
+// one it came through); a bounded local repair settles those, flipping only
+// bonds whose flip leaves fewer contradicted atoms behind.
+//
+// Which of the two sides a system settled on is arbitrary — flipping every
+// sign of a system keeps it self-consistent and just moves all its dashes to
+// the other side — so the plan is flipped when the majority of its bonds would
+// then point away from the system's own centre. A ring therefore keeps its
+// dashes **inside**, the way it is drawn on paper.
+//
+// Nothing here reads the atom order a file happens to use: a bond stored the
+// other way round has its direction — and so its "left" — flipped, and sigma
+// (which endpoint is atom1) accounts for that when the sign is written.
+var aromPlan={sign:null,nx:null,ny:null,nz:null};
+function isAromaticOrder(o){return o>=1.25&&o<1.75}
+// The far endpoint of a bond as it is drawn, with the periodic shift applied
+// exactly as placePiece() applies it, so a crystal's wrapped bond is planned
+// along the line it is actually drawn on.
+function bondEnd(b,out){
+    var a2=MD.atoms[b.atom2];
+    if(!a2)return false;
+    var ex=a2.x,ey=a2.y,ez=a2.z;
+    if(b.shift&&CRY){
+        var lv=CRY.latticeVectors;
+        ex+=b.shift[0]*lv[0][0]+b.shift[1]*lv[1][0]+b.shift[2]*lv[2][0];
+        ey+=b.shift[0]*lv[0][1]+b.shift[1]*lv[1][1]+b.shift[2]*lv[2][1];
+        ez+=b.shift[0]*lv[0][2]+b.shift[1]*lv[1][2]+b.shift[2]*lv[2][2];
+    }
+    out[0]=ex;out[1]=ey;out[2]=ez;
+    return true;
+}
+// Unit direction of one bond.
+var _bondScratch=[0,0,0];
+function bondUnitDir(b,out){
+    var a1=MD.atoms[b.atom1];
+    if(!a1||!bondEnd(b,_bondScratch))return false;
+    var dx=_bondScratch[0]-a1.x,dy=_bondScratch[1]-a1.y,dz=_bondScratch[2]-a1.z;
+    var l=Math.sqrt(dx*dx+dy*dy+dz*dz);
+    if(l<0.0001)return false;
+    out[0]=dx/l;out[1]=dy/l;out[2]=dz/l;
+    return true;
+}
+// One connected aromatic system: find its plane, then walk it and write a side
+// (±1) and that plane into every bond it contains.
+function planAromaticComponent(comp,adj,dx,dy,dz,sign,nx,ny,nz,mark,stamp,isBridge){
+    var bonds=MD.bonds,i,k,p,q;
+    // The bonds of the system span its plane, so the cross product of two bonds
+    // meeting at an atom is the plane normal (up to sign). Take the pair that
+    // is least collinear as the reference — one distorted bond should not tilt
+    // a plane it is drawn in — and average every pair aligned to it.
+    var atoms=[];
+    for(i=0;i<comp.length;i++){
+        var cb=bonds[comp[i]];
+        if(mark[cb.atom1]!==stamp){mark[cb.atom1]=stamp;atoms.push(cb.atom1)}
+        if(mark[cb.atom2]!==stamp){mark[cb.atom2]=stamp;atoms.push(cb.atom2)}
+    }
+    var rx=0,ry=0,rz=0,refLen=0;
+    for(i=0;i<atoms.length;i++){
+        var al=adj[atoms[i]];
+        if(!al||al.length<2)continue;
+        for(p=0;p<al.length-1;p++)for(q=p+1;q<al.length;q++){
+            var A=al[p],B=al[q];
+            var cx=dy[A]*dz[B]-dz[A]*dy[B],
+                cy=dz[A]*dx[B]-dx[A]*dz[B],
+                cz=dx[A]*dy[B]-dy[A]*dx[B];
+            var cl=cx*cx+cy*cy+cz*cz;
+            if(cl>refLen){refLen=cl;rx=cx;ry=cy;rz=cz}
+        }
+    }
+    if(refLen>1e-12){
+        var rl=Math.sqrt(refLen);rx/=rl;ry/=rl;rz/=rl;
+        var sx=0,sy=0,sz=0;
+        for(i=0;i<atoms.length;i++){
+            var al2=adj[atoms[i]];
+            if(!al2||al2.length<2)continue;
+            for(p=0;p<al2.length-1;p++)for(q=p+1;q<al2.length;q++){
+                var A2=al2[p],B2=al2[q];
+                var cx2=dy[A2]*dz[B2]-dz[A2]*dy[B2],
+                    cy2=dz[A2]*dx[B2]-dx[A2]*dz[B2],
+                    cz2=dx[A2]*dy[B2]-dy[A2]*dx[B2];
+                if(cx2*rx+cy2*ry+cz2*rz<0){cx2=-cx2;cy2=-cy2;cz2=-cz2}
+                sx+=cx2;sy+=cy2;sz+=cz2;
+            }
+        }
+        var sl=Math.sqrt(sx*sx+sy*sy+sz*sz);
+        if(sl>1e-9){rx=sx/sl;ry=sy/sl;rz=sz/sl}
+    }else{
+        // Every bond of the system is collinear (a straight chain), so the
+        // bonds name no plane: any perpendicular to the chain is as good, and
+        // one fixed axis keeps the dashes on one side of it.
+        var ax=dx[comp[0]],ay=dy[comp[0]],az=dz[comp[0]];
+        var ux=0,uy=1,uz=0;
+        if(Math.abs(ay)>0.9){ux=1;uy=0;uz=0}
+        rx=ay*uz-az*uy;ry=az*ux-ax*uz;rz=ax*uy-ay*ux;
+        var vl=Math.sqrt(rx*rx+ry*ry+rz*rz);
+        if(vl<1e-9){rx=1;ry=0;rz=0}else{rx/=vl;ry/=vl;rz/=vl}
+    }
+    // Walk: sign = +1 puts the dash on the left of atom1 -> atom2, -1 on the
+    // other side. At an atom, a bond that arrives there (its dash already on
+    // the left of the travel direction) sends every other bond of that atom out
+    // on the left of its own direction; at a two-bond atom, a bond that leaves
+    // takes the arriving one's place, so the band stays on one side of the path
+    // through the whole walk.
+    //
+    // A three-bond atom is a branch, and there the band cannot simply continue
+    // (a bond has two sides and the arm must pick one), so each arm takes the
+    // side that keeps the band's own direction: the dash that points most
+    // nearly the way the arriving dash points. That is what keeps a fused ring
+    // whole — the perimeter arm stays on the side the band was already on,
+    // while the shared bond takes whichever of its two sides that is, and the
+    // ring on the far side then starts from there.
+    //
+    // One case is the opposite: when the band arrives over a bond that no ring
+    // runs through (a biaryl link) and the arms are ring bonds, the arms are a
+    // ring of their own and must not inherit the band's side — that would draw
+    // the second ring's dashes on the outside. Those arms are mirrored instead,
+    // which puts them on the inside of their own ring. A bridge whose arms are
+    // bridges too is a branch of a chain, where there is no inside to prefer,
+    // so it keeps the band's direction like any other branch.
+    var seed=comp[0],stack=[seed];
+    sign[seed]=1;
+    while(stack.length){
+        var cur=stack.pop();
+        var b2=bonds[cur];
+        for(var e=0;e<2;e++){
+            var X=e===0?b2.atom1:b2.atom2;
+            var sg=e===0?1:-1;                    // +1 when X is the bond's atom1
+            var incoming=sign[cur]===-sg;
+            var alx=adj[X];
+            if(!alx)continue;
+            var deg=alx.length;
+            // The arriving dash's direction, for the branch rule below.
+            var oex=0,oey=0,oez=0;
+            if(deg>2&&incoming){
+                oex=sign[cur]*(ry*dz[cur]-rz*dy[cur]);
+                oey=sign[cur]*(rz*dx[cur]-rx*dz[cur]);
+                oez=sign[cur]*(rx*dy[cur]-ry*dx[cur]);
+            }
+            var acrossBridge=deg>2&&incoming&&isBridge&&isBridge[cur];
+            for(k=0;k<alx.length;k++){
+                var f=alx[k];
+                if(f===cur||sign[f])continue;
+                var sgF=bonds[f].atom1===X?1:-1;
+                if(deg>2&&incoming){
+                    var cx3=ry*dz[f]-rz*dy[f],cy3=rz*dx[f]-rx*dz[f],cz3=rx*dy[f]-ry*dx[f];
+                    var ahead=(oex*cx3+oey*cy3+oez*cz3)>=0;
+                    if(acrossBridge&&!isBridge[f])ahead=!ahead;
+                    sign[f]=ahead?sgF:-sgF;
+                }else{
+                    sign[f]=(incoming||deg>2)?sgF:-sgF;
+                }
+                stack.push(f);
+            }
+        }
+    }
+    // A bond shared by two rings belongs to both, and the walk only knows the
+    // ring it came through, so a fused system can be left with one atom whose
+    // two dashes face opposite ways. In sign space the rule at a two-bond atom
+    // is exactly "one bond in, one bond out" (a bond that leaves offsets to the
+    // left of its own direction, a bond that arrives offsets to the left of the
+    // direction it came from, which is the same side of the path), and flipping
+    // a bond flips only its own two ends — so a violated atom is settled
+    // locally, by taking whichever of its two bonds leaves fewer violated atoms
+    // behind. A flip is only taken when it strictly reduces that count, so a
+    // ring that is already consistent is never touched.
+    var stateOf=function(bi,X){return sign[bi]===(bonds[bi].atom1===X?1:-1)?1:-1};
+    var badAt=function(X){
+        var a=adj[X];
+        if(!a||a.length!==2)return 0;
+        var be=bonds[a[0]];
+        if(be.atom1===be.atom2)return 0;
+        return stateOf(a[0],X)===stateOf(a[1],X)?1:0;
+    };
+    for(var pass=0;pass<3;pass++){
+        var flipped=false;
+        for(i=0;i<atoms.length;i++){
+            var vx=atoms[i];
+            if(!badAt(vx))continue;
+            var pair=adj[vx];
+            var pick=-1,pickGain=0;
+            for(k=0;k<2;k++){
+                var cand=pair[k],cb2=bonds[cand];
+                var was=badAt(cb2.atom1)+badAt(cb2.atom2);
+                sign[cand]=-sign[cand];
+                var now=badAt(cb2.atom1)+badAt(cb2.atom2);
+                sign[cand]=-sign[cand];
+                if(was-now>pickGain){pickGain=was-now;pick=cand}
+            }
+            if(pick>=0){sign[pick]=-sign[pick];flipped=true}
+        }
+        if(!flipped)break;
+    }
+    // Which side the walk settled on is arbitrary until it is compared with
+    // where the system sits: a ring's bonds outvote a chain's, whose own vote
+    // means nothing (a chain's centre lies on the chain itself).
+    var centreX=0,centreY=0,centreZ=0;
+    for(i=0;i<atoms.length;i++){
+        var ca=MD.atoms[atoms[i]];
+        centreX+=ca.x;centreY+=ca.y;centreZ+=ca.z;
+    }
+    centreX/=atoms.length;centreY/=atoms.length;centreZ/=atoms.length;
+    var vote=0,e3=[0,0,0];
+    for(i=0;i<comp.length;i++){
+        var bi=comp[i],bb=bonds[bi];
+        var ba1=MD.atoms[bb.atom1];
+        if(!sign[bi])sign[bi]=1;
+        if(!ba1||!bondEnd(bb,e3))continue;
+        vote+=sign[bi]*((ry*dz[bi]-rz*dy[bi])*((ba1.x+e3[0])*0.5-centreX)+
+                        (rz*dx[bi]-rx*dz[bi])*((ba1.y+e3[1])*0.5-centreY)+
+                        (rx*dy[bi]-ry*dx[bi])*((ba1.z+e3[2])*0.5-centreZ));
+    }
+    if(vote>0){for(i=0;i<comp.length;i++)sign[comp[i]]=-sign[comp[i]]}
+    for(i=0;i<comp.length;i++){
+        var si=comp[i];
+        nx[si]=rx;ny[si]=ry;nz[si]=rz;
+    }
+}
+// Which aromatic bonds no ring runs through (the bridges of the aromatic
+// subgraph). Only asked for when some atom has three aromatic bonds, which is
+// the only place the answer is used, so a structure of separate rings and
+// chains pays nothing for it. One iterative DFS, disc/low as usual.
+function markAromaticBridges(adj,disc,low,isBridge,na){
+    var time=0,a,v,bi,b,w,i;
+    for(a=0;a<na;a++){
+        if(!adj[a]||disc[a])continue;
+        var st=[a],stEdge=[-1],stIdx=[0];
+        disc[a]=low[a]=++time;
+        while(st.length){
+            v=st[st.length-1];
+            i=stIdx[stIdx.length-1];
+            var list=adj[v];
+            if(i<list.length){
+                stIdx[stIdx.length-1]=i+1;
+                bi=list[i];b=MD.bonds[bi];
+                w=b.atom1===v?b.atom2:b.atom1;
+                if(w===v)continue;
+                if(!disc[w]){
+                    disc[w]=low[w]=++time;
+                    st.push(w);stEdge.push(bi);stIdx.push(0);
+                }else if(bi!==stEdge[stEdge.length-1]&&disc[w]<low[v]){
+                    low[v]=disc[w];
+                }
+            }else{
+                st.pop();stIdx.pop();
+                var pe=stEdge.pop();
+                if(st.length){
+                    var parent=st[st.length-1];
+                    if(low[v]<low[parent])low[parent]=low[v];
+                    if(low[v]>disc[parent]&&pe>=0)isBridge[pe]=1;
+                }
+            }
+        }
+    }
+}
+// Plan every aromatic bond of the current bond list. Called wherever the bond
+// list is (re)built — the scene build, a frame or molecule switch, an edit, an
+// Undo, an Import, an MM commit and a Move Atoms release — and never on a path
+// that only re-places existing pieces, because a bond's side is a property of
+// the structure, not of the instant it is drawn. Cost is one pass over the
+// bonds, one walk per aromatic system, and a bridge search that is only taken
+// when some atom has three aromatic bonds (the one place its answer is used).
+function planAromaticDashes(){
+    var bonds=MD.bonds,nb=bonds.length,i,na=MD.atoms.length;
+    aromPlan={sign:null,nx:null,ny:null,nz:null};
+    if(nb===0)return;
+    // A structure without a single aromatic bond pays one scan and nothing
+    // else — no arrays, no adjacency, no walk — which is what the overwhelming
+    // majority of files (any protein, any alkane) get from this feature.
+    var any=false;
+    for(i=0;i<nb;i++){
+        if(isAromaticOrder(bonds[i].order)){any=true;break}
+    }
+    if(!any)return;
+    var sign=new Int8Array(nb),nx=new Float32Array(nb),ny=new Float32Array(nb),nz=new Float32Array(nb);
+    aromPlan={sign:sign,nx:nx,ny:ny,nz:nz};
+    var dx=new Float32Array(nb),dy=new Float32Array(nb),dz=new Float32Array(nb);
+    // Atom -> its aromatic bonds, as a plain indexed array: this is walked once
+    // per atom per component and once more inside the repair, and an array of
+    // arrays stays on the fast path where an object keyed by atom index does
+    // not (a structure of tens of thousands of atoms turns that object into a
+    // dictionary). Both this and the mark array below are only created once an
+    // aromatic bond has actually been seen, so a structure without any pays
+    // nothing for the plan.
+    var adj=null,mark=null,list=[],d3=[0,0,0],maxDeg=0;
+    for(i=0;i<nb;i++){
+        var b=bonds[i];
+        if(!isAromaticOrder(b.order))continue;
+        if(!bondUnitDir(b,d3))continue;
+        if(!adj)adj=new Array(na);
+        dx[i]=d3[0];dy[i]=d3[1];dz[i]=d3[2];
+        var a1=b.atom1,a2=b.atom2;
+        if(a1!==a2){
+            var l1=adj[a1];if(!l1)l1=adj[a1]=[];
+            l1.push(i);
+            if(l1.length>maxDeg)maxDeg=l1.length;
+        }
+        var l2=adj[a2];if(!l2)l2=adj[a2]=[];
+        l2.push(i);
+        if(l2.length>maxDeg)maxDeg=l2.length;
+        list.push(i);
+    }
+    if(list.length===0)return;
+    var isBridge=null;
+    if(maxDeg>2){
+        isBridge=new Uint8Array(nb);
+        markAromaticBridges(adj,new Int32Array(na),new Int32Array(na),isBridge,na);
+    }
+    var seen=new Uint8Array(nb),stack=[];
+    // One mark array for the whole pass, stamped per component, so a structure
+    // made of many small aromatic fragments does not allocate one set per ring.
+    mark=new Int32Array(na);
+    var stamp=0;
+    for(var s=0;s<list.length;s++){
+        var seed=list[s];
+        if(seen[seed])continue;
+        var comp=[];
+        stack.length=0;stack.push(seed);seen[seed]=1;
+        while(stack.length){
+            var cur=stack.pop();
+            comp.push(cur);
+            var cb=bonds[cur];
+            for(var e=0;e<2;e++){
+                var al=adj[e===0?cb.atom1:cb.atom2];
+                if(!al)continue;
+                for(var k=0;k<al.length;k++){
+                    var nb2=al[k];
+                    if(!seen[nb2]){seen[nb2]=1;stack.push(nb2)}
+                }
+            }
+        }
+        stamp++;
+        planAromaticComponent(comp,adj,dx,dy,dz,sign,nx,ny,nz,mark,stamp,isBridge);
+    }
+}
+
 // Declare the pieces one bond is drawn with. The order thresholds are the same
 // the viewer has always used: one line below 1.25, an aromatic line with its
 // dashed partner below 1.75, two lines below 2.5, three below 3.5.
 function createBond(b){
     var a1=MD.atoms[b.atom1],a2=MD.atoms[b.atom2];
     if(!a1||!a2)return;
+    // A ghost has no valence and no bonds: every path that makes or keeps a
+    // bond drops the ones that touch one (bond perception, loading, editing,
+    // pasting). This is the last door - a bond list restored from an older
+    // snapshot, or one built before an atom became a ghost, must not draw a
+    // stick into a point either.
+    if(isGhostAtom(a1)||isGhostAtom(a2))return;
+    // A space-filling model has no sticks: its spheres are van der Waals
+    // spheres, which already touch, so a cylinder between two atom centres would
+    // only show where it pokes out of them. This is the one door a piece is
+    // declared through - the scene build, a moved region's rebuild and a
+    // comparison's halves all come here - so no path can leave a stick behind.
+    if(displayStyle==='spacefill')return;
     // A VMD script sets the bond radius per bond (the representation that
     // covers both endpoints); 0 means the script does not draw it at all.
-    var br=typeof b.vmdR==='number'?b.vmdR:0.12;
+    var br=bondPieceRadius(b);
     if(br<=0.0005)return;
     var ord=b.order||1;
     // Multiple-bond line offsets keep their proportions to the bond radius.
-    var offK=br/0.12;
+    var offK=br/BOND_R;
     // 键的两半跟随它连的原子: 标量 (Beta) 配色下原子球是按标量画视图色, 这里
     // 让半键读同一个颜色, 一根键两半就与两端原子一致。betaColorOf 在配色关闭
     // (或原子没有标量) 时返回 null, 退化成元素颜色, 非 Beta 文件的行为不变。
@@ -3308,6 +3924,12 @@ function applyFragRotDelta(ax,ay){
         a.x=fragRotCx+v.x;a.y=fragRotCy+v.y;a.z=fragRotCz+v.z;
     });
     updateAtomMeshPositions();
+    // A rotation turns each ring's plane with the fragment, and an aromatic
+    // dash is offset inside that plane: re-plan before re-placing, or the
+    // dashes would tilt out of their ring for the length of the drag. The plan
+    // is linear in the aromatic bonds and every piece reads it when it is
+    // placed, so this costs one pass and touches no piece.
+    planAromaticDashes();
     rebuildBondsTouching(selectedAtoms);
 }
 function screenPointOnPlane(e,planeZ){
@@ -3631,6 +4253,10 @@ function mmApplyLiveCoords(coords){
         if(!mmRun.movedAll[i]){mmRun.movedAll[i]=true;mmRun.movedCount++}
     }
     updateAtomMeshPositions();
+    // A run relaxes the geometry, so a ring's plane turns with it: the plan is
+    // refreshed once per chunk (never per frame) and every piece reads it when
+    // it is placed, so the dashes stay in their ring while the run streams.
+    planAromaticDashes();
     rebuildBondsTouching(moved);
     return true;
 }
@@ -3964,6 +4590,16 @@ function startMmOptimization(){
         modeInfoEl.textContent='Molecular Mechanics - select atoms first: click atoms here, or use Select Atoms / Box Select';
         return;
     }
+    // A ghost is a position, not a particle: it has no bonds and no electrons,
+    // so there is nothing in it to relax. It is left out of the mobile set (the
+    // reference geometry keeps its place) and handed to the force field as the
+    // dummy element, whose well depth is zero - so it neither moves nor pulls
+    // the atoms around it towards a point that is not there.
+    var movable=selectedAtoms.filter(function(idx){return !isGhostAtom(MD.atoms[idx])});
+    if(movable.length===0){
+        modeInfoEl.textContent='Molecular Mechanics - the selection holds no real atom (ghosts are not particles)';
+        return;
+    }
     // Anything else that owns the coordinates has to let go before the run
     // starts: a playing normal mode and a frame auto-play both write the
     // structure every frame, and a Move Atoms drag is mid-session on it. Each is
@@ -3976,7 +4612,7 @@ function startMmOptimization(){
     if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
     stopFrameAutoPlay();
     vdCommit();
-    var i,indices=selectedAtoms.slice(),origin=new Array(indices.length);
+    var i,indices=movable,origin=new Array(indices.length);
     for(i=0;i<indices.length;i++){
         var a=MD.atoms[indices[i]];
         origin[i]=a?[a.x,a.y,a.z]:null;
@@ -4006,7 +4642,7 @@ function startMmOptimization(){
     vscodeApi.postMessage({
         command:'mmOptimize',
         runId:mmRun.id,
-        atoms:MD.atoms.map(function(a){return{element:a.element,x:a.x,y:a.y,z:a.z}}),
+        atoms:MD.atoms.map(function(a){return{element:isGhostAtom(a)?'X':a.element,x:a.x,y:a.y,z:a.z}}),
         bonds:MD.bonds.map(function(b){return{atom1:b.atom1,atom2:b.atom2,order:b.order}}),
         selected:indices.slice(),
         options:mmOptionSnapshot()
@@ -4309,6 +4945,46 @@ function resetSelection(){
     selectedAtoms=[];diffSelectedAtoms=[];originalCoords=null;highlightSelected();
     selInfoEl.textContent='';
     mmSelectionChanged();
+}
+/**
+ * Select every atom on screen — the keyboard's counterpart to dragging a box
+ * over the whole view, which in Diff mode means both halves.
+ *
+ * Nothing here changes the structure, so it is allowed in every mode and takes
+ * no undo step; the only thing it waits for is a closed dialog, whose preview
+ * was captured for the selection it opened with. A move/rotate session owns the
+ * selection it started with, so one in flight is ended first (exactly as
+ * releasing the mouse would) rather than being handed a different atom set
+ * halfway through.
+ */
+function selectAllAtoms(){
+    if(modalOpen()){
+        modeInfoEl.textContent='Select All: close the open dialog first';
+        return false;
+    }
+    if(!MD.atoms||MD.atoms.length===0){
+        modeInfoEl.textContent='Select All: the structure is empty';
+        return false;
+    }
+    if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
+    selectedAtoms=[];
+    for(var i=0;i<MD.atoms.length;i++)selectedAtoms.push(i);
+    if(diffMode){
+        diffSelectedAtoms=[];
+        var dn=(diffData&&diffData.atoms)?diffData.atoms.length:0;
+        for(var j=0;j<dn;j++)diffSelectedAtoms.push(j);
+        updateDiffSelInfo();
+    }else if(currentMode==='selectAtoms'||currentMode==='replaceAtom'||currentMode==='addH'||currentMode==='mmOpt'){
+        // These modes word a finished selection themselves, and their label
+        // path opens nothing (a two-atom structure must not pop a dialog here).
+        checkSelectionComplete();
+    }else{
+        selInfoEl.textContent='Selected: '+formatAtomList(selectedAtoms)+' ('+selectedAtoms.length+' atoms)';
+    }
+    highlightSelected();
+    mmSelectionChanged();
+    modeInfoEl.textContent='Selected all '+selectedAtoms.length+' atom'+(selectedAtoms.length===1?'':'s');
+    return true;
 }
 
 document.querySelectorAll('.tbtn[data-mode]').forEach(function(b){b.addEventListener('click',function(){
@@ -4783,6 +5459,45 @@ window.addEventListener('message',function(event){
     }
 });
 
+/**
+ * Where a block of incoming atoms goes so that it cannot overlap anything on
+ * screen: its centroid is put one bounding-sphere radius plus a buffer away from
+ * the existing structure's, along +X.
+ *
+ * A bounding sphere contains every atom, so this single O(n) test guarantees no
+ * incoming atom overlaps ANY existing atom — including blocks added earlier,
+ * which are part of "existing" by now. Rotation-invariant, no overlap iterations
+ * needed. The two user-visible placements (Import, and paste of a copied
+ * fragment) share it, so a pasted copy lands where an import would.
+ */
+function placeBlockBeside(newAtoms){
+    var n=newAtoms.length,i,a;
+    var c2x=0,c2y=0,c2z=0;
+    for(i=0;i<n;i++){a=newAtoms[i];c2x+=a.x;c2y+=a.y;c2z+=a.z}
+    if(n>0){c2x/=n;c2y/=n;c2z/=n}
+    var N0=MD.atoms.length;
+    if(N0===0)return{x:-c2x,y:-c2y,z:-c2z};
+    var c1x=0,c1y=0,c1z=0,R1=0,R2=0;
+    for(i=0;i<N0;i++){a=MD.atoms[i];c1x+=a.x;c1y+=a.y;c1z+=a.z}
+    c1x/=N0;c1y/=N0;c1z/=N0;
+    for(i=0;i<N0;i++){
+        a=MD.atoms[i];
+        var d1=Math.sqrt((a.x-c1x)*(a.x-c1x)+(a.y-c1y)*(a.y-c1y)+(a.z-c1z)*(a.z-c1z));
+        if(d1>R1)R1=d1;
+    }
+    for(i=0;i<n;i++){
+        a=newAtoms[i];
+        var d2=Math.sqrt((a.x-c2x)*(a.x-c2x)+(a.y-c2y)*(a.y-c2y)+(a.z-c2z)*(a.z-c2z));
+        if(d2>R2)R2=d2;
+    }
+    // buf=2.5 Å per side covers any atom radius, so the closest two atoms of the
+    // two blocks end up 2*2.5+2.0 = 7.0 Å apart (the import has always spaced
+    // them exactly this way) — visibly separate, and never bonded by accident.
+    var BUF=2.5,GAP=2.0;
+    var D=(R1+BUF)+(R2+BUF)+GAP;
+    return{x:c1x+D-c2x,y:c1y-c2y,z:c1z-c2z};
+}
+
 function importStructure(msg){
     // Append an imported structure (parsed by the extension host) beside the
     // current structure at a guaranteed non-overlapping position. One undo
@@ -4796,35 +5511,17 @@ function importStructure(msg){
     if(newAtoms.length===0)return;
     pushUndo();
     var N0=MD.atoms.length;
-    // --- Non-overlap placement via bounding spheres ---
-    // Place the incoming structure on the +X side of the existing structure:
-    // centroid distance = (R1+buf) + (R2+buf) + gap, where R is each
-    // structure's max distance from its own centroid and buf=2.5 Å covers
-    // any atom radius. A bounding sphere contains every atom, so this single
-    // O(n) check guarantees no imported atom overlaps ANY existing atom —
-    // including previously imported structures, which are part of
-    // "existing" by now. Rotation-invariant, no overlap iterations needed.
-    var i,a;
-    var c1x=0,c1y=0,c1z=0;
-    if(N0>0){
-        for(i=0;i<N0;i++){a=MD.atoms[i];c1x+=a.x;c1y+=a.y;c1z+=a.z}
-        c1x/=N0;c1y/=N0;c1z/=N0;
-    }
-    var c2x=0,c2y=0,c2z=0;
-    for(i=0;i<newAtoms.length;i++){a=newAtoms[i];c2x+=a.x;c2y+=a.y;c2z+=a.z}
-    c2x/=newAtoms.length;c2y/=newAtoms.length;c2z/=newAtoms.length;
-    var R1=0,R2=0;
-    if(N0>0){
-        for(i=0;i<N0;i++){a=MD.atoms[i];var d1=Math.sqrt((a.x-c1x)*(a.x-c1x)+(a.y-c1y)*(a.y-c1y)+(a.z-c1z)*(a.z-c1z));if(d1>R1)R1=d1}
-    }
-    for(i=0;i<newAtoms.length;i++){a=newAtoms[i];var d2=Math.sqrt((a.x-c2x)*(a.x-c2x)+(a.y-c2y)*(a.y-c2y)+(a.z-c2z)*(a.z-c2z));if(d2>R2)R2=d2}
-    var BUF=2.5,GAP=2.0;
-    var tx,ty,tz;
-    if(N0===0){tx=-c2x;ty=-c2y;tz=-c2z}
-    else{var D=(R1+BUF)+(R2+BUF)+GAP;tx=c1x+D-c2x;ty=c1y-c2y;tz=c1z-c2z}
-    for(i=0;i<newAtoms.length;i++){
-        a=newAtoms[i];
-        MD.atoms.push({element:a.element,x:a.x+tx,y:a.y+ty,z:a.z+tz,color:a.color||((MD.atomColors&&MD.atomColors[a.element])||'#FF1493')});
+    // --- Non-overlap placement ---
+    // The geometry lives in placeBlockBeside, which the fragment paste uses too:
+    // one rule, so a pasted copy lands exactly where an imported structure would.
+    var t=placeBlockBeside(newAtoms);
+    for(var i=0;i<newAtoms.length;i++){
+        var a=newAtoms[i];
+        var item={element:a.element,x:a.x+t.x,y:a.y+t.y,z:a.z+t.z,color:a.color||((MD.atomColors&&MD.atomColors[a.element])||'#FF1493')};
+        // An imported ghost stays a ghost - its element is what says which basis
+        // it stands for, and the flag is what keeps it unbonded.
+        if(a.ghost===true||a.element==='X')item.ghost=true;
+        MD.atoms.push(item);
     }
     // --- Bonds ---
     if(!MD.hasExplicitBonds&&!msg.hasExplicitBonds){
@@ -4838,6 +5535,10 @@ function importStructure(msg){
         MD.hasExplicitBonds=true;
         if(msg.hasExplicitBonds){
             newBonds.forEach(function(b){
+                // A ghost can carry no bond: an authored bond naming one in the
+                // imported file is dropped here as it is on load.
+                if(newAtoms[b.atom1]&&isGhostAtom(newAtoms[b.atom1]))return;
+                if(newAtoms[b.atom2]&&isGhostAtom(newAtoms[b.atom2]))return;
                 if(b.atom1<newAtoms.length&&b.atom2<newAtoms.length)
                     MD.bonds.push({atom1:N0+b.atom1,atom2:N0+b.atom2,order:b.order==null?1:b.order});
             });
@@ -4859,6 +5560,176 @@ function importStructure(msg){
     modeInfoEl.textContent='Imported '+newAtoms.length+' atoms from '+(msg.fileName||'file')+' - placed beside the existing structure';
 }
 
+// ===== Fragment clipboard (Ctrl+C / Ctrl+X / Ctrl+V) =====
+// The clipboard holds one fragment, in coordinates relative to its own centroid,
+// so it carries no position: pasting is a translation to a free spot, and the
+// same fragment can be pasted again and again. The bonds *inside* the fragment
+// travel with it verbatim — a copy must be a copy, bond orders included — and no
+// bond is invented between the copy and whatever it lands beside, which is why a
+// paste does not re-detect the combined system the way an import does.
+//
+// It is the viewer's own clipboard: the system clipboard is left alone, because
+// reading it would need a permission the webview may refuse and writing it would
+// replace text the user copied elsewhere. A copy is also mirrored into
+// localStorage, best effort and re-validated on the way back, so a fragment can
+// be pasted into another panel; if storage is unavailable the fragment simply
+// stays in memory for this panel.
+var CLIP_KEY='molecularViewer3d.fragment';
+var PASTE_ATOM_LIMIT=20000;   // the ceiling a single imported block is held to
+var clipFrag=null;
+
+function clipStore(){
+    if(!clipFrag)return;
+    try{window.localStorage.setItem(CLIP_KEY,JSON.stringify(clipFrag))}catch(e){}
+}
+function clipLoad(){
+    clipFrag=null;
+    try{
+        var raw=window.localStorage.getItem(CLIP_KEY);
+        if(raw)clipFrag=clipSanitize(JSON.parse(raw));
+    }catch(e){clipFrag=null}
+    return clipFrag;
+}
+/** Whatever comes back from storage is data, not a fragment: it may have been
+ *  written by an older version, by another tab, or be something else entirely.
+ *  Anything that is not a complete, finite, in-range fragment is discarded
+ *  rather than half-used. */
+function clipSanitize(c){
+    if(!c||typeof c!=='object')return null;
+    var src=c.atoms;
+    if(!Array.isArray(src)||src.length===0||src.length>PASTE_ATOM_LIMIT)return null;
+    var atoms=[],i,a;
+    for(i=0;i<src.length;i++){
+        a=src[i];
+        if(!a||typeof a.element!=='string'||!/^[A-Z][a-z]?$/.test(a.element))return null;
+        if(typeof a.x!=='number'||typeof a.y!=='number'||typeof a.z!=='number')return null;
+        if(!isFinite(a.x)||!isFinite(a.y)||!isFinite(a.z))return null;
+        // The ghost flag is carried through the clipboard, but only as a real
+        // boolean: anything else in that field is data from an older version or
+        // another tab and is dropped rather than trusted.
+        var item={element:a.element,x:a.x,y:a.y,z:a.z};
+        if(a.ghost===true)item.ghost=true;
+        atoms.push(item);
+    }
+    var bonds=[],srcB=Array.isArray(c.bonds)?c.bonds:[];
+    for(i=0;i<srcB.length;i++){
+        var b=srcB[i];
+        if(!b||typeof b.a!=='number'||typeof b.b!=='number')continue;
+        if(b.a<0||b.b<0||b.a>=atoms.length||b.b>=atoms.length||b.a===b.b)continue;
+        // A ghost cannot carry a bond, so a stored fragment that has one is
+        // stripped of it here rather than pasted as something the viewer would
+        // refuse to draw.
+        if(isGhostAtom(atoms[b.a])||isGhostAtom(atoms[b.b]))continue;
+        bonds.push({a:b.a,b:b.b,order:(typeof b.order==='number'&&isFinite(b.order))?b.order:1});
+    }
+    return {v:1,atoms:atoms,bonds:bonds};
+}
+/** Copy the selected atoms and the bonds among them. False means there was
+ *  nothing to copy, so the caller can leave the key to the browser. */
+function copySelection(){
+    if(selectedAtoms.length===0){
+        modeInfoEl.textContent='Copy: select atoms first - click atoms, or use Select Atoms / Box Select';
+        return false;
+    }
+    var idx=selectedAtoms.slice().sort(function(a,b){return a-b});
+    var map={},atoms=[],sx=0,sy=0,sz=0,i,a;
+    for(i=0;i<idx.length;i++){
+        a=MD.atoms[idx[i]];
+        if(!a)continue;
+        // A selection should not repeat an index, but a repeated one would make
+        // the fragment hold the same atom twice and bond the copy to the wrong
+        // end, so it is dropped here rather than trusted.
+        if(map[idx[i]]!==undefined)continue;
+        map[idx[i]]=atoms.length;
+        var item={element:a.element,x:a.x,y:a.y,z:a.z};
+        if(isGhostAtom(a))item.ghost=true;
+        atoms.push(item);
+        sx+=a.x;sy+=a.y;sz+=a.z;
+    }
+    if(atoms.length===0)return false;
+    var cx=sx/atoms.length,cy=sy/atoms.length,cz=sz/atoms.length;
+    atoms.forEach(function(q){q.x-=cx;q.y-=cy;q.z-=cz});
+    var bonds=[];
+    MD.bonds.forEach(function(b){
+        var p=map[b.atom1],q=map[b.atom2];
+        if(p===undefined||q===undefined)return;
+        bonds.push({a:p,b:q,order:b.order});
+    });
+    clipFrag={v:1,atoms:atoms,bonds:bonds};
+    clipStore();
+    modeInfoEl.textContent='Copied '+atoms.length+' atom(s)'+(bonds.length?' and '+bonds.length+' bond(s)':'');
+    return true;
+}
+/** Cut = copy, then the same deletion the toolbar's batch delete uses (so a
+ *  crystal loses its base atoms and its base bonds exactly as a plain Delete
+ *  does), with one undo step for the pair. */
+function cutSelection(){
+    if(diffMode){modeInfoEl.textContent='Cut is not available in diff mode';return false}
+    var n=selectedAtoms.length;
+    if(n===0){
+        modeInfoEl.textContent='Cut: select atoms first - click atoms, or use Select Atoms / Box Select';
+        return false;
+    }
+    if(!copySelection())return false;
+    pushUndo();
+    provMark('cutAtoms',n);
+    batchDeleteSelected();
+    modeInfoEl.textContent='Cut '+n+' atom(s) - Ctrl+V pastes them back';
+    return true;
+}
+/** Paste the clipboard beside the current structure, as one undo step, and
+ *  select what arrived. Refused where appending atoms cannot be kept: a
+ *  periodic cell (its contents are regenerated from the base atoms, so the copy
+ *  would vanish on the next rebuild) and a two-structure comparison (which has
+ *  no single structure to grow). */
+function pasteClipboard(){
+    if(diffMode){modeInfoEl.textContent='Paste is not available in diff mode';return false}
+    if(CRY){modeInfoEl.textContent='Paste is not available for crystal structures';return false}
+    if(!clipFrag)clipLoad();
+    if(!clipFrag){modeInfoEl.textContent='Paste: nothing copied yet';return false}
+    var frag=clipFrag;
+    if(MD.atoms.length+frag.atoms.length>PASTE_ATOM_LIMIT){
+        modeInfoEl.textContent='Paste: the structure would exceed '+PASTE_ATOM_LIMIT+' atoms - nothing was pasted';
+        return false;
+    }
+    if(vibActive||vibPaused)stopVibration();
+    if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
+    stopFrameAutoPlay();
+    pushUndo();
+    provMark('pasteAtoms',frag.atoms.length);
+    var t=placeBlockBeside(frag.atoms);
+    var N0=MD.atoms.length;
+    frag.atoms.forEach(function(a){
+        var item={element:a.element,x:a.x+t.x,y:a.y+t.y,z:a.z+t.z,
+            color:(MD.atomColors&&MD.atomColors[a.element])||'#FF1493'};
+        if(a.ghost===true||a.element==='X')item.ghost=true;
+        MD.atoms.push(item);
+    });
+    frag.bonds.forEach(function(b){
+        // A fragment read back from storage may still name a ghost in a bond;
+        // a ghost has no valence, so such a bond is not pasted at all.
+        if(isGhostAtom(frag.atoms[b.a])||isGhostAtom(frag.atoms[b.b]))return;
+        MD.bonds.push({atom1:N0+b.a,atom2:N0+b.b,order:b.order});
+    });
+    rebuildScene();
+    // Select what just arrived, so it can be moved, cut or copied straight away.
+    selectedAtoms=[];
+    for(var i=N0;i<MD.atoms.length;i++)selectedAtoms.push(i);
+    highlightSelected();
+    selInfoEl.textContent='Selected: '+formatAtomList(selectedAtoms)+' ('+selectedAtoms.length+' atoms)';
+    // Zoom out when the copy lands outside the current view (the import's rule).
+    var maxD=0;
+    MD.atoms.forEach(function(a){
+        var dx=a.x-CX,dy=a.y-CY,dz=a.z-CZ,dd=Math.sqrt(dx*dx+dy*dy+dz*dz);
+        if(dd>maxD)maxD=dd;
+    });
+    var need=maxD*2.5+5;
+    if(camDist<need){camDist=need;camera.position.set(0,0,camDist);camera.lookAt(0,0,0)}
+    needsRender=true;
+    modeInfoEl.textContent='Pasted '+frag.atoms.length+' atom(s) beside the existing structure';
+    return true;
+}
+
 // ===== Add H (hydrogen completion) =====
 // The geometry is computed in the extension host, by the SMILES -> 3D engine's
 // own experience tables (X-H lengths, theoretical angles) with every atom that
@@ -4876,13 +5747,21 @@ function startAddHydrogens(){
     }
     if(vibActive||vibPaused)stopVibration();
     if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
+    // A ghost has no valence, so it can be neither a centre (nothing to
+    // complete) nor a neighbour (no bond to count). It goes to the engine as the
+    // dummy element, and out of the selection.
+    var hSel=selectedAtoms.filter(function(i){return !isGhostAtom(MD.atoms[i])});
+    if(hSel.length===0){
+        modeInfoEl.textContent='Add H - the selection holds no real atom (ghosts have no valence)';
+        return;
+    }
     addHPending=true;
-    modeInfoEl.textContent='Add H: completing '+selectedAtoms.length+' selected atom(s)...';
+    modeInfoEl.textContent='Add H: completing '+hSel.length+' selected atom(s)...';
     vscodeApi.postMessage({
         command:'addHydrogens',
-        atoms:MD.atoms.map(function(a){return{element:a.element,x:a.x,y:a.y,z:a.z}}),
+        atoms:MD.atoms.map(function(a){return{element:isGhostAtom(a)?'X':a.element,x:a.x,y:a.y,z:a.z}}),
         bonds:MD.bonds.map(function(b){return{atom1:b.atom1,atom2:b.atom2,order:b.order}}),
-        selected:selectedAtoms.slice()
+        selected:hSel
     });
 }
 function applyHydrogenResult(msg){
@@ -5328,7 +6207,7 @@ function buildDiffListHTML(diffs,totalDiff){
             html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Bond Length Differences ('+diffs.bonds.length+')</b></div>';
             diffs.bonds.sort(function(a,b){return b.pct-a.pct});
             diffs.bonds.forEach(function(d){
-                html+='<div class="diff-row">  '+MD.atoms[d.i1].element+(d.i1+1)+'-'+MD.atoms[d.i2].element+(d.i2+1)+
+                html+='<div class="diff-row">  '+atomLabel(MD.atoms[d.i1],d.i1)+'-'+atomLabel(MD.atoms[d.i2],d.i2)+
                     ': '+d.d1.toFixed(3)+' vs '+d.d2.toFixed(3)+' Å (Δ='+d.diff.toFixed(3)+', '+d.pct.toFixed(2)+'%)</div>';
             });
         }
@@ -5336,7 +6215,7 @@ function buildDiffListHTML(diffs,totalDiff){
             html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Bond Angle Differences ('+diffs.angles.length+')</b></div>';
             diffs.angles.sort(function(a,b){return b.pct-a.pct});
             diffs.angles.forEach(function(d){
-                html+='<div class="diff-row">  '+MD.atoms[d.i1].element+(d.i1+1)+'-'+MD.atoms[d.i2].element+(d.i2+1)+'-'+MD.atoms[d.i3].element+(d.i3+1)+
+                html+='<div class="diff-row">  '+atomLabel(MD.atoms[d.i1],d.i1)+'-'+atomLabel(MD.atoms[d.i2],d.i2)+'-'+atomLabel(MD.atoms[d.i3],d.i3)+
                     ': '+d.a1.toFixed(1)+'° vs '+d.a2.toFixed(1)+'° (Δ='+d.diff.toFixed(1)+'°, '+d.pct.toFixed(2)+'%)</div>';
             });
         }
@@ -5344,7 +6223,7 @@ function buildDiffListHTML(diffs,totalDiff){
             html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Dihedral Differences ('+diffs.dihedrals.length+')</b></div>';
             diffs.dihedrals.sort(function(a,b){return b.pct-a.pct});
             diffs.dihedrals.forEach(function(d){
-                html+='<div class="diff-row">  '+MD.atoms[d.i1].element+(d.i1+1)+'-'+MD.atoms[d.i2].element+(d.i2+1)+'-'+MD.atoms[d.i3].element+(d.i3+1)+'-'+MD.atoms[d.i4].element+(d.i4+1)+
+                html+='<div class="diff-row">  '+atomLabel(MD.atoms[d.i1],d.i1)+'-'+atomLabel(MD.atoms[d.i2],d.i2)+'-'+atomLabel(MD.atoms[d.i3],d.i3)+'-'+atomLabel(MD.atoms[d.i4],d.i4)+
                     ': '+d.d1.toFixed(1)+'° vs '+d.d2.toFixed(1)+'° (Δ='+d.diff.toFixed(1)+'°, '+d.pct.toFixed(2)+'%)</div>';
             });
         }
@@ -5534,6 +6413,86 @@ diffReopenEl.addEventListener('click',function(){
     layoutPanels();
 });
 
+// Build the comparison's right-hand model: one sphere per atom and two cylinder
+// pieces per bond, drawn in the current display style exactly as the left-hand
+// half is (that half is the ordinary scene, which rebuildScene rebuilds).
+//
+// hiAtom is keyed by right-hand atom index and hiBond by the pair of
+// left-hand indices a bond maps to - the key this half has always used for its
+// bond marks - so a caller can hand over either the sets the difference
+// computation just produced or the ones already on screen.
+//
+// The model is built in place rather than by re-entering the comparison, so the
+// two view states, the camera and the pan stay where the user put them.
+function buildDiffModel(hiAtom,hiBond){
+    if(!diffMolGroup||!diffData)return;
+    var i;
+    for(i=0;i<diffAtomMeshes.length;i++){
+        diffMolGroup.remove(diffAtomMeshes[i]);
+        disposeMesh(diffAtomMeshes[i]);
+    }
+    diffAtomMeshes=[];
+    var dSegs=sphereSegs(diffData.atoms.length);
+    diffData.atoms.forEach(function(a,i){
+        var gh=isGhostAtom(a);
+        // The same radius rule as the left half — the default balls, van der
+        // Waals spheres, or a joint as thick as the sticks. A comparison's atoms
+        // carry no script scale, so there is none to apply.
+        var r=drawnRadius({element:a.element,ghost:gh},0);
+        var isHi=hiAtom[i]===true;
+        // Same pooled geometry and material scheme as the left-hand structure:
+        // a comparison of two large structures draws its two sides from a
+        // handful of objects instead of one per atom. A ghost is the small
+        // faint marker it is on the left, so the two halves read the same way.
+        var diffCol=gh?GHOST_COLOR:a.color;
+        var mesh=new THREE.Mesh(sphereGeoFor(r,dSegs),diffAtomMaterial(diffCol,isHi?2:0,gh));
+        mesh.position.set(a.x-diffCX,a.y-diffCY,a.z-diffCZ);
+        mesh.userData={element:a.element,index:i,diffHi:isHi,baseColor:diffCol,ghost:gh};
+        diffMolGroup.add(mesh);
+        diffAtomMeshes.push(mesh);
+    });
+
+    // The right-hand bonds: two pieces per bond (one per half), each carrying
+    // the transform it is drawn with. The comparison's structure never moves,
+    // so a piece stores its own numbers and the highlight can be re-applied by
+    // refilling the two pools rather than editing a material per mesh. A
+    // space-filling model draws no sticks at all; this half has its own piece
+    // list, so it takes the same decision as createBond rather than inheriting
+    // it.
+    diffBondPieces.length=0;
+    if(displayStyle!=='spacefill')diffData.bonds.forEach(function(b){
+        var a1=diffData.atoms[b.atom1],a2=diffData.atoms[b.atom2];
+        if(!a1||!a2)return;
+        var sx=a1.x-diffCX,sy=a1.y-diffCY,sz=a1.z-diffCZ;
+        var ex=a2.x-diffCX,ey=a2.y-diffCY,ez=a2.z-diffCZ;
+        var dx=ex-sx,dy=ey-sy,dz=ez-sz;
+        var l=Math.sqrt(dx*dx+dy*dy+dz*dz);
+        if(l<0.001)return;
+        var mpx=(sx+ex)*0.5,mpy=(sy+ey)*0.5,mpz=(sz+ez)*0.5;
+        var origI1=diffReverseMapping?diffReverseMapping[b.atom1]:-1;
+        var origI2=diffReverseMapping?diffReverseMapping[b.atom2]:-1;
+        var bondKey=Math.min(origI1,origI2)+'-'+Math.max(origI1,origI2);
+        var isHi=hiBond[bondKey]===true;
+        addDiffBondPiece(sx,sy,sz,mpx-sx,mpy-sy,mpz-sz,l/2,BOND_R,new THREE.Color(a1.color),bondKey,isHi);
+        addDiffBondPiece(mpx,mpy,mpz,ex-mpx,ey-mpy,ez-mpz,l/2,BOND_R,new THREE.Color(a2.color),bondKey,isHi);
+    });
+    diffBuildBondPools();
+}
+
+// Rebuild that model from the state on screen, for a change of drawing style:
+// the marks the difference computation put on the two halves are read back off
+// the meshes and pieces before they are replaced, so restyling a comparison
+// keeps its differences marked and keeps the right-hand selection glowing.
+function rebuildDiffModel(){
+    if(!diffMode||!diffMolGroup)return;
+    var hiAtom={},hiBond={};
+    diffAtomMeshes.forEach(function(m,i){if(m.userData.diffHi)hiAtom[i]=true});
+    diffBondPieces.forEach(function(p){if(p.hi)hiBond[p.key]=true});
+    buildDiffModel(hiAtom,hiBond);
+    highlightSelected();
+    needsRender=true;
+}
+
 function enterDiffRender(diffs,mapping){
     if(vibActive||vibPaused)stopVibration();
     stopMoveSession();
@@ -5547,57 +6506,19 @@ function enterDiffRender(diffs,mapping){
     diffData.atoms.forEach(function(a){diffCX+=a.x;diffCY+=a.y;diffCZ+=a.z});
     if(diffData.atoms.length>0){diffCX/=diffData.atoms.length;diffCY/=diffData.atoms.length;diffCZ/=diffData.atoms.length}
 
-    var highlightAtoms={};
-    var highlightBonds={};
+    // The right-hand model is built from the marks the difference computation
+    // produced, keyed the way that half is addressed (see buildDiffModel).
+    var hiAtom={},hiBond={};
     if(diffs&&mapping){
+        var markHi=function(idx){var ri=mapping[idx];if(ri>=0)hiAtom[ri]=true};
         diffs.bonds.forEach(function(d){
-            highlightAtoms[d.i1]=true;highlightAtoms[d.i2]=true;
-            highlightBonds[Math.min(d.i1,d.i2)+'-'+Math.max(d.i1,d.i2)]=true;
+            markHi(d.i1);markHi(d.i2);
+            hiBond[Math.min(d.i1,d.i2)+'-'+Math.max(d.i1,d.i2)]=true;
         });
-        diffs.angles.forEach(function(d){
-            highlightAtoms[d.i1]=true;highlightAtoms[d.i2]=true;highlightAtoms[d.i3]=true;
-        });
-        diffs.dihedrals.forEach(function(d){
-            highlightAtoms[d.i1]=true;highlightAtoms[d.i2]=true;highlightAtoms[d.i3]=true;highlightAtoms[d.i4]=true;
-        });
+        diffs.angles.forEach(function(d){markHi(d.i1);markHi(d.i2);markHi(d.i3)});
+        diffs.dihedrals.forEach(function(d){markHi(d.i1);markHi(d.i2);markHi(d.i3);markHi(d.i4)});
     }
-
-    var dSegs=sphereSegs(diffData.atoms.length);
-    diffData.atoms.forEach(function(a,i){
-        var r=getR(a.element);
-        var isHi=highlightAtoms[mapping?mapping.indexOf(i):-1];
-        // Same pooled geometry and material scheme as the left-hand structure:
-        // a comparison of two large structures draws its two sides from a
-        // handful of objects instead of one per atom.
-        var mesh=new THREE.Mesh(sphereGeoFor(r,dSegs),diffAtomMaterial(a.color,isHi?2:0));
-        mesh.position.set(a.x-diffCX,a.y-diffCY,a.z-diffCZ);
-        mesh.userData={element:a.element,index:i,diffHi:isHi?true:false,baseColor:a.color};
-        diffMolGroup.add(mesh);
-        diffAtomMeshes.push(mesh);
-    });
-
-    // The right-hand bonds: two pieces per bond (one per half), each carrying
-    // the transform it is drawn with. The comparison's structure never moves,
-    // so a piece stores its own numbers and the highlight can be re-applied by
-    // refilling the two pools rather than editing a material per mesh.
-    diffBondPieces.length=0;
-    diffData.bonds.forEach(function(b){
-        var a1=diffData.atoms[b.atom1],a2=diffData.atoms[b.atom2];
-        if(!a1||!a2)return;
-        var sx=a1.x-diffCX,sy=a1.y-diffCY,sz=a1.z-diffCZ;
-        var ex=a2.x-diffCX,ey=a2.y-diffCY,ez=a2.z-diffCZ;
-        var dx=ex-sx,dy=ey-sy,dz=ez-sz;
-        var l=Math.sqrt(dx*dx+dy*dy+dz*dz);
-        if(l<0.001)return;
-        var mpx=(sx+ex)*0.5,mpy=(sy+ey)*0.5,mpz=(sz+ez)*0.5;
-        var origI1=mapping?mapping.indexOf(b.atom1):-1;
-        var origI2=mapping?mapping.indexOf(b.atom2):-1;
-        var bondKey=Math.min(origI1,origI2)+'-'+Math.max(origI1,origI2);
-        var isHi=highlightBonds[bondKey];
-        addDiffBondPiece(sx,sy,sz,mpx-sx,mpy-sy,mpz-sz,l/2,0.12,new THREE.Color(a1.color),bondKey,isHi);
-        addDiffBondPiece(mpx,mpy,mpz,ex-mpx,ey-mpy,ez-mpz,l/2,0.12,new THREE.Color(a2.color),bondKey,isHi);
-    });
-    diffBuildBondPools();
+    buildDiffModel(hiAtom,hiBond);
 
     if(diffs&&mapping){
         var leftHi={};
@@ -5985,13 +6906,21 @@ var routePanelEl=document.getElementById('route-panel');
 var routeReopenEl=document.getElementById('route-reopen');
 var OPT_STEPS=MD.optSteps||null;
 var OPT_SOURCE=MD.optSource||null;
-// Gaussian's own convergence criteria (force 0.000450/0.000300 Hartree/Bohr,
-// displacement 0.001800/0.001200 Bohr) are the Item/Value/Converged? table
-// thresholds of Gaussian optimization logs. They apply ONLY when the log
-// really came from Gaussian — other programs (e.g. xtb, whose charts are
-// driven by its gnorm criterion) draw no threshold lines rather than a
-// borrowed, meaningless scale.
-var OPT_IS_GAUSSIAN=OPT_SOURCE==='gaussian';
+// The convergence targets to draw as dashed guides. The file's own values win:
+// ORCA states its criteria (TolMAXG / TolRMSG / TolMAXD / TolRMSD) in every
+// optimization output, and a run told to converge tighter than the default must
+// show the line it was actually held to. Gaussian only prints its criteria as
+// the Tolerance column of the same table, so its documented defaults stand in
+// (force 0.000450/0.000300 Hartree/Bohr, displacement 0.001800/0.001200 Bohr),
+// and they apply ONLY to a Gaussian log — xtb's gnorm criterion and a bare
+// trajectory state no tolerance at all, and a borrowed scale would draw a target
+// the run was never asked to meet.
+var OPT_THRESHOLDS=(function(){
+    var t=MD.optThresholds;
+    if(t&&(t.maxForce!=null||t.rmsForce!=null||t.maxDisplacement!=null||t.rmsDisplacement!=null))return t;
+    if(OPT_SOURCE==='gaussian')return {maxForce:0.000450,rmsForce:0.000300,maxDisplacement:0.001800,rmsDisplacement:0.001200};
+    return null;
+})();
 var NORMAL_MODES=MD.normalModes||null;
 
 // ---------------------------------------------------------------------------
@@ -6381,10 +7310,10 @@ function renderOptCharts(){
             drawConvergenceChart(cv,OPT_STEPS,'energy','Energy (Hartree)','#3794ff',null);
         }else if(field==='force'){
             cv.style.height='110px';
-            drawDualChart(cv,OPT_STEPS,['maxForce','rmsForce'],['Max Force','RMS Force'],['#ff6b6b','#ffa94d'],OPT_IS_GAUSSIAN?0.000450:null,OPT_IS_GAUSSIAN?0.000300:null);
+            drawDualChart(cv,OPT_STEPS,['maxForce','rmsForce'],['Max Force','RMS Force'],['#ff6b6b','#ffa94d'],OPT_THRESHOLDS?OPT_THRESHOLDS.maxForce:null,OPT_THRESHOLDS?OPT_THRESHOLDS.rmsForce:null);
         }else if(field==='disp'){
             cv.style.height='110px';
-            drawDualChart(cv,OPT_STEPS,['maxDisplacement','rmsDisplacement'],['Max Disp','RMS Disp'],['#51cf66','#74c0fc'],OPT_IS_GAUSSIAN?0.001800:null,OPT_IS_GAUSSIAN?0.001200:null);
+            drawDualChart(cv,OPT_STEPS,['maxDisplacement','rmsDisplacement'],['Max Disp','RMS Disp'],['#51cf66','#74c0fc'],OPT_THRESHOLDS?OPT_THRESHOLDS.maxDisplacement:null,OPT_THRESHOLDS?OPT_THRESHOLDS.rmsDisplacement:null);
         }
     });
 }
@@ -6819,6 +7748,13 @@ function vdWriteAtoms(){
         if(q>maxSq)maxSq=q;
     }
     vdMaxDisp=Math.sqrt(maxSq);
+    // A displaced geometry is a different geometry: the aromatic sides are
+    // re-planned from it (a displaced ring is still a ring, and its plane may
+    // have tilted), which the pieces then read when they are placed. Playback
+    // of a mode deliberately keeps the equilibrium plan: it borrows the
+    // geometry for one cycle and puts it back, and a plan that changed 60 times
+    // a second could flip a side mid-animation.
+    planAromaticDashes();
     return true;
 }
 /** Add a mode to the distortion or change its share; false when the mode
@@ -7145,7 +8081,7 @@ function buildFreqPanel(){
 optReopenEl.addEventListener('click',function(){buildOptPanel()});
 freqReopenEl.addEventListener('click',function(){buildFreqPanel()});
 
-// ===== Route Keywords Panel (Gaussian log route cards) =====
+// ===== Route Keywords Panel (Gaussian route cards, ORCA simple input) =====
 var ROUTES=MD.routes||null;
 function rtEsc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 function buildRoutePanel(){
@@ -7191,7 +8127,9 @@ layoutPanels();
 function formatAtomList(indices,atoms){
     atoms=atoms||MD.atoms;
     if(indices.length===0)return '';
-    var list=indices.slice(0,15).map(function(i){var a=atoms[i];return(a?a.element:'?')+(i+1)});
+    // atomLabel marks a ghost with a star (C*3, X5), so a selection that is
+    // about to be ghosted - or one that already is - reads as points, not atoms.
+    var list=indices.slice(0,15).map(function(i){return atomLabel(atoms[i],i)});
     var str=list.join(', ');
     if(indices.length>15)str+=' ... ('+indices.length+' atoms)';
     return str;
@@ -7368,12 +8306,21 @@ function layoutPanels(){
 // atom with the same colour and state draws with the same material, and a
 // per-atom material would be one material per atom again.
 function highlightSelected(){
+    // One lookup for the whole pass instead of one scan per atom: Select All
+    // makes the selection the entire structure, and an indexOf per mesh would
+    // pay for that with a quadratic walk (135 ms at 20 000 atoms measured).
+    // Same answer as before — an index the structure does not have never
+    // matches, exactly as indexOf returned -1.
+    var sel={},i;
+    for(i=0;i<selectedAtoms.length;i++)sel[selectedAtoms[i]]=true;
     atomMeshes.forEach(function(m,i){
-        setAtomHighlight(m,selectedAtoms.indexOf(i)>=0?1:(m.userData.diffHi?2:0));
+        setAtomHighlight(m,sel[i]===true?1:(m.userData.diffHi?2:0));
     });
     if(diffMode){
+        var dsel={};
+        for(i=0;i<diffSelectedAtoms.length;i++)dsel[diffSelectedAtoms[i]]=true;
         diffAtomMeshes.forEach(function(m,i){
-            setDiffAtomHighlight(m,diffSelectedAtoms.indexOf(i)>=0?1:(m.userData.diffHi?2:0));
+            setDiffAtomHighlight(m,dsel[i]===true?1:(m.userData.diffHi?2:0));
         });
     }
     needsRender=true;
@@ -7494,17 +8441,17 @@ function fmtMeasurement(kind,sel,atomsArr){
     if(kind==='bondLength'&&sel.length===2){
         var a1=atomsArr[sel[0]],a2=atomsArr[sel[1]];
         var d=dist(a1,a2);
-        return {label:a1.element+(sel[0]+1)+' - '+a2.element+(sel[1]+1),value:d.toFixed(4)+' A',num:d};
+        return {label:atomLabel(a1,sel[0])+' - '+atomLabel(a2,sel[1]),value:d.toFixed(4)+' A',num:d};
     }
     if(kind==='bondAngle'&&sel.length===3){
         var a1=atomsArr[sel[0]],a2=atomsArr[sel[1]],a3=atomsArr[sel[2]];
         var ang=angle(a1,a2,a3);
-        return {label:a1.element+(sel[0]+1)+' - '+a2.element+(sel[1]+1)+' - '+a3.element+(sel[2]+1),value:ang.toFixed(2)+' deg',num:ang};
+        return {label:atomLabel(a1,sel[0])+' - '+atomLabel(a2,sel[1])+' - '+atomLabel(a3,sel[2]),value:ang.toFixed(2)+' deg',num:ang};
     }
     if(kind==='dihedral'&&sel.length===4){
         var a1=atomsArr[sel[0]],a2=atomsArr[sel[1]],a3=atomsArr[sel[2]],a4=atomsArr[sel[3]];
         var dih=dihedral(a1,a2,a3,a4);
-        return {label:a1.element+(sel[0]+1)+' - '+a2.element+(sel[1]+1)+' - '+a3.element+(sel[2]+1)+' - '+a4.element+(sel[3]+1),value:dih.toFixed(2)+' deg',num:dih};
+        return {label:atomLabel(a1,sel[0])+' - '+atomLabel(a2,sel[1])+' - '+atomLabel(a3,sel[2])+' - '+atomLabel(a4,sel[3]),value:dih.toFixed(2)+' deg',num:dih};
     }
     return null;
 }
@@ -7684,7 +8631,7 @@ function showBondLengthModal(){
     var existingBond=MD.bonds.find(function(b){return(b.atom1===selectedAtoms[0]&&b.atom2===selectedAtoms[1])||(b.atom1===selectedAtoms[1]&&b.atom2===selectedAtoms[0])});
     var curOrder=existingBond?existingBond.order:1;
     saveOriginal();
-    var n1=a1.element+(selectedAtoms[0]+1),n2=a2.element+(selectedAtoms[1]+1);
+    var n1=atomLabel(a1,selectedAtoms[0]),n2=atomLabel(a2,selectedAtoms[1]);
     showModal('<h3>Adjust Bond Length</h3>'+
         '<div class="current-val">Current: '+cur.toFixed(4)+' A, Bond order: '+curOrder+'</div>'+
         '<label>Fix atom:</label><select id="m-fix"><option value="1">Fix '+n1+' (move '+n2+')</option><option value="2">Fix '+n2+' (move '+n1+')</option></select>'+
@@ -7704,6 +8651,17 @@ function showBondLengthModal(){
             if(existingBond){MD.bonds=MD.bonds.filter(function(b){return b!==existingBond});existingBond=null;rebuildScene()}
         }else{
             if(!existingBond){
+                // A ghost has no valence, so this pair cannot be given a bond
+                // even from here: the dialog is the one place a bond can be
+                // created by hand, and a ghost would otherwise leave with one
+                // (which the drawing refuses and a saved connect section would
+                // carry into a calculation). The control goes back to None so it
+                // never claims a bond that does not exist.
+                if(isGhostAtom(a1)||isGhostAtom(a2)){
+                    this.value='0';
+                    modeInfoEl.textContent='A ghost atom cannot be bonded - no bond was created';
+                    return;
+                }
                 existingBond={atom1:selectedAtoms[0],atom2:selectedAtoms[1],order:newOrder};
                 MD.bonds.push(existingBond);
             }else{existingBond.order=newOrder}
@@ -7721,7 +8679,7 @@ function showBondAngleModal(){
     var a1=MD.atoms[selectedAtoms[0]],a2=MD.atoms[selectedAtoms[1]],a3=MD.atoms[selectedAtoms[2]];
     var cur=angle(a1,a2,a3);
     saveOriginal();
-    var n1=a1.element+(selectedAtoms[0]+1),n2=a2.element+(selectedAtoms[1]+1),n3=a3.element+(selectedAtoms[2]+1);
+    var n1=atomLabel(a1,selectedAtoms[0]),n2=atomLabel(a2,selectedAtoms[1]),n3=atomLabel(a3,selectedAtoms[2]);
     showModal('<h3>Adjust Bond Angle</h3>'+
         '<div class="current-val">Current: '+cur.toFixed(2)+' deg</div>'+
         '<label>Fix side:</label><select id="m-fix"><option value="1">Fix '+n1+'-'+n2+' (move '+n3+')</option><option value="2">Fix '+n2+'-'+n3+' (move '+n1+')</option></select>'+
@@ -7742,7 +8700,7 @@ function showDihedralModal(){
     var a1=MD.atoms[selectedAtoms[0]],a2=MD.atoms[selectedAtoms[1]],a3=MD.atoms[selectedAtoms[2]],a4=MD.atoms[selectedAtoms[3]];
     var cur=dihedral(a1,a2,a3,a4);
     saveOriginal();
-    var n1=a1.element+(selectedAtoms[0]+1),n2=a2.element+(selectedAtoms[1]+1),n3=a3.element+(selectedAtoms[2]+1),n4=a4.element+(selectedAtoms[3]+1);
+    var n1=atomLabel(a1,selectedAtoms[0]),n2=atomLabel(a2,selectedAtoms[1]),n3=atomLabel(a3,selectedAtoms[2]),n4=atomLabel(a4,selectedAtoms[3]);
     showModal('<h3>Adjust Dihedral Angle</h3>'+
         '<div class="current-val">Current: '+cur.toFixed(2)+' deg</div>'+
         '<label>Fix side:</label><select id="m-fix"><option value="1">Fix '+n1+'-'+n2+'-'+n3+' (move '+n4+')</option><option value="2">Fix '+n2+'-'+n3+'-'+n4+' (move '+n1+')</option></select>'+
@@ -7791,7 +8749,8 @@ function showAddAtomModal(){
     if(!anchor)return;
     showModal('<h3>Add Atom</h3>'+
         '<label>Element:</label><select id="m-elem">'+
-        '<option>H</option><option>He</option>'+
+        '<option value="X">X (dummy point)</option>'+
+        '<option selected>H</option><option>He</option>'+
         '<option>Li</option><option>Be</option><option>B</option><option>C</option><option>N</option><option>O</option><option>F</option><option>Ne</option>'+
         '<option>Na</option><option>Mg</option><option>Al</option><option>Si</option><option>P</option><option>S</option><option>Cl</option><option>Ar</option>'+
         '<option>K</option><option>Ca</option><option>Sc</option><option>Ti</option><option>V</option><option>Cr</option><option>Mn</option><option>Fe</option>'+
@@ -7805,7 +8764,21 @@ function showAddAtomModal(){
         '</select>'+
         '<label>Bond order:</label><select id="m-bond-order"><option value="1">Single (1.0)</option><option value="1.5">Aromatic (1.5)</option><option value="2">Double (2.0)</option><option value="3">Triple (3.0)</option></select>'+
         '<label>Bond length (A):</label><input type="number" id="m-val" value="1.09" step="0.01" min="0.3" max="5">'+
+        '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">'+
+        '<input type="checkbox" id="m-ghost" style="flex:0 0 auto;width:auto">'+
+        '<span>Ghost atom - no nucleus, no electrons, no bond</span></label>'+
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok" id="m-ok">OK</button></div>',null);
+    // A ghost carries no bond, and a dummy point has no element to bond with:
+    // the two controls that describe the new bond are turned off rather than
+    // silently ignored, so the dialog says what it will do.
+    var ghostSync=function(){
+        var g=document.getElementById('m-ghost');
+        var el=document.getElementById('m-elem');
+        if(!g||!el)return;
+        var isG=g.checked||el.value==='X';
+        var bo=document.getElementById('m-bond-order');
+        if(bo){bo.disabled=isG;bo.title=isG?'A ghost atom is never bonded':''}
+    };
     document.getElementById('m-elem').addEventListener('change',function(){
         var defaults={H:1.09,He:1.30,Li:2.12,Be:1.67,B:1.58,C:1.54,N:1.47,O:1.43,F:1.36,Ne:1.35,
             Na:1.88,Mg:1.63,Al:1.84,Si:1.87,P:1.80,S:1.82,Cl:1.77,Ar:1.74,
@@ -7818,13 +8791,25 @@ function showAddAtomModal(){
             Tm:2.26,Yb:2.26,Lu:2.26,Hf:2.23,Ta:2.22,W:2.18,Re:2.20,Os:2.19,
             Ir:2.16,Pt:2.13,Au:2.14,Hg:2.14,Tl:2.20,Pb:2.22,Bi:2.23};
         document.getElementById('m-val').value=defaults[this.value]||1.5;
+        ghostSync();
     });
+    document.getElementById('m-ghost').addEventListener('change',ghostSync);
     document.getElementById('m-ok').addEventListener('click',function(){
-        pushUndo();
-        provMark('addAtoms',1);
         var el=document.getElementById('m-elem').value;
         var bl=parseFloat(document.getElementById('m-val').value)||1.5;
         var bondOrder=parseFloat(document.getElementById('m-bond-order').value)||1;
+        var ghost=document.getElementById('m-ghost').checked||el==='X';
+        // Ghosts are refused in a periodic cell: every crystal format this
+        // viewer writes (CIF, POSCAR, VESTA, cube) states a species per site
+        // and has no way to say "this one has no nucleus", so a ghost would
+        // come back as a real atom on the next load.
+        if(ghost&&CRY){
+            hideModal();resetSelection();
+            modeInfoEl.textContent='Ghost atoms are not available for crystal structures';
+            return;
+        }
+        pushUndo();
+        provMark(ghost?'addGhostAtoms':'addAtoms',1);
         var dir={x:0,y:0,z:1};
         if(CRY){
             var baseAnchorIdx=anchor.baseIdx!=null?anchor.baseIdx:anchorIdx;
@@ -7865,9 +8850,21 @@ function showAddAtomModal(){
                 dir=pickFreeDirection(nbrs);
             }
             var newIdx=MD.atoms.length;
-            MD.atoms.push({element:el,x:anchor.x+dir.x*bl,y:anchor.y+dir.y*bl,z:anchor.z+dir.z*bl,color:MD.atomColors[el]||'#FF1493',index:newIdx});
-            MD.bonds.push({atom1:anchorIdx,atom2:newIdx,order:bondOrder});
+            var newAtom={element:el,x:anchor.x+dir.x*bl,y:anchor.y+dir.y*bl,z:anchor.z+dir.z*bl,color:MD.atomColors[el]||'#FF1493',index:newIdx};
+            if(ghost)newAtom.ghost=true;
+            MD.atoms.push(newAtom);
+            // The bond is the one thing a ghost does not get: a ghost has no
+            // valence, and bonding one to its anchor would make the bond
+            // perception, the force field and every saved format disagree about
+            // what it is. The anchor being a ghost is refused for the same
+            // reason - a point has nothing to bond with.
+            if(!ghost&&!isGhostAtom(anchor))MD.bonds.push({atom1:anchorIdx,atom2:newIdx,order:bondOrder});
             rebuildScene();hideModal();originalCoords=null;resetSelection();
+            if(ghost){
+                modeInfoEl.textContent='Added a ghost atom of '+(el==='X'?'no element (dummy point)':el)+' - not bonded';
+            }else if(isGhostAtom(anchor)){
+                modeInfoEl.textContent='Added '+el+' - not bonded: the anchor is a ghost atom';
+            }
         }
     });
     document.getElementById('m-cancel').addEventListener('click',function(){hideModal();originalCoords=null;resetSelection()});
@@ -7876,10 +8873,15 @@ function showAddAtomModal(){
 function showReplaceAtomModal(){
     if(selectedAtoms.length===0)return;
     var names=formatAtomList(selectedAtoms);
+    // Pre-ticking the box when everything selected is already a ghost makes the
+    // dialog show the state it will keep, so "Replace" on a ghost selection is
+    // not a silent un-ghosting.
+    var allGhost=selectedAtoms.every(function(i){return isGhostAtom(MD.atoms[i])});
     showModal('<h3>Replace Atom</h3>'+
         '<div class="current-val">Replace '+selectedAtoms.length+' atom(s): '+names+'</div>'+
         '<label>New element:</label><select id="m-elem">'+
-        '<option>H</option><option>He</option>'+
+        '<option value="X">X (dummy point)</option>'+
+        '<option selected>H</option><option>He</option>'+
         '<option>Li</option><option>Be</option><option>B</option><option>C</option><option>N</option><option>O</option><option>F</option><option>Ne</option>'+
         '<option>Na</option><option>Mg</option><option>Al</option><option>Si</option><option>P</option><option>S</option><option>Cl</option><option>Ar</option>'+
         '<option>K</option><option>Ca</option><option>Sc</option><option>Ti</option><option>V</option><option>Cr</option><option>Mn</option><option>Fe</option>'+
@@ -7891,34 +8893,130 @@ function showReplaceAtomModal(){
         '<option>Tm</option><option>Yb</option><option>Lu</option><option>Hf</option><option>Ta</option><option>W</option><option>Re</option><option>Os</option>'+
         '<option>Ir</option><option>Pt</option><option>Au</option><option>Hg</option><option>Tl</option><option>Pb</option><option>Bi</option>'+
         '</select>'+
+        '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">'+
+        '<input type="checkbox" id="m-ghost"'+(allGhost?' checked':'')+' style="flex:0 0 auto;width:auto">'+
+        '<span>Ghost - keep each atom\\'s element, drop its bonds</span></label>'+
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok" id="m-ok">Replace</button></div>',null);
+    var ghostSync=function(){
+        var g=document.getElementById('m-ghost');
+        var el=document.getElementById('m-elem');
+        if(!g||!el)return;
+        // Ticked: the element list has no say - every atom stays the element it
+        // already is and merely loses its nucleus. That is the gesture a
+        // counterpoise setup needs ("make this whole fragment ghosts"), and it
+        // is the only reading under which a mixed selection makes sense.
+        el.disabled=g.checked;
+        el.title=g.checked?'A ghost keeps each atom\\'s own element':'';
+    };
+    document.getElementById('m-ghost').addEventListener('change',ghostSync);
+    ghostSync();
     document.getElementById('m-ok').addEventListener('click',function(){
-        pushUndo();
-        provMark('replaceAtoms',selectedAtoms.length);
+        var ghost=document.getElementById('m-ghost').checked;
         var el=document.getElementById('m-elem').value;
+        if(ghost&&CRY){
+            hideModal();resetSelection();
+            modeInfoEl.textContent='Ghost atoms are not available for crystal structures';
+            return;
+        }
+        // Counted before the change so the title records what actually happened:
+        // a Replace that re-declares atoms already in the state asked for is not
+        // an edit and does not get a clause. Choosing X keeps an atom a ghost
+        // whatever the switch says - the dummy element *is* one - so a real
+        // conversion needs both the switch off and a real element.
+        var n=selectedAtoms.length,changedGhost=0,changedReal=0;
         selectedAtoms.forEach(function(idx){
             var a=MD.atoms[idx];
-            a.element=el;
-            a.color=MD.atomColors[el]||'#FF1493';
+            if(!a)return;
+            var was=isGhostAtom(a);
+            if(ghost&&!was)changedGhost++;
+            else if(!ghost&&was&&el!=='X')changedReal++;
+        });
+        pushUndo();
+        if(ghost){
+            if(changedGhost>0)provMark('ghostAtoms',changedGhost);
+        }else{
+            provMark('replaceAtoms',n);
+            if(changedReal>0)provMark('unghostAtoms',changedReal);
+        }
+        var becameReal=[];
+        selectedAtoms.forEach(function(idx){
+            var a=MD.atoms[idx];
+            if(!a)return;
+            if(ghost){
+                a.ghost=true;
+            }else{
+                if(isGhostAtom(a)&&el!=='X')becameReal.push(idx);
+                a.element=el;
+                a.ghost=false;
+                a.color=MD.atomColors[el]||'#FF1493';
+            }
             if(CRY){
                 var bi=a.baseIdx!=null?a.baseIdx:idx;
                 if(CRY.baseAtoms[bi]){
-                    CRY.baseAtoms[bi].element=el;
+                    CRY.baseAtoms[bi].element=a.element;
                     CRY.baseAtoms[bi].color=a.color;
+                    CRY.baseAtoms[bi].ghost=a.ghost;
                 }
             }
         });
+        // A ghost has no bonds, so becoming one takes the atom's bonds with it;
+        // becoming real again is the reverse - the atom is re-derived from the
+        // geometry the same way a load would, and only the bonds that touch a
+        // converted atom are added, so no existing bond changes.
+        dropGhostBonds();
+        if(becameReal.length>0)rebondAtoms(becameReal);
         if(CRY){rebuildCrystal();}
         rebuildScene();hideModal();originalCoords=null;resetSelection();
     });
     document.getElementById('m-cancel').addEventListener('click',function(){hideModal();originalCoords=null;resetSelection()});
 }
 
+/** Remove every bond that touches a ghost atom of the structure on screen. */
+function dropGhostBonds(){
+    if(MD.bonds.length===0)return;
+    var kept=MD.bonds.filter(function(b){
+        var a1=MD.atoms[b.atom1],a2=MD.atoms[b.atom2];
+        if(!a1||!a2)return false;
+        return !isGhostAtom(a1)&&!isGhostAtom(a2);
+    });
+    if(kept.length!==MD.bonds.length)MD.bonds=kept;
+}
+
+/**
+ * Give the named atoms the bonds a fresh perception would derive for them.
+ *
+ * Used when a ghost is turned back into a real atom: the ghost had no bonds, so
+ * the atom is left isolated by the change, and no other pass would reconnect it
+ * (the viewer only re-derives bonds for a moved region). The orders come from
+ * the same detector a load uses, and only bonds that touch one of the converted
+ * atoms and do not exist yet are added — a bond the structure already had is
+ * never rewritten by this.
+ */
+function rebondAtoms(indices){
+    if(!indices||indices.length===0)return;
+    var want={};
+    indices.forEach(function(i){want[i]=1});
+    var have={};
+    MD.bonds.forEach(function(b){
+        if(b.atom1==null||b.atom2==null)return;
+        have[Math.min(b.atom1,b.atom2)+'-'+Math.max(b.atom1,b.atom2)]=1;
+    });
+    var derived;
+    try{derived=detectBondsFromAtoms(MD.atoms,MD.charge)}catch(e){return}
+    derived.forEach(function(b){
+        if(!want[b.atom1]&&!want[b.atom2])return;
+        var key=Math.min(b.atom1,b.atom2)+'-'+Math.max(b.atom1,b.atom2);
+        if(have[key])return;
+        have[key]=1;
+        MD.bonds.push({atom1:Math.min(b.atom1,b.atom2),atom2:Math.max(b.atom1,b.atom2),order:b.order});
+    });
+}
+
 function showDeleteAtomModal(){
     var idx=selectedAtoms[0];
     var a=MD.atoms[idx];
     if(!a)return;
-    var name=a.element+(idx+1);
+    var name=atomLabel(a,idx);
     showModal('<h3>Delete Atom</h3>'+
         '<div class="current-val">Delete '+name+'?</div>'+
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok mbtn-danger" id="m-ok">Delete</button></div>',null);
@@ -8146,7 +9244,12 @@ function provEditText(e){
     var n=e.n||1;
     switch(e.k){
         case 'addAtoms':return n===1?'1 atom added':n+' atoms added';
+        case 'addGhostAtoms':return n===1?'1 ghost atom added':n+' ghost atoms added';
+        case 'ghostAtoms':return n===1?'1 atom made a ghost':n+' atoms made ghosts';
+        case 'unghostAtoms':return n===1?'1 ghost made real':n+' ghosts made real';
         case 'delAtoms':return n===1?'1 atom deleted':n+' atoms deleted';
+        case 'cutAtoms':return n===1?'1 atom cut':n+' atoms cut';
+        case 'pasteAtoms':return n===1?'1 atom pasted':n+' atoms pasted';
         case 'replaceAtoms':return n===1?'1 atom replaced':n+' atoms replaced';
         case 'addH':return n===1?'1 H added':n+' H added';
         case 'translate':return 'translated';
@@ -8250,8 +9353,20 @@ function doSave(){
     // format gets one line, with the original title kept after a '|'.
     var saveTitle=provTitle(MD.title||'Modified structure',true);
     var gjfTitle=provTitle(MD.title||'Modified structure',false);
+    var nGhosts=0;
+    MD.atoms.forEach(function(a){if(isGhostAtom(a))nGhosts++});
+    // How each format spells a ghost, and how it spells one that stands for a
+    // named element. The two programs that have a ghost concept at all take the
+    // element with them - Gaussian's C-Bq and ORCA's C: both mean "the basis
+    // functions of a carbon, no nucleus" - and every other format here can only
+    // say "a point", so it gets the dummy spelling. That is deliberate: a ghost
+    // must never come back as a real atom, and X (or Du, q, *, XX) is
+    // the one thing those readers agree is not one.
+    var xyzEl=function(a){return isGhostAtom(a)?'X':a.element};
+    var gjfEl=function(a){return isGhostAtom(a)?(a.element==='X'?'Bq':a.element+'-Bq'):a.element};
+    var orcaEl=function(a){return isGhostAtom(a)?(a.element==='X'?'X':a.element+':'):a.element};
     var xyz=MD.atoms.length+'\\n'+saveTitle+'\\n';
-    MD.atoms.forEach(function(a){xyz+=a.element+'  '+a.x.toFixed(6)+'  '+a.y.toFixed(6)+'  '+a.z.toFixed(6)+'\\n'});
+    MD.atoms.forEach(function(a){xyz+=xyzEl(a)+'  '+a.x.toFixed(6)+'  '+a.y.toFixed(6)+'  '+a.z.toFixed(6)+'\\n'});
     var gjf='';
     var meta=MD.gjfMeta;
     if(meta){
@@ -8271,7 +9386,7 @@ function doSave(){
         gjf='%chk=molecule.chk\\n%mem=4GB\\n%nproc=4\\n# B3LYP/6-31G(d)\\n\\n'+saveTitle+'\\n\\n0 1\\n';
     }
     MD.atoms.forEach(function(a){
-        var el=a.element; while(el.length<2) el+=' ';
+        var el=gjfEl(a); while(el.length<2) el+=' ';
         var sx=a.x.toFixed(8); while(sx.length<17) sx=' '+sx;
         var sy=a.y.toFixed(8); while(sy.length<17) sy=' '+sy;
         var sz=a.z.toFixed(8); while(sz.length<17) sz=' '+sz;
@@ -8306,20 +9421,28 @@ function doSave(){
 
     var coord='$coord\\n';
     var ANG_TO_BOHR=1.8897259886;
-    MD.atoms.forEach(function(a){coord+='  '+(a.x*ANG_TO_BOHR).toFixed(8)+'  '+(a.y*ANG_TO_BOHR).toFixed(8)+'  '+(a.z*ANG_TO_BOHR).toFixed(8)+' '+a.element.toLowerCase()+'\\n'});
+    // TURBOMOLE's dummy atom is q in $coord; it has no way to say which
+    // element a ghost stands for, so an elemental ghost is written the same way.
+    MD.atoms.forEach(function(a){coord+='  '+(a.x*ANG_TO_BOHR).toFixed(8)+'  '+(a.y*ANG_TO_BOHR).toFixed(8)+'  '+(a.z*ANG_TO_BOHR).toFixed(8)+' '+(isGhostAtom(a)?'q':a.element.toLowerCase())+'\\n'});
     coord+='$end\\n';
     if(chrg!==0)coord+='$chrg '+chrg+'\\n';
     if(mult!==1)coord+='$spin '+(mult-1)/2+'\\n';
 
     // ORCA's first line is a comment line, so the provenance is one there and
-    // the keywords keep their own line below it.
+    // the keywords keep their own line below it. ORCA spells a ghost with a
+    // colon after the element and a dummy with X.
     var orcaInp='# '+saveTitle+'\\n! B3LYP def2-SVP\\n\\n* xyz '+chrg+' '+mult+'\\n';
-    MD.atoms.forEach(function(a){orcaInp+=a.element+' '+a.x.toFixed(6)+' '+a.y.toFixed(6)+' '+a.z.toFixed(6)+'\\n'});
+    MD.atoms.forEach(function(a){orcaInp+=orcaEl(a)+' '+a.x.toFixed(6)+' '+a.y.toFixed(6)+' '+a.z.toFixed(6)+'\\n'});
     orcaInp+='*\\n';
 
+    // Tripos knows one dummy: atom type Du, which is also the only field a
+    // MOL2 atom line can carry it in.
     var mol2='@<TRIPOS>MOLECULE\\n'+saveTitle+'\\n'+MD.atoms.length+' '+MD.bonds.length+' 0 0 0\\nSMALL\\nNO_CHARGES\\n\\n';
     mol2+='@<TRIPOS>ATOM\\n';
-    MD.atoms.forEach(function(a,i){mol2+=(i+1)+' '+a.element+' '+a.x.toFixed(6)+' '+a.y.toFixed(6)+' '+a.z.toFixed(6)+' '+a.element+' 1 UNK 0.000\\n'});
+    MD.atoms.forEach(function(a,i){
+        if(isGhostAtom(a)){mol2+=(i+1)+' X'+(i+1)+' '+a.x.toFixed(6)+' '+a.y.toFixed(6)+' '+a.z.toFixed(6)+' Du 1 UNK 0.000\\n';return}
+        mol2+=(i+1)+' '+a.element+' '+a.x.toFixed(6)+' '+a.y.toFixed(6)+' '+a.z.toFixed(6)+' '+a.element+' 1 UNK 0.000\\n';
+    });
     mol2+='@<TRIPOS>BOND\\n';
     var bondIdx=1;
     MD.bonds.forEach(function(b){
@@ -8333,14 +9456,16 @@ function doSave(){
 
     var mol=saveTitle+'\\n '+MD.atoms.length+'  '+MD.bonds.length+'  0  0  0  0  0  0  0  0999 V2000\\n';
     MD.atoms.forEach(function(a){
-        var z=AN2[a.element]||0;
+        // MDL's dummy is the * wildcard atom (a ghost has no element to name
+        // and no nuclear charge to write, which is exactly what * says).
+        var sym=isGhostAtom(a)?'*':a.element;
         var sx=(a.x*10).toFixed(4);
         var sy=(a.y*10).toFixed(4);
         var sz=(a.z*10).toFixed(4);
         while(sx.length<10)sx=' '+sx;
         while(sy.length<10)sy=' '+sy;
         while(sz.length<10)sz=' '+sz;
-        mol+=sx+sy+sz+' '+a.element+' 0  0  0  0  0  0  0  0  0  0  0  0\\n';
+        mol+=sx+sy+sz+' '+sym+' 0  0  0  0  0  0  0  0  0  0  0  0\\n';
     });
     MD.bonds.forEach(function(b){
         var bt=1;
@@ -8358,19 +9483,24 @@ function doSave(){
 
     // PDB owns a TITLE record, so the provenance goes in there (wrapped at 60
     // characters per record with a continuation number) instead of being lost.
+    // A ghost is written with the element column X (the standard unknown/dummy
+    // symbol) and the residue DUM, so a PDB reader shows a dummy instead of
+    // reading a ghost as the atom it stands for.
     var pdb=provPdbTitle(saveTitle);
     MD.atoms.forEach(function(a,i){
+        var gh=isGhostAtom(a);
         var serial=(i+1).toString();while(serial.length<5)serial=' '+serial;
+        var sym=gh?'X':a.element;
         var name;
-        if(a.element.length===1){name=' '+a.element+'  '}
-        else{name=a.element+'  '}
+        if(sym.length===1){name=' '+sym+'  '}
+        else{name=sym+'  '}
         var sx=a.x.toFixed(3);while(sx.length<8)sx=' '+sx;
         var sy=a.y.toFixed(3);while(sy.length<8)sy=' '+sy;
         var sz=a.z.toFixed(3);while(sz.length<8)sz=' '+sz;
-        var el=a.element.charAt(0).toUpperCase();
-        if(a.element.length>1)el+=a.element.charAt(1).toLowerCase();
+        var el=sym.charAt(0).toUpperCase();
+        if(sym.length>1)el+=sym.charAt(1).toLowerCase();
         while(el.length<2)el=' '+el;
-        pdb+='ATOM  '+serial+name+'UNK A   1    '+sx+sy+sz+'  1.00  0.00          '+el+'\\n';
+        pdb+=(gh?'HETATM':'ATOM  ')+serial+name+(gh?'DUM':'UNK')+' A   1    '+sx+sy+sz+'  1.00  0.00          '+el+'\\n';
     });
     MD.bonds.forEach(function(b){
         var a1=(b.atom1+1).toString();while(a1.length<5)a1=' '+a1;
@@ -8383,9 +9513,11 @@ function doSave(){
     var chrgStr=chrg!==0?' CHARGE='+chrg:'';
     var multStr=mult!==1?' MS='+mult:'';
     mopac+='PM7'+chrgStr+multStr+'\\n\\n';
+    // MOPAC's dummy atom is XX (X on newer versions); a ghost has no parameters
+    // to run with, so it is only a geometry point there.
     MD.atoms.forEach(function(a){
         var sx=a.x.toFixed(5);var sy=a.y.toFixed(5);var sz=a.z.toFixed(5);
-        mopac+=a.element+' '+sx+' 1 '+sy+' 1 '+sz+' 1\\n';
+        mopac+=(isGhostAtom(a)?'XX':a.element)+' '+sx+' 1 '+sy+' 1 '+sz+' 1\\n';
     });
     mopac+='\\n';
 
@@ -8493,7 +9625,17 @@ function doSave(){
         ?'<div class="current-val">Coordinates include a manual displacement: '+
             vdCompsText()+'.</div>'
         :'';
-    showModal('<h3>Save File</h3>'+vdNote+
+    // A ghost survives the trip into every format, but not in the same words -
+    // and in the formats that have no ghost concept it can only survive as a
+    // dummy point. Saying which is which is the difference between a counterpoise
+    // input and a file that quietly contains an extra atom.
+    var ghostNote=nGhosts>0
+        ?'<div class="current-val"><b>'+nGhosts+' ghost atom'+(nGhosts===1?'':'s')+'</b>: '+
+            'written as <code>C-Bq</code> in the Gaussian input and <code>C:</code> in the ORCA input '+
+            '(element kept), and as a dummy point - <code>X</code> / <code>Du</code> / <code>q</code> / '+
+            '<code>*</code> / <code>XX</code> - in the formats that have no ghost atom.</div>'
+        :'';
+    showModal('<h3>Save File</h3>'+vdNote+ghostNote+
         '<label>Format:</label><select id="m-fmt">'+
         '<option value="xyz">XYZ (.xyz)</option>'+
         '<option value="gjf">Gaussian Input (.gjf)</option>'+
@@ -8707,6 +9849,45 @@ function updateSpinButton(){
     });
 })();
 
+// ===== Display style (ball and stick / space-filling / stick) =====
+// The control sits in the View card, but the state it sets does not belong to
+// View: the scene build and the bond builder read it, so a structure keeps the
+// style it was given when the toolbar moves on to another tool, when the frame
+// or the molecule changes, and when an undo rewrites the structure. One function
+// keeps the control in step with the state, so a value the page does not
+// recognise can never leave the two disagreeing.
+var styleSelectEl=document.getElementById('style-select');
+function syncStyleSelect(){
+    if(styleSelectEl&&styleSelectEl.value!==displayStyle)styleSelectEl.value=displayStyle;
+}
+// A style *is* the geometry - sphere radii live in the (pooled) sphere geometry
+// and a space-filling model draws no sticks - so it is applied by rebuilding the
+// scene, the same path a frame switch or an edit takes. That is also what keeps
+// everything else in step with it: the selection highlight, the comparison's
+// right half, the surface patches and the info panel are all parts of that one
+// rebuild.
+function setDisplayStyle(style){
+    // hasOwnProperty, not a plain lookup: 'constructor' and 'toString' are on
+    // every object, and a style is only ever one of the three keys.
+    if(!Object.prototype.hasOwnProperty.call(DISPLAY_STYLES,style)||style===displayStyle){syncStyleSelect();return}
+    displayStyle=style;
+    syncStyleSelect();
+    rebuildScene();
+    // In Diff mode the right-hand structure is a model of its own, built by
+    // buildDiffModel rather than by rebuildScene, so it is restyled here — with
+    // the marks it is already wearing, so the comparison does not lose them.
+    if(diffMode)rebuildDiffModel();
+    // The panels keep clear of the part of the view the structure occupies, and
+    // that box is measured from the drawn spheres: a space-filling model is
+    // several times the footprint of the ball model it replaced, so the layout
+    // is taken again rather than left around a structure that changed size.
+    layoutPanels();
+}
+if(styleSelectEl){
+    syncStyleSelect();
+    styleSelectEl.addEventListener('change',function(){setDisplayStyle(this.value)});
+}
+
 // ===== Alt-drag: write the view transform into the coordinates =====
 // A View-mode drag normally turns the view (rotQuat) or slides it (panX/panY)
 // and leaves the file alone. Holding Alt during the press turns the very same
@@ -8801,7 +9982,11 @@ function bakeWriteAtoms(){
     }
     bakeMoved=true;
     // Spheres and bond pieces only: the geometry itself never changes, and CX is
-    // frozen for the drag, so both are a re-placement of existing objects.
+    // frozen for the drag, so both are a re-placement of existing objects. A
+    // rotation bake turns the ring planes with the atoms, so the aromatic sides
+    // are re-planned first — the same rule the fragment-rotation drag follows,
+    // and a translation bake leaves every direction (and the plan) untouched.
+    if(bakeKind==='rot')planAromaticDashes();
     updateAtomMeshPositions();
     placeBondPieces();
     needsRender=true;
@@ -8862,6 +10047,57 @@ function updateBakeHint(){
 }
 updateBakeHint();
 
+// ===== Picking =====
+// One door for "which atom is under the cursor": every click — the selection,
+// the three measurements, Replace Atom, Add H's anchor, Move Atoms' grab,
+// Delete — and the hover tooltip come through here, so the two can never
+// disagree about what is being pointed at.
+//
+// The spheres are the targets. The stick model, however, draws an atom no wider
+// than the tubes meeting at it (that is what the model is), which leaves a joint
+// a few pixels across once a structure is large enough to be zoomed out: a
+// 0.24 A joint is about 3 px on a 25 A cage, and that is not a target a hand can
+// aim at. A press or hover that misses every sphere is therefore re-tested
+// against a cone around each atom whose radius is fixed in *pixels*, so the
+// precision the pointer needs is the same at every zoom level. It applies to the
+// stick model only: the default balls and the van der Waals spheres are their own
+// targets, and picking in them is exactly what it has always been.
+var PICK_SLOP_PX=6;
+var _pickInv=new THREE.Matrix4();
+var _pickO=new THREE.Vector3();
+var _pickDir=new THREE.Vector3();
+function stickPick(atoms,meshes,cx,cy,cz,group){
+    if(displayStyle!=='stick'||!group||!atoms||atoms.length===0)return -1;
+    var h=canvas.clientHeight||0;
+    if(!(h>1))return -1;
+    // Radius of the cone per unit of depth: the canvas height spans
+    // 2*tan(fov/2) at depth 1, so PICK_SLOP_PX pixels are this fraction of it.
+    var perDepth=(2*Math.tan((camera.fov||60)*Math.PI/360)*PICK_SLOP_PX)/h;
+    // The ray is taken into the group's own frame, where the atoms are, so the
+    // test is the plain distance from a point to a line. The group's transform is
+    // a rotation and a translation, which preserve both lengths and the parameter
+    // along the ray, so the answer is the one the world-space ray would give.
+    group.updateWorldMatrix(true,false);
+    _pickInv.copy(group.matrixWorld).invert();
+    _pickO.copy(raycaster.ray.origin).applyMatrix4(_pickInv);
+    _pickDir.copy(raycaster.ray.direction).transformDirection(_pickInv);
+    var n=meshes?Math.min(atoms.length,meshes.length):atoms.length;
+    var best=-1,bestT=Infinity;
+    for(var i=0;i<n;i++){
+        // An atom that is not drawn is not a target, which is exactly what its
+        // mesh says (a VMD script hides an atom by giving it sphere scale 0).
+        if(meshes&&meshes[i]&&meshes[i].visible===false)continue;
+        var a=atoms[i];if(!a)continue;
+        var ox=a.x-cx-_pickO.x,oy=a.y-cy-_pickO.y,oz=a.z-cz-_pickO.z;
+        var t=ox*_pickDir.x+oy*_pickDir.y+oz*_pickDir.z;
+        if(!(t>0)||t>=bestT)continue;
+        var qx=ox-_pickDir.x*t,qy=oy-_pickDir.y*t,qz=oz-_pickDir.z*t;
+        var lim=t*perDepth;
+        if(qx*qx+qy*qy+qz*qz<=lim*lim){best=i;bestT=t}
+    }
+    return best;
+}
+
 function getClickedAtom(e){
     var rect=canvas.getBoundingClientRect();
     if(diffMode){
@@ -8880,6 +10116,8 @@ function getClickedAtom(e){
             raycaster.setFromCamera(mouse,camera);
             var hitsL=raycaster.intersectObjects(atomMeshes);
             if(hitsL.length>0)return hitsL[0].object.userData.index;
+            var stL=stickPick(MD.atoms,atomMeshes,CX,CY,CZ,moleculeGroup);
+            if(stL>=0)return stL;
         }else{
             diffActiveSide='right';
             mouse.x=((localX-halfW)/(w-halfW))*2-1;
@@ -8891,6 +10129,8 @@ function getClickedAtom(e){
             raycaster.setFromCamera(mouse,camera);
             var hitsR=raycaster.intersectObjects(diffAtomMeshes);
             if(hitsR.length>0)return hitsR[0].object.userData.index;
+            var stR=stickPick(diffData.atoms,diffAtomMeshes,diffCX,diffCY,diffCZ,diffMolGroup);
+            if(stR>=0)return stR;
         }
         return-1;
     }
@@ -8899,7 +10139,7 @@ function getClickedAtom(e){
     raycaster.setFromCamera(mouse,camera);
     var hits=raycaster.intersectObjects(atomMeshes);
     if(hits.length>0)return hits[0].object.userData.index;
-    return-1;
+    return stickPick(MD.atoms,atomMeshes,CX,CY,CZ,moleculeGroup);
 }
 
 canvas.addEventListener('mousedown',function(e){
@@ -9093,48 +10333,13 @@ canvas.addEventListener('mousemove',function(e){
         }
     }
     prevM={x:e.clientX,y:e.clientY};
-    var rect=canvas.getBoundingClientRect();
-    if(diffMode){
-        var w=rect.width;
-        var h=rect.height;
-        var halfW=Math.floor(w/2);
-        var localX=e.clientX-rect.left;
-        var hitsD;
-        if(localX<halfW){
-            mouse.x=(localX/halfW)*2-1;
-            mouse.y=-((e.clientY-rect.top)/h)*2+1;
-            camera.aspect=halfW/h;
-            camera.updateProjectionMatrix();
-            camera.position.set(0,0,camDist);
-            camera.updateMatrixWorld();
-            raycaster.setFromCamera(mouse,camera);
-            hitsD=raycaster.intersectObjects(atomMeshes);
-        }else{
-            mouse.x=((localX-halfW)/(w-halfW))*2-1;
-            mouse.y=-((e.clientY-rect.top)/h)*2+1;
-            camera.aspect=(w-halfW)/h;
-            camera.updateProjectionMatrix();
-            camera.position.set(0,0,diffCamDist);
-            camera.updateMatrixWorld();
-            raycaster.setFromCamera(mouse,camera);
-            hitsD=raycaster.intersectObjects(diffAtomMeshes);
-        }
-        if(hitsD&&hitsD.length>0){
-            var o=hitsD[0].object,i=o.userData.index;
-            var a=diffMode&&o.userData.diffHi!==undefined&&localX>=halfW?diffData.atoms[i]:MD.atoms[i];
-            tooltipEl.textContent=a.element+(i+1)+' ('+a.x.toFixed(4)+', '+a.y.toFixed(4)+', '+a.z.toFixed(4)+')';
-            tooltipEl.style.display='block';
-            tooltipEl.style.left=(e.clientX-container.getBoundingClientRect().left+15)+'px';
-            tooltipEl.style.top=(e.clientY-container.getBoundingClientRect().top-10)+'px';
-        }else{tooltipEl.style.display='none'}
-        return;
-    }
-    mouse.x=((e.clientX-rect.left)/rect.width)*2-1;
-    mouse.y=-((e.clientY-rect.top)/rect.height)*2+1;
-    raycaster.setFromCamera(mouse,camera);
-    var hits=raycaster.intersectObjects(atomMeshes);
-    if(hits.length>0){var o=hits[0].object,i=o.userData.index,a=MD.atoms[i];
-        tooltipEl.textContent=a.element+(i+1)+' ('+a.x.toFixed(4)+', '+a.y.toFixed(4)+', '+a.z.toFixed(4)+')';
+    // The hover probe and the press ask the same question through the same door,
+    // so they can never disagree about which atom is pointed at - and the stick
+    // model's wider pick target applies to both.
+    var hi=getClickedAtom(e);
+    if(hi>=0){
+        var a=(diffMode&&diffActiveSide==='right')?diffData.atoms[hi]:MD.atoms[hi];
+        tooltipEl.textContent=atomLabel(a,hi)+(isGhostAtom(a)?' (ghost)':'')+' ('+a.x.toFixed(4)+', '+a.y.toFixed(4)+', '+a.z.toFixed(4)+')';
         tooltipEl.style.display='block';
         tooltipEl.style.left=(e.clientX-container.getBoundingClientRect().left+15)+'px';
         tooltipEl.style.top=(e.clientY-container.getBoundingClientRect().top-10)+'px';
@@ -9253,8 +10458,100 @@ canvas.addEventListener('touchmove',function(e){e.preventDefault();
 },{passive:false});
 canvas.addEventListener('touchend',function(e){if(e.touches.length===0&&isRot)spinLaunch();isRot=false;if(e.touches.length<2)touchSD=0});
 
+// ===== Keyboard shortcuts =====
+// The page keeps one keyboard door. Esc, Ctrl/Cmd+Z, Ctrl/Cmd+S and the
+// selection/clipboard keys Ctrl/Cmd+A and Ctrl/Cmd+X/C/V are the keys a hand
+// reaches for before the mouse, so they are settled here, in front of the
+// viewer's own key handling (arrows, Delete). A keystroke that belongs to a text
+// field stays the field's own — Ctrl+Z there is the browser's text undo, Ctrl+A
+// its select-all, Ctrl+V its paste — with Esc as the one exception, because Esc
+// is how a user gets out of a dialog that a field sits in.
+var IS_MAC=/^(Mac|iPhone|iPad|iPod)/.test(navigator.platform||'');
+var KEY_MOD=IS_MAC?'Cmd':'Ctrl';
+function keyTargetEditable(t){if(!t)return false;var n=t.tagName;return n==='INPUT'||n==='TEXTAREA'||n==='SELECT'||t.isContentEditable===true}
+function modalOpen(){return !!(modalOverlay&&modalOverlay.classList.contains('show'))}
+/**
+ * Esc: back out of exactly one state, in the order the user built them up.
+ * Every step takes back something the user started and nothing else — a
+ * dismissed dialog, an abandoned rectangle, a tool left for View, a selection
+ * let go — so a second press can only undo a smaller thing, never the structure.
+ */
+function escapeOneLevel(){
+    if(modalOpen()){
+        // The dialog's own Cancel button is the path that knows what
+        // cancelling means (some of them put back the geometry they were
+        // previewing); only a dialog without one falls back to plain hiding.
+        var cancel=modalEl.querySelector('.mbtn-cancel');
+        if(cancel){cancel.click();return true}
+        hideModal();return true;
+    }
+    if(isBoxSelecting){
+        // A rectangle still being dragged is thrown away: it has selected
+        // nothing yet, so there is nothing to take back.
+        isBoxSelecting=false;boxRectEl.style.display='none';boxStart=null;
+        needsRender=true;layoutPanels();return true;
+    }
+    if(currentMode!=='view'){setMode('view');return true}
+    if(selectedAtoms.length>0||diffSelectedAtoms.length>0){resetSelection();return true}
+    return false;
+}
+(function(){
+    // The two mouse-free actions say their own keys, on the buttons that do them.
+    var ub=document.getElementById('undo-btn');if(ub)ub.title='Undo ('+KEY_MOD+'+Z)';
+    var sb=document.getElementById('save-btn');if(sb)sb.title='Save As ('+KEY_MOD+'+S)';
+})();
 document.addEventListener('keydown',function(e){
-    if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA'||e.target.tagName==='SELECT')return;
+    if(e.key==='Escape'&&!e.ctrlKey&&!e.metaKey&&!e.altKey){
+        if(escapeOneLevel()){e.preventDefault();return}
+    }
+    var editable=keyTargetEditable(e.target);
+    var mod=e.ctrlKey||e.metaKey;
+    if(mod&&!e.altKey&&!e.shiftKey){
+        // e.key follows the layout (on AZERTY Ctrl+Z arrives as 'z'), e.code
+        // does not (on a Cyrillic layout it arrives as 'я'), so a shortcut
+        // answers to either: one physical press, one action, any keyboard.
+        var lk=(e.key||'').toLowerCase();
+        if(lk==='z'||e.code==='KeyZ'){
+            // Not while a dialog is open: it previews geometry on top of an
+            // undo step of its own, and an undo behind its back would split
+            // the two apart — its Cancel would then pop someone else's step.
+            if(!editable&&!modalOpen()){e.preventDefault();doUndo();return}
+        }else if(lk==='s'||e.code==='KeyS'){
+            if(modalOpen()){
+                // The Save dialog is the one dialog that can finish its own
+                // job from the keyboard: a second Ctrl+S presses its Save
+                // button, keeping the format already chosen.
+                var fmtEl=document.getElementById('m-fmt'),okEl=document.getElementById('m-ok');
+                if(fmtEl&&okEl){e.preventDefault();okEl.click();return}
+            }else if(!editable){
+                e.preventDefault();doSave();return;
+            }
+        }else if(lk==='a'||e.code==='KeyA'){
+            // Select every atom. Outside a text field the page has no use for
+            // select-all, so the key is consumed either way: a refusal (a dialog
+            // is open) must not quietly select the page's text instead. Auto-
+            // repeat is ignored — each repeat would rebuild the whole selection
+            // and re-highlight every atom.
+            if(!editable&&!e.repeat){e.preventDefault();selectAllAtoms();return}
+        }else if(lk==='c'||e.code==='KeyC'){
+            // Copy is read-only, so it is allowed wherever there is a selection
+            // — a dialog or a comparison on screen does not make it unsafe.
+            // Auto-repeat is ignored: a held key would re-copy the same atoms
+            // dozens of times. The page has no selectable text (see the
+            // user-select rules in the stylesheet), so there is nothing for the
+            // browser's own copy to take here; a field's text is excluded above.
+            if(!editable&&!e.repeat&&copySelection()){e.preventDefault();return}
+        }else if(lk==='x'||e.code==='KeyX'){
+            // Cut deletes, so it waits until no dialog is previewing the
+            // structure it is about to change.
+            if(!editable&&!e.repeat&&!modalOpen()&&cutSelection()){e.preventDefault();return}
+        }else if(lk==='v'||e.code==='KeyV'){
+            // Paste grows the structure: never behind a dialog, and never on a
+            // key repeat, or holding the key would paste again and again.
+            if(!editable&&!e.repeat&&!modalOpen()&&pasteClipboard()){e.preventDefault();return}
+        }
+    }
+    if(editable)return;
     ctrlDown=e.ctrlKey;
     // The first arrow key of a hold-session stops whatever spin is running, so
     // the key takes over; keys pressed while another is already held (and the
@@ -9452,7 +10749,8 @@ class MolecularDocument implements vscode.CustomDocument {
         public readonly logSource?: string,
         public readonly routes?: RouteSection[],
         public readonly vmdPayload?: VmdPayload,
-        public readonly autoBeta: boolean = false
+        public readonly autoBeta: boolean = false,
+        public readonly optThresholds?: OptThresholds
     ) {}
 
     dispose(): void {}

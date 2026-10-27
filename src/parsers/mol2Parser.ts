@@ -1,4 +1,5 @@
 import { Atom, Bond, MolecularData } from '../types';
+import { ghostFromLabel } from './ghostAtoms';
 
 export function parseMol2(content: string): MolecularData {
     const lines = content.split(/\r?\n/);
@@ -25,14 +26,22 @@ export function parseMol2(content: string): MolecularData {
             while (i < lines.length && lines[i].trim() !== '' && !lines[i].trim().startsWith('@<TRIPOS>')) {
                 const parts = lines[i].trim().split(/\s+/);
                 if (parts.length >= 6) {
+                    // Tripos writes a dummy atom with the type `Du`; the type
+                    // field is also the only place a ghost can be named here,
+                    // since a MOL2 atom line has no separate ghost marker.
                     const elementRaw = parts[5].split('.')[0];
-                    const element = elementRaw.charAt(0).toUpperCase() + elementRaw.slice(1).toLowerCase();
+                    const ghost = ghostFromLabel(elementRaw);
+                    const element = ghost
+                        ? ghost.element
+                        : elementRaw.charAt(0).toUpperCase() + elementRaw.slice(1).toLowerCase();
                     const x = parseFloat(parts[2]);
                     const y = parseFloat(parts[3]);
                     const z = parseFloat(parts[4]);
 
                     if (element && !isNaN(x) && !isNaN(y) && !isNaN(z)) {
-                        atoms.push({ element, x, y, z, index: atomIndex });
+                        const atom: Atom = { element, x, y, z, index: atomIndex };
+                        if (ghost) atom.ghost = true;
+                        atoms.push(atom);
                         atomIndex++;
                     }
                 }
