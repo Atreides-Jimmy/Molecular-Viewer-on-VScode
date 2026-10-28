@@ -1798,6 +1798,13 @@ var boundary={aMin:0,aMax:1,bMin:0,bMax:1,cMin:0,cMax:1};
 // for a picture nobody asked for — the same ceiling the clipboard refuses
 // fragments over, applied before the first sphere is made.
 var MAX_CRYSTAL_ATOMS=20000;
+// The most cell repeats the periodic neighbour search will enumerate along one
+// axis. The count it actually needs comes from the cell's own shape (a repeat
+// is only worth trying while it is narrower than the cutoff being searched), so
+// a real crystal asks for one or two; the cap exists so a degenerate cell —
+// two lattice vectors nearly parallel, say — cannot turn a bond search into a
+// few hundred thousand distance tests per atom pair.
+var CRYSTAL_MAX_IMAGE_REPEAT=4;
 // How far outside the bounds a whole molecule's centre may sit and still be
 // drawn (Angstrom, converted per axis with the lattice vector's length). Zero
 // is the strict reading: only images centred inside the boundary are drawn.
@@ -2084,52 +2091,294 @@ function getOccupancyTexture(color,occupancy){
     return tex;
 }
 
+// ===== Periodic bonds: one neighbour search, then the shared detector =====
+//
+// A crystal file states one cell, but the chemistry happens in the lattice that
+// cell is repeated in: a carbonate's carbon is bonded to an oxygen the file has
+// wrapped into the next cell, so the bonds cannot be read off the centre cell
+// alone. And they have to be the bonds the molecular path would find, or the
+// same structure would be drawn with different orders depending on whether it
+// arrived as a CIF or as an XYZ.
+//
+// So no chemistry is decided here. The cell's atoms are laid out the way the
+// renderer draws them — a finite molecule whole, at the unwrap offsets
+// rebuildCrystal() places it by, and a periodic network as the centre cell plus
+// the neighbour images its split bonds point at — and the page's own detector
+// (detectBondsFromAtoms — the perception module the host and every molecular
+// path already run) perceives that set. Each bond it returns is written back as
+// the base pair plus the integer image it points at, which is the form
+// rebuildCrystal() draws and every editor writes back into the cell. Orders,
+// the aromatic 1.5, the valence relaxation: all of it is whatever the shared
+// module says, not a second table kept here.
+//
+// The neighbour search is enumerated, never rounded. Rounding the fractional
+// difference gives the shortest image only for an orthogonal cell; in a skewed
+// one it can leave a bond a whole cell long (drawn straight through the
+// structure) or choose an image that is not the nearest at all, which loses the
+// bond. The enumeration is bounded rather than guessed: a repeat s_i moves a
+// displacement only across the planes the other two lattice vectors span, at a
+// fixed spacing w_i, so an image is at least |s_i - f_i| * w_i away — every
+// image a pair can reach lies inside s_i in [ceil(f_i - n_i), floor(f_i + n_i)]
+// with n_i = cut / w_i. For an ordinary cell n_i is 1 and that is the classic
+// block of 27 images; a flat or skewed cell widens it to 5x5x5, which is
+// exactly the case rounding got wrong.
 function detectCrystalBaseBonds(){
     if(!CRY||!CRY_INV)return;
     var baseAtoms=CRY.baseAtoms;
     var lv=CRY.latticeVectors;
     var inv=CRY_INV;
     var n=baseAtoms.length;
-    var CR2={H:0.31,He:0.28,Li:1.28,Be:0.96,B:0.85,C:0.76,N:0.71,O:0.66,F:0.57,Ne:0.58,Na:1.66,Mg:1.41,Al:1.21,Si:1.11,P:1.07,S:1.05,Cl:1.02,Ar:1.06,K:2.03,Ca:1.76,Sc:1.70,Ti:1.60,V:1.53,Cr:1.39,Mn:1.39,Fe:1.32,Co:1.26,Ni:1.24,Cu:1.32,Zn:1.22,Ga:1.22,Ge:1.20,As:1.19,Se:1.20,Br:1.20,Kr:1.16,Rb:2.20,Sr:1.95,Y:1.90,Zr:1.75,Nb:1.64,Mo:1.54,Tc:1.47,Ru:1.46,Rh:1.42,Pd:1.39,Ag:1.45,Cd:1.44,In:1.42,Sn:1.39,Sb:1.39,Te:1.38,Xe:1.40,Cs:2.44,Ba:2.15,La:2.07,Ce:2.04,Pr:2.03,Nd:2.01,Pm:1.99,Sm:1.98,Eu:1.98,Gd:1.96,Tb:1.94,Dy:1.92,Ho:1.92,Er:1.89,Tm:1.90,Yb:1.87,Lu:1.87,Hf:1.75,Ta:1.70,W:1.62,Re:1.51,Os:1.44,Ir:1.41,Pt:1.36,Au:1.36,Hg:1.32,Tl:1.45,Pb:1.46,Bi:1.48,Po:1.40,At:1.50,Rn:1.50,I:1.39};
-    var BS={'C+C':[{o:3,l:1.20,t:0.05},{o:1.5,l:1.39,t:0.05},{o:2,l:1.38,t:0.05},{o:1,l:1.51,t:0.10}],'C+N':[{o:2,l:1.26,t:0.05},{o:1.5,l:1.36,t:0.05},{o:1,l:1.43,t:0.10},{o:3,l:1.16,t:0.06}],'C+O':[{o:2,l:1.24,t:0.05},{o:1,l:1.39,t:0.05}],'N+N':[{o:1,l:1.41,t:0.10},{o:2,l:1.25,t:0.06},{o:3,l:1.10,t:0.06}],'N+O':[{o:2,l:1.20,t:0.06},{o:1.5,l:1.30,t:0.06},{o:1,l:1.40,t:0.15}],'O+O':[{o:2,l:1.21,t:0.06},{o:1,l:1.48,t:0.15}],'C+S':[{o:1.5,l:1.73,t:0.06},{o:2,l:1.60,t:0.10},{o:1,l:1.82,t:0.15}],'C+F':[{o:1,l:1.33,t:0.10}],'C+H':[{o:1,l:0.97,t:0.15}],'N+H':[{o:1,l:0.88,t:0.15}],'O+H':[{o:1,l:0.85,t:0.15}]};
-    var BC={HH:0,CH:1.3,HO:1.2,HN:1.3,CC:1.9,CO:1.7,CN:1.7,NN:1.7,NO:1.8,CF:1.6,CS:2.0};
-    function pk(e1,e2){e1=e1.toUpperCase();e2=e2.toUpperCase();return e1<e2?e1+e2:e2+e1}
-    function sk(e1,e2){e1=e1.charAt(0).toUpperCase()+e1.slice(1).toLowerCase();e2=e2.charAt(0).toUpperCase()+e2.slice(1).toLowerCase();return e1<e2?e1+'+'+e2:e2+'+'+e1}
-    function gbo(el1,el2,d){
-        var p=pk(el1,el2);var co=BC[p];
-        if(co!==undefined){if(d>co)return 0}else{var r1=CR2[el1.charAt(0).toUpperCase()+el1.slice(1).toLowerCase()]||1.5;var r2=CR2[el2.charAt(0).toUpperCase()+el2.slice(1).toLowerCase()]||1.5;if(d>(r1+r2)+0.5)return 0}
-        var s=sk(el1,el2);var sp=BS[s];
-        if(sp){for(var k=0;k<sp.length;k++){if(Math.abs(d-sp[k].l)<=sp[k].t)return sp[k].o}var bo=1,md=Infinity;for(var k=0;k<sp.length;k++){var df=Math.abs(d-sp[k].l);if(df<md){md=df;bo=sp[k].o}}return bo}
-        var r1=CR2[el1.charAt(0).toUpperCase()+el1.slice(1).toLowerCase()]||1.5;var r2=CR2[el2.charAt(0).toUpperCase()+el2.slice(1).toLowerCase()]||1.5;var rs=r1+r2;var ratio=rs?d/rs:1;
-        if(ratio<0.85)return 3;if(ratio<0.90)return 2;return 1;
+    var widths=crystalPlaneWidths(lv);
+    var round=Math.round;
+    var i,j;
+
+    // The widest cutoff each element can have against anything in this cell.
+    // The pair loop runs n^2/2 times, so it reads one number per atom rather
+    // than asking the table — which normalises two element strings — per pair;
+    // the exact pair cutoff is asked only for the few pairs that survive the
+    // cheap rejection below.
+    var elements=[],seenEl={};
+    for(i=0;i<n;i++){
+        var elI=baseAtoms[i].element;
+        if(!seenEl[elI]){seenEl[elI]=true;elements.push(elI)}
     }
-    function cartToFrac(a){
-        return[inv[0][0]*a.x+inv[0][1]*a.y+inv[0][2]*a.z,
-               inv[1][0]*a.x+inv[1][1]*a.y+inv[1][2]*a.z,
-               inv[2][0]*a.x+inv[2][1]*a.y+inv[2][2]*a.z];
-    }
-    var bonds=[];
-    for(var i=0;i<n;i++){
-        var f1=cartToFrac(baseAtoms[i]);
-        f1[0]-=Math.floor(f1[0]);f1[1]-=Math.floor(f1[1]);f1[2]-=Math.floor(f1[2]);
-        for(var j=i+1;j<n;j++){
-            var f2=cartToFrac(baseAtoms[j]);
-            f2[0]-=Math.floor(f2[0]);f2[1]-=Math.floor(f2[1]);f2[2]-=Math.floor(f2[2]);
-            var fdx=f2[0]-f1[0],fdy=f2[1]-f1[1],fdz=f2[2]-f1[2];
-            var sx=Math.round(fdx),sy=Math.round(fdy),sz=Math.round(fdz);
-            var wfx=fdx-sx,wfy=fdy-sy,wfz=fdz-sz;
-            var dx=wfx*lv[0][0]+wfy*lv[1][0]+wfz*lv[2][0];
-            var dy=wfx*lv[0][1]+wfy*lv[1][1]+wfz*lv[2][1];
-            var dz=wfx*lv[0][2]+wfy*lv[1][2]+wfz*lv[2][2];
-            var dist=Math.sqrt(dx*dx+dy*dy+dz*dz);
-            var bo=gbo(baseAtoms[i].element,baseAtoms[j].element,dist);
-            if(bo>0){
-                bonds.push({atom1:i,atom2:j,order:bo,shift:[-sx,-sy,-sz]});
-            }
+    var widestOf={};
+    for(i=0;i<elements.length;i++){
+        var widest=0;
+        for(j=0;j<elements.length;j++){
+            var wc=BP.pairCutoff(elements[i],elements[j]);
+            if(wc>widest)widest=wc;
         }
+        widestOf[elements[i]]=widest;
+    }
+    var capOf=new Float64Array(n);
+    for(i=0;i<n;i++)capOf[i]=widestOf[baseAtoms[i].element]||0;
+
+    // The bonds the search found, then the atoms they join — laid out for the
+    // detector exactly as rebuildCrystal() draws them. Plain records holding
+    // only the fields the detector reads: the perception module runs the same
+    // code the host does, and nothing else about an atom is its business.
+    var probe=[];
+    var probeAt=[];   // per probe atom: the base site and the cell offset of this copy
+    var pairs=[];     // the bonded base pairs, in (atom1 asc, atom2 asc) order
+    var pairAt={};
+
+    var w0=widths[0]*widths[0],w1=widths[1]*widths[1],w2=widths[2]*widths[2];
+    for(i=0;i<n;i++){
+        var ai=baseAtoms[i];
+        var ax=ai.x,ay=ai.y,az=ai.z;
+        var capI=capOf[i];
+        for(j=i+1;j<n;j++){
+            var bj=baseAtoms[j];
+            var dx=bj.x-ax,dy=bj.y-ay,dz=bj.z-az;
+            var fx=inv[0][0]*dx+inv[0][1]*dy+inv[0][2]*dz;
+            var fy=inv[1][0]*dx+inv[1][1]*dy+inv[1][2]*dz;
+            var fz=inv[2][0]*dx+inv[2][1]*dy+inv[2][2]*dz;
+            // The pairs that can bond are a small share of all of them, and the
+            // cheapest test is arithmetic: no image of either atom can be closer
+            // than the displacement measured across the three plane normals.
+            var qx=fx-round(fx),qy=fy-round(fy),qz=fz-round(fz);
+            var low=qx*qx*w0+qy*qy*w1+qz*qz*w2;
+            var cap=capI<capOf[j]?capI:capOf[j];
+            if(low>cap*cap)continue;
+            var cut=BP.pairCutoff(ai.element,bj.element);
+            if(!(cut>0)||low>cut*cut)continue;
+            var near=crystalShortestFractional(fx,fy,fz,cut,lv,widths);
+            if(near.dist>cut)continue;
+            // near.shift is the repeat subtracted from bj's fractional
+            // position, so the bond points at the opposite cell.
+            var shift=[-near.shift[0],-near.shift[1],-near.shift[2]];
+            pairAt[i+'_'+j+'_'+shift[0]+'_'+shift[1]+'_'+shift[2]]=pairs.length;
+            pairs.push({i:i,j:j,shift:shift,order:0});
+        }
+    }
+
+    // The periodic graph's components, walked once with an image offset per
+    // atom — the same unwrap rebuildCrystal() uses, so the detector and the
+    // renderer cannot disagree about which atoms form a molecule. A finite
+    // component is a molecule, and it is laid out once per site at its
+    // unwrapped position: that is exactly the molecule the molecular path
+    // perceives, so its orders are the molecular path's. A periodic component
+    // has no single consistent layout (a cycle comes back a cell over), so it
+    // is laid out as the centre cell plus the images the search found — the
+    // same cut the renderer draws.
+    var comp=crystalComponents(pairs.map(function(p){return{atom1:p.i,atom2:p.j,shift:p.shift}}),n);
+    var groupOf=comp.groupOf,groups=comp.groups;
+    function addProbe(baseIdx,off){
+        var b=baseAtoms[baseIdx];
+        probe.push({
+            element:b.element,
+            x:b.x+off[0]*lv[0][0]+off[1]*lv[1][0]+off[2]*lv[2][0],
+            y:b.y+off[0]*lv[0][1]+off[1]*lv[1][1]+off[2]*lv[2][1],
+            z:b.z+off[0]*lv[0][2]+off[1]*lv[1][2]+off[2]*lv[2][2]
+        });
+        probeAt.push({base:baseIdx,shift:off});
+    }
+    groups.forEach(function(g){
+        var k;
+        if(g.periodic){
+            for(k=0;k<g.members.length;k++)addProbe(g.members[k],ZERO_SHIFT);
+        }else{
+            for(k=0;k<g.members.length;k++)addProbe(g.members[k],g.offset[g.members[k]]);
+        }
+    });
+    var imageAt={};
+    pairs.forEach(function(p){
+        var g=groupOf[p.i];
+        if(g===undefined||!groups[g].periodic)return;
+        if(!(p.shift[0]||p.shift[1]||p.shift[2]))return;
+        var key=p.j+'_'+p.shift[0]+'_'+p.shift[1]+'_'+p.shift[2];
+        if(imageAt[key])return;
+        imageAt[key]=true;
+        addProbe(p.j,p.shift);
+    });
+
+    // The detector runs on that set exactly as it runs on a molecule. A cell
+    // states no total charge, so it gets the neutral assumption a bare
+    // coordinate set gets.
+    var found=detectBondsFromAtoms(probe);
+
+    // Read every perceived bond back in the cell's own terms: which two base
+    // sites it joins, and how many cells apart the copies are. The image search
+    // already decided that number for each pair, so a bond whose two copies are
+    // further apart than the pair's own shortest image is not this cell's bond
+    // and is left out — the pair list holds one bond per base pair, as the
+    // renderer and every editor expect.
+    for(i=0;i<found.length;i++){
+        var b=found[i];
+        var at1=probeAt[b.atom1],at2=probeAt[b.atom2];
+        var base1=at1.base,base2=at2.base;
+        if(base1===base2)continue;
+        var sh=[at2.shift[0]-at1.shift[0],at2.shift[1]-at1.shift[1],at2.shift[2]-at1.shift[2]];
+        if(base1>base2){
+            var t=base1;base1=base2;base2=t;
+            sh=[-sh[0],-sh[1],-sh[2]];
+        }
+        var at=pairAt[base1+'_'+base2+'_'+sh[0]+'_'+sh[1]+'_'+sh[2]];
+        // Two images exactly equidistant is a tie the search broke towards the
+        // larger repeat, and the walk may have taken the same tie from the
+        // other end. The pair with the opposite shift is the bond this pair
+        // holds.
+        if(at===undefined)at=pairAt[base1+'_'+base2+'_'+(-sh[0])+'_'+(-sh[1])+'_'+(-sh[2])];
+        if(at===undefined)continue;
+        pairs[at].order=b.order;
+    }
+
+    var bonds=[];
+    for(i=0;i<pairs.length;i++){
+        // A pair the search reached but the detector would not accept — two
+        // sites closer than any real bond, a length no table supports — stays
+        // out: the order is what the perception says, and here it says nothing.
+        if(!(pairs[i].order>0))continue;
+        bonds.push({atom1:pairs[i].i,atom2:pairs[i].j,order:pairs[i].order,shift:pairs[i].shift});
     }
     CRY.baseBonds=bonds;
     CRY.bondsDetected=true;
+}
+
+// The connected components of a base bond list, each walked once with an
+// integer image offset per atom — the unwrap. Bond (a1,a2,shift s) means the
+// image of a2 in cell c+s bonds with the image of a1 in cell c, so walking the
+// edge a1->a2 adds s to the image offset and a2->a1 subtracts it. A cycle that
+// comes back shifted marks the whole component periodic: that is what an
+// infinite network is, and what a molecule never is. Offsets are exact
+// integers, so the consistency check cannot drift.
+//
+// Two readers share this walk. rebuildCrystal() places a finite component by
+// these offsets (a molecule is drawn whole), and detectCrystalBaseBonds() lays
+// a finite component out at them so the detector perceives the molecule the
+// molecular path would.
+function crystalComponents(bondList,n){
+    var adj={};var groupOf={};var groups=[];
+    bondList.forEach(function(bb){
+        if(!adj[bb.atom1])adj[bb.atom1]=[];
+        if(!adj[bb.atom2])adj[bb.atom2]=[];
+        adj[bb.atom1].push({nb:bb.atom2,s:bb.shift,sign:1});
+        adj[bb.atom2].push({nb:bb.atom1,s:bb.shift,sign:-1});
+    });
+    for(var bi=0;bi<n;bi++){
+        if(groupOf[bi]!==undefined)continue;
+        if(!adj[bi]){groupOf[bi]=-1;continue}
+        var gid=groups.length;var queue=[bi];groupOf[bi]=gid;
+        var offset={};offset[bi]=[0,0,0];
+        var periodic=false;
+        for(var qi=0;qi<queue.length;qi++){
+            var cur=queue[qi];
+            var oc=offset[cur];
+            var nbrs=adj[cur]||[];
+            for(var ni=0;ni<nbrs.length;ni++){
+                var e=nbrs[ni];
+                var s=e.s||ZERO_SHIFT;
+                var no=[oc[0]+e.sign*s[0],oc[1]+e.sign*s[1],oc[2]+e.sign*s[2]];
+                if(offset[e.nb]!==undefined){
+                    var po=offset[e.nb];
+                    if(no[0]!==po[0]||no[1]!==po[1]||no[2]!==po[2])periodic=true;
+                    continue;
+                }
+                offset[e.nb]=no;
+                groupOf[e.nb]=gid;
+                queue.push(e.nb);
+            }
+        }
+        groups.push({members:queue.slice(),offset:offset,periodic:periodic});
+    }
+    return {groups:groups,groupOf:groupOf};
+}
+
+// The spacing between the lattice planes a repeat along each axis moves a
+// displacement across: the cell volume over the area the other two vectors
+// span. This is the lattice's own measure of "one cell along this axis", and
+// what bounds how many repeats a search can possibly need.
+function crystalPlaneWidths(lv){
+    var a=lv[0],b=lv[1],c=lv[2];
+    var bcx=b[1]*c[2]-b[2]*c[1],bcy=b[2]*c[0]-b[0]*c[2],bcz=b[0]*c[1]-b[1]*c[0];
+    var cax=c[1]*a[2]-c[2]*a[1],cay=c[2]*a[0]-c[0]*a[2],caz=c[0]*a[1]-c[1]*a[0];
+    var abx=a[1]*b[2]-a[2]*b[1],aby=a[2]*b[0]-a[0]*b[2],abz=a[0]*b[1]-a[1]*b[0];
+    var det=Math.abs(a[0]*bcx+a[1]*bcy+a[2]*bcz);
+    return [det/Math.sqrt(bcx*bcx+bcy*bcy+bcz*bcz),
+            det/Math.sqrt(cax*cax+cay*cay+caz*caz),
+            det/Math.sqrt(abx*abx+aby*aby+abz*abz)];
+}
+
+// The shortest periodic image of a fractional displacement: which repeats to
+// subtract, what is left inside one cell, and how long that is.
+//
+// cut is what bounds the search — the distance the caller cares about — so
+// every image that could be within it is enumerated and none beyond it is.
+// A displacement exactly midway between two cells is a tie, and the walk runs
+// from the largest repeat down so a tie keeps the answer rounding gave.
+function crystalShortestFractional(fx,fy,fz,cut,lv,widths){
+    var n=[1,1,1],k,q;
+    for(k=0;k<3;k++){
+        q=widths[k]>1e-9?cut/widths[k]:0;
+        n[k]=q>1?Math.ceil(q+1e-9):1;
+        if(!(n[k]>=1)||n[k]>CRYSTAL_MAX_IMAGE_REPEAT)n[k]=CRYSTAL_MAX_IMAGE_REPEAT;
+    }
+    var loX=Math.ceil(fx-n[0]-1e-9),hiX=Math.floor(fx+n[0]+1e-9);
+    var loY=Math.ceil(fy-n[1]-1e-9),hiY=Math.floor(fy+n[1]+1e-9);
+    var loZ=Math.ceil(fz-n[2]-1e-9),hiZ=Math.floor(fz+n[2]+1e-9);
+    if(hiX<loX){loX=hiX=Math.round(fx)}
+    if(hiY<loY){loY=hiY=Math.round(fy)}
+    if(hiZ<loZ){loZ=hiZ=Math.round(fz)}
+    var best=null,bestD2=Infinity;
+    for(var sx=hiX;sx>=loX;sx--){
+        var gx=fx-sx;
+        for(var sy=hiY;sy>=loY;sy--){
+            var gy=fy-sy;
+            for(var sz=hiZ;sz>=loZ;sz--){
+                var gz=fz-sz;
+                var ax=gx*lv[0][0]+gy*lv[1][0]+gz*lv[2][0];
+                var ay=gx*lv[0][1]+gy*lv[1][1]+gz*lv[2][1];
+                var az=gx*lv[0][2]+gy*lv[1][2]+gz*lv[2][2];
+                var d2=ax*ax+ay*ay+az*az;
+                if(d2<bestD2-1e-12){
+                    bestD2=d2;
+                    best=[sx,sy,sz,gx,gy,gz];
+                }
+            }
+        }
+    }
+    return {shift:[best[0],best[1],best[2]],frac:[best[3],best[4],best[5]],dist:Math.sqrt(bestD2)};
 }
 
 function rebuildCrystal(){
@@ -2174,40 +2423,11 @@ function rebuildCrystal(){
     // Bond (a1,a2,shift s) means the image of a2 in cell c+s bonds with the
     // image of a1 in cell c, so walking the edge a1->a2 adds s to the image
     // offset and a2->a1 subtracts it. Offsets are exact integers, so the
-    // consistency check cannot drift.
-    var adj={};var groupOf={};var groups=[];
-    baseBonds.forEach(function(bb){
-        if(!adj[bb.atom1])adj[bb.atom1]=[];
-        if(!adj[bb.atom2])adj[bb.atom2]=[];
-        adj[bb.atom1].push({nb:bb.atom2,s:bb.shift,sign:1});
-        adj[bb.atom2].push({nb:bb.atom1,s:bb.shift,sign:-1});
-    });
-    baseAtoms.forEach(function(ba,bi){
-        if(groupOf[bi]!==undefined)return;
-        if(!adj[bi]){groupOf[bi]=-1;return}
-        var gid=groups.length;var queue=[bi];groupOf[bi]=gid;
-        var offset={};offset[bi]=[0,0,0];
-        var periodic=false;
-        for(var qi=0;qi<queue.length;qi++){
-            var cur=queue[qi];
-            var oc=offset[cur];
-            var nbrs=adj[cur]||[];
-            for(var ni=0;ni<nbrs.length;ni++){
-                var e=nbrs[ni];
-                var s=e.s||ZERO_SHIFT;
-                var no=[oc[0]+e.sign*s[0],oc[1]+e.sign*s[1],oc[2]+e.sign*s[2]];
-                if(offset[e.nb]!==undefined){
-                    var po=offset[e.nb];
-                    if(no[0]!==po[0]||no[1]!==po[1]||no[2]!==po[2])periodic=true;
-                    continue;
-                }
-                offset[e.nb]=no;
-                groupOf[e.nb]=gid;
-                queue.push(e.nb);
-            }
-        }
-        groups.push({members:queue.slice(),offset:offset,periodic:periodic});
-    });
+    // consistency check cannot drift. The walk itself lives in
+    // crystalComponents(), because the bond detector lays a finite molecule out
+    // by the same offsets and the two must not disagree.
+    var comp=crystalComponents(baseBonds,baseAtoms.length);
+    var groupOf=comp.groupOf;var groups=comp.groups;
 
     var iMin=Math.floor(aMin),iMax=Math.ceil(aMax);
     var jMin=Math.floor(bMin),jMax=Math.ceil(bMax);
@@ -2550,8 +2770,14 @@ function crystalImageDirection(from,to,sign,shift){
         var fy=inv[1][0]*(to.x-from.x)+inv[1][1]*(to.y-from.y)+inv[1][2]*(to.z-from.z)+sign*shift[1];
         var fz=inv[2][0]*(to.x-from.x)+inv[2][1]*(to.y-from.y)+inv[2][2]*(to.z-from.z)+sign*shift[2];
         // The nearest image of that neighbour is the one the anchor is bonded
-        // to as far as the free direction is concerned.
-        fx-=Math.round(fx);fy-=Math.round(fy);fz-=Math.round(fz);
+        // to as far as the free direction is concerned — found by the same
+        // enumerated search the bonds use, because rounding the fractional
+        // difference picks the nearest image only in an orthogonal cell.
+        var cx=fx*lv[0][0]+fy*lv[1][0]+fz*lv[2][0];
+        var cy=fx*lv[0][1]+fy*lv[1][1]+fz*lv[2][1];
+        var cz=fx*lv[0][2]+fy*lv[1][2]+fz*lv[2][2];
+        var near=crystalShortestFractional(fx,fy,fz,Math.sqrt(cx*cx+cy*cy+cz*cz),lv,crystalPlaneWidths(lv));
+        fx=near.frac[0];fy=near.frac[1];fz=near.frac[2];
         dx=fx*lv[0][0]+fy*lv[1][0]+fz*lv[2][0];
         dy=fx*lv[0][1]+fy*lv[1][1]+fz*lv[2][1];
         dz=fx*lv[0][2]+fy*lv[1][2]+fz*lv[2][2];
