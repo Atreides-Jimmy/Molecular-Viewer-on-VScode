@@ -846,6 +846,19 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         let diffData: MolecularData;
                         let diffFrames: (LogFrame | OrcaFrame)[] = [];
                         let diffVmdColors: string[] | null = null;
+                        // A crystal comparison needs the *cell* of the right-hand
+                        // file, which the display-only atom list cannot state:
+                        // the base sites, their lattice and (on the page) the
+                        // periodic bonds. Captured before the payload is reduced
+                        // to a display list.
+                        let diffCrystalPayload: {
+                            a: number; b: number; c: number;
+                            alpha: number; beta: number; gamma: number;
+                            latticeVectors: number[][];
+                            spaceGroup: string;
+                            symmetryOps: string[];
+                            baseAtoms: { element: string; x: number; y: number; z: number; occupancy?: number }[];
+                        } | null = null;
 
                         if (diffExt === 'tcl') {
                             const tclResult = parseTcl(diffText);
@@ -887,6 +900,18 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         } else {
                             diffData = parseFile(diffText, diffFileName);
                             if (diffData.crystal) {
+                                const c = diffData.crystal;
+                                diffCrystalPayload = {
+                                    a: c.a, b: c.b, c: c.c,
+                                    alpha: c.alpha, beta: c.beta, gamma: c.gamma,
+                                    latticeVectors: c.latticeVectors,
+                                    spaceGroup: c.spaceGroup || '',
+                                    symmetryOps: c.symmetryOps || [],
+                                    baseAtoms: c.baseAtoms.map(a => ({
+                                        element: a.element, x: a.x, y: a.y, z: a.z,
+                                        occupancy: a.occupancy
+                                    }))
+                                };
                                 diffData.bonds = [];
                                 diffData.crystal.baseBonds = [];
                             } else {
@@ -957,7 +982,10 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             // The comparison side is a different file; its total charge
                             // is what its own bonds should be checked against, not the
                             // document on screen.
-                            charge: diffData.charge
+                            charge: diffData.charge,
+                            // A cell, when the file stated one: the page compares it
+                            // against the cell on screen before it looks at a graph.
+                            crystal: diffCrystalPayload
                         });
                     } catch (e: any) {
                         vscode.window.showErrorMessage('Diff failed: ' + (e.message || e));
@@ -2122,11 +2150,14 @@ function getOccupancyTexture(color,occupancy){
 // with n_i = cut / w_i. For an ordinary cell n_i is 1 and that is the classic
 // block of 27 images; a flat or skewed cell widens it to 5x5x5, which is
 // exactly the case rounding got wrong.
-function detectCrystalBaseBonds(){
-    if(!CRY||!CRY_INV)return;
-    var baseAtoms=CRY.baseAtoms;
-    var lv=CRY.latticeVectors;
-    var inv=CRY_INV;
+// The same search, over any cell — the loaded one, or the right-hand cell of a
+// crystal comparison, which is not the structure on screen and must not be
+// written into CRY. Returns the base bonds (pair + image shift) and touches
+// nothing else.
+function detectCrystalBaseBondsFor(cry,inv){
+    if(!cry||!cry.latticeVectors||!cry.baseAtoms||!inv)return[];
+    var baseAtoms=cry.baseAtoms;
+    var lv=cry.latticeVectors;
     var n=baseAtoms.length;
     var widths=crystalPlaneWidths(lv);
     var round=Math.round;
@@ -2272,7 +2303,11 @@ function detectCrystalBaseBonds(){
         if(!(pairs[i].order>0))continue;
         bonds.push({atom1:pairs[i].i,atom2:pairs[i].j,order:pairs[i].order,shift:pairs[i].shift});
     }
-    CRY.baseBonds=bonds;
+    return bonds;
+}
+function detectCrystalBaseBonds(){
+    if(!CRY||!CRY_INV)return;
+    CRY.baseBonds=detectCrystalBaseBondsFor(CRY,CRY_INV);
     CRY.bondsDetected=true;
 }
 
@@ -2477,9 +2512,14 @@ function rebuildCrystal(){
             for(var cj=jMin;cj<=jMax;cj++){
                 for(var ck=kMin;ck<=kMax;ck++){
                     var ax=fx+ci,ay=fy+cj,az=fz+ck;
-                    if(ax<aMin-EPS||ax>aMax+EPS)continue;
-                    if(ay<bMin-EPS||ay>bMax+EPS)continue;
-                    if(az<cMin-EPS||az>cMax+EPS)continue;
+                    // Half-open on the max side, the same rule the whole-molecule
+                    // pass uses: the image of an atom that sits exactly on the
+                    // upper face belongs to the cell below it, not to both. The
+                    // closed test (<= aMax) drew that one site twice — at 0 and at
+                    // 1 — for a cell that states it once.
+                    if(ax<aMin-EPS||ax>=aMax-1e-12)continue;
+                    if(ay<bMin-EPS||ay>=bMax-1e-12)continue;
+                    if(az<cMin-EPS||az>=cMax-1e-12)continue;
                     var ox=ax*lv[0][0]+ay*lv[1][0]+az*lv[2][0];
                     var oy=ax*lv[0][1]+ay*lv[1][1]+az*lv[2][1];
                     var oz=ax*lv[0][2]+ay*lv[1][2]+az*lv[2][2];
@@ -3022,56 +3062,52 @@ function pooledMat(key,make){
     if(!m){m=make();m.userData={shared:true};matPool[key]=m}
     return m;
 }
-function sphereGeoFor(r,segs){
-    return pooledGeo('s|'+r.toFixed(4)+'|'+segs[0]+'|'+segs[1],function(){return new THREE.SphereGeometry(r,segs[0],segs[1])});
-}
-// An atom's colour follows the scalar-colour toggle (a scene rebuild), and its
-// highlight is a *state*: plain, selected, or diff-highlighted. Both used to be
-// written into the atom's own material, which is exactly why every atom needed
-// one. Keying the pool by (colour, occupancy, state, ghost) keeps the same three
-// appearances while a whole structure shares a handful of materials.
+// An atom's appearance is what its *material* decides, and a material cannot
+// vary inside one instanced draw: the element colour rides the instance colour
+// buffer, an occupancy rides a texture, and a ghost is translucent. The
+// appearance key below is that classification. The highlight is a third axis —
+// plain, selected and difference-marked are separate instanced meshes (see the
+// atom sphere layer), so selecting one atom moves one instance between two
+// buffers and can never change how another atom is drawn.
 //
 // A ghost is a fourth appearance: faint, and drawn without writing depth, so a
 // ghost standing exactly on a real atom (the usual counterpoise layout) reads as
 // a shadow *around* that atom instead of hiding it.
-function atomMaterial(col,occ,state,ghost){
-    var o=(occ!=null&&occ<0.999)?occ.toFixed(3):'1';
-    var g=ghost?1:0;
-    return pooledMat('a|'+col+'|'+o+'|'+state+'|'+g,function(){
+function atomInstanceMaterial(appearance,state){
+    return pooledMat('ia|'+appearance+'|'+state,function(){
         var m;
-        if(g)m=new THREE.MeshPhongMaterial({color:new THREE.Color(col),shininess:20,specular:0x222222,transparent:true,opacity:0.45,depthWrite:false});
-        else if(o!=='1')m=new THREE.MeshPhongMaterial({color:0xffffff,map:getOccupancyTexture(col,occ),shininess:80,specular:0x444444});
-        else m=new THREE.MeshPhongMaterial({color:new THREE.Color(col),shininess:80,specular:0x444444});
+        if(appearance==='g'){
+            m=new THREE.MeshPhongMaterial({color:new THREE.Color(GHOST_COLOR),shininess:20,specular:0x222222,transparent:true,opacity:0.45,depthWrite:false});
+        }else if(appearance.charAt(0)==='o'){
+            var bits=appearance.split('|');
+            m=new THREE.MeshPhongMaterial({color:0xffffff,map:getOccupancyTexture(bits[1],parseFloat(bits[2])),shininess:80,specular:0x444444});
+        }else{
+            m=new THREE.MeshPhongMaterial({color:0xffffff,shininess:80,specular:0x444444});
+        }
         if(state===1){m.emissive=new THREE.Color(0xffff00);m.emissiveIntensity=0.6}
         else if(state===2){m.emissive=new THREE.Color(0xff6600);m.emissiveIntensity=0.4}
         return m;
     });
 }
-// Ask for one of those three states. Every writer of the highlight goes
-// through here, so no call site can leave a shared material in a changed state
-// for the atoms it is shared with.
+// Ask for one of those three states. Every writer of the highlight goes through
+// here; the handle records the state and moves its own instance between the two
+// state meshes of its appearance.
 function setAtomHighlight(mesh,state){
     if(!mesh||!mesh.userData)return;
-    mesh.material=atomMaterial(mesh.userData.baseColor!=null?mesh.userData.baseColor:'#FF1493',mesh.userData.occ,state,mesh.userData.ghost);
+    var ud=mesh.userData;
+    var old=ud.hlState||0;
+    if(old===state)return;
+    ud.hlState=state;
+    if(ud.sphereLayer){
+        sphereLayerWriteState(ud.sphereLayer,mesh,old,false);
+        sphereLayerWriteState(ud.sphereLayer,mesh,state,true);
+    }
 }
-// The comparison's atoms follow the same idea, with the diff highlight being a
-// colour of its own (0xff6600, the way the comparison has always marked a
-// difference) rather than a glow over the structure's colour. A ghost on either
-// side is drawn the same faint marker the main structure uses.
-function diffAtomMaterial(col,state,ghost){
-    var g=ghost?1:0;
-    return pooledMat('d|'+col+'|'+state+'|'+g,function(){
-        var m;
-        if(g)m=new THREE.MeshPhongMaterial({color:new THREE.Color(col),shininess:20,specular:0x222222,transparent:true,opacity:0.45,depthWrite:false});
-        else m=new THREE.MeshPhongMaterial({color:new THREE.Color(state===2?0xff6600:col),shininess:80,specular:0x444444});
-        if(state===1){m.emissive=new THREE.Color(0xffff00);m.emissiveIntensity=0.6}
-        else if(state===2){m.emissive=new THREE.Color(0xff6600);m.emissiveIntensity=0.4}
-        return m;
-    });
-}
+// The comparison's atoms follow the same rule. The difference marker is the
+// colour the difference half writes into the instance colour buffer (the
+// comparison's orange), not a second material.
 function setDiffAtomHighlight(mesh,state){
-    if(!mesh||!mesh.userData)return;
-    mesh.material=diffAtomMaterial(mesh.userData.baseColor!=null?mesh.userData.baseColor:'#FF1493',state,mesh.userData.ghost);
+    setAtomHighlight(mesh,state);
 }
 
 function disposeMesh(ch){
@@ -3199,6 +3235,200 @@ function poolClear(pool){
 
 // The main structure's bonds: one pool, one draw call, whatever the size.
 var bondPool=newBondPool(40,0,0,moleculeGroup);
+
+// ===== Atoms: one instanced sphere per appearance and state =====
+// The bonds have been instanced for a long time; the atoms were not, so a
+// crystal's 2x2x2 view was 2352 draw calls for its spheres alone. A sphere is
+// now a shared unit geometry scaled per instance, and every atom is a *record*
+// — the atomMeshes array holds a lightweight handle (position + userData, never
+// added to the scene) instead of a Mesh. Every other pass keeps the contract it
+// always had: "position" is the atom minus the rotation centre, "userData"
+// carries the element, index and highlight state, "visible" says whether a
+// sphere is drawn at all.
+//
+// The material cannot vary inside one instanced draw, so atoms are grouped by
+// the appearance its material decides (ordinary / ghost / occupancy) and, within
+// that, by highlight state (plain / selected / difference-marked) into three
+// instanced meshes. The three state meshes hold one slot per atom of the
+// appearance, so a highlight change is two setMatrixAt writes — it never
+// re-indexes the buffers, never touches another atom, and never changes the
+// number of draw calls.
+function atomHandle(){
+    return {
+        position:{x:0,y:0,z:0,
+            set:function(x,y,z){this.x=x;this.y=y;this.z=z},
+            copy:function(v){this.x=v.x;this.y=v.y;this.z=v.z}},
+        userData:{},
+        visible:true
+    };
+}
+var mainSphereLayer={kind:'main',parent:null,classes:{},count:0};
+var diffSphereLayer={kind:'diff',parent:null,classes:{},count:0};
+var atomColorCache={};
+var ATOM_WHITE=new THREE.Color(0xffffff);
+var ATOM_ORANGE=new THREE.Color(0xff6600);
+var _atomM=new THREE.Matrix4();
+var _atomZero=new THREE.Matrix4().makeScale(0,0,0);
+function atomColorOf(col){
+    var c=atomColorCache[col];
+    if(!c){c=new THREE.Color(col);atomColorCache[col]=c}
+    return c;
+}
+function unitSphereGeo(segs){
+    return pooledGeo('us|'+segs[0]+'|'+segs[1],function(){return new THREE.SphereGeometry(1,segs[0],segs[1])});
+}
+// What the atom's material must know: a ghost is translucent whatever its
+// element, an occupancy below 1 carries its own texture, everything else is an
+// ordinary element sphere whose colour rides the instance buffer.
+function atomAppearanceOf(ud){
+    if(ud.ghost)return 'g';
+    if(ud.occ!=null&&ud.occ<0.999)return 'o|'+ud.baseColor+'|'+ud.occ.toFixed(3);
+    return 'n';
+}
+function writeAtomMatrix(inst,slot,h,r){
+    if(!inst)return;
+    if(r>0){
+        _atomM.makeScale(r,r,r);
+        _atomM.setPosition(h.position.x,h.position.y,h.position.z);
+        inst.setMatrixAt(slot,_atomM);
+    }else inst.setMatrixAt(slot,_atomZero);
+}
+function atomClassEnsure(layer,key,size,geo,geoKey,parent){
+    var c=layer.classes[key];
+    if(!c){
+        c={key:key,insts:[null,null,null],cap:0,geoKey:'',slots:[],shown:[0,0,0]};
+        layer.classes[key]=c;
+    }
+    // Grow, never shrink: an edit that only rewrites the same structure reuses
+    // the buffers it already uploaded. A change of sphere tessellation (the atom
+    // count crossed a band) is the one case that has to rebuild the geometry
+    // reference.
+    if(c.cap<size||c.geoKey!==geoKey){
+        for(var s=0;s<3;s++){
+            var old=c.insts[s];
+            if(old){if(old.parent)old.parent.remove(old);old.dispose()}
+            var inst=new THREE.InstancedMesh(geo,atomInstanceMaterial(key,s),size);
+            // The instances span the whole structure while the shared unit
+            // sphere is one unit wide, so the mesh's own bounds say nothing
+            // about where the atoms are; one draw call is cheap enough to always
+            // draw, exactly as the bond pools do.
+            inst.frustumCulled=false;
+            inst.count=0;
+            c.insts[s]=inst;
+        }
+        c.cap=size;c.geoKey=geoKey;
+    }
+    for(var k=0;k<3;k++){
+        var now=c.insts[k];
+        if(now.parent!==parent)parent.add(now);
+    }
+    return c;
+}
+// Build (or refresh) a layer from the handles and the atom list they describe.
+// isDiff is the comparison's right half, where a marked atom is drawn in the
+// comparison's orange instead of a glow over its element colour.
+function sphereLayerBuild(layer,handles,parent,segs,isDiff){
+    layer.parent=parent;
+    layer.count=handles.length;
+    var used={},order=[],i;
+    for(i=0;i<handles.length;i++){
+        var h=handles[i],ud=h.userData;
+        var app=atomAppearanceOf(ud);
+        ud.sphereAppearance=app;
+        ud.sphereLayer=layer;
+        var list=used[app];
+        if(!list){list=[];used[app]=list;order.push(app)}
+        ud.sphereSlot=list.length;
+        list.push(h);
+    }
+    // An appearance no atom carries any more (a ghost converted back, a
+    // disordered site removed) takes its three meshes with it.
+    Object.keys(layer.classes).forEach(function(k){
+        if(used[k])return;
+        var c=layer.classes[k];
+        for(var s=0;s<3;s++){
+            var inst=c.insts[s];
+            if(inst){if(inst.parent)inst.parent.remove(inst);inst.dispose()}
+        }
+        delete layer.classes[k];
+    });
+    if(handles.length===0)return;
+    var geo=unitSphereGeo(segs);
+    var geoKey=segs[0]+'x'+segs[1];
+    order.forEach(function(k){
+        var members=used[k];
+        var c=atomClassEnsure(layer,k,members.length,geo,geoKey,parent);
+        c.slots=members;
+        var occupancy=k.charAt(0)==='o';
+        for(var s=0;s<3;s++){
+            c.insts[s].count=members.length;
+            c.shown[s]=0;
+        }
+        for(var m=0;m<members.length;m++){
+            var mm=members[m],mu=mm.userData;
+            var state=mu.hlState||0;
+            // A ghost and an occupancy material already carry their colour; a
+            // plain atom takes the element colour from the instance buffer. The
+            // difference half paints every marked atom orange.
+            var col=(occupancy||mu.ghost)?ATOM_WHITE:atomColorOf(mu.baseColor||'#FF1493');
+            for(s=0;s<3;s++)c.insts[s].setColorAt(m,(isDiff&&s===2)?ATOM_ORANGE:col);
+            for(s=0;s<3;s++){
+                var show=(s===state)&&mu.drawn!==false;
+                writeAtomMatrix(c.insts[s],m,mm,show?mu.radius:0);
+                if(show)c.shown[s]++;
+            }
+        }
+        for(s=0;s<3;s++){
+            var ins=c.insts[s];
+            ins.instanceMatrix.needsUpdate=true;
+            if(ins.instanceColor)ins.instanceColor.needsUpdate=true;
+            ins.visible=c.shown[s]>0;
+        }
+    });
+}
+// One atom changes state: hide its slot in the old mesh, show it in the new one.
+// Both writes are constant time, and the object count on screen is unchanged.
+function sphereLayerWriteState(layer,h,state,show){
+    var ud=h.userData;
+    var c=layer&&layer.classes[ud.sphereAppearance];
+    if(!c)return;
+    var inst=c.insts[state];
+    if(!inst)return;
+    var vis=!!show&&ud.drawn!==false;
+    writeAtomMatrix(inst,ud.sphereSlot,h,vis?ud.radius:0);
+    c.shown[state]+=vis?1:-1;
+    if(c.shown[state]<0)c.shown[state]=0;
+    inst.instanceMatrix.needsUpdate=true;
+    inst.visible=c.shown[state]>0;
+    needsRender=true;
+}
+// After a drag, a vibration frame or a re-centring, every handle has moved. Only
+// the state a slot is currently shown in carries its position, so one matrix
+// write per atom is enough.
+function sphereLayerSyncPositions(layer){
+    if(!layer||layer.count===0)return;
+    Object.keys(layer.classes).forEach(function(k){
+        var c=layer.classes[k];
+        for(var m=0;m<c.slots.length;m++){
+            var h=c.slots[m],ud=h.userData;
+            writeAtomMatrix(c.insts[ud.hlState||0],m,h,ud.drawn!==false?ud.radius:0);
+        }
+        // Only a state that has atoms on screen was written; the other two
+        // buffers are still all-zero and do not need re-uploading.
+        for(var s=0;s<3;s++)if(c.shown[s]>0)c.insts[s].instanceMatrix.needsUpdate=true;
+    });
+}
+function sphereLayerClear(layer){
+    if(!layer)return;
+    Object.keys(layer.classes).forEach(function(k){
+        var c=layer.classes[k];
+        for(var s=0;s<3;s++){
+            var inst=c.insts[s];
+            if(inst){if(inst.parent)inst.parent.remove(inst);inst.dispose()}
+        }
+    });
+    layer.classes={};layer.count=0;layer.parent=null;
+}
 
 // ===== VMD Surf patches =====
 // A "mol representation Surf <probe> <isovalue>" patch is the isosurface of
@@ -3576,17 +3806,18 @@ function rebuildScene(keepCenter){
         // stands for.
         var col=gh?GHOST_COLOR:(betaColorOf(a)||a.color);
         var occ=a.occupancy!=null?a.occupancy:1;
-        // Geometry and material come from the pools: atoms of the same radius
-        // (and colour/occupancy) draw with the very same objects, so a
-        // structure of any size costs a handful of GPU buffers and materials
-        // instead of one of each per atom.
-        var mesh=new THREE.Mesh(sphereGeoFor(drawn?r:0.001,segs),atomMaterial(col,occ,0,gh));
+        // One record per atom, not one Mesh per atom: radius, colour and the
+        // appearance key are what the instanced layer needs, and every other
+        // pass still reads "position", "userData" and "visible" exactly as
+        // before.
+        var mesh=atomHandle();
         mesh.position.set(a.x-CX,a.y-CY,a.z-CZ);
-        mesh.userData={element:a.element,index:i,baseColor:col,occ:occ,ghost:gh};
+        mesh.userData={element:a.element,index:i,baseColor:col,occ:occ,ghost:gh,
+                       radius:drawn?r:0,drawn:drawn,hlState:0};
         mesh.visible=drawn;
-        moleculeGroup.add(mesh);
         atomMeshes.push(mesh);
     });
+    sphereLayerBuild(mainSphereLayer,atomMeshes,moleculeGroup,segs,false);
     rebuildBondPieces();
     if(CRY)buildCellWireframe();
     highlightSelected();
@@ -3606,6 +3837,7 @@ function updateScenePositions(keepCenter){
         if(MD.atoms.length>0){CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length}
     }
     atomMeshes.forEach(function(m,i){var a=MD.atoms[i];if(a)m.position.set(a.x-CX,a.y-CY,a.z-CZ)});
+    sphereLayerSyncPositions(mainSphereLayer);
     rebuildBondPieces();
     if(CRY)buildCellWireframe();
     highlightSelected();
@@ -3617,6 +3849,7 @@ function updateAtomMeshPositions(){
     // Light per-frame update used during Move Atoms drags: refresh atom
     // sphere positions + selection highlights only (no bond mesh rebuild).
     atomMeshes.forEach(function(m,i){var a=MD.atoms[i];if(a)m.position.set(a.x-CX,a.y-CY,a.z-CZ)});
+    sphereLayerSyncPositions(mainSphereLayer);
     highlightSelected();
     hideVmdSurfaces();
 }
@@ -3629,6 +3862,7 @@ function shiftAllMeshesForCenter(dx,dy,dz){
     for(i=0;i<atomMeshes.length;i++){
         atomMeshes[i].position.x-=dx;atomMeshes[i].position.y-=dy;atomMeshes[i].position.z-=dz;
     }
+    sphereLayerSyncPositions(mainSphereLayer);
     // A bond piece's transform is computed from the atoms *minus the centre*,
     // so re-placing them all against the new centre is the same shift — and it
     // is one pass over the instances, with no geometry involved.
@@ -6243,6 +6477,19 @@ var diffActiveSide='left';
 var diffSelectedAtoms=[];
 var diffMapping=null;
 var diffReverseMapping=null;
+// A crystal comparison runs on the base cells, so the difference list's indices
+// are base indices, the right-half display index is the matching base index, and
+// the left half has one displayed image per base atom (more in a supercell).
+// These four carry that translation; the molecular comparison leaves them at
+// their defaults.
+var diffBaseIndices=false;
+var diffHasCrystal=false;
+var diffLabelAtoms=null;
+var diffDisplayByBase=null;
+var diffReverseBaseMapping=null;
+var diffRightCrystal=null;
+var diffRightInv=null;
+var diffRightBonds=null;
 var diffPanelEl=document.getElementById('diff-panel');
 var diffReopenEl=document.getElementById('diff-reopen');
 var diffPanelHTML='';
@@ -6651,6 +6898,29 @@ function findAtomMapping(atoms1,bonds1,atoms2,bonds2){
     var adj1=buildAdjacency(atoms1,bonds1);
     var adj2=buildAdjacency(atoms2,bonds2);
 
+    // When the two lists are one graph in the same order -- the same file
+    // compared with itself, or a file and its unedited copy -- the identity is
+    // the correspondence a user means. Answering it directly is also what keeps
+    // a self-comparison exact: the backtracking search below may legitimately
+    // pick a symmetry permutation instead, and a swapped pair of equivalent
+    // atoms would then show a difference the user never made. A reordered file
+    // fails the neighbour test and takes the general search.
+    var sameOrder=true,i;
+    for(i=0;i<n1;i++){
+        if(atoms1[i].element!==atoms2[i].element){sameOrder=false;break}
+    }
+    if(sameOrder){
+        var neighbourKey=function(adj,idx){
+            var list=adj[idx].map(function(e){return e.to});
+            list.sort(function(a,b){return a-b});
+            return list.join(',');
+        };
+        for(i=0;i<n1;i++){
+            if(neighbourKey(adj1,i)!==neighbourKey(adj2,i)){sameOrder=false;break}
+        }
+        if(sameOrder)return atoms1.map(function(_,idx){return idx});
+    }
+
     var elCount1={},elCount2={};
     atoms1.forEach(function(a){elCount1[a.element]=(elCount1[a.element]||0)+1});
     atoms2.forEach(function(a){elCount2[a.element]=(elCount2[a.element]||0)+1});
@@ -6840,10 +7110,190 @@ function diffQuadKey(e1,eCenter1,eCenter2,e4){
     return e1<=e4?(e1+'-'+eCenter1+'-'+eCenter2+'-'+e4):(e4+'-'+eCenter2+'-'+eCenter1+'-'+e1);
 }
 
-function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct){
+// ===== Crystal comparison: the cell's periodic graph, not the displayed copies =====
+//
+// A crystal's screen is a supercell whose molecules are drawn whole, while the
+// file it is compared against is one wrapped cell: at 2x2x2 the two lists are
+// 2352 and 294 atoms, and even at 0..1 the same atom sits at a different
+// cartesian position. Comparing those lists could only ever answer "Skeletons
+// Differ" -- which is exactly what it did. A comparison now happens on what both
+// files actually state: their **cell parameters** and their **base cell's
+// periodic graph**. Every distance is measured through the bond's own image, so
+// a bond across a cell face is its real length and not a cell.
+var CRYSTAL_DIFF_LEN_TOL=1e-2;   // Angstrom: two cells this close are the same cell
+var CRYSTAL_DIFF_ANG_TOL=0.05;   // degree
+
+// The six cell parameters derived from the lattice vectors themselves (a file's
+// a/b/c/angles are the same numbers, but the vectors are the ones every other
+// crystal pass uses).
+function crystalCellParams(cry){
+    var lv=cry&&cry.latticeVectors;
+    if(!lv||lv.length<3)return null;
+    function len(v){return Math.sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2])}
+    function ang(u,v){
+        var lu=len(u),lvv=len(v);
+        if(!(lu>1e-12)||!(lvv>1e-12))return 90;
+        var d=(u[0]*v[0]+u[1]*v[1]+u[2]*v[2])/(lu*lvv);
+        return Math.acos(Math.max(-1,Math.min(1,d)))*180/Math.PI;
+    }
+    return {a:len(lv[0]),b:len(lv[1]),c:len(lv[2]),
+            alpha:ang(lv[1],lv[2]),beta:ang(lv[0],lv[2]),gamma:ang(lv[0],lv[1])};
+}
+function crystalCellParamsEqual(p,q){
+    if(!p||!q)return false;
+    var lens=['a','b','c'],angs=['alpha','beta','gamma'],i;
+    for(i=0;i<3;i++)if(Math.abs(p[lens[i]]-q[lens[i]])>CRYSTAL_DIFF_LEN_TOL)return false;
+    for(i=0;i<3;i++)if(Math.abs(p[angs[i]]-q[angs[i]])>CRYSTAL_DIFF_ANG_TOL)return false;
+    return true;
+}
+function crystalCellDiffHTML(p,q){
+    var rows=[['a','a'],['b','b'],['c','c'],['alpha','α'],['beta','β'],['gamma','γ']];
+    var html='';
+    for(var i=0;i<rows.length;i++){
+        var k=rows[i][0],name=rows[i][1];
+        var unit=(k==='a'||k==='b'||k==='c')?' Å':'°';
+        var dec=(k==='a'||k==='b'||k==='c')?3:2;
+        html+='<div class="diff-row">'+name+': '+(p?p[k].toFixed(dec):'?')+unit+
+              ' vs '+(q?q[k].toFixed(dec):'?')+unit+'</div>';
+    }
+    return html;
+}
+// The inverse lattice of any cell. computeCrystalInv() reads the loaded CRY;
+// the right-hand cell of a comparison has no business writing into it.
+function crystalInverseOf(lv){
+    if(!lv||lv.length<3)return null;
+    var det=lv[0][0]*(lv[1][1]*lv[2][2]-lv[1][2]*lv[2][1])-
+            lv[0][1]*(lv[1][0]*lv[2][2]-lv[1][2]*lv[2][0])+
+            lv[0][2]*(lv[1][0]*lv[2][1]-lv[1][1]*lv[2][0]);
+    if(Math.abs(det)<1e-12)return null;
+    var invDet=1/det;
+    return [
+        [(lv[1][1]*lv[2][2]-lv[1][2]*lv[2][1])*invDet,(lv[1][2]*lv[2][0]-lv[1][0]*lv[2][2])*invDet,(lv[1][0]*lv[2][1]-lv[1][1]*lv[2][0])*invDet],
+        [(lv[0][2]*lv[2][1]-lv[0][1]*lv[2][2])*invDet,(lv[0][0]*lv[2][2]-lv[0][2]*lv[2][0])*invDet,(lv[0][1]*lv[2][0]-lv[0][0]*lv[2][1])*invDet],
+        [(lv[0][1]*lv[1][2]-lv[0][2]*lv[1][1])*invDet,(lv[0][2]*lv[1][0]-lv[0][0]*lv[1][2])*invDet,(lv[0][0]*lv[1][1]-lv[0][1]*lv[1][0])*invDet]
+    ];
+}
+function crystalFracsOf(cry,inv){
+    return (cry.baseAtoms||[]).map(function(a){
+        return [inv[0][0]*a.x+inv[0][1]*a.y+inv[0][2]*a.z,
+                inv[1][0]*a.x+inv[1][1]*a.y+inv[1][2]*a.z,
+                inv[2][0]*a.x+inv[2][1]*a.y+inv[2][2]*a.z];
+    });
+}
+// One bond per base pair, keyed low-to-high, its shift moving the higher atom's
+// image relative to the lower one.
+function crystalBondMap(bonds){
+    var map={};
+    (bonds||[]).forEach(function(b){
+        var i=b.atom1,j=b.atom2,s=b.shift||ZERO_SHIFT;
+        if(i>j){var t=i;i=j;j=t;s=[-s[0],-s[1],-s[2]]}
+        map[i+','+j]=s;
+    });
+    return map;
+}
+function crystalBondShift(map,from,to){
+    if(from===to)return ZERO_SHIFT;
+    var a=from,b=to,neg=false;
+    if(a>b){var t=a;a=b;b=t;neg=true}
+    var s=map[a+','+b];
+    if(!s)return ZERO_SHIFT;
+    return neg?[-s[0],-s[1],-s[2]]:s;
+}
+// The cartesian vector from an atom to the bonded image of another. This is what
+// a bond length, an angle and a dihedral are measured through; a bond whose
+// shift is (0,0,0) is the plain difference.
+function crystalPairVector(cry,frs,map,from,to){
+    var lv=cry.latticeVectors;
+    var s=crystalBondShift(map,from,to);
+    var fa=frs[from],fb=frs[to];
+    var dx=fb[0]+s[0]-fa[0],dy=fb[1]+s[1]-fa[1],dz=fb[2]+s[2]-fa[2];
+    return [dx*lv[0][0]+dy*lv[1][0]+dz*lv[2][0],
+            dx*lv[0][1]+dy*lv[1][1]+dz*lv[2][1],
+            dx*lv[0][2]+dy*lv[1][2]+dz*lv[2][2]];
+}
+function crystalVectorAngle(u,v){
+    var du=Math.sqrt(u[0]*u[0]+u[1]*u[1]+u[2]*u[2]);
+    var dv=Math.sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);
+    if(du<1e-10||dv<1e-10)return 0;
+    var d=(u[0]*v[0]+u[1]*v[1]+u[2]*v[2])/(du*dv);
+    return Math.acos(Math.max(-1,Math.min(1,d)))*180/Math.PI;
+}
+// A dihedral along a chain of bonded images: the three bond vectors, laid end to
+// end. Taking each bond's own image is what keeps a torsion across a face the
+// torsion of the molecule, not of the cell.
+function crystalVectorDihedral(v1,v2,v3){
+    var p1={x:v1[0],y:v1[1],z:v1[2]};
+    var p2={x:v1[0]+v2[0],y:v1[1]+v2[1],z:v1[2]+v2[2]};
+    var p3={x:p2.x+v3[0],y:p2.y+v3[1],z:p2.z+v3[2]};
+    return dihedral3d({x:0,y:0,z:0},p1,p2,p3);
+}
+// The six measurement closures computeConformationDiffs can run on instead of
+// the plain cartesian ones.
+function crystalGeometryOf(cry,inv,bonds){
+    var frs=crystalFracsOf(cry,inv);
+    var map=crystalBondMap(bonds);
+    return {
+        dist:function(i,j){
+            var v=crystalPairVector(cry,frs,map,i,j);
+            return Math.sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);
+        },
+        angle:function(i,j,k){
+            var u=crystalPairVector(cry,frs,map,j,i);
+            var v=crystalPairVector(cry,frs,map,j,k);
+            return crystalVectorAngle(u,v);
+        },
+        dihedral:function(a,b,c,d){
+            var w0=crystalPairVector(cry,frs,map,a,b);
+            var w1=crystalPairVector(cry,frs,map,b,c);
+            var w2=crystalPairVector(cry,frs,map,c,d);
+            return crystalVectorDihedral(w0,w1,w2);
+        }
+    };
+}
+function computeCrystalConformationDiffs(leftCry,leftInv,leftBonds,rightCry,rightInv,rightBonds,mapping,threshPct){
+    var g1=crystalGeometryOf(leftCry,leftInv,leftBonds);
+    var g2=crystalGeometryOf(rightCry,rightInv,rightBonds);
+    return computeConformationDiffs(leftCry.baseAtoms,leftBonds,rightCry.baseAtoms,rightBonds,
+        mapping,threshPct,
+        {dist1:g1.dist,dist2:g2.dist,angle1:g1.angle,angle2:g2.angle,
+         dihedral1:g1.dihedral,dihedral2:g2.dihedral});
+}
+// The whole decision, in one place so the panel and the verification harness
+// read the same answer: cells first, then the base graphs, then the geometry.
+function crystalStructureDiff(leftCry,leftInv,leftBonds,rightCry,rightInv,rightBonds,threshPct){
+    var leftCell=crystalCellParams(leftCry);
+    var rightCell=crystalCellParams(rightCry);
+    if(!leftCell||!rightCell)return {status:'no-cell'};
+    if(!crystalCellParamsEqual(leftCell,rightCell)){
+        return {status:'cell-differs',leftCell:leftCell,rightCell:rightCell};
+    }
+    var mapping=findAtomMapping(leftCry.baseAtoms,leftBonds,rightCry.baseAtoms,rightBonds);
+    if(!mapping){
+        return {status:'skeleton-differs',leftCell:leftCell,rightCell:rightCell,
+                leftAtoms:(leftCry.baseAtoms||[]).length,leftBonds:(leftBonds||[]).length,
+                rightAtoms:(rightCry.baseAtoms||[]).length,rightBonds:(rightBonds||[]).length};
+    }
+    return {status:'ok',mapping:mapping,leftCell:leftCell,rightCell:rightCell,
+            diffs:computeCrystalConformationDiffs(leftCry,leftInv,leftBonds,
+                rightCry,rightInv,rightBonds,mapping,threshPct)};
+}
+
+// geo is optional: six closures that measure one side's internal coordinates.
+// The molecular path leaves it out and gets the plain cartesian expressions it
+// always used; the crystal comparison supplies a set that measures through each
+// bond's periodic image, so the same loops, the same statistics and the same
+// difference list serve both — and a crystal can never quietly use a different
+// notion of "bond length" from a molecule.
+function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct,geo){
     var diffs={bonds:[],angles:[],dihedrals:[]};
     var tp=threshPct||2;
     var statAcc={bonds:{},angles:{},dihedrals:{}};
+    var dist1=geo?geo.dist1:function(i,j){return dist3d(atoms1[i],atoms1[j])};
+    var dist2=geo?geo.dist2:function(i,j){return dist3d(atoms2[i],atoms2[j])};
+    var angle1=geo?geo.angle1:function(i,j,k){return angle3d(atoms1[i],atoms1[j],atoms1[k])};
+    var angle2=geo?geo.angle2:function(i,j,k){return angle3d(atoms2[i],atoms2[j],atoms2[k])};
+    var dihedral1=geo?geo.dihedral1:function(a,b,c,d){return dihedral3d(atoms1[a],atoms1[b],atoms1[c],atoms1[d])};
+    var dihedral2=geo?geo.dihedral2:function(a,b,c,d){return dihedral3d(atoms2[a],atoms2[b],atoms2[c],atoms2[d])};
 
     var bondSet2={};
     bonds2.forEach(function(b){bondSet2[Math.min(b.atom1,b.atom2)+'-'+Math.max(b.atom1,b.atom2)]=b.order});
@@ -6852,8 +7302,8 @@ function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct)
         var a2m=Math.max(mapping[b.atom1],mapping[b.atom2]);
         var key=a1m+'-'+a2m;
         if(bondSet2[key]!==undefined){
-            var d1=dist3d(atoms1[b.atom1],atoms1[b.atom2]);
-            var d2=dist3d(atoms2[mapping[b.atom1]],atoms2[mapping[b.atom2]]);
+            var d1=dist1(b.atom1,b.atom2);
+            var d2=dist2(mapping[b.atom1],mapping[b.atom2]);
             collectDiffStat(statAcc.bonds,diffPairKey(atoms1[b.atom1].element,atoms1[b.atom2].element),d1-d2);
             var dd=Math.abs(d1-d2);
             var avg=(d1+d2)/2;
@@ -6880,8 +7330,8 @@ function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct)
                 var key=[i1,j,i3].sort().join('-');
                 if(angleSeen[key])continue;
                 angleSeen[key]=true;
-                var a1=angle3d(atoms1[i1],atoms1[j],atoms1[i3]);
-                var a2=angle3d(atoms2[mapping[i1]],atoms2[mapping[j]],atoms2[mapping[i3]]);
+                var a1=angle1(i1,j,i3);
+                var a2=angle2(mapping[i1],mapping[j],mapping[i3]);
                 collectDiffStat(statAcc.angles,diffTripletKey(atoms1[i1].element,atoms1[j].element,atoms1[i3].element),a1-a2);
                 var da=Math.abs(a1-a2);
                 var avgA=(a1+a2)/2;
@@ -6907,8 +7357,8 @@ function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct)
                     var key=[s0,start,mid,end].sort().join('-');
                     if(dihedralSeen[key])return;
                     dihedralSeen[key]=true;
-                    var d1=dihedral3d(atoms1[s0],atoms1[start],atoms1[mid],atoms1[end]);
-                    var d2=dihedral3d(atoms2[mapping[s0]],atoms2[mapping[start]],atoms2[mapping[mid]],atoms2[mapping[end]]);
+                    var d1=dihedral1(s0,start,mid,end);
+                    var d2=dihedral2(mapping[s0],mapping[start],mapping[mid],mapping[end]);
                     collectDiffStat(statAcc.dihedrals,
                         diffQuadKey(atoms1[s0].element,atoms1[start].element,atoms1[mid].element,atoms1[end].element),
                         diffWrap180(d1-d2));
@@ -6933,6 +7383,145 @@ function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct)
     return diffs;
 }
 
+// ===== Crystal Diff =====
+//
+// Two crystals are compared as cells (crystalStructureDiff): the screen's
+// supercell and the file's wrapped cell are two drawings of the same object, so
+// only the base cell is comparable. The right half is still drawn from
+// diffData.atoms (the file's one cell) and the left from the displayed
+// supercell; every difference index is a base index, and these helpers translate
+// it to each half's display indices.
+function crystalDiffDisplayMaps(baseMapping){
+    var left=MD.atoms,right=diffData.atoms;
+    var disp=new Array(left.length);
+    var byBase=[];
+    var rev=new Array(right.length).fill(-1);
+    for(var i=0;i<left.length;i++){
+        disp[i]=-1;
+        var bi=left[i]&&left[i].baseIdx;
+        if(bi==null||bi<0||bi>=baseMapping.length)continue;
+        var rj=baseMapping[bi];
+        if(rj==null||rj<0)continue;
+        disp[i]=rj;
+        if(!byBase[bi])byBase[bi]=[];
+        byBase[bi].push(i);
+        if(rev[rj]<0)rev[rj]=i;
+    }
+    var revBase=new Array(right.length).fill(-1);
+    for(var b=0;b<baseMapping.length;b++){
+        var rb=baseMapping[b];
+        if(rb>=0&&rb<revBase.length)revBase[rb]=b;
+    }
+    diffMapping=disp;
+    diffReverseMapping=rev;
+    diffDisplayByBase=byBase;
+    diffReverseBaseMapping=revBase;
+}
+function crystalDiffStatusHTML(res){
+    var html='<span class="diff-close">×</span>';
+    if(res.status==='cell-differs'){
+        html+='<h4>Unit Cells Differ</h4>'+
+            '<div class="diff-row">The two files state different cells, so their periodic graphs cannot be compared.</div>'+
+            crystalCellDiffHTML(res.leftCell,res.rightCell)+
+            '<div class="diff-row" style="margin-top:6px;color:var(--vscode-descriptionForeground,#999)">The two structures are still shown side by side. Click Diff again to exit.</div>';
+    }else if(res.status==='skeleton-differs'){
+        html+='<h4>Skeletons Differ</h4>'+
+            '<div class="diff-row">The unit cells match, but the base-cell graphs do not.</div>'+
+            '<div class="diff-row">Left: '+res.leftAtoms+' atoms, '+res.leftBonds+' bonds (base cell)</div>'+
+            '<div class="diff-row">Right: '+res.rightAtoms+' atoms, '+res.rightBonds+' bonds (base cell)</div>'+
+            '<div class="diff-row" style="margin-top:6px;color:var(--vscode-descriptionForeground,#999)">Click Diff again to exit.</div>';
+    }else{
+        html+='<h4>Not Comparable</h4>'+
+            '<div class="diff-row">A crystal is compared with another crystal: one side of this comparison states no unit cell.</div>'+
+            '<div class="diff-row" style="margin-top:6px;color:var(--vscode-descriptionForeground,#999)">Click Diff again to exit.</div>';
+    }
+    return html;
+}
+function clearDiffMarks(){
+    atomMeshes.forEach(function(m){m.userData.diffHi=false;setAtomHighlight(m,0)});
+    diffAtomMeshes.forEach(function(m){m.userData.diffHi=false;setDiffAtomHighlight(m,0)});
+    diffBondPieces.forEach(function(p){p.hi=false});
+    diffBuildBondPools();
+    needsRender=true;
+}
+function showCrystalDiffStatus(res){
+    diffMapping=null;diffReverseMapping=null;diffDisplayByBase=null;diffReverseBaseMapping=null;
+    showDiffPanel(crystalDiffStatusHTML(res),true);
+    diffPanelEl.classList.add('show');
+    var tag=res.status==='cell-differs'?'cell differs':
+            (res.status==='skeleton-differs'?'skeleton differs':'not comparable');
+    diffLabelRight.textContent='Diff: '+diffData.fileName+' ('+tag+')';
+    modeInfoEl.textContent='Diff Mode ('+tag+')';
+    clearDiffMarks();
+}
+function startCrystalDiff(msg){
+    diffMode=true;
+    diffLabelLeft.textContent='Original: '+(MD.title||'crystal');
+    diffLabelLeft.classList.add('show');
+    diffLabelRight.textContent='Diff: '+diffData.fileName;
+    diffLabelRight.classList.add('show');
+    var right=msg.crystal||null;
+    var rightInv=right?crystalInverseOf(right.latticeVectors):null;
+    if(!CRY||!right||!rightInv){
+        diffBaseIndices=false;diffLabelAtoms=null;
+        showCrystalDiffStatus({status:'incompatible'});
+        updateBakeHint();
+        enterDiffRender();
+        vdSyncPanel();
+        layoutPanels();
+        return;
+    }
+    if(!CRY.bondsDetected)detectCrystalBaseBonds();
+    var leftBonds=CRY.baseBonds;
+    var rightBonds=detectCrystalBaseBondsFor(right,rightInv);
+    diffRightCrystal=right;diffRightInv=rightInv;diffRightBonds=rightBonds;
+    diffDetBonds1=leftBonds;diffDetBonds2=rightBonds;
+    var res=crystalStructureDiff(CRY,CRY_INV,leftBonds,right,rightInv,rightBonds,diffThresholdPct);
+    diffBaseIndices=true;
+    diffLabelAtoms=CRY.baseAtoms;
+    if(res.status==='ok'){
+        crystalDiffDisplayMaps(res.mapping);
+        var diffs=res.diffs;
+        var total=diffs.bonds.length+diffs.angles.length+diffs.dihedrals.length;
+        showDiffPanel(buildDiffResultsHTML(diffs,total),true);
+        wireDiffSlider();
+        diffLabelRight.textContent='Diff: '+diffData.fileName;
+        modeInfoEl.textContent='Diff Mode ('+total+' differences)';
+        enterDiffRender(diffs,res.mapping);
+        vdSyncPanel();
+        layoutPanels();
+        return;
+    }
+    showCrystalDiffStatus(res);
+    updateBakeHint();
+    enterDiffRender();
+    vdSyncPanel();
+    layoutPanels();
+}
+// A rebuild of the left structure (an edit, a style change, an undo) re-runs
+// the cell comparison and updates the open panel in place; the right half is a
+// model of the file's cell and does not move.
+function crystalDiffRefresh(){
+    if(!CRY||!diffRightCrystal||!diffRightInv)return;
+    var res=crystalStructureDiff(CRY,CRY_INV,CRY.baseBonds,diffRightCrystal,diffRightInv,
+        diffRightBonds,diffThresholdPct);
+    if(res.status!=='ok'){showCrystalDiffStatus(res);return}
+    diffBaseIndices=true;diffLabelAtoms=CRY.baseAtoms;
+    crystalDiffDisplayMaps(res.mapping);
+    var diffs=res.diffs;
+    var total=diffs.bonds.length+diffs.angles.length+diffs.dihedrals.length;
+    var listEl=diffPanelEl.querySelector('#diff-results-list');
+    if(listEl){
+        listEl.innerHTML=buildDiffListHTML(diffs,total);
+        wireDiffStatsToggle(listEl);
+    }
+    var fullHTML=buildDiffResultsHTML(diffs,total);
+    diffPanelHTML=fullHTML;
+    diffResultsHTML=fullHTML;
+    modeInfoEl.textContent='Diff Mode ('+total+' differences)';
+    diffLabelRight.textContent='Diff: '+diffData.fileName;
+    updateDiffHighlights(diffs);
+}
 function startDiff(msg){
     // The comparison has two structures to choose from, so a molecular-mechanics
     // panel has nothing to act on while it is open; it comes back on exit, and a
@@ -6944,6 +7533,16 @@ function startDiff(msg){
     }
     mmCancelRun();
     diffData={atoms:msg.atoms,bonds:msg.bonds,title:msg.title||msg.fileName,fileName:msg.fileName,charge:msg.charge};
+    diffBaseIndices=false;diffHasCrystal=false;diffLabelAtoms=null;diffDisplayByBase=null;
+    diffReverseBaseMapping=null;diffRightCrystal=null;diffRightInv=null;diffRightBonds=null;
+
+    // A crystal on either side is compared as a cell, never as the two atom
+    // lists the screen and the file happen to hold.
+    if(CRY||msg.crystal){
+        diffHasCrystal=true;
+        startCrystalDiff(msg);
+        return;
+    }
 
     var detBonds1=detectBondsFromAtoms(MD.atoms,MD.charge);
     var detBonds2=detectBondsFromAtoms(diffData.atoms,diffData.charge);
@@ -7015,10 +7614,13 @@ function buildDiffResultsHTML(diffs,totalDiff){
 
 function buildDiffListHTML(diffs,totalDiff){
     var html='';
+    // A crystal comparison's indices address the base cell, so its labels come
+    // from that list; the molecular one keeps MD.atoms.
+    var labelAtoms=diffLabelAtoms||MD.atoms;
     if(totalDiff===0){
         html+='<div class="diff-row" style="color:#4ec9b0">Structures are identical (same conformation within thresholds).</div>';
     }else{
-        html+='<div class="diff-row">Mapping: '+MD.atoms.length+' atoms matched. '+totalDiff+' differences found.</div>';
+        html+='<div class="diff-row">Mapping: '+labelAtoms.length+' atoms matched. '+totalDiff+' differences found.</div>';
     }
     html+=buildDiffStatsHTML(diffs.stats);
     if(totalDiff>0){
@@ -7026,7 +7628,7 @@ function buildDiffListHTML(diffs,totalDiff){
             html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Bond Length Differences ('+diffs.bonds.length+')</b></div>';
             diffs.bonds.sort(function(a,b){return b.pct-a.pct});
             diffs.bonds.forEach(function(d){
-                html+='<div class="diff-row">  '+atomLabel(MD.atoms[d.i1],d.i1)+'-'+atomLabel(MD.atoms[d.i2],d.i2)+
+                html+='<div class="diff-row">  '+atomLabel(labelAtoms[d.i1],d.i1)+'-'+atomLabel(labelAtoms[d.i2],d.i2)+
                     ': '+d.d1.toFixed(3)+' vs '+d.d2.toFixed(3)+' Å (Δ='+d.diff.toFixed(3)+', '+d.pct.toFixed(2)+'%)</div>';
             });
         }
@@ -7034,7 +7636,7 @@ function buildDiffListHTML(diffs,totalDiff){
             html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Bond Angle Differences ('+diffs.angles.length+')</b></div>';
             diffs.angles.sort(function(a,b){return b.pct-a.pct});
             diffs.angles.forEach(function(d){
-                html+='<div class="diff-row">  '+atomLabel(MD.atoms[d.i1],d.i1)+'-'+atomLabel(MD.atoms[d.i2],d.i2)+'-'+atomLabel(MD.atoms[d.i3],d.i3)+
+                html+='<div class="diff-row">  '+atomLabel(labelAtoms[d.i1],d.i1)+'-'+atomLabel(labelAtoms[d.i2],d.i2)+'-'+atomLabel(labelAtoms[d.i3],d.i3)+
                     ': '+d.a1.toFixed(1)+'° vs '+d.a2.toFixed(1)+'° (Δ='+d.diff.toFixed(1)+'°, '+d.pct.toFixed(2)+'%)</div>';
             });
         }
@@ -7042,8 +7644,8 @@ function buildDiffListHTML(diffs,totalDiff){
             html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Dihedral Differences ('+diffs.dihedrals.length+')</b></div>';
             diffs.dihedrals.sort(function(a,b){return b.pct-a.pct});
             diffs.dihedrals.forEach(function(d){
-                html+='<div class="diff-row">  '+atomLabel(MD.atoms[d.i1],d.i1)+'-'+atomLabel(MD.atoms[d.i2],d.i2)+'-'+atomLabel(MD.atoms[d.i3],d.i3)+'-'+atomLabel(MD.atoms[d.i4],d.i4)+
-                    ': '+d.d1.toFixed(1)+'° vs '+d.d2.toFixed(1)+'° (Δ='+d.diff.toFixed(1)+'°, '+d.pct.toFixed(2)+'%)</div>';
+                html+='<div class="diff-row">  '+atomLabel(labelAtoms[d.i1],d.i1)+'-'+atomLabel(labelAtoms[d.i2],d.i2)+'-'+atomLabel(labelAtoms[d.i3],d.i3)+'-'+atomLabel(labelAtoms[d.i4],d.i4)+
+                    ': '+d.d1.toFixed(1)+'° vs '+d.d2.toFixed(1)+'° (Δ='+d.diff.toFixed(1)+', '+d.pct.toFixed(2)+'%)</div>';
             });
         }
     }
@@ -7123,6 +7725,12 @@ function wireDiffSlider(){
 }
 
 function recomputeDiff(){
+    // A crystal comparison is re-run on the cells, not on the two display lists
+    // (whose atom counts only coincide at 0..1).
+    if(diffHasCrystal){
+        if(CRY&&diffRightCrystal)crystalDiffRefresh();
+        return;
+    }
     if(!diffMapping||!diffDetBonds1||!diffDetBonds2)return;
     var diffs=computeConformationDiffs(MD.atoms,diffDetBonds1,diffData.atoms,diffDetBonds2,diffMapping,diffThresholdPct);
     var totalDiff=diffs.bonds.length+diffs.angles.length+diffs.dihedrals.length;
@@ -7139,6 +7747,13 @@ function recomputeDiff(){
 }
 function refreshDiff(){
     if(!diffMode)return;
+    // A crystal comparison survives a rebuild of the left structure by
+    // re-running the cell comparison; comparing display lists again would
+    // reintroduce the supercell-against-cell mismatch this path removes.
+    if(diffHasCrystal){
+        if(CRY&&diffRightCrystal)crystalDiffRefresh();
+        return;
+    }
     diffDetBonds1=detectBondsFromAtoms(MD.atoms,MD.charge);
     diffMapping=findAtomMapping(MD.atoms,diffDetBonds1,diffData.atoms,diffDetBonds2);
     if(diffMapping){
@@ -7176,11 +7791,16 @@ function updateDiffHighlights(diffs){
     });
 
     atomMeshes.forEach(function(m,i){
-        m.userData.diffHi=highlightAtoms[i]?true:false;
+        if(diffBaseIndices&&diffDisplayByBase){
+            var bi=MD.atoms[i]&&MD.atoms[i].baseIdx;
+            m.userData.diffHi=(bi!=null&&highlightAtoms[bi]===true);
+        }else m.userData.diffHi=highlightAtoms[i]?true:false;
     });
 
     diffAtomMeshes.forEach(function(m,i){
-        var origI=diffReverseMapping?diffReverseMapping[i]:-1;
+        var origI=(diffBaseIndices&&diffReverseBaseMapping)?
+            diffReverseBaseMapping[i]:(diffReverseMapping?diffReverseMapping[i]:-1);
+        if(origI==null)origI=-1;
         m.userData.diffHi=(origI>=0&&highlightAtoms[origI])?true:false;
     });
 
@@ -7245,11 +7865,8 @@ diffReopenEl.addEventListener('click',function(){
 // two view states, the camera and the pan stay where the user put them.
 function buildDiffModel(hiAtom,hiBond){
     if(!diffMolGroup||!diffData)return;
-    var i;
-    for(i=0;i<diffAtomMeshes.length;i++){
-        diffMolGroup.remove(diffAtomMeshes[i]);
-        disposeMesh(diffAtomMeshes[i]);
-    }
+    // The atoms are records now, not children of the group: the instanced layer
+    // below is what draws them, so there is nothing to remove or dispose here.
     diffAtomMeshes=[];
     var dSegs=sphereSegs(diffData.atoms.length);
     diffData.atoms.forEach(function(a,i){
@@ -7259,17 +7876,18 @@ function buildDiffModel(hiAtom,hiBond){
         // carry no script scale, so there is none to apply.
         var r=drawnRadius({element:a.element,ghost:gh},0);
         var isHi=hiAtom[i]===true;
-        // Same pooled geometry and material scheme as the left-hand structure:
-        // a comparison of two large structures draws its two sides from a
-        // handful of objects instead of one per atom. A ghost is the small
-        // faint marker it is on the left, so the two halves read the same way.
+        // A ghost is the small faint marker it is on the left, so the two halves
+        // read the same way. The mark is a state on the handle; the instanced
+        // layer draws a marked atom in the comparison's orange.
         var diffCol=gh?GHOST_COLOR:a.color;
-        var mesh=new THREE.Mesh(sphereGeoFor(r,dSegs),diffAtomMaterial(diffCol,isHi?2:0,gh));
+        var mesh=atomHandle();
         mesh.position.set(a.x-diffCX,a.y-diffCY,a.z-diffCZ);
-        mesh.userData={element:a.element,index:i,diffHi:isHi,baseColor:diffCol,ghost:gh};
-        diffMolGroup.add(mesh);
+        mesh.userData={element:a.element,index:i,diffHi:isHi,baseColor:diffCol,ghost:gh,
+                       radius:r,drawn:r>0.0005,hlState:isHi?2:0};
+        mesh.visible=r>0.0005;
         diffAtomMeshes.push(mesh);
     });
+    sphereLayerBuild(diffSphereLayer,diffAtomMeshes,diffMolGroup,dSegs,true);
 
     // The right-hand bonds: two pieces per bond (one per half), each carrying
     // the transform it is drawn with. The comparison's structure never moves,
@@ -7341,9 +7959,17 @@ function enterDiffRender(diffs,mapping){
 
     if(diffs&&mapping){
         var leftHi={};
-        diffs.bonds.forEach(function(d){leftHi[d.i1]=true;leftHi[d.i2]=true});
-        diffs.angles.forEach(function(d){leftHi[d.i1]=true;leftHi[d.i2]=true;leftHi[d.i3]=true});
-        diffs.dihedrals.forEach(function(d){leftHi[d.i1]=true;leftHi[d.i2]=true;leftHi[d.i3]=true;leftHi[d.i4]=true});
+        // A crystal difference names a base site; every displayed image of that
+        // site wears the mark, because the user sees a supercell.
+        var markLeft=function(idx){
+            if(diffBaseIndices&&diffDisplayByBase){
+                var list=diffDisplayByBase[idx];
+                if(list)for(var k=0;k<list.length;k++)leftHi[list[k]]=true;
+            }else leftHi[idx]=true;
+        };
+        diffs.bonds.forEach(function(d){markLeft(d.i1);markLeft(d.i2)});
+        diffs.angles.forEach(function(d){markLeft(d.i1);markLeft(d.i2);markLeft(d.i3)});
+        diffs.dihedrals.forEach(function(d){markLeft(d.i1);markLeft(d.i2);markLeft(d.i3);markLeft(d.i4)});
         atomMeshes.forEach(function(m,i){
             m.userData.diffHi=leftHi[i]?true:false;
         });
@@ -7390,9 +8016,13 @@ function exitDiff(){
     poolClear(diffBondPoolPlain);
     poolClear(diffBondPoolHot);
     diffBondPieces.length=0;
+    sphereLayerClear(diffSphereLayer);
     diffAtomMeshes=[];
     diffSelectedAtoms=[];
     diffMapping=null;diffReverseMapping=null;
+    diffBaseIndices=false;diffHasCrystal=false;diffLabelAtoms=null;
+    diffDisplayByBase=null;diffReverseBaseMapping=null;
+    diffRightCrystal=null;diffRightInv=null;diffRightBonds=null;
     diffDetBonds1=null;diffDetBonds2=null;
     diffActiveSide='left';
     diffTransformSide='left';
@@ -8335,6 +8965,7 @@ function updateVibrationPositions(){
     for(var i=0;i<MD.atoms.length&&i<atomMeshes.length;i++){
         atomMeshes[i].position.set(MD.atoms[i].x-CX,MD.atoms[i].y-CY,MD.atoms[i].z-CZ);
     }
+    sphereLayerSyncPositions(mainSphereLayer);
     updateVibBondMeshes();
 }
 function startVibration(modeIdx){
@@ -8961,10 +9592,29 @@ function getMoleculeScreenBox(){
     if(!atomMeshes||atomMeshes.length===0||!moleculeGroup)return null;
     scene.updateMatrixWorld(true);
     var minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
-    function projectGroup(group,camW,offX){
+    function projectGroup(group,meshes,camW,offX){
         if(!group||!group.children.length)return;
         var box=new THREE.Box3().setFromObject(group);
         if(box.isEmpty())return;
+        // The spheres are instanced from a unit geometry, so their own object
+        // bounds say "one unit around the group origin". Each atom's drawn
+        // radius is added here instead, which is exactly the footprint the old
+        // per-atom Mesh gave Box3.setFromObject.
+        if(meshes){
+            var pv=new THREE.Vector3();
+            for(var mi=0;mi<meshes.length;mi++){
+                var mh=meshes[mi];
+                if(!mh)continue;
+                var mr=mh.userData?mh.userData.radius:0;
+                pv.set(mh.position.x,mh.position.y,mh.position.z).applyMatrix4(group.matrixWorld);
+                if(pv.x-mr<box.min.x)box.min.x=pv.x-mr;
+                if(pv.y-mr<box.min.y)box.min.y=pv.y-mr;
+                if(pv.z-mr<box.min.z)box.min.z=pv.z-mr;
+                if(pv.x+mr>box.max.x)box.max.x=pv.x+mr;
+                if(pv.y+mr>box.max.y)box.max.y=pv.y+mr;
+                if(pv.z+mr>box.max.z)box.max.z=pv.z+mr;
+            }
+        }
         var cs=[
             [box.min.x,box.min.y,box.min.z],[box.min.x,box.min.y,box.max.z],
             [box.min.x,box.max.y,box.min.z],[box.min.x,box.max.y,box.max.z],
@@ -8989,14 +9639,14 @@ function getMoleculeScreenBox(){
             var halfW=Math.floor(w/2);
             camera.aspect=halfW/h;camera.updateProjectionMatrix();
             camera.position.set(0,0,camDist);camera.updateMatrixWorld(true);
-            projectGroup(moleculeGroup,halfW,0);
+            projectGroup(moleculeGroup,atomMeshes,halfW,0);
             camera.aspect=(w-halfW)/h;camera.updateProjectionMatrix();
             camera.position.set(0,0,diffCamDist);camera.updateMatrixWorld(true);
-            projectGroup(diffMolGroup,(w-halfW),halfW);
+            projectGroup(diffMolGroup,diffAtomMeshes,(w-halfW),halfW);
         }else{
             camera.aspect=w/h;camera.updateProjectionMatrix();
             camera.position.set(0,0,camDist);camera.updateMatrixWorld(true);
-            projectGroup(moleculeGroup,w,0);
+            projectGroup(moleculeGroup,atomMeshes,w,0);
         }
     }finally{
         camera.aspect=sa;camera.updateProjectionMatrix();
@@ -11266,6 +11916,38 @@ function stickPick(atoms,meshes,cx,cy,cz,group){
     return best;
 }
 
+// The spheres are instanced now, so the hit test is the analytic one the ray
+// always meant: the nearest sphere along the ray, in the group's own frame (a
+// rotation and a translation preserve lengths and the ray parameter, exactly
+// as stickPick argues). A tessellated SphereGeometry raycast would answer the
+// same atom; this answers it without walking a geometry.
+function pickAtomSphere(atoms,meshes,cx,cy,cz,group){
+    if(!group||!atoms||!meshes||atoms.length===0)return -1;
+    group.updateWorldMatrix(true,false);
+    _pickInv.copy(group.matrixWorld).invert();
+    _pickO.copy(raycaster.ray.origin).applyMatrix4(_pickInv);
+    _pickDir.copy(raycaster.ray.direction).transformDirection(_pickInv);
+    var n=Math.min(atoms.length,meshes.length);
+    var best=-1,bestT=Infinity;
+    for(var i=0;i<n;i++){
+        var m=meshes[i];
+        if(!m||m.visible===false)continue;
+        var r=m.userData?m.userData.radius:0;
+        if(!(r>0))continue;
+        var o=m.position;
+        var ox=o.x-_pickO.x,oy=o.y-_pickO.y,oz=o.z-_pickO.z;
+        var t=ox*_pickDir.x+oy*_pickDir.y+oz*_pickDir.z;
+        var qx=ox-_pickDir.x*t,qy=oy-_pickDir.y*t,qz=oz-_pickDir.z*t;
+        var d2=qx*qx+qy*qy+qz*qz;
+        if(d2>r*r)continue;
+        var dt=Math.sqrt(r*r-d2);
+        var t0=t-dt;
+        var hit=t0>0?t0:t+dt;
+        if(hit<0)continue;
+        if(hit<bestT){best=i;bestT=hit}
+    }
+    return best;
+}
 function getClickedAtom(e){
     var rect=canvas.getBoundingClientRect();
     if(diffMode){
@@ -11282,8 +11964,8 @@ function getClickedAtom(e){
             camera.position.set(0,0,camDist);
             camera.updateMatrixWorld();
             raycaster.setFromCamera(mouse,camera);
-            var hitsL=raycaster.intersectObjects(atomMeshes);
-            if(hitsL.length>0)return hitsL[0].object.userData.index;
+            var pl=pickAtomSphere(MD.atoms,atomMeshes,CX,CY,CZ,moleculeGroup);
+            if(pl>=0)return pl;
             var stL=stickPick(MD.atoms,atomMeshes,CX,CY,CZ,moleculeGroup);
             if(stL>=0)return stL;
         }else{
@@ -11295,8 +11977,8 @@ function getClickedAtom(e){
             camera.position.set(0,0,diffCamDist);
             camera.updateMatrixWorld();
             raycaster.setFromCamera(mouse,camera);
-            var hitsR=raycaster.intersectObjects(diffAtomMeshes);
-            if(hitsR.length>0)return hitsR[0].object.userData.index;
+            var pr=pickAtomSphere(diffData.atoms,diffAtomMeshes,diffCX,diffCY,diffCZ,diffMolGroup);
+            if(pr>=0)return pr;
             var stR=stickPick(diffData.atoms,diffAtomMeshes,diffCX,diffCY,diffCZ,diffMolGroup);
             if(stR>=0)return stR;
         }
@@ -11305,8 +11987,8 @@ function getClickedAtom(e){
     mouse.x=((e.clientX-rect.left)/rect.width)*2-1;
     mouse.y=-((e.clientY-rect.top)/rect.height)*2+1;
     raycaster.setFromCamera(mouse,camera);
-    var hits=raycaster.intersectObjects(atomMeshes);
-    if(hits.length>0)return hits[0].object.userData.index;
+    var hit=pickAtomSphere(MD.atoms,atomMeshes,CX,CY,CZ,moleculeGroup);
+    if(hit>=0)return hit;
     return stickPick(MD.atoms,atomMeshes,CX,CY,CZ,moleculeGroup);
 }
 
@@ -11547,13 +12229,20 @@ canvas.addEventListener('mouseup',function(e){
         var bw=Math.abs(e.clientX-boxStart.x),bh=Math.abs(e.clientY-boxStart.y);
         if(bw<3&&bh<3){boxStart=null;layoutPanels();return;}
         var v=new THREE.Vector3();
+        // The atom handles are records, not scene children, so a box test takes
+        // the same local position the instance matrices carry and applies the
+        // group's world matrix itself — the number a Mesh.getWorldPosition()
+        // used to return.
         if(diffMode){
             var dw=rect.width,dh=rect.height,dhalfW=Math.floor(dw/2);
             diffActiveSide='left';
             camera.aspect=dhalfW/dh;camera.updateProjectionMatrix();
             camera.position.set(0,0,camDist);camera.updateMatrixWorld(true);
-            atomMeshes.forEach(function(m){
-                m.getWorldPosition(v);v.project(camera);
+            moleculeGroup.updateWorldMatrix(true,false);
+            atomMeshes.forEach(function(m,i){
+                var a=MD.atoms[i];if(!a)return;
+                v.set(a.x-CX,a.y-CY,a.z-CZ).applyMatrix4(moleculeGroup.matrixWorld);
+                v.project(camera);
                 var sx=(v.x*0.5+0.5)*dhalfW+rect.left;
                 var sy=(-v.y*0.5+0.5)*dh+rect.top;
                 if(sx>=bx&&sx<=bx+bw&&sy>=by&&sy<=by+bh){selectAtom(m.userData.index);}
@@ -11562,16 +12251,22 @@ canvas.addEventListener('mouseup',function(e){
                 diffActiveSide='right';
                 camera.aspect=(dw-dhalfW)/dh;camera.updateProjectionMatrix();
                 camera.position.set(0,0,diffCamDist);camera.updateMatrixWorld(true);
-                diffAtomMeshes.forEach(function(m){
-                    m.getWorldPosition(v);v.project(camera);
+                diffMolGroup.updateWorldMatrix(true,false);
+                diffAtomMeshes.forEach(function(m,i){
+                    var a=diffData.atoms[i];if(!a)return;
+                    v.set(a.x-diffCX,a.y-diffCY,a.z-diffCZ).applyMatrix4(diffMolGroup.matrixWorld);
+                    v.project(camera);
                     var sx=(v.x*0.5+0.5)*(dw-dhalfW)+rect.left+dhalfW;
                     var sy=(-v.y*0.5+0.5)*dh+rect.top;
                     if(sx>=bx&&sx<=bx+bw&&sy>=by&&sy<=by+bh){selectAtom(m.userData.index);}
                 });
             }
         }else{
-            atomMeshes.forEach(function(m){
-                m.getWorldPosition(v);v.project(camera);
+            moleculeGroup.updateWorldMatrix(true,false);
+            atomMeshes.forEach(function(m,i){
+                var a=MD.atoms[i];if(!a)return;
+                v.set(a.x-CX,a.y-CY,a.z-CZ).applyMatrix4(moleculeGroup.matrixWorld);
+                v.project(camera);
                 var sx=(v.x*0.5+0.5)*rect.width+rect.left;
                 var sy=(-v.y*0.5+0.5)*rect.height+rect.top;
                 if(sx>=bx&&sx<=bx+bw&&sy>=by&&sy<=by+bh){selectAtom(m.userData.index);}
