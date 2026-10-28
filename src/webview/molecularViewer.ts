@@ -10199,7 +10199,7 @@ function provOriginalTitle(){
     if(t===''||t==='Modified structure'||t==='Empty'||t==='No structures found')return '';
     return t;
 }
-function provTitle(fallback,keepOriginal){
+function provTitle(fallback,keepOriginal,extraHead){
     var merged=provMerged.slice();
     var src=provSource;
     if(!src&&merged.length)src=merged.shift();
@@ -10213,6 +10213,12 @@ function provTitle(fallback,keepOriginal){
     }else if(VMD&&VMD.molecules&&VMD.molecules.length>1){
         head.push('molecule '+(vmdMolIdx+1)+' of '+VMD.molecules.length);
     }
+    // A caller that has something the ordinary clauses cannot say — the cell and
+    // bounds a cluster was cut from — puts it here, ahead of the edits, so the
+    // 190-character cap can only cost the edit list and never the structure's
+    // identity (a cluster file that does not say which cell it came from is not
+    // traceable at all).
+    if(extraHead)head.push(extraHead);
     // Merged files come after the frame: the frame belongs to the source file.
     if(merged.length)head.push('merged with '+merged.join(', '));
     var body=[];
@@ -10317,7 +10323,6 @@ function doSave(){
 
     var chrg=MD.charge||0;
     var mult=MD.multiplicity||1;
-    var AN2={H:1,He:2,Li:3,Be:4,B:5,C:6,N:7,O:8,F:9,Ne:10,Na:11,Mg:12,Al:13,Si:14,P:15,S:16,Cl:17,Ar:18,K:19,Ca:20,Sc:21,Ti:22,V:23,Cr:24,Mn:25,Fe:26,Co:27,Ni:28,Cu:29,Zn:30,Ga:31,Ge:32,As:33,Se:34,Br:35,Kr:36,Rb:37,Sr:38,Y:39,Zr:40,Nb:41,Mo:42,Tc:43,Ru:44,Rh:45,Pd:46,Ag:47,Cd:48,In:49,Sn:50,Sb:51,Te:52,I:53,Xe:54,Cs:55,Ba:56,La:57,Ce:58,Pr:59,Nd:60,Pm:61,Sm:62,Eu:63,Gd:64,Tb:65,Dy:66,Ho:67,Er:68,Tm:69,Yb:70,Lu:71,Hf:72,Ta:73,W:74,Re:75,Os:76,Ir:77,Pt:78,Au:79,Hg:80,Tl:81,Pb:82,Bi:83,Po:84,At:85,Rn:86};
 
     var coord='$coord\\n';
     var ANG_TO_BOHR=1.8897259886;
@@ -10421,41 +10426,71 @@ function doSave(){
     });
     mopac+='\\n';
 
+    // ===== CIF =====
+    // What a saved CIF states, and what it must not: the file carries the *unit
+    // cell*, which is what every edit is written back into and what every
+    // rebuild redraws from, with every symmetry operation the original file
+    // declared already expanded into it. Writing that expanded cell under the
+    // original operation list is the mixed body that expands a second time on
+    // the next read — a P2(1)/c file's 147 sites recovering as 294 atoms, and
+    // 294 on the read after that — so the export declares P1 with the identity
+    // operation and says which body it is in _audit_creation_method. The
+    // fractional coordinates are wrapped into [0,1) for the same reason: an
+    // atom moved across a face (see Local Crystal Modifications) is the same
+    // site as the wrapped one, and a reader that folds coordinates itself must
+    // not be handed a value that means a different site than it says.
     var cifContent='';
     if(CRY){
-        var inv=CRY_INV;
+        var cifVol=crystalCellVolume();
+        var origSg=CRY.spaceGroup?String(CRY.spaceGroup).split("'").join(''):'';
         cifContent='data_modified\\n';
+        cifContent+='_audit_creation_method \\'MV: full unit cell, symmetry expanded';
+        if(origSg)cifContent+=' (from '+origSg+')';
+        cifContent+=', written as P1\\'\\n';
+        // The cell's composition, in Hill order (the same table the info panel
+        // shows), one count per site. A partial occupancy is written as the
+        // full site it is: _chemical_formula_sum describes the sites a file
+        // lists, and the occupancy column already says how much of each.
+        cifContent+='_chemical_formula_sum \\''+crystalFormulaSum(CRY.baseAtoms)+'\\'\\n';
         cifContent+='_cell_length_a '+CRY.a.toFixed(6)+'\\n';
         cifContent+='_cell_length_b '+CRY.b.toFixed(6)+'\\n';
         cifContent+='_cell_length_c '+CRY.c.toFixed(6)+'\\n';
         cifContent+='_cell_angle_alpha '+CRY.alpha.toFixed(6)+'\\n';
         cifContent+='_cell_angle_beta '+CRY.beta.toFixed(6)+'\\n';
         cifContent+='_cell_angle_gamma '+CRY.gamma.toFixed(6)+'\\n';
-        if(CRY.spaceGroup)cifContent+='_symmetry_space_group_name_H-M \\''+CRY.spaceGroup+'\\'\\n';
-        cifContent+='loop_\\n_symmetry_equiv_pos_as_xyz\\n';
-        (CRY.symmetryOps||['x, y, z']).forEach(function(op){cifContent+='\\''+op+'\\'\\n'});
-        cifContent+='loop_\\n_atom_site_label\\n_atom_site_type_symbol\\n_atom_site_fract_x\\n_atom_site_fract_y\\n_atom_site_fract_z\\n_atom_site_occupancy\\n';
+        cifContent+='_cell_volume '+cifVol.toFixed(6)+'\\n';
+        cifContent+='_symmetry_space_group_name_H-M \\'P 1\\'\\n';
+        cifContent+='loop_\\n_symmetry_equiv_pos_as_xyz\\n\\'x, y, z\\'\\n';
+        cifContent+='loop_\\n_atom_site_label\\n_atom_site_type_symbol\\n_atom_site_fract_x\\n_atom_site_fract_y\\n_atom_site_fract_z\\n_atom_site_occupancy\\n_atom_site_site_symmetry_multiplicity\\n';
         CRY.baseAtoms.forEach(function(ba,i){
-            var fx=inv[0][0]*ba.x+inv[0][1]*ba.y+inv[0][2]*ba.z;
-            var fy=inv[1][0]*ba.x+inv[1][1]*ba.y+inv[1][2]*ba.z;
-            var fz=inv[2][0]*ba.x+inv[2][1]*ba.y+inv[2][2]*ba.z;
+            var f=crystalFracWrapped(ba.x,ba.y,ba.z);
             var label=ba.element+(i+1);
             var occ=(ba.occupancy!=null?ba.occupancy:1).toFixed(3);
-            cifContent+=label+' '+ba.element+' '+fx.toFixed(6)+' '+fy.toFixed(6)+' '+fz.toFixed(6)+' '+occ+'\\n';
+            // P1 has one operation, so every site is its own multiplicity.
+            cifContent+=label+' '+ba.element+' '+f[0].toFixed(6)+' '+f[1].toFixed(6)+' '+f[2].toFixed(6)+' '+occ+' 1\\n';
         });
     }
 
+    // ===== VASP POSCAR =====
+    // The old export wrote the *displayed* atoms against the *unit cell's*
+    // lattice, so every atom of a supercell sat outside the box it declared
+    // (fractions of 2.0 and more) and the file described no structure at all.
+    // The atoms and the lattice now come from the same object — the base cell
+    // that CIF/VESTA write and that every edit is committed into — and the
+    // comment line says so, so a POSCAR of a 2x2x2 view is the unit cell and
+    // not a silently mislabelled supercell.
     var vaspContent='';
     if(CRY){
         var lv=CRY.latticeVectors;
-        var vInv=CRY_INV;
+        var base=CRY.baseAtoms;
         var elemOrder=[];
         var elemCounts={};
-        MD.atoms.forEach(function(a){
-            if(elemCounts[a.element]===undefined){elemOrder.push(a.element);elemCounts[a.element]=0}
-            elemCounts[a.element]++;
+        base.forEach(function(ba){
+            if(elemCounts[ba.element]===undefined){elemOrder.push(ba.element);elemCounts[ba.element]=0}
+            elemCounts[ba.element]++;
         });
-        vaspContent=saveTitle+'\\n';
+        var vaspTitle=provTitle(MD.title||'Modified structure',true,'unit cell, '+base.length+' atoms (not the displayed supercell)');
+        vaspContent=vaspTitle+'\\n';
         vaspContent+='1.0\\n';
         for(var ii=0;ii<3;ii++){
             vaspContent+='  '+lv[ii][0].toFixed(8)+'  '+lv[ii][1].toFixed(8)+'  '+lv[ii][2].toFixed(8)+'\\n';
@@ -10463,53 +10498,35 @@ function doSave(){
         vaspContent+=elemOrder.join('  ')+'\\n';
         vaspContent+=elemOrder.map(function(e){return elemCounts[e]}).join('  ')+'\\n';
         vaspContent+='Direct\\n';
-        MD.atoms.forEach(function(a){
-            var fx=vInv[0][0]*a.x+vInv[0][1]*a.y+vInv[0][2]*a.z;
-            var fy=vInv[1][0]*a.x+vInv[1][1]*a.y+vInv[1][2]*a.z;
-            var fz=vInv[2][0]*a.x+vInv[2][1]*a.y+vInv[2][2]*a.z;
-            vaspContent+='  '+fx.toFixed(8)+'  '+fy.toFixed(8)+'  '+fz.toFixed(8)+'\\n';
+        base.forEach(function(ba){
+            var f=crystalFracWrapped(ba.x,ba.y,ba.z);
+            vaspContent+='  '+f[0].toFixed(8)+'  '+f[1].toFixed(8)+'  '+f[2].toFixed(8)+'\\n';
         });
     }
 
-    var cubeContent='';
-    if(CRY){
-        var clv=CRY.latticeVectors;
-        var nGrid=2;
-        cubeContent='Molecular Viewer export\\n';
-        // The cube format has exactly two comment lines before the atom count:
-        // the provenance takes the second one, it does not add a third.
-        cubeContent+=saveTitle+'\\n';
-        cubeContent+='-'+MD.atoms.length+'  0.000000  0.000000  0.000000\\n';
-        cubeContent+=nGrid+'  '+(clv[0][0]/nGrid).toFixed(8)+'  '+(clv[0][1]/nGrid).toFixed(8)+'  '+(clv[0][2]/nGrid).toFixed(8)+'\\n';
-        cubeContent+=nGrid+'  '+(clv[1][0]/nGrid).toFixed(8)+'  '+(clv[1][1]/nGrid).toFixed(8)+'  '+(clv[1][2]/nGrid).toFixed(8)+'\\n';
-        cubeContent+=nGrid+'  '+(clv[2][0]/nGrid).toFixed(8)+'  '+(clv[2][1]/nGrid).toFixed(8)+'  '+(clv[2][2]/nGrid).toFixed(8)+'\\n';
-        MD.atoms.forEach(function(a){
-            var z=AN2[a.element]||0;
-            cubeContent+=z+'  0.000000  '+a.x.toFixed(8)+'  '+a.y.toFixed(8)+'  '+a.z.toFixed(8)+'\\n';
-        });
-        var nVals=nGrid*nGrid*nGrid;
-        for(var vi=0;vi<nVals;vi++){
-            cubeContent+='0.0000e+00';
-            if((vi+1)%6===0||vi===nVals-1){cubeContent+='\\n'}else{cubeContent+='  '}
-        }
-    }
-
+    // ===== Gaussian cube =====
+    // A negative atom count makes a cube file announce orbital records it does
+    // not carry, and a 2x2x2 grid announces a volume that is not there either;
+    // the file has to be a real one to be read: a positive atom count (which
+    // also states the units are Bohr), the unit cell as the grid's box, and a
+    // grid the caller can size. The values are zeros because the viewer carries
+    // no volumetric data — the file is a geometry + grid container, not a
+    // density — and a reader may sample it as such. It is built when the user
+    // presses Save, because the grid size is chosen in the dialog.
     var vestaContent='';
     if(CRY){
-        var vInv=CRY_INV;
-        vestaContent='#VESTA_FORMAT_VERSION 3.5.4\\n\\n\\nCRYSTAL\\n\\nTITLE\\n'+saveTitle+'\\n\\nGROUP\\n    1   1 P 1\\n\\nSYMOP\\n 0.000000  0.000000  0.000000  1  0  0   0  1  0   0  0  1   1\\n-1.0 -1.0 -1.0  1 0 0  0 0 0  0 0 0\\n\\nTRANM 0\\n 0.000000  0.000000  0.000000  1  0  0   0  1  0   0  0  1\\n\\nLTRANSL\\n -1\\n 0.000000  0.000000  0.000000  0.000000  0.000000  0.000000\\n\\nLORIENT\\n -1   0   0   0   0\\n 1.000000  0.000000  0.000000  1.000000  0.000000  0.000000\\n 0.000000  0.000000  1.000000  0.000000  0.000000  1.000000\\n\\nLMATRIX\\n 1.000000  0.000000  0.000000  0.000000\\n 0.000000  1.000000  0.000000  0.000000\\n 0.000000  0.000000  1.000000  0.000000\\n 0.000000  0.000000  0.000000  1.000000\\n 0.000000  0.000000  0.000000\\n\\nCELLP\\n';
+        var vestaTitle=provTitle(MD.title||'Modified structure',true,'unit cell, '+CRY.baseAtoms.length+' atoms');
+        vestaContent='#VESTA_FORMAT_VERSION 3.5.4\\n\\n\\nCRYSTAL\\n\\nTITLE\\n'+vestaTitle+'\\n\\nGROUP\\n    1   1 P 1\\n\\nSYMOP\\n 0.000000  0.000000  0.000000  1  0  0   0  1  0   0  0  1   1\\n-1.0 -1.0 -1.0  1 0 0  0 0 0  0 0 0\\n\\nTRANM 0\\n 0.000000  0.000000  0.000000  1  0  0   0  1  0   0  0  1\\n\\nLTRANSL\\n -1\\n 0.000000  0.000000  0.000000  0.000000  0.000000  0.000000\\n\\nLORIENT\\n -1   0   0   0   0\\n 1.000000  0.000000  0.000000  1.000000  0.000000  0.000000\\n 0.000000  0.000000  1.000000  0.000000  0.000000  1.000000\\n\\nLMATRIX\\n 1.000000  0.000000  0.000000  0.000000\\n 0.000000  1.000000  0.000000  0.000000\\n 0.000000  0.000000  1.000000  0.000000\\n 0.000000  0.000000  0.000000  1.000000\\n 0.000000  0.000000  0.000000\\n\\nCELLP\\n';
         vestaContent+=' '+CRY.a.toFixed(6)+'  '+CRY.b.toFixed(6)+'  '+CRY.c.toFixed(6)+'  '+CRY.alpha.toFixed(6)+'  '+CRY.beta.toFixed(6)+'  '+CRY.gamma.toFixed(6)+'\\n';
         vestaContent+=' 0.000000  0.000000  0.000000  0.000000  0.000000  0.000000\\n\\nSTRUC\\n';
         CRY.baseAtoms.forEach(function(ba,i){
-            var fx=vInv[0][0]*ba.x+vInv[0][1]*ba.y+vInv[0][2]*ba.z;
-            var fy=vInv[1][0]*ba.x+vInv[1][1]*ba.y+vInv[1][2]*ba.z;
-            var fz=vInv[2][0]*ba.x+vInv[2][1]*ba.y+vInv[2][2]*ba.z;
+            var f=crystalFracWrapped(ba.x,ba.y,ba.z);
             var label=ba.element+(i+1);
             var occ=(ba.occupancy!=null?ba.occupancy:1).toFixed(4);
             var idxStr=''+(i+1);while(idxStr.length<3)idxStr=' '+idxStr;
             var elStr=ba.element;while(elStr.length<3)elStr=elStr+' ';
             var labelStr=label;while(labelStr.length<4)labelStr=labelStr+' ';
-            vestaContent+=idxStr+' '+elStr+' '+labelStr+' '+occ+'   '+fx.toFixed(6)+'   '+fy.toFixed(6)+'   '+fz.toFixed(6)+'    2i       1\\n';
+            vestaContent+=idxStr+' '+elStr+' '+labelStr+' '+occ+'   '+f[0].toFixed(6)+'   '+f[1].toFixed(6)+'   '+f[2].toFixed(6)+'    2i       1\\n';
             vestaContent+='                            0.000000   0.000000   0.000000  0.00\\n';
         });
     }
@@ -10535,10 +10552,26 @@ function doSave(){
             '(element kept), and as a dummy point - <code>X</code> / <code>Du</code> / <code>q</code> / '+
             '<code>*</code> / <code>XX</code> - in the formats that have no ghost atom.</div>'
         :'';
-    showModal('<h3>Save File</h3>'+vdNote+ghostNote+
+    // A crystal's two families of files do different jobs, and the dialog says
+    // so before it writes either: the crystal formats describe the unit cell
+    // (the cell the session edits, symmetry expanded, P1), while the cluster
+    // formats cut what is on screen out as a molecule — the file a QM job
+    // starts from, and the only way to get one cage out of a framework.
+    var crystalNote=CRY
+        ?'<div class="current-val">Crystal formats (CIF / POSCAR / VESTA / cube) write the <b>unit cell</b> - '+
+            'every symmetry operation expanded into one cell, declared P1. '+
+            'The cluster formats (XYZ / GJF - displayed cluster) write <b>what is on screen</b>, '+
+            'cut to the bounds below, as a molecule.</div>'
+        :'';
+    showModal('<h3>Save File</h3>'+vdNote+ghostNote+crystalNote+
         '<label>Format:</label><select id="m-fmt">'+
+        // The molecular formats keep their old order (plain XYZ is still the
+        // default selection), and the cluster formats sit next to them because
+        // they are the same question asked of a crystal.
         '<option value="xyz">XYZ (.xyz)</option>'+
         '<option value="gjf">Gaussian Input (.gjf)</option>'+
+        (CRY?'<option value="xyz-cluster">XYZ - displayed cluster (.xyz)</option>':'')+
+        (CRY?'<option value="gjf-cluster">Gaussian Input - displayed cluster (.gjf)</option>':'')+
         (CRY?'<option value="cif">CIF (.cif)</option>':'')+
         (CRY?'<option value="vasp">VASP POSCAR (.vasp)</option>':'')+
         (CRY?'<option value="cube">Gaussian Cube (.cube)</option>':'')+
@@ -10550,15 +10583,49 @@ function doSave(){
         '<option value="pdb">PDB (.pdb)</option>'+
         '<option value="mop">MOPAC Input (.mop)</option>'+
         '</select>'+
+        (CRY?'<div class="modal-row" id="m-keepmol-row" style="display:none"><label style="min-width:0">Cluster:</label>'+
+            '<input type="checkbox" id="m-keepmol" checked style="flex:0 0 auto;width:auto">'+
+            '<span class="current-val" style="margin:0">keep whole molecules (untick to cut strict at the bounds)</span></div>':'')+
+        (CRY?'<div class="modal-row" id="m-grid-row" style="display:none"><label>Cube grid:</label>'+
+            '<input type="number" id="m-grid" value="'+CUBE_GRID_DEFAULT+'" step="1" min="2" max="'+CUBE_GRID_MAX+'">'+
+            '<span class="current-val" style="margin:0">points per cell axis (all-zero values)</span></div>':'')+
         '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button><button class="mbtn mbtn-ok" id="m-ok">Save</button></div>',null);
+    // The two option rows belong to specific formats, so they appear with them:
+    // a cluster control shown over a CIF export would be a switch that does
+    // nothing, and the grid shown everywhere would read as a CIF option.
+    var fmtSelEl=document.getElementById('m-fmt');
+    function syncSaveRows(){
+        var kr=document.getElementById('m-keepmol-row');
+        var gr=document.getElementById('m-grid-row');
+        var f=fmtSelEl?fmtSelEl.value:'';
+        if(kr&&kr.style)kr.style.display=(f==='xyz-cluster'||f==='gjf-cluster')?'flex':'none';
+        if(gr&&gr.style)gr.style.display=(f==='cube')?'flex':'none';
+    }
+    if(fmtSelEl)fmtSelEl.addEventListener('change',syncSaveRows);
+    syncSaveRows();
     document.getElementById('m-ok').addEventListener('click',function(){
         var fmt=document.getElementById('m-fmt').value;
         var content,ext;
+        try{
         switch(fmt){
             case 'gjf':content=gjf;ext='.gjf';break;
             case 'cif':content=cifContent;ext='.cif';break;
             case 'vasp':content=vaspContent;ext='.vasp';break;
-            case 'cube':content=cubeContent;ext='.cube';break;
+            // The grid is the one thing about the cube the dialog lets a user
+            // size, so it is read here rather than at open time. A grid whose
+            // value block would be unreasonably large is refused before a file
+            // is written, with the limit named, instead of being clamped to a
+            // size the user did not ask for.
+            case 'cube':{
+                var gEl=document.getElementById('m-grid');
+                var nGrid=gEl?Math.floor(Number(gEl.value)):CUBE_GRID_DEFAULT;
+                if(!(nGrid>=2))nGrid=CUBE_GRID_DEFAULT;
+                if(nGrid>CUBE_GRID_MAX){
+                    alert('Cube grid '+nGrid+' is too large: the limit is '+CUBE_GRID_MAX+' points per axis ('+(CUBE_GRID_MAX*CUBE_GRID_MAX*CUBE_GRID_MAX)+' values). Reduce it and save again.');
+                    return;
+                }
+                content=buildCubeContent(nGrid);ext='.cube';break;
+            }
             case 'vesta':content=vestaContent;ext='.vesta';break;
             case 'coord':content=coord;ext='.coord';break;
             case 'inp':content=orcaInp;ext='.inp';break;
@@ -10566,12 +10633,213 @@ function doSave(){
             case 'mol':content=mol;ext='.mol';break;
             case 'pdb':content=pdb;ext='.pdb';break;
             case 'mop':content=mopac;ext='.mop';break;
+            case 'xyz-cluster':content=buildClusterXyz(keepWholeMolecules());ext='.xyz';break;
+            case 'gjf-cluster':content=buildClusterGjf(keepWholeMolecules());ext='.gjf';break;
             default:content=xyz;ext='.xyz';
+        }
+        }catch(err){
+            alert('Failed to generate save content: '+(err&&err.message?err.message:String(err)));
+            return;
         }
         vscodeApi.postMessage({command:'saveFile',content:content,suggestedName:'molecule_modified'+ext,filePath:MD.filePath||''});
         hideModal();
     });
     document.getElementById('m-cancel').addEventListener('click',function(){hideModal()});
+}
+
+// ===== Crystal export: the unit cell, and the cluster cut out of it =====
+//
+// Every crystal format in the save dialog answers one of two questions, and
+// each answer is written by the functions below instead of a second copy of
+// the geometry arithmetic:
+//
+//   "what is the cell?"   CIF / POSCAR / VESTA / cube — baseAtoms, each site
+//                         wrapped into [0,1), the cell's own lattice, and the
+//                         declaration (P1, audit line, comment line) that says
+//                         the symmetry is already expanded;
+//   "what is on screen?"  xyz-cluster / gjf-cluster — the displayed atoms cut
+//                         to the supercell bounds, as the molecule a QM job
+//                         starts from.
+//
+// The two are deliberately different files: a cell is periodic and a cluster is
+// not, and a format that says one while containing the other is the bug E2/E3
+// were about (a POSCAR listing 2x2x2 atoms against a 1x1x1 lattice, a CIF
+// listing an expanded cell under the original operation list).
+
+// The cube's grid is the only export setting that changes the file's size, so
+// it has an explicit ceiling: 64 points per axis is 262 144 zeros, a few
+// megabytes of text. Above that a file is refused rather than clamped.
+var CUBE_GRID_DEFAULT=40;
+var CUBE_GRID_MAX=64;
+var CUBE_BOHR_PER_ANG=1.8897259886;
+
+/** The unit cell's volume (the lattice determinant). */
+function crystalCellVolume(){
+    if(!CRY||!CRY.latticeVectors)return 0;
+    var lv=CRY.latticeVectors;
+    var det=lv[0][0]*(lv[1][1]*lv[2][2]-lv[1][2]*lv[2][1])
+          -lv[0][1]*(lv[1][0]*lv[2][2]-lv[1][2]*lv[2][0])
+          +lv[0][2]*(lv[1][0]*lv[2][1]-lv[1][1]*lv[2][0]);
+    return Math.abs(det);
+}
+/** The cell's composition in Hill order, spaced the way a CIF writes it. */
+function crystalFormulaSum(atoms){
+    var f=formulaFromAtoms(atoms||[]);
+    if(!f)return '';
+    var re=/([A-Z][a-z]?)(\\d+)?/g,m,out='';
+    while((m=re.exec(f))!==null){
+        if(out)out+=' ';
+        out+=m[1]+(m[2]||'');
+    }
+    return out;
+}
+/**
+ * Fractional coordinates wrapped into [0,1).
+ *
+ * Wrapping is not cosmetic: an atom moved across a face is the same site as its
+ * wrapped position, and a file that lists 1.02 hands a reader a coordinate it
+ * has to fold itself — while a value that rounds to 1.000000 at six decimals is
+ * written as 0 instead of as the upper face, which is the next cell.
+ */
+function crystalFracWrapped(x,y,z){
+    var inv=CRY_INV;
+    var f=[inv[0][0]*x+inv[0][1]*y+inv[0][2]*z,
+           inv[1][0]*x+inv[1][1]*y+inv[1][2]*z,
+           inv[2][0]*x+inv[2][1]*y+inv[2][2]*z];
+    for(var i=0;i<3;i++){
+        var w=f[i]-Math.floor(f[i]);
+        if(w>=1-5e-7)w=0;
+        f[i]=w;
+    }
+    return f;
+}
+/**
+ * The displayed region as a molecule: atoms plus the bonds among them.
+ *
+ * keepWhole=true is what the picture already shows — the builder places a
+ * finite molecule complete once its centroid is inside the bounds, so its atoms
+ * can sit outside the box and still belong to the cage the user cut out.
+ * keepWhole=false is the strict reading, atom by atom against the bounds, which
+ * is what a fragment cut for a QM job often needs to be.
+ *
+ * A bond that crosses a cell face (a bond with a shift) is dropped: it is the
+ * stub the renderer draws towards an image that is not in the file, and writing
+ * it as a bond between two atoms of the cluster would invent a length across
+ * the cell.
+ */
+function crystalCluster(keepWhole){
+    var inv=CRY_INV;
+    var map={},atoms=[],bonds=[];
+    for(var i=0;i<MD.atoms.length;i++){
+        var a=MD.atoms[i];
+        if(!keepWhole){
+            var fx=inv[0][0]*a.x+inv[0][1]*a.y+inv[0][2]*a.z;
+            var fy=inv[1][0]*a.x+inv[1][1]*a.y+inv[1][2]*a.z;
+            var fz=inv[2][0]*a.x+inv[2][1]*a.y+inv[2][2]*a.z;
+            if(fx<boundary.aMin-1e-9||fx>boundary.aMax+1e-9)continue;
+            if(fy<boundary.bMin-1e-9||fy>boundary.bMax+1e-9)continue;
+            if(fz<boundary.cMin-1e-9||fz>boundary.cMax+1e-9)continue;
+        }
+        map[i]=atoms.length;
+        atoms.push({element:a.element,ghost:a.ghost,x:a.x,y:a.y,z:a.z,index:atoms.length});
+    }
+    MD.bonds.forEach(function(b){
+        if(b.shift&&(b.shift[0]||b.shift[1]||b.shift[2]))return;
+        var a1=map[b.atom1],a2=map[b.atom2];
+        if(a1===undefined||a2===undefined)return;
+        bonds.push({atom1:a1,atom2:a2,order:b.order});
+    });
+    return {atoms:atoms,bonds:bonds};
+}
+/** The cell a cluster was cut from and the bounds that cut it, for its title. */
+function crystalClusterTitle(nAtoms,keepWhole){
+    var c=CRY;
+    var cell='cell '+c.a.toFixed(3)+'/'+c.b.toFixed(3)+'/'+c.c.toFixed(3)+' A '+
+        c.alpha.toFixed(2)+'/'+c.beta.toFixed(2)+'/'+c.gamma.toFixed(2);
+    var bnd='bounds a['+boundary.aMin+','+boundary.aMax+'] b['+boundary.bMin+','+boundary.bMax+'] c['+boundary.cMin+','+boundary.cMax+']';
+    return 'cluster '+cell+', '+bnd+', '+(keepWhole?'whole molecules':'cut at the bounds')+', '+nAtoms+' atoms';
+}
+/** The cluster-dialog switch: whole molecules unless the user unticked it. */
+function keepWholeMolecules(){
+    var el=document.getElementById('m-keepmol');
+    return el?!!el.checked:true;
+}
+function buildClusterXyz(keepWhole){
+    var cl=crystalCluster(keepWhole);
+    var title=provTitle(MD.title||'Modified structure',false,crystalClusterTitle(cl.atoms.length,keepWhole));
+    var out=cl.atoms.length+'\\n'+title+'\\n';
+    cl.atoms.forEach(function(a){
+        out+=(isGhostAtom(a)?'X':a.element)+'  '+a.x.toFixed(6)+'  '+a.y.toFixed(6)+'  '+a.z.toFixed(6)+'\\n';
+    });
+    return out;
+}
+function buildClusterGjf(keepWhole){
+    var cl=crystalCluster(keepWhole);
+    var title=provTitle(MD.title||'Modified structure',false,crystalClusterTitle(cl.atoms.length,keepWhole));
+    var chrg=MD.charge||0,mult=MD.multiplicity||1;
+    // A crystal has no Gaussian route of its own to preserve, so the cluster
+    // gets the same default header a fresh structure gets.
+    var out='%chk=cluster.chk\\n%mem=4GB\\n%nproc=4\\n# B3LYP/6-31G(d)\\n\\n'+title+'\\n\\n'+chrg+' '+mult+'\\n';
+    cl.atoms.forEach(function(a){
+        var el=isGhostAtom(a)?(a.element==='X'?'Bq':a.element+'-Bq'):a.element;
+        while(el.length<2)el+=' ';
+        var sx=a.x.toFixed(8);while(sx.length<17)sx=' '+sx;
+        var sy=a.y.toFixed(8);while(sy.length<17)sy=' '+sy;
+        var sz=a.z.toFixed(8);while(sz.length<17)sz=' '+sz;
+        out+=' '+el+' '+sx+' '+sy+' '+sz+'\\n';
+    });
+    out+='\\n';
+    // One connect line per atom, each bond written once (on the line of the
+    // lower-numbered atom) — the convention the molecular GJF writer uses, so
+    // a cluster input and an ordinary input read the same way.
+    var conn=[];
+    for(var ci=0;ci<cl.atoms.length;ci++)conn.push([]);
+    cl.bonds.forEach(function(b){
+        if(b.atom1<b.atom2)conn[b.atom1].push(b.atom2+1,b.order.toFixed(1));
+        else if(b.atom2<b.atom1)conn[b.atom2].push(b.atom1+1,b.order.toFixed(1));
+    });
+    for(var ai=0;ai<cl.atoms.length;ai++){
+        out+=[ai+1].concat(conn[ai]).join(' ')+'\\n';
+    }
+    out+='\\n';
+    return out;
+}
+/**
+ * A real Gaussian cube of the unit cell: the atoms, the cell as the grid's box,
+ * and a grid of zeros the caller sizes.
+ *
+ * A positive atom count is written (a negative one announces orbital records
+ * this file does not carry, and readers then consume the grid as that record),
+ * and it also states the units: cube files count in Bohr unless the count is
+ * negative, so every coordinate here is converted rather than written in Å
+ * under a header that says otherwise. The values are zeros — the viewer has no
+ * density to sample — and the header's second line says so, so a consumer can
+ * tell "a grid that happens to be flat" from "a density that came out zero".
+ */
+function buildCubeContent(nGrid){
+    var lv=CRY.latticeVectors;
+    var base=CRY.baseAtoms;
+    var title=provTitle(MD.title||'Modified structure',true,'unit cell, '+base.length+' atoms, '+nGrid+'^3 zero grid');
+    var out='Molecular Viewer export\\n'+title+'\\n';
+    out+=base.length+'  0.000000  0.000000  0.000000\\n';
+    for(var ax=0;ax<3;ax++){
+        out+=nGrid+'  '+(lv[ax][0]/nGrid*CUBE_BOHR_PER_ANG).toFixed(8)+
+            '  '+(lv[ax][1]/nGrid*CUBE_BOHR_PER_ANG).toFixed(8)+
+            '  '+(lv[ax][2]/nGrid*CUBE_BOHR_PER_ANG).toFixed(8)+'\\n';
+    }
+    base.forEach(function(ba){
+        var f=crystalFracWrapped(ba.x,ba.y,ba.z);
+        var x=(f[0]*lv[0][0]+f[1]*lv[1][0]+f[2]*lv[2][0])*CUBE_BOHR_PER_ANG;
+        var y=(f[0]*lv[0][1]+f[1]*lv[1][1]+f[2]*lv[2][1])*CUBE_BOHR_PER_ANG;
+        var z=(f[0]*lv[0][2]+f[1]*lv[1][2]+f[2]*lv[2][2])*CUBE_BOHR_PER_ANG;
+        out+=(AN[ba.element]||0)+'  0.000000  '+x.toFixed(8)+'  '+y.toFixed(8)+'  '+z.toFixed(8)+'\\n';
+    });
+    var nVals=nGrid*nGrid*nGrid;
+    for(var vi=0;vi<nVals;vi++){
+        out+='0.0000e+00';
+        if((vi+1)%6===0||vi===nVals-1)out+='\\n';else out+='  ';
+    }
+    return out;
 }
 
 function parseSelectInput(input){
