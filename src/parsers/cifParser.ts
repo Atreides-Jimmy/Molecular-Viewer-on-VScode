@@ -1,4 +1,17 @@
 import { Atom, AsymAtom, Bond, CrystalData, MolecularData } from '../types';
+import {
+    applySymOp,
+    cartToFrac,
+    cellToLatticeVectors,
+    createNearIndex,
+    DEDUPE_TOL,
+    EXACT_MERGE,
+    fracToCart,
+    parseSymOp,
+    SymOp,
+    wrapFrac
+} from './crystalGeometry';
+import { lookupSpaceGroupOps, SpaceGroupOps } from './spaceGroupTable';
 
 /**
  * CIF reader.
@@ -341,100 +354,7 @@ function tokenize(content: string): CifData {
     return data;
 }
 
-// ===== Cell =====
-
-function cellToLatticeVectors(a: number, b: number, c: number, alpha: number, beta: number, gamma: number): number[][] {
-    const rad = Math.PI / 180;
-    const ar = alpha * rad;
-    const br = beta * rad;
-    const gr = gamma * rad;
-
-    const cosA = Math.cos(ar);
-    const cosB = Math.cos(br);
-    const cosG = Math.cos(gr);
-    const sinG = Math.sin(gr);
-
-    const aVec = [a, 0, 0];
-    const bVec = [b * cosG, b * sinG, 0];
-    const cX = c * cosB;
-    const cY = c * (cosA - cosB * cosG) / sinG;
-    const cZ2 = 1 - cosA * cosA - cosB * cosB - cosG * cosG + 2 * cosA * cosB * cosG;
-    const cZ = c * Math.sqrt(Math.max(0, cZ2)) / sinG;
-    const cVec = [cX, cY, cZ];
-
-    return [aVec, bVec, cVec];
-}
-
-function fracToCart(frac: number[], lattice: number[][]): [number, number, number] {
-    const x = frac[0] * lattice[0][0] + frac[1] * lattice[1][0] + frac[2] * lattice[2][0];
-    const y = frac[0] * lattice[0][1] + frac[1] * lattice[1][1] + frac[2] * lattice[2][1];
-    const z = frac[0] * lattice[0][2] + frac[1] * lattice[1][2] + frac[2] * lattice[2][2];
-    return [x, y, z];
-}
-
 // ===== Symmetry =====
-
-interface SymOp {
-    R: number[][];
-    t: number[];
-}
-
-function parseSymOp(s: string): SymOp {
-    const parts = s.split(',').map(p => p.trim());
-    const R = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
-    const t = [0, 0, 0];
-
-    for (let idx = 0; idx < 3; idx++) {
-        if (idx >= parts.length) continue;
-        const expr = parts[idx].replace(/\s+/g, '').toLowerCase();
-        let sign = 1;
-        let k = 0;
-        while (k < expr.length) {
-            const ch = expr[k];
-            if (ch === '+') { sign = 1; k++; continue; }
-            if (ch === '-') { sign = -1; k++; continue; }
-            if (ch === 'x' || ch === 'y' || ch === 'z') {
-                const col = ch === 'x' ? 0 : ch === 'y' ? 1 : 2;
-                R[idx][col] += sign;
-                sign = 1;
-                k++;
-                continue;
-            }
-            const numMatch = expr.substring(k).match(/^(\d+\/\d+|\d+\.?\d*)/);
-            if (numMatch) {
-                let v: number;
-                if (numMatch[1].includes('/')) {
-                    const [p, q] = numMatch[1].split('/').map(Number);
-                    v = p / q;
-                } else {
-                    v = parseFloat(numMatch[1]);
-                }
-                t[idx] += sign * v;
-                sign = 1;
-                k += numMatch[1].length;
-                continue;
-            }
-            k++;
-        }
-    }
-
-    return { R, t };
-}
-
-function applySymOp(op: SymOp, frac: number[]): number[] {
-    const result = [0, 0, 0];
-    for (let i = 0; i < 3; i++) {
-        result[i] = op.R[i][0] * frac[0] + op.R[i][1] * frac[1] + op.R[i][2] * frac[2] + op.t[i];
-    }
-    return result;
-}
-
-function wrapFrac(v: number): number {
-    let r = v - Math.floor(v);
-    if (r >= 1 - 1e-6) r -= 1;
-    if (r < 0) r += 1;
-    return r;
-}
 
 /**
  * Whether a string is an operation this parser can apply: `x`, `y` and `z` each
@@ -509,91 +429,29 @@ function collectSymOps(data: CifData): { ops: string[]; tag: string | null; sawT
     return { ops: [], tag: null, sawTag };
 }
 
+/**
+ * The warning a file gets when its space-group name, not its own table, supplied
+ * the operations. It names the group and setting the table used, because the
+ * coordinates in the file were written for *some* setting: a reader that picks
+ * a different origin or cell choice would draw a different, equally plausible
+ * crystal. The origin caveat is only added when the choice really was a guess.
+ */
+function builtInSymmetryWarning(hit: SpaceGroupOps): string {
+    let s = 'no symmetry operations in the file: applied ' + hit.ops.length +
+        ' operation' + (hit.ops.length === 1 ? '' : 's') + ' of ' + hit.symbol +
+        ' (No. ' + hit.number + (hit.settingLabel === '' ? '' : ', ' + hit.settingLabel) +
+        ') from the built-in space-group table';
+    if (hit.assumedOrigin) {
+        s += '; the file does not state which origin its coordinates use, and the other origin would expand them differently';
+    }
+    return s;
+}
+
 // ===== Coincident sites =====
-
-/**
- * How close two images must be before they are the same atom, in Angstrom.
- *
- * This has to be far below a bond length: a structure can legitimately list two
- * sites 0.3 A apart (a split position, a partially occupied pair) and folding
- * them into one loses an atom that the file says is there. A tenth of an
- * angstrom only catches what symmetry expansion produces on purpose — the
- * images of a site that sits on a special position — plus genuine duplicates.
- */
-const DEDUPE_TOL = 0.1;
-const DEDUPE_TOL2 = DEDUPE_TOL * DEDUPE_TOL;
-
-/**
- * Two images closer than this are the same point, not two points that happen to
- * be near each other: the difference is round-off in the fractional -> cartesian
- * round trip (a few 1e-9 A at most). Only merges *above* it say anything about
- * the structure rather than about the arithmetic, so only those are reported.
- */
-const EXACT_MERGE = 1e-4;
-
-interface NearIndex {
-    add(x: number, y: number, z: number): void;
-    /** Nearest atom within DEDUPE_TOL of (x,y,z), with its distance. */
-    find(x: number, y: number, z: number): { index: number; dist: number } | null;
-}
-
-/**
- * A grid over the atoms placed so far, one cell per tolerance.
- *
- * Symmetry expansion compares every image against every atom already placed, so
- * a framework (thousands of sites times hundreds of operations) turns the naive
- * scan into billions of distance checks. A grid makes each lookup local; the
- * neighbourhood is 3x3x3 cells because two points closer than one cell size can
- * only ever land in adjacent cells. The result is the same as the exhaustive
- * scan — the distance test still decides — only it no longer depends on how
- * many atoms the cell already holds.
- */
-function createNearIndex(): NearIndex {
-    const buckets = new Map<number, number[]>();
-    const xs: number[] = [];
-    const ys: number[] = [];
-    const zs: number[] = [];
-    const cellOf = (v: number) => Math.floor(v / DEDUPE_TOL);
-    // A number hash of the three cell indices. Collisions only cost a distance
-    // check, never a wrong answer.
-    const bucketKey = (ix: number, iy: number, iz: number) =>
-        (ix * 73856093) ^ (iy * 19349663) ^ (iz * 83492791);
-
-    return {
-        add(x: number, y: number, z: number): void {
-            const k = bucketKey(cellOf(x), cellOf(y), cellOf(z));
-            const bucket = buckets.get(k);
-            if (bucket) bucket.push(xs.length);
-            else buckets.set(k, [xs.length]);
-            xs.push(x);
-            ys.push(y);
-            zs.push(z);
-        },
-        find(x: number, y: number, z: number): { index: number; dist: number } | null {
-            const ix = cellOf(x), iy = cellOf(y), iz = cellOf(z);
-            let best = -1;
-            let bestD2 = DEDUPE_TOL2;
-            for (let dx = -1; dx <= 1; dx++) {
-                for (let dy = -1; dy <= 1; dy++) {
-                    for (let dz = -1; dz <= 1; dz++) {
-                        const bucket = buckets.get(bucketKey(ix + dx, iy + dy, iz + dz));
-                        if (!bucket) continue;
-                        for (let n = 0; n < bucket.length; n++) {
-                            const i = bucket[n];
-                            const ex = xs[i] - x, ey = ys[i] - y, ez = zs[i] - z;
-                            const d2 = ex * ex + ey * ey + ez * ez;
-                            if (d2 < bestD2) {
-                                bestD2 = d2;
-                                best = i;
-                            }
-                        }
-                    }
-                }
-            }
-            return best < 0 ? null : { index: best, dist: Math.sqrt(bestD2) };
-        }
-    };
-}
+// The tolerance, its grid index and the "only round-off is quiet" rule are
+// shared with the VESTA reader — see crystalGeometry.ts. Two readers expanding
+// the same structure must use one ruler, or the same crystal gets two atom
+// counts.
 
 // ===== Entry point =====
 
@@ -633,7 +491,8 @@ function emptyCellCif(
     warnings: string[],
     cell: { a: number; b: number; c: number; alpha: number; beta: number; gamma: number },
     spaceGroup: string | undefined,
-    symmetryOps: string[]
+    symmetryOps: string[],
+    symmetrySource?: 'file' | 'builtin'
 ): MolecularData {
     const lattice = cellToLatticeVectors(cell.a, cell.b, cell.c, cell.alpha, cell.beta, cell.gamma);
     return {
@@ -648,11 +507,228 @@ function emptyCellCif(
             latticeVectors: lattice,
             spaceGroup,
             symmetryOps,
+            symmetrySource,
             baseAtoms: [],
             baseBonds: [],
             asymAtoms: []
         }
     };
+}
+
+// ===== The file's own bond table =====
+//
+// `_geom_bond` lists the bonds the depositor refined, in the site labels of the
+// asymmetric unit, with a symmetry code on each end that names the operation
+// and the cell the bonded image sits in (`2_766`: operation 2, translation
+// (2, 1, 1)). The table is the file's own statement, and it is worth reading:
+// it can disagree with distance-based perception on bond order, and it is the
+// only source for bonds whose length falls outside a covalent-radius cutoff.
+//
+// What comes out is expressed in `baseAtoms` — the expanded cell the viewer
+// draws and edits — because that, not the asymmetric unit, is what every page
+// pass addresses. A row whose two ends are the same site image is skipped: a
+// bond from an atom to its own image has no drawable length or direction, and
+// the viewer's bond graph holds one edge per pair anyway.
+
+interface SiteSymmetry {
+    op: SymOp;
+    shift: number[];
+}
+
+/** `.` and a missing code both mean the listed site itself, not operation 1. */
+function parseSiteSymmetry(code: string, ops: SymOp[]): SiteSymmetry | null {
+    const s = String(code === undefined || code === null ? '' : code).trim();
+    if (isMissingValue(s)) {
+        return { op: parseSymOp('x, y, z'), shift: [0, 0, 0] };
+    }
+    const m = /^(-?\d+)_([0-9])([0-9])([0-9])$/.exec(s);
+    if (!m) return null;
+    const n = parseInt(m[1], 10);
+    if (!(n >= 1 && n <= ops.length)) return null;
+    return { op: ops[n - 1], shift: [parseInt(m[2], 10) - 5, parseInt(m[3], 10) - 5, parseInt(m[4], 10) - 5] };
+}
+
+function bondTableLoop(data: CifData): CifLoop | null {
+    for (const loop of data.loops) {
+        if (columnOf(loop, ['_geom_bond_atom_site_label_1']) >= 0 &&
+            columnOf(loop, ['_geom_bond_atom_site_label_2']) >= 0) return loop;
+    }
+    return null;
+}
+
+type BondEndpoint = { baseIdx: number; offset: number[] } | 'label' | 'code' | 'image';
+
+function readCifBondTable(
+    data: CifData,
+    parsedSymOps: SymOp[],
+    asymAtoms: AsymAtom[],
+    baseAtoms: Atom[],
+    lattice: number[][]
+): { bonds: Bond[]; warnings: string[] } {
+    const warnings: string[] = [];
+    const loop = bondTableLoop(data);
+    if (!loop) {
+        // A loop carrying `_geom_bond_` keys but no label pair is a table the
+        // reader cannot use. Saying so beats reading the structure as if its
+        // file had never claimed any bonds.
+        const stray = data.loops.some(l => l.keys.some(k => normTag(k).indexOf('_geom_bond_') === 0));
+        if (stray) warnings.push('a _geom_bond loop has no atom-site label columns: its bond table was ignored');
+        return { bonds: [], warnings };
+    }
+
+    const col1 = columnOf(loop, ['_geom_bond_atom_site_label_1']);
+    const col2 = columnOf(loop, ['_geom_bond_atom_site_label_2']);
+    const code1Col = columnOf(loop, ['_geom_bond_site_symmetry_1']);
+    const code2Col = columnOf(loop, ['_geom_bond_site_symmetry_2']);
+    const orderCol = columnOf(loop, ['_geom_bond_order']);
+    const valenceCol = columnOf(loop, ['_geom_bond_valence']);
+    const minCols = Math.max(col1, col2) + 1;
+
+    const siteOf: { [label: string]: AsymAtom } = {};
+    let duplicateLabels = 0;
+    let duplicateExample = '';
+    for (const site of asymAtoms) {
+        const label = (site.label || '').trim();
+        if (label === '') continue;
+        if (siteOf[label]) {
+            duplicateLabels++;
+            if (duplicateExample === '') duplicateExample = label;
+            continue;
+        }
+        siteOf[label] = site;
+    }
+
+    // Every image of a site as the cell holds it, with the fractional position
+    // the image search compares against. A site on a special position has
+    // fewer images than the operation list, and the merged-away operations all
+    // land on the images that did survive — which is why a bond row may name
+    // any operation the file lists.
+    const imagesBySite: { [idx: number]: { baseIdx: number; frac: number[] }[] } = {};
+    for (const at of baseAtoms) {
+        const idx = at.asymIdx;
+        if (idx === undefined) continue;
+        const baseIdx = at.baseIdx !== undefined ? at.baseIdx : at.index;
+        const frac = cartToFrac([at.x, at.y, at.z], lattice);
+        (imagesBySite[idx] || (imagesBySite[idx] = [])).push({ baseIdx, frac });
+    }
+
+    function resolve(label: string, code: string | undefined): BondEndpoint {
+        const site = siteOf[label];
+        if (!site) return 'label';
+        const sym = parseSiteSymmetry(code === undefined ? '' : code, parsedSymOps);
+        if (!sym) return 'code';
+        const moved = applySymOp(sym.op, site.frac);
+        const target = [moved[0] + sym.shift[0], moved[1] + sym.shift[1], moved[2] + sym.shift[2]];
+        const images = imagesBySite[site.index] || [];
+        for (const img of images) {
+            const offset = [
+                Math.round(target[0] - img.frac[0]),
+                Math.round(target[1] - img.frac[1]),
+                Math.round(target[2] - img.frac[2])
+            ];
+            let residual = 0;
+            for (let axis = 0; axis < 3; axis++) {
+                const r = Math.abs(target[axis] - img.frac[axis] - offset[axis]);
+                if (r > residual) residual = r;
+            }
+            // The target is a position this reader computed from the file's own
+            // operations, so a real match is round-off; a tenth of a percent of
+            // a cell is far below the separation of any two distinct images.
+            if (residual < 1e-3) return { baseIdx: img.baseIdx, offset };
+        }
+        return 'image';
+    }
+
+    const bonds: Bond[] = [];
+    const seen: { [key: string]: true } = {};
+    let badLabels = 0;
+    let labelExample = '';
+    let badCodes = 0;
+    let codeExample = '';
+    let badImages = 0;
+    let selfBonds = 0;
+
+    for (const row of loop.rows) {
+        if (row.length < minCols) continue;
+        const label1 = (row[col1] || '').trim();
+        const label2 = (row[col2] || '').trim();
+        if (isMissingValue(label1) || isMissingValue(label2)) {
+            badLabels++;
+            if (labelExample === '') labelExample = label1 || label2;
+            continue;
+        }
+        const code1 = code1Col >= 0 ? row[code1Col] : '';
+        const code2 = code2Col >= 0 ? row[code2Col] : '';
+        const end1 = resolve(label1, code1);
+        const end2 = resolve(label2, code2);
+        if (end1 === 'label' || end2 === 'label') {
+            badLabels++;
+            if (labelExample === '') labelExample = end1 === 'label' ? label1 : label2;
+            continue;
+        }
+        if (end1 === 'code' || end2 === 'code') {
+            badCodes++;
+            if (codeExample === '') codeExample = (end1 === 'code' ? code1 : code2).trim();
+            continue;
+        }
+        if (end1 === 'image' || end2 === 'image') {
+            badImages++;
+            continue;
+        }
+        if (end1.baseIdx === end2.baseIdx) {
+            selfBonds++;
+            continue;
+        }
+        let a1 = end1.baseIdx;
+        let a2 = end2.baseIdx;
+        // The cell stores one edge per pair, atom1 < atom2, so the shift is
+        // stated for that direction: the image of atom2 in cell c+shift bonds
+        // with the image of atom1 in cell c.
+        let offset = [
+            end2.offset[0] - end1.offset[0],
+            end2.offset[1] - end1.offset[1],
+            end2.offset[2] - end1.offset[2]
+        ];
+        if (a1 > a2) {
+            const t = a1; a1 = a2; a2 = t;
+            offset = [-offset[0], -offset[1], -offset[2]];
+        }
+        const key = a1 + '_' + a2 + '_' + offset[0] + '_' + offset[1] + '_' + offset[2];
+        if (seen[key]) continue;
+        seen[key] = true;
+
+        const orderRaw = orderCol >= 0 ? parseNumber(row[orderCol]) : null;
+        // A file that lists no order column has not said the bond is single; it
+        // has said nothing about the order. Zero means exactly that, so the
+        // merge only overrides perception when the table really states one.
+        const order = orderRaw !== null && orderRaw >= 1 && orderRaw <= 3 ? orderRaw : 0;
+        const valenceRaw = valenceCol >= 0 ? parseNumber(row[valenceCol]) : null;
+        const bond: Bond = { atom1: a1, atom2: a2, order, shift: [offset[0], offset[1], offset[2]] };
+        if (valenceRaw !== null && valenceRaw > 0) bond.valence = valenceRaw;
+        bonds.push(bond);
+    }
+
+    if (duplicateLabels > 0) {
+        warnings.push('bond table: site label ' + duplicateExample + ' names more than one site: its bonds use the first');
+    }
+    if (badLabels > 0) {
+        warnings.push('bond table: ' + badLabels + ' row' + (badLabels === 1 ? '' : 's') +
+            ' name a site the atom list does not have' + (labelExample ? ' (e.g. ' + labelExample + ')' : ''));
+    }
+    if (badCodes > 0) {
+        warnings.push('bond table: ' + badCodes + ' row' + (badCodes === 1 ? '' : 's') +
+            ' carry a symmetry code that names no operation in the file' +
+            (codeExample ? ' (e.g. ' + codeExample + ')' : ''));
+    }
+    if (badImages > 0) {
+        warnings.push('bond table: ' + badImages + ' row' + (badImages === 1 ? '' : 's') +
+            ' name an image of a site that is not in the expanded cell');
+    }
+    if (selfBonds > 0) {
+        warnings.push('bond table: ' + selfBonds + ' bond' + (selfBonds === 1 ? '' : 's') +
+            ' join a site to its own symmetry image and were skipped');
+    }
+    return { bonds, warnings };
 }
 
 export function parseCif(content: string): MolecularData {
@@ -688,7 +764,10 @@ export function parseCif(content: string): MolecularData {
     const spaceGroupOut = spaceGroup === undefined || spaceGroup === '' ? undefined : spaceGroup;
 
     const scan = collectSymOps(data);
-    const symmetryOps = scan.ops.length > 0 ? scan.ops.slice() : ['x, y, z'];
+    let symmetryOps = scan.ops.length > 0 ? scan.ops.slice() : ['x, y, z'];
+    // Provenance travels with the operations: the page can then say that the
+    // expansion came from a name rather than from the file's own table.
+    let symmetrySource: 'file' | 'builtin' | undefined = scan.ops.length > 0 ? 'file' : undefined;
 
     // The cell comes first: without one there is nothing to expand, and a
     // warning about symmetry would only bury the reason the view is empty.
@@ -712,8 +791,21 @@ export function parseCif(content: string): MolecularData {
         if (scan.sawTag) {
             warnings.push('no readable symmetry operation under ' + scan.sawTag + ': read as P1');
         } else {
-            warnings.push('no symmetry operations in the file: read as P1' +
-                (spaceGroupOut ? ' (declared space group ' + spaceGroupOut + ')' : ''));
+            // The file states no operations at all. If it names a group, the
+            // built-in table can supply them; a file with its own (even
+            // unreadable) operation tag never reaches this branch.
+            const hit = spaceGroupOut === undefined ? null : lookupSpaceGroupOps(spaceGroupOut, cell);
+            if (hit !== null && hit.number > 1) {
+                symmetryOps = hit.ops.slice();
+                symmetrySource = 'builtin';
+                warnings.push(builtInSymmetryWarning(hit));
+            } else if (spaceGroupOut !== undefined && hit === null) {
+                warnings.push('no symmetry operations in the file: read as P1 (declared space group ' +
+                    spaceGroupOut + ', which is not in the built-in space-group table)');
+            } else {
+                warnings.push('no symmetry operations in the file: read as P1' +
+                    (spaceGroupOut ? ' (declared space group ' + spaceGroupOut + ')' : ''));
+            }
         }
     }
 
@@ -723,7 +815,7 @@ export function parseCif(content: string): MolecularData {
     const site = atomSiteLoop(data);
     if (!site) {
         warnings.push('no atom sites in the file');
-        return emptyCellCif('No atom sites found in CIF', warnings, cell, spaceGroupOut, symmetryOps);
+        return emptyCellCif('No atom sites found in CIF', warnings, cell, spaceGroupOut, symmetryOps, symmetrySource);
     }
 
     const atomLoop = site.loop;
@@ -735,12 +827,14 @@ export function parseCif(content: string): MolecularData {
     const yCol = columnOf(atomLoop, [axis + 'y']);
     const zCol = columnOf(atomLoop, [axis + 'z']);
     const occCol = columnOf(atomLoop, ['_atom_site_occupancy']);
+    const disorderCol = columnOf(atomLoop, ['_atom_site_disorder_group']);
 
     interface RawAtom {
         element: string;
         label: string;
         frac: number[];
         occupancy: number;
+        disorderGroup?: string;
     }
     const rawAtoms: RawAtom[] = [];
 
@@ -761,9 +855,13 @@ export function parseCif(content: string): MolecularData {
         const zv = parseNumber(row[zCol]);
         if (xv === null || yv === null || zv === null) { skipped++; continue; }
         const occupancy = occCol >= 0 ? (parseNumber(row[occCol]) ?? 1) : 1;
+        const groupRaw = disorderCol >= 0 ? (row[disorderCol] || '').trim() : '';
+        // `?` and `.` both mean "no group": a file that marks none must not
+        // grow a group called "?" that the panel would offer to filter.
+        const disorderGroup = groupRaw && !isMissingValue(groupRaw) ? groupRaw : undefined;
 
         const frac = useFract ? [xv, yv, zv] : cartToFrac([xv, yv, zv], lattice);
-        rawAtoms.push({ element, label, frac, occupancy });
+        rawAtoms.push({ element, label, frac, occupancy, disorderGroup });
     }
     if (skipped > 0) {
         warnings.push(skipped + ' atom site' + (skipped === 1 ? '' : 's') +
@@ -808,7 +906,12 @@ export function parseCif(content: string): MolecularData {
                 baseIdx: baseAtoms.length,
                 // The file's own name for the site this image came from; empty
                 // labels stay undefined so a file without labels adds nothing.
-                siteLabel: raw.label || undefined
+                siteLabel: raw.label || undefined,
+                // Where this image came from and which operation placed it —
+                // the two numbers a tooltip needs to say "site O1, op #7".
+                asymIdx: asymAtoms.length,
+                symOp: opIdx,
+                disorderGroup: raw.disorderGroup
             });
             hitOps.push(opIdx);
         }
@@ -824,7 +927,8 @@ export function parseCif(content: string): MolecularData {
             frac: [siteFrac[0], siteFrac[1], siteFrac[2]],
             index: asymAtoms.length,
             occupancy: raw.occupancy,
-            symmetryOps: hitOps
+            symmetryOps: hitOps,
+            disorderGroup: raw.disorderGroup
         });
     }
 
@@ -847,14 +951,23 @@ export function parseCif(content: string): MolecularData {
         cellI: 0, cellJ: 0, cellK: 0
     }));
 
+    // The file's bond table is read last: it needs the expanded cell (to name
+    // the image each end sits in) and the asymmetric unit (to know what its
+    // site labels mean). Its warnings join the file's own, so the panel's one
+    // summary line accounts for them.
+    const bondTable = readCifBondTable(data, parsedSymOps, asymAtoms, baseAtoms, lattice);
+    warnings.push(...bondTable.warnings);
+
     const crystal: CrystalData = {
         a, b, c, alpha, beta, gamma,
         latticeVectors: lattice,
         spaceGroup: spaceGroupOut,
         symmetryOps,
+        symmetrySource,
         baseAtoms: baseAtoms.map(at => ({ ...at, cellI: 0, cellJ: 0, cellK: 0 })),
         baseBonds: [] as Bond[],
-        asymAtoms
+        asymAtoms,
+        fileBonds: bondTable.bonds.length > 0 ? bondTable.bonds : undefined
     };
 
     // The title chain skips missing values, so a file whose `_chemical_name_common`
@@ -871,41 +984,7 @@ export function parseCif(content: string): MolecularData {
     };
 }
 
-function cartToFrac(cart: number[], lattice: number[][]): number[] {
-    const [aVec, bVec, cVec] = lattice;
-    const det = aVec[0] * (bVec[1] * cVec[2] - bVec[2] * cVec[1]) -
-                aVec[1] * (bVec[0] * cVec[2] - bVec[2] * cVec[0]) +
-                aVec[2] * (bVec[0] * cVec[1] - bVec[1] * cVec[0]);
-    if (Math.abs(det) < 1e-10) return [0, 0, 0];
-    const invDet = 1 / det;
-    const inv = [
-        [
-            (bVec[1] * cVec[2] - bVec[2] * cVec[1]) * invDet,
-            (bVec[2] * cVec[0] - bVec[0] * cVec[2]) * invDet,
-            (bVec[0] * cVec[1] - bVec[1] * cVec[0]) * invDet
-        ],
-        [
-            (aVec[2] * cVec[1] - aVec[1] * cVec[2]) * invDet,
-            (aVec[0] * cVec[2] - aVec[2] * cVec[0]) * invDet,
-            (aVec[1] * cVec[0] - aVec[0] * cVec[1]) * invDet
-        ],
-        [
-            (aVec[1] * bVec[2] - aVec[2] * bVec[1]) * invDet,
-            (aVec[2] * bVec[0] - aVec[0] * bVec[2]) * invDet,
-            (aVec[0] * bVec[1] - aVec[1] * bVec[0]) * invDet
-        ]
-    ];
-    return [
-        inv[0][0] * cart[0] + inv[0][1] * cart[1] + inv[0][2] * cart[2],
-        inv[1][0] * cart[0] + inv[1][1] * cart[1] + inv[1][2] * cart[2],
-        inv[2][0] * cart[0] + inv[2][1] * cart[1] + inv[2][2] * cart[2]
-    ];
-}
-
-export function cartesianToFractional(cart: number[], lattice: number[][]): number[] {
-    return cartToFrac(cart, lattice);
-}
-
-export function fractionalToCartesian(frac: number[], lattice: number[][]): [number, number, number] {
-    return fracToCart(frac, lattice);
-}
+// The two conversions are part of this module's published surface (callers use
+// them to move between the two coordinate systems a CIF can list), but the
+// arithmetic is shared with the other crystal readers.
+export { cartToFrac as cartesianToFractional, fracToCart as fractionalToCartesian };

@@ -33,6 +33,31 @@ export interface Atom {
      * together instead of relying on a parallel array staying aligned.
      */
     siteLabel?: string;
+    /**
+     * The asymmetric-unit site this cell atom is an image of (`asymIdx`, an
+     * index into `CrystalData.asymAtoms`) and the operation that placed it
+     * (`symOp`, an index into `CrystalData.symmetryOps`). The pair is what
+     * answers "where did this atom come from" for a tooltip or a site table, and
+     * both parsers write it while expanding, so it is exact rather than
+     * reconstructed by re-running the expansion. Absent on a structure that
+     * never had an asymmetric unit to begin with.
+     */
+    asymIdx?: number;
+    symOp?: number;
+    /**
+     * POSCAR "Selective dynamics" flags for this atom, one letter per axis
+     * (`T T F`). Kept verbatim so a read-save-read round trip states exactly
+     * what the file stated; the viewer itself has no use for the constraint.
+     */
+    constraint?: string;
+    /**
+     * The file's disorder group (`_atom_site_disorder_group`), when it states
+     * one. Empty/undefined means "not part of any group". The page uses it to
+     * show one component of a disordered site at a time; it is never inferred
+     * from occupancy, because two groups can each be fully occupied in
+     * different parts of a structure and occupancy alone cannot tell them apart.
+     */
+    disorderGroup?: string;
 }
 
 export interface Bond {
@@ -41,6 +66,14 @@ export interface Bond {
     order: number;
     crossCell?: boolean;
     shift?: [number, number, number];
+    /**
+     * `_geom_bond_valence` as the file states it, when it states one. A bond
+     * valence is not a bond order — it is the share of an atom's valence this
+     * bond carries, so a single bond is 1 and a delocalised one can be 1.5 —
+     * and it is kept verbatim so a read-save-read round trip says what the
+     * file said instead of a number the viewer guessed.
+     */
+    valence?: number;
 }
 
 /**
@@ -79,6 +112,8 @@ export interface AsymAtom {
      * only when the file happens to list it first.
      */
     symmetryOps: number[];
+    /** `_atom_site_disorder_group` for this site, when the file states one. */
+    disorderGroup?: string;
 }
 
 export interface CrystalData {
@@ -91,6 +126,12 @@ export interface CrystalData {
     latticeVectors: number[][];
     spaceGroup?: string;
     symmetryOps: string[];
+    /**
+     * Where the operations came from: the file's own symmetry table, or the
+     * built-in space-group table consulted because the file stated only a
+     * space-group name. Absent on formats that carry no operations at all.
+     */
+    symmetrySource?: 'file' | 'builtin';
     baseAtoms: Atom[];
     baseBonds: Bond[];
     /**
@@ -102,9 +143,28 @@ export interface CrystalData {
     /**
      * Bonds among `asymAtoms`, by their `index`. Present only when a format
      * states bonds for the asymmetric unit itself; a CIF's `_geom_bond` loop is
-     * not read yet, so this stays undefined rather than being invented.
+     * expanded into the base cell instead (see `fileBonds`), so this stays
+     * undefined rather than being invented.
      */
     asymBonds?: Bond[];
+    /**
+     * The bonds the file itself states (`_geom_bond`), already expanded into
+     * `baseAtoms` indices with the periodic image each bond points at. Only the
+     * CIF reader fills it, because only CIF carries a bond table among the
+     * formats read here.
+     *
+     * This is evidence, not the session's bond list: `baseBonds` stays the
+     * geometry-perceived list, and the page merges this table over it once, on
+     * the first rebuild. The table states which of the detected bonds the file
+     * agrees with and with what order; a bond the table lists that perception
+     * did not find is reported, not drawn, because a single bad row must not
+     * replace the picture the structure's geometry supports.
+     *
+     * An entry's `order` is 0 when the table lists the bond but states no order
+     * (`_geom_bond_order` absent or missing for that row): the file has said
+     * nothing about the order, and the perceived one stands.
+     */
+    fileBonds?: Bond[];
     /**
      * How many whole molecules (finite connected components) the unit cell
      * contains — the crystallographic Z for a molecular crystal. Written only

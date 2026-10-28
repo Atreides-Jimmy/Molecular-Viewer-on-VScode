@@ -812,6 +812,9 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                 'MDL Mol': ['mol'],
                                 'PDB': ['pdb'],
                                 'MOPAC': ['mop'],
+                                // The powder XRD panel exports a two-column
+                                // 2theta/intensity text file.
+                                'XY Data': ['xy', 'dat'],
                                 'All Files': ['*']
                             }
                         });
@@ -857,6 +860,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             latticeVectors: number[][];
                             spaceGroup: string;
                             symmetryOps: string[];
+                            symmetrySource?: 'file' | 'builtin';
                             baseAtoms: { element: string; x: number; y: number; z: number; occupancy?: number }[];
                         } | null = null;
 
@@ -907,6 +911,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                     latticeVectors: c.latticeVectors,
                                     spaceGroup: c.spaceGroup || '',
                                     symmetryOps: c.symmetryOps || [],
+                                    symmetrySource: c.symmetrySource,
                                     baseAtoms: c.baseAtoms.map(a => ({
                                         element: a.element, x: a.x, y: a.y, z: a.z,
                                         occupancy: a.occupancy
@@ -1356,13 +1361,24 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             latticeVectors: data.crystal.latticeVectors,
             spaceGroup: data.crystal.spaceGroup || '',
             symmetryOps: data.crystal.symmetryOps,
+            symmetrySource: data.crystal.symmetrySource,
             baseAtoms: data.crystal.baseAtoms.map(a => ({
                 element: a.element, x: a.x, y: a.y, z: a.z,
                 index: a.index, occupancy: a.occupancy, baseIdx: a.baseIdx,
-                siteLabel: a.siteLabel || undefined
+                siteLabel: a.siteLabel || undefined,
+                asymIdx: a.asymIdx, symOp: a.symOp,
+                constraint: a.constraint, disorderGroup: a.disorderGroup
             })),
             baseBonds: data.crystal.baseBonds.map(b => ({
-                atom1: b.atom1, atom2: b.atom2, order: b.order
+                atom1: b.atom1, atom2: b.atom2, order: b.order, shift: b.shift, valence: b.valence
+            })),
+            fileBonds: (data.crystal.fileBonds || []).map(b => ({
+                atom1: b.atom1, atom2: b.atom2, order: b.order, shift: b.shift, valence: b.valence
+            })),
+            asymAtoms: (data.crystal.asymAtoms || []).map(a => ({
+                element: a.element, label: a.label, x: a.x, y: a.y, z: a.z,
+                frac: a.frac, index: a.index, occupancy: a.occupancy,
+                symmetryOps: a.symmetryOps, disorderGroup: a.disorderGroup
             }))
         } : null;
 
@@ -1462,16 +1478,23 @@ input,textarea{-webkit-user-select:text;user-select:text}
 #mm-reopen.busy{border-color:var(--vscode-textLink-foreground,#3794ff);color:var(--vscode-textLink-foreground,#3794ff)}
 #axes-indicator{position:absolute;bottom:12px;left:12px;width:90px;height:90px;z-index:25;pointer-events:none}
 #axes-indicator svg{width:100%;height:100%}
-#crystal-panel{position:absolute;top:8px;right:8px;background:rgba(0,0,0,0.6);border:1px solid var(--vscode-panel-border,#444);border-radius:4px;padding:8px 10px;font-size:11px;color:var(--vscode-editor-foreground,#ccc);z-index:25;display:none;min-width:180px;max-width:calc(100% - 16px)}
+#crystal-panel{position:absolute;top:8px;right:8px;background:rgba(0,0,0,0.6);border:1px solid var(--vscode-panel-border,#444);border-radius:4px;padding:8px 10px;font-size:11px;color:var(--vscode-editor-foreground,#ccc);z-index:25;display:none;min-width:180px;max-width:calc(100% - 16px);max-height:calc(100% - 16px);overflow-y:auto}
 #crystal-panel h4{margin:0 0 6px 0;font-size:11px;font-weight:600}
 #crystal-panel .bnd-row{display:flex;align-items:center;gap:4px;margin:3px 0}
 #crystal-panel .bnd-row label{width:42px;text-align:right}
 #crystal-panel .bnd-row input{width:48px;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;padding:1px 3px;font-size:11px;text-align:center}
+#crystal-panel .bnd-row select{flex:1;min-width:0;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;padding:1px 2px;font-size:11px}
+#crystal-panel .bnd-row select:disabled{opacity:.5;cursor:default}
 #crystal-panel .bnd-btn{margin-top:6px;width:100%;background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff);border:none;border-radius:3px;padding:4px 6px;font-size:11px;cursor:pointer}
 #crystal-panel .bnd-btn:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
 #crystal-panel .bnd-presets{display:flex;gap:4px;margin-top:6px}
 #crystal-panel .bnd-mini{flex:1;background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#fff);border:1px solid var(--vscode-panel-border,#444);border-radius:3px;padding:3px 4px;font-size:11px;cursor:pointer;white-space:nowrap;min-width:0}
 #crystal-panel .bnd-mini:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e)}
+#crystal-panel .bnd-cell{margin-top:6px;font-size:10px;line-height:1.4;color:var(--vscode-descriptionForeground,#999);white-space:pre-line}
+#crystal-panel .hk-title{margin:8px 0 2px;font-weight:600;font-size:11px}
+#crystal-panel .hk-row label{width:34px}
+#crystal-panel .hk-row input{width:32px;padding:1px 2px}
+#crystal-panel .hk-val{margin:1px 0 0 34px;font-size:10px;line-height:1.35;color:var(--vscode-descriptionForeground,#999);white-space:normal}
 #egg-panel{position:absolute;top:8px;right:8px;background:rgba(0,0,0,0.6);border:1px solid var(--vscode-panel-border,#444);border-radius:4px;padding:8px 10px;font-size:11px;color:var(--vscode-editor-foreground,#ccc);z-index:25;display:none;min-width:200px;max-width:calc(100% - 16px);max-height:calc(100% - 70px);overflow-y:auto}
 #egg-panel.show{display:block}
 #egg-panel .ep-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:5px;font-weight:600}
@@ -1505,6 +1528,54 @@ input,textarea{-webkit-user-select:text;user-select:text}
 #rotate-panel .rp-slider-row input[type=number]{width:58px;flex-shrink:0;padding:3px 4px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:11px;box-sizing:border-box}
 #rotate-panel .rp-error{color:var(--vscode-errorForeground,#f66);font-size:11px;margin-top:4px;line-height:1.4}
 #rotate-panel .rp-hint{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:4px;line-height:1.4}
+#neigh-panel{display:none;position:absolute;bottom:40px;left:8px;z-index:50;background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:4px;padding:8px;width:330px;max-width:calc(100% - 16px);box-shadow:0 2px 8px rgba(0,0,0,0.3)}
+#neigh-panel .ng-title{font-size:12px;font-weight:bold;margin-bottom:4px}
+#neigh-panel .ng-line{display:flex;align-items:center;gap:6px;margin:4px 0;font-size:11px;min-height:20px}
+#neigh-panel .ng-line label{white-space:nowrap;color:var(--vscode-descriptionForeground,#999)}
+#neigh-panel .ng-line .ng-chk{display:flex;align-items:center;gap:3px;color:var(--vscode-editor-foreground,#ccc)}
+#neigh-panel input[type=number]{width:64px;padding:3px 5px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:11px;box-sizing:border-box}
+#neigh-panel .ng-anchor{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#neigh-panel .ng-summary{font-size:11px;color:var(--vscode-descriptionForeground,#999);margin:4px 0;min-height:14px}
+#neigh-panel .ng-list{max-height:220px;overflow-y:auto;border-top:1px solid rgba(128,128,128,0.25);margin-top:4px}
+#neigh-panel .ng-item{display:flex;align-items:baseline;gap:8px;padding:2px 3px;font-size:11px;cursor:pointer;white-space:nowrap}
+#neigh-panel .ng-item:hover{background:rgba(255,255,255,0.08)}
+#neigh-panel .ng-item.ng-off{opacity:0.6;cursor:default}
+#neigh-panel .ng-name{flex:1;overflow:hidden;text-overflow:ellipsis}
+#neigh-panel .ng-d{color:var(--vscode-descriptionForeground,#999);font-variant-numeric:tabular-nums}
+#neigh-panel .ng-cell{color:#e8a33d;font-size:10px}
+#neigh-panel .ng-empty{font-size:11px;color:var(--vscode-descriptionForeground,#999);padding:4px 3px}
+#neigh-panel .ng-btns{display:flex;gap:4px;margin-top:6px}
+#neigh-panel .ng-btns button{flex:1;padding:4px 6px;border-radius:3px;cursor:pointer;font-size:11px;border:1px solid var(--vscode-button-background,#0e639c);background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff)}
+#neigh-panel .ng-btns button:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
+#neigh-panel .ng-hint{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:4px;line-height:1.4}
+#xrd-panel{display:none;position:absolute;bottom:40px;left:8px;z-index:50;background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:4px;padding:8px;width:456px;max-width:calc(100% - 16px);max-height:calc(100% - 16px);overflow-y:auto;box-shadow:0 2px 8px rgba(0,0,0,0.3)}
+#xrd-panel .xr-title{display:flex;align-items:center;justify-content:space-between;font-size:12px;font-weight:bold;margin-bottom:4px}
+#xrd-panel .xr-close{background:none;border:none;color:var(--vscode-editor-foreground,#ccc);font-size:15px;line-height:1;cursor:pointer;padding:0 2px}
+#xrd-panel .xr-close:hover{color:#fff}
+#xrd-panel .xr-line{display:flex;align-items:center;gap:6px;margin:4px 0;font-size:11px;min-height:20px}
+#xrd-panel .xr-line label{white-space:nowrap;color:var(--vscode-descriptionForeground,#999)}
+#xrd-panel select{flex:1;min-width:0;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;padding:1px 2px;font-size:11px}
+#xrd-panel select.xr-narrow{flex:0 0 62px}
+#xrd-panel .xr-summary{font-size:11px;color:var(--vscode-descriptionForeground,#999);margin:2px 0;min-height:14px}
+#xrd-panel canvas{display:block;width:100%;height:150px;border:1px solid rgba(128,128,128,0.25);border-radius:3px;background:#0d1117}
+#xrd-panel .xr-note{font-size:10px;color:var(--vscode-descriptionForeground,#999);line-height:1.4;margin:3px 0}
+#xrd-panel .xr-list{max-height:132px;overflow-y:auto;border-top:1px solid rgba(128,128,128,0.25);margin-top:3px;font-variant-numeric:tabular-nums}
+#xrd-panel .xr-head,#xrd-panel .xr-row{display:flex;gap:6px;font-size:10px;padding:1px 2px;white-space:nowrap}
+#xrd-panel .xr-head{color:var(--vscode-descriptionForeground,#999);border-bottom:1px solid rgba(128,128,128,0.18);margin-bottom:1px}
+#xrd-panel .xr-c1{width:62px;text-align:right}
+#xrd-panel .xr-c2{width:58px;text-align:right}
+#xrd-panel .xr-c3{flex:1;text-align:right}
+#xrd-panel .xr-c4{width:40px;text-align:right}
+#xrd-panel .xr-c5{width:24px;text-align:right;color:#e8a33d}
+#xrd-panel .xr-row{color:var(--vscode-editor-foreground,#ccc)}
+#xrd-panel .xr-empty{font-size:11px;color:var(--vscode-descriptionForeground,#999);padding:4px 2px}
+#xrd-panel .xr-btns{display:flex;gap:4px;margin-top:6px}
+#xrd-panel .xr-btns button{flex:1;padding:4px 6px;border-radius:3px;cursor:pointer;font-size:11px;border:1px solid var(--vscode-button-background,#0e639c);background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff)}
+#xrd-panel .xr-btns button:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
+#xrd-panel .xr-btns button.xr-secondary{background:var(--vscode-button-secondaryBackground,#3a3d41);border-color:var(--vscode-panel-border,#444);color:var(--vscode-button-secondaryForeground,#fff)}
+#xrd-panel .xr-btns button.xr-secondary:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e)}
+#xrd-panel .xr-btns button:disabled{opacity:.5;cursor:default}
+#xrd-panel .xr-hint{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:4px;line-height:1.4}
 /* The View-mode controls are two cards, not one: Auto Rotate and Edit
    Coordinates each carry their own collision box in layoutPanels(), so a tall
    neighbour (the Diff results panel above all) can push them apart instead of
@@ -1665,6 +1736,7 @@ canvas{display:block}
 <button class="tbtn" data-mode="bondLength">Bond Length</button>
 <button class="tbtn" data-mode="bondAngle">Bond Angle</button>
 <button class="tbtn" data-mode="dihedral">Dihedral</button>
+<button class="tbtn" data-mode="neighbours">Neighbours</button>
 <button class="tbtn" data-mode="rotateGroup">Rotate Group</button>
 <button class="tbtn" data-mode="moveAtoms">Move Atoms</button>
 <button class="tbtn" data-mode="mmOpt">MM Optimize</button>
@@ -1702,7 +1774,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-p2" title="Eight unit cells, 0..2 along every axis">2×2×2</button><button class="bnd-mini" id="bnd-p3" title="Twenty-seven unit cells, 0..3 along every axis">3×3×3</button><button class="bnd-mini" id="bnd-p4" title="Sixty-four unit cells, 0..4 along every axis">4×4×4</button></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-reset" title="Back to the single unit cell, 0..1 along every axis">Reset</button><button class="bnd-mini" id="bnd-origin" title="Keep the spans, move the low corner onto the lattice origin">Align Origin</button></div><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="vp-title">Auto Rotate</div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div><div class="vp-title vp-sub">Display</div><select id="style-select" title="How the structure is drawn: ball and stick (the default), van der Waals spheres, or sticks without the atom spheres"><option value="ball">Ball &amp; Stick</option><option value="spacefill">Space-filling</option><option value="stick">Stick</option></select></div><div id="bake-panel"><div class="vp-title">Edit Coordinates</div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-p2" title="Eight unit cells, 0..2 along every axis">2×2×2</button><button class="bnd-mini" id="bnd-p3" title="Twenty-seven unit cells, 0..3 along every axis">3×3×3</button><button class="bnd-mini" id="bnd-p4" title="Sixty-four unit cells, 0..4 along every axis">4×4×4</button></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-reset" title="Back to the single unit cell, 0..1 along every axis">Reset</button><button class="bnd-mini" id="bnd-origin" title="Keep the spans, move the low corner onto the lattice origin">Align Origin</button></div><div class="bnd-cell" id="bnd-cell-line"></div><div class="bnd-row"><label>Disorder</label><select id="bnd-disorder" title="Show the ordered part plus one disorder group; All shows every alternative the cell lists"><option value="">All</option></select></div><div class="hk-title">Lattice Planes (h k l)</div><div class="bnd-row hk-row"><label>(h k l)</label><input type="number" id="hk-h" value="0" step="1" title="h"><input type="number" id="hk-k" value="0" step="1" title="k"><input type="number" id="hk-l" value="1" step="1" title="l"></div><div class="hk-val" id="hk-d1"></div><div class="bnd-row hk-row"><label>2nd</label><input type="number" id="hk2-h" value="1" step="1" title="h of the second plane"><input type="number" id="hk2-k" value="0" step="1" title="k of the second plane"><input type="number" id="hk2-l" value="0" step="1" title="l of the second plane"></div><div class="hk-val" id="hk-d2"></div><button id="hk-show" class="bnd-btn" title="Draw the (hkl) plane through the centre of the box">Show Plane</button><button id="xrd-open" class="bnd-btn" title="Calculate the powder X-ray diffraction pattern of the unit cell">Powder XRD Pattern...</button><button id="bnd-edit-cell" class="bnd-btn" title="Change the cell parameters; every site keeps its fractional coordinates">Edit Cell...</button><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="vp-title">Auto Rotate</div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div><div class="vp-title vp-sub">Display</div><select id="style-select" title="How the structure is drawn: ball and stick (the default), van der Waals spheres, sticks without the atom spheres, or coordination polyhedra around metal and metalloid centres"><option value="ball">Ball &amp; Stick</option><option value="spacefill">Space-filling</option><option value="stick">Stick</option><option value="polyhedra">Polyhedra</option></select></div><div id="bake-panel"><div class="vp-title">Edit Coordinates</div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="neigh-panel"><div class="ng-title">Neighbours</div><div class="ng-line"><label for="ng-radius">Radius (A)</label><input type="number" id="ng-radius" value="3.5" min="0.1" max="12" step="0.1"><label class="ng-chk" for="ng-skip"><input type="checkbox" id="ng-skip" checked>skip bonded</label></div><div class="ng-line"><label>Anchor</label><span class="ng-anchor" id="ng-anchor">click an atom</span></div><div class="ng-summary" id="ng-summary"></div><div class="ng-list" id="ng-list"></div><div class="ng-btns"><button id="ng-select">Select listed</button></div><div class="ng-hint" id="ng-hint">Click a row to select that atom. Crystal images outside the drawn cell are listed with their cell offset.</div></div><div id="xrd-panel"><div class="xr-title"><span>Powder XRD</span><button class="xr-close" id="xrd-close" title="Close (Esc)">&times;</button></div><div class="xr-line"><label for="xrd-rad">Radiation</label><select id="xrd-rad" title="The X-ray wavelength the pattern is calculated for"></select><label for="xrd-2max">2&theta; max</label><select id="xrd-2max" class="xr-narrow" title="The highest diffraction angle in the pattern"></select></div><div class="xr-summary" id="xrd-summary"></div><canvas id="xrd-canvas" width="440" height="150"></canvas><div class="xr-note" id="xrd-note"></div><div class="xr-list" id="xrd-list"></div><div class="xr-btns"><button id="xrd-refresh" class="xr-secondary" title="Recalculate after the structure changed">Recalculate</button><button id="xrd-export" title="Save the drawn curve as a two-column text file">Export .xy</button></div><div class="xr-hint">Pattern of the unit cell on screen (the supercell bounds do not change it) with Cromer-Mann form factors, Lorenz-polarisation and a Caglioti Gaussian profile.</div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="box-select-rect"></div>
@@ -1752,7 +1824,7 @@ function atomLabel(a,i){
     return el+((typeof i==='number')?(i+1):'');
 }
 // ===== Display style =====
-// A structure can be drawn three ways, and the choice belongs to the view, not
+// A structure can be drawn four ways, and the choice belongs to the view, not
 // to a mode: it is one variable here, above every block that reads it, and the
 // toolbar switching tools never touches it - which is what makes a style chosen
 // in View still be there in Bond Length, Move Atoms, MM Optimize or Diff, and
@@ -1765,12 +1837,19 @@ function atomLabel(a,i){
 //   'stick'     the sticks stay, and every sphere shrinks to the thickness of
 //               the sticks that meet at it, so the model reads as tubes with no
 //               beads (and no notch at a bend, because the joint fills it).
+//   'polyhedra' ball and stick plus the coordination hull of every metal or
+//               metalloid centre (see the polyhedra section): translucent
+//               faces in the centre's colour with their edges, merged into one
+//               geometry. A centre with fewer than four neighbours, a planar
+//               shell, or a structure whose centres bond only to other centres
+//               keeps the ball-and-stick picture, so the style never draws a
+//               shape that is not there.
 //
 // Only two places in the page read it - the atom radius of rebuildScene (and of
 // the comparison's right half) and the piece builder createBond - so one part
 // of the picture cannot be drawn in one style and another part in another.
 var displayStyle='ball';
-var DISPLAY_STYLES={ball:1,spacefill:1,stick:1};
+var DISPLAY_STYLES={ball:1,spacefill:1,stick:1,polyhedra:1};
 // van der Waals radii: the same table the host resolves a script's Surf probe
 // and the VDW representation against (src/parsers/vmdVisualization.ts). It is
 // copied rather than injected because the page's HTML is a template literal
@@ -1855,6 +1934,26 @@ function computeCrystalInv(){
     ];
 }
 computeCrystalInv();
+// The lattice matrix the page works with, from the six cell parameters, in the
+// orientation every parser builds it (a along x, b in the xy plane). Edit Cell
+// is the one place in the page that changes the cell, so it uses this formula
+// and the same six inputs the parsers read.
+function crystalLatticeFromParams(a,b,c,alpha,beta,gamma){
+    var rad=Math.PI/180;
+    var ca=Math.cos(alpha*rad),cb=Math.cos(beta*rad),cg=Math.cos(gamma*rad),sg=Math.sin(gamma*rad);
+    var av=[a,0,0];
+    var bv=[b*cg,b*sg,0];
+    var cx=c*cb;
+    var cy=c*(ca-cb*cg)/sg;
+    var cz2=1-ca*ca-cb*cb-cg*cg+2*ca*cb*cg;
+    var cz=c*Math.sqrt(Math.max(0,cz2))/sg;
+    return [av,bv,[cx,cy,cz]];
+}
+function crystalFracToCart(f,lv){
+    return [f[0]*lv[0][0]+f[1]*lv[1][0]+f[2]*lv[2][0],
+            f[0]*lv[0][1]+f[1]*lv[1][1]+f[2]*lv[2][1],
+            f[0]*lv[0][2]+f[1]*lv[1][2]+f[2]*lv[2][2]];
+}
 // The six bounds inputs show the boundary in force. It lives outside the
 // crystal panel's own block because an undo restores the boundary together with
 // the base cell, and has to put the inputs back with it.
@@ -1864,6 +1963,136 @@ function syncBndInputs(){
         var el=document.getElementById(pr[0]);
         if(el)el.value=boundary[pr[1]];
     });
+}
+// The cell parameters in force, in the supercell panel. Only a display: the
+// dialog reads them back from CRY, so a stale line can never be edited from.
+function syncCellPanel(){
+    var el=document.getElementById('bnd-cell-line');
+    if(!el||!CRY)return;
+    el.textContent='a '+CRY.a.toFixed(3)+'  b '+CRY.b.toFixed(3)+'  c '+CRY.c.toFixed(3)+
+        '\\nα '+CRY.alpha.toFixed(2)+'°  β '+CRY.beta.toFixed(2)+'°  γ '+CRY.gamma.toFixed(2)+'°';
+}
+function crystalCellEstimate(nb){
+    var na=Math.ceil(nb.aMax)-Math.floor(nb.aMin);
+    var nbv=Math.ceil(nb.bMax)-Math.floor(nb.bMin);
+    var nc=Math.ceil(nb.cMax)-Math.floor(nb.cMin);
+    if(na<1)na=1;
+    if(nbv<1)nbv=1;
+    if(nc<1)nc=1;
+    return na*nbv*nc;
+}
+// The disorder groups a cell states, in the file's own spelling. An atom with
+// no group belongs to the ordered part and is never a group of its own.
+function crystalDisorderGroups(){
+    var all=(CRY&&CRY.baseAtoms)||[];
+    var seen={},out=[];
+    for(var i=0;i<all.length;i++){
+        var g=all[i].disorderGroup;
+        if(g&&!seen[g]){seen[g]=true;out.push(g)}
+    }
+    out.sort(function(x,y){return x<y?-1:x>y?1:0});
+    return out;
+}
+// The base sites the view shows, saves and counts: every ungrouped site plus
+// the alternative the panel names. The filter is a view state only — CRY keeps
+// every site at its own index, so edits still commit to the site they name and
+// switching back to All (or undoing) loses nothing.
+function crystalVisibleBaseAtoms(){
+    var all=(CRY&&CRY.baseAtoms)||[];
+    var g=CRY&&CRY.disorderFilter;
+    if(!g)return all;
+    var out=[];
+    for(var i=0;i<all.length;i++){
+        var a=all[i];
+        if(!a.disorderGroup||a.disorderGroup===g)out.push(a);
+    }
+    return out;
+}
+// The panel's All / group select, rebuilt from the cell in force. It follows
+// every rebuild — an edit, an undo, a removed atom — so a group that no longer
+// exists leaves the list and the view falls back to All.
+function syncDisorderPanel(){
+    var sel=document.getElementById('bnd-disorder');
+    if(!sel||!CRY)return;
+    var groups=crystalDisorderGroups();
+    if(CRY.disorderFilter&&groups.indexOf(CRY.disorderFilter)<0)CRY.disorderFilter=null;
+    var want=CRY.disorderFilter||'';
+    var opts='<option value="">All</option>';
+    for(var i=0;i<groups.length;i++){
+        var g=groups[i];
+        opts+='<option value="'+escapeHtml(g)+'"'+(g===want?' selected':'')+'>Group '+escapeHtml(g)+'</option>';
+    }
+    sel.innerHTML=opts;
+    sel.value=want;
+    sel.disabled=groups.length===0;
+}
+// Edit Cell: the six parameters are the one description of the box a reader
+// can check against the file, so they are shown back as typed values. A site's
+// fractional coordinates are the invariant across the edit — that is what
+// makes a bond along a stretch with a, and only with a. The base cell, its
+// bonds and the bounds all stay in their own terms; the picture, the info
+// panel and every export read the new cell from CRY.
+function applyCellEdit(a,b,c,al,be,ga){
+    if(!CRY)return false;
+    var vals=[a,b,c,al,be,ga];
+    var bad=vals.some(function(v){return !isFinite(v)});
+    if(!bad&&!(a>0&&b>0&&c>0))bad=true;
+    if(!bad&&(al<=0||al>=180||be<=0||be>=180||ga<=0||ga>=180))bad=true;
+    var lv=null;
+    if(!bad){
+        lv=crystalLatticeFromParams(a,b,c,al,be,ga);
+        var det=lv[0][0]*(lv[1][1]*lv[2][2]-lv[1][2]*lv[2][1])-
+                lv[0][1]*(lv[1][0]*lv[2][2]-lv[1][2]*lv[2][0])+
+                lv[0][2]*(lv[1][0]*lv[2][1]-lv[1][1]*lv[2][0]);
+        if(!(Math.abs(det)>1e-8))bad=true;
+    }
+    if(bad){
+        showModal('<h3>Invalid Cell</h3><div class="current-val">Lengths must be positive, angles between 0 and 180 degrees, and the three vectors must enclose a nonzero volume.</div><div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">OK</button></div>',null);
+        document.getElementById('m-cancel').addEventListener('click',hideModal);
+        return false;
+    }
+    // The picture is rebuilt from the base cell, so the same ceiling that
+    // guards the bounds guards a changed cell too.
+    var est=CRY.baseAtoms.length*crystalCellEstimate(boundary);
+    if(est>MAX_CRYSTAL_ATOMS){
+        showModal('<h3>Supercell Too Large</h3><div class="current-val">This cell would build about '+est+' atoms; the limit is '+MAX_CRYSTAL_ATOMS+'.</div><div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">OK</button></div>',null);
+        document.getElementById('m-cancel').addEventListener('click',hideModal);
+        return false;
+    }
+    var inv=CRY_INV;
+    if(!inv){
+        showModal('<h3>Invalid Cell</h3><div class="current-val">The cell in force has no inverse, so its sites have no fractional coordinates to keep.</div><div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">OK</button></div>',null);
+        document.getElementById('m-cancel').addEventListener('click',hideModal);
+        return false;
+    }
+    if(moveDragActive||moveKeyActive||fragRotActive)stopMoveSession();
+    pushUndo();
+    var base=CRY.baseAtoms;
+    var fracs=[];
+    var i;
+    for(i=0;i<base.length;i++){
+        var p=base[i];
+        fracs.push([
+            inv[0][0]*p.x+inv[0][1]*p.y+inv[0][2]*p.z,
+            inv[1][0]*p.x+inv[1][1]*p.y+inv[1][2]*p.z,
+            inv[2][0]*p.x+inv[2][1]*p.y+inv[2][2]*p.z
+        ]);
+    }
+    CRY.a=a;CRY.b=b;CRY.c=c;CRY.alpha=al;CRY.beta=be;CRY.gamma=ga;
+    CRY.latticeVectors=lv;
+    computeCrystalInv();
+    for(i=0;i<base.length;i++){
+        var cart=crystalFracToCart(fracs[i],lv);
+        base[i].x=cart[0];base[i].y=cart[1];base[i].z=cart[2];
+    }
+    // baseBonds keep their fractional shifts: the same two sites in the same
+    // neighbouring cells are still joined by the same bond.
+    rebuildCrystal();
+    syncCellPanel();
+    rebuildScene(true);
+    mmSelectionChanged();
+    layoutPanels();
+    return true;
 }
 function formulaFromAtoms(arr){
     var counts={};
@@ -1912,8 +2141,19 @@ function updateMolInfo(){
         html+='<br>Unit Cell: '+formulaFromAtoms(CRY.baseAtoms);
         html+='<br>Cell: '+CRY.a.toFixed(3)+' × '+CRY.b.toFixed(3)+' × '+CRY.c.toFixed(3);
         html+='<br>Angles: '+CRY.alpha.toFixed(1)+'°, '+CRY.beta.toFixed(1)+'°, '+CRY.gamma.toFixed(1)+'°';
-        if(CRY.spaceGroup)html+='<br>SG: '+escapeHtml(CRY.spaceGroup);
+        if(CRY.spaceGroup)html+='<br>SG: '+escapeHtml(CRY.spaceGroup)+(CRY.symmetrySource==='builtin'?' (ops from built-in table)':'');
         html+='<br>Supercell: '+sa.toFixed(2)+'×'+sb.toFixed(2)+'×'+sc.toFixed(2);
+        // The file's own bond table, when it states one: how many bonds it
+        // lists against how many distance perception found. A row the table
+        // states and perception does not is a disagreement worth showing; the
+        // file's extra rows are not drawn (see mergeCrystalFileBonds).
+        if(CRY.bondSource&&CRY.bondSource.file>0){
+            html+='<br>Bonds: file '+CRY.bondSource.file+' / detected '+CRY.bondSource.detected;
+            if(CRY.bondSource.fileOnly>0){
+                html+=' <span style="color:#e8a33d">('+CRY.bondSource.fileOnly+
+                    ' only in the file)</span>';
+            }
+        }
         // Crystallographic constants of the unit cell itself: its volume, the
         // number of whole molecules it holds (Z — the count rebuildCrystal's
         // unwrap pass produces; a cell whose only component is an infinite
@@ -1939,6 +2179,35 @@ function updateMolInfo(){
                     if(crMassOk&&crMass>0)html+='<br>Density: '+(crMass/(0.602214*crVol)).toFixed(3)+' g/cm³';
                 }
             }
+        }
+        // G9: the asymmetric unit the file lists, with the operations that
+        // placed its images. Collapsed by default, because a molecular crystal
+        // with hundreds of sites would otherwise push the composition off the
+        // panel. This is the same data the tooltip quotes for one atom, shown
+        // as the whole site list.
+        if(CRY.asymAtoms&&CRY.asymAtoms.length){
+            var asu=CRY.asymAtoms;
+            var asuRows='';
+            for(var ai=0;ai<asu.length;ai++){
+                var asuSite=asu[ai];
+                var hit=asuSite.symmetryOps||[];
+                var ops='';
+                var shown=0;
+                for(var hj=0;hj<hit.length&&shown<3;hj++){
+                    if(ops!=='')ops+='; ';
+                    ops+='#'+(hit[hj]+1)+' '+escapeHtml((CRY.symmetryOps&&CRY.symmetryOps[hit[hj]])||'');
+                    shown++;
+                }
+                if(hit.length>shown)ops+=' +'+(hit.length-shown);
+                if(ops==='')ops='-';
+                asuRows+='<tr><td>'+escapeHtml(asuSite.label||('#'+(ai+1)))+'</td><td>'+escapeHtml(asuSite.element)+
+                    '</td><td>'+(asuSite.occupancy!=null?asuSite.occupancy:1)+'</td><td>'+hit.length+'</td><td>'+ops+'</td></tr>';
+            }
+            html+='<details style="margin-top:5px"><summary style="cursor:pointer">Asymmetric unit: '+
+                asu.length+' site'+(asu.length===1?'':'s')+'</summary>'+
+                '<table style="font-size:11px;border-collapse:collapse;margin-top:3px">'+
+                '<tr style="opacity:.75"><th align="left">site</th><th align="left">el</th><th align="left">occ</th><th align="left">mult</th><th align="left">operations</th></tr>'+
+                asuRows+'</table></details>';
         }
     }
     if(VMD&&VMD.molecules[vmdMolIdx]){
@@ -2080,7 +2349,9 @@ function atomRadius(a){
 // stickJointRadii); an atom with no sticks at all is drawn at the default stick
 // thickness instead, so an isolated ion does not vanish.
 function drawnRadius(a,jointR){
-    if(displayStyle==='ball')return atomRadius(a);
+    // The polyhedra style is the ball-and-stick picture with hulls added, so
+    // its atoms are drawn exactly as the default style draws them.
+    if(displayStyle==='ball'||displayStyle==='polyhedra')return atomRadius(a);
     if(isGhostAtom(a))return atomRadius(a);
     if(displayStyle==='spacefill')return VDW_R[a.element]||DEFAULT_VDW_R;
     return jointR>0?jointR:STICK_JOINT_R;
@@ -2100,6 +2371,319 @@ function stickJointRadii(){
         if(b.atom2<out.length&&r>out[b.atom2])out[b.atom2]=r;
     }
     return out;
+}
+
+// ===== Coordination polyhedra (the polyhedra display style) =====
+// The style draws the coordination hull of every metal or metalloid centre:
+// translucent faces in the centre's colour with their edges, all centres in
+// one merged geometry, over the ball-and-stick picture the other styles draw.
+// A centre whose shell is entirely made of other centres (a pure metal, an
+// intermetallic) is left as ball and stick: its hull would put a shape on every
+// atom of the structure and say nothing a bond does not. So is a centre with
+// fewer than four neighbours, and one with a planar shell (square planar,
+// trigonal, or a collinear detector accident) - there is no solid to draw, and
+// a flat sheet would only hide the atoms inside it.
+//
+// The hull is the convex hull of the neighbour positions. Every triple of
+// points proposes a plane; a triple is a hull face when every other point is
+// behind its plane (within a tolerance scaled to the shell). Coplanar hull
+// vertices are collected per plane, ordered around it and fanned, so a square
+// face of an octahedron is two triangles rather than four overlapped ones.
+// A shell wider than POLY_NEIGHBOURS_MAX is trimmed to its nearest points (a
+// real coordination shell is 4 to 16 neighbours; anything wider is a bond
+// detector blur that would cost the hull its quadratic worst case for no
+// picture). A structure with more centres than POLY_MAX_CENTERS falls back to
+// ball and stick entirely: the style must never stall a rebuild.
+//
+// The page carries no convex-hull library and must not grow one for this: the
+// arithmetic below is a dozen lines of geometry, not a dependency.
+var POLY_CENTERS=(function(){
+    var s='Li Be Na Mg Al K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn Ga Rb Sr Y Zr '+
+        'Nb Mo Tc Ru Rh Pd Ag Cd In Sn Cs Ba La Ce Pr Nd Pm Sm Eu Gd Tb Dy Ho '+
+        'Er Tm Yb Lu Hf Ta W Re Os Ir Pt Au Hg Tl Pb Bi Po Fr Ra Ac Th Pa U Np '+
+        'Pu Am Cm Bk Cf B Si Ge As Sb Te';
+    var out={},list=s.split(' ');
+    for(var i=0;i<list.length;i++)out[list[i]]=1;
+    return out;
+})();
+var POLY_MAX_CENTERS=8000;
+var POLY_NEIGHBOURS_MAX=24;
+function isPolyCenter(el){return !!POLY_CENTERS[el]}
+
+// A colour string from an atom record as three 0..1 channels. Anything the
+// page does not recognise reads as neutral grey rather than nothing.
+function polyRgb(c){
+    if(typeof c==='string'&&c.charAt(0)==='#'&&c.length>=7){
+        var r=parseInt(c.substr(1,2),16),g=parseInt(c.substr(3,2),16),b=parseInt(c.substr(5,2),16);
+        if(isFinite(r)&&isFinite(g)&&isFinite(b))return [r/255,g/255,b/255];
+    }
+    return [0.72,0.72,0.72];
+}
+// Andrew's monotone chain over the projected points: the convex polygon of a
+// planar face, counter-clockwise in the plane's own basis (which the caller
+// orients so that counter-clockwise is outward).
+function polyChain(q){
+    var m=q.length,i,p;
+    if(m<3)return [];
+    var idx=[];
+    for(i=0;i<m;i++)idx.push(i);
+    idx.sort(function(a,b){
+        if(q[a][0]!==q[b][0])return q[a][0]-q[b][0];
+        return q[a][1]-q[b][1];
+    });
+    function cross(o,a,b){
+        return (q[a][0]-q[o][0])*(q[b][1]-q[o][1])-(q[a][1]-q[o][1])*(q[b][0]-q[o][0]);
+    }
+    var lower=[];
+    for(i=0;i<m;i++){
+        p=idx[i];
+        while(lower.length>=2&&cross(lower[lower.length-2],lower[lower.length-1],p)<=1e-12)lower.pop();
+        lower.push(p);
+    }
+    var upper=[];
+    for(i=m-1;i>=0;i--){
+        p=idx[i];
+        while(upper.length>=2&&cross(upper[upper.length-2],upper[upper.length-1],p)<=1e-12)upper.pop();
+        upper.push(p);
+    }
+    lower.pop();upper.pop();
+    var out=lower.concat(upper);
+    return out.length>=3?out:[];
+}
+// The hull of one shell: faces as index triples and edges as index pairs, both
+// into pts, or null when the shell is not a solid. Points are relative to the
+// centre they surround, so the tolerances scale with the shell's own size.
+function polyHull(pts){
+    var n=pts.length,i,j,k,m;
+    if(n<4)return null;
+    var scale=0;
+    for(i=0;i<n;i++){
+        var d=Math.sqrt(pts[i][0]*pts[i][0]+pts[i][1]*pts[i][1]+pts[i][2]*pts[i][2]);
+        if(d>scale)scale=d;
+    }
+    if(!(scale>1e-6))return null;
+    var eps=1e-6*scale;
+    var planes=[];
+    for(i=0;i<n-2;i++){
+        for(j=i+1;j<n-1;j++){
+            for(k=j+1;k<n;k++){
+                var ax=pts[i][0],ay=pts[i][1],az=pts[i][2];
+                var ux=pts[j][0]-ax,uy=pts[j][1]-ay,uz=pts[j][2]-az;
+                var vx=pts[k][0]-ax,vy=pts[k][1]-ay,vz=pts[k][2]-az;
+                var nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx;
+                var len=Math.sqrt(nx*nx+ny*ny+nz*nz);
+                if(!(len>1e-8*scale*scale))continue;
+                nx/=len;ny/=len;nz/=len;
+                var pd=nx*ax+ny*ay+nz*az;
+                var pos=0,neg=0;
+                for(m=0;m<n;m++){
+                    if(m===i||m===j||m===k)continue;
+                    var sd=nx*pts[m][0]+ny*pts[m][1]+nz*pts[m][2]-pd;
+                    if(sd>eps)pos++;
+                    else if(sd<-eps)neg++;
+                }
+                if(pos&&neg)continue;
+                if(!pos&&!neg)continue;
+                if(pos){nx=-nx;ny=-ny;nz=-nz;pd=-pd}
+                var pl=null;
+                for(m=0;m<planes.length;m++){
+                    var p0=planes[m];
+                    if(p0.nx*nx+p0.ny*ny+p0.nz*nz>1-1e-6&&Math.abs(p0.d-pd)<eps){pl=p0;break}
+                }
+                if(!pl){pl={nx:nx,ny:ny,nz:nz,d:pd};planes.push(pl)}
+            }
+        }
+    }
+    if(planes.length<4)return null;
+    var faces=[],edges=[],seen={};
+    for(m=0;m<planes.length;m++){
+        var pl2=planes[m];
+        // The plane's own basis: u in the plane, v = n x u, so u x v = n.
+        var bux,buy,buz;
+        if(Math.abs(pl2.nx)<=Math.abs(pl2.ny)&&Math.abs(pl2.nx)<=Math.abs(pl2.nz)){bux=0;buy=-pl2.nz;buz=pl2.ny}
+        else if(Math.abs(pl2.ny)<=Math.abs(pl2.nz)){bux=pl2.nz;buy=0;buz=-pl2.nx}
+        else{bux=-pl2.ny;buy=pl2.nx;buz=0}
+        var bl=Math.sqrt(bux*bux+buy*buy+buz*buz);
+        bux/=bl;buy/=bl;buz/=bl;
+        var bvx=pl2.ny*buz-pl2.nz*buy,bvy=pl2.nz*bux-pl2.nx*buz,bvz=pl2.nx*buy-pl2.ny*bux;
+        var on=[],q=[];
+        for(i=0;i<n;i++){
+            var off=pl2.nx*pts[i][0]+pl2.ny*pts[i][1]+pl2.nz*pts[i][2]-pl2.d;
+            if(Math.abs(off)>1e-5*scale)continue;
+            on.push(i);
+            q.push([pts[i][0]*bux+pts[i][1]*buy+pts[i][2]*buz,
+                    pts[i][0]*bvx+pts[i][1]*bvy+pts[i][2]*bvz,i]);
+        }
+        var ring=polyChain(q);
+        if(ring.length<3)continue;
+        var poly=[];
+        for(i=0;i<ring.length;i++)poly.push(on[ring[i]]);
+        for(i=1;i+1<poly.length;i++)faces.push([poly[0],poly[i],poly[i+1]]);
+        for(i=0;i<poly.length;i++){
+            var e1=poly[i],e2=poly[(i+1)%poly.length];
+            var key=e1<e2?e1+'_'+e2:e2+'_'+e1;
+            if(seen[key])continue;
+            seen[key]=1;
+            edges.push([e1,e2]);
+        }
+    }
+    if(faces.length<4)return null;
+    // A nearly flat shell passes the plane tests as a paper-thin solid; its
+    // volume is what tells it apart from a polyhedron worth drawing.
+    var vol=0;
+    for(i=0;i<faces.length;i++){
+        var A=pts[faces[i][0]],B=pts[faces[i][1]],C=pts[faces[i][2]];
+        vol+=A[0]*(B[1]*C[2]-B[2]*C[1])-A[1]*(B[0]*C[2]-B[2]*C[0])+A[2]*(B[0]*C[1]-B[1]*C[0]);
+    }
+    vol=Math.abs(vol)/6;
+    if(vol<1e-3*scale*scale*scale)return null;
+    return {faces:faces,edges:edges};
+}
+// Every centre's hull as one merged body of triangles and edge segments, in
+// group-local coordinates (the centre is at cx,cy,cz). Pure: the caller draws
+// it. shiftOf(bond) gives the lattice offset of the bond's second endpoint, or
+// null when the bond is not periodic; the two images are then symmetric, which
+// is what makes the hull of a centre at a cell face close across it.
+function polyhedraGeometry(atoms,bonds,cx,cy,cz,shiftOf){
+    if(!atoms||atoms.length===0||!bonds||bonds.length===0)return null;
+    var n=atoms.length,nb=new Array(n),i,j,t;
+    function add(ci,nel,ox,oy,oz,px,py,pz){
+        var l=nb[ci];
+        if(!l){l=[];nb[ci]=l}
+        var dx=px-ox,dy=py-oy,dz=pz-oz;
+        // The same image twice (two bond records, or a bond and its reverse)
+        // is one neighbour; two different images are two.
+        for(t=0;t<l.length;t++){
+            if(Math.abs(l[t].x-dx)<1e-6&&Math.abs(l[t].y-dy)<1e-6&&Math.abs(l[t].z-dz)<1e-6)return;
+        }
+        l.push({el:nel,x:dx,y:dy,z:dz});
+    }
+    for(i=0;i<bonds.length;i++){
+        var b=bonds[i];
+        if(!b)continue;
+        var a1=atoms[b.atom1],a2=atoms[b.atom2];
+        if(!a1||!a2)continue;
+        if(isGhostAtom(a1)||isGhostAtom(a2))continue;
+        var sh=shiftOf?shiftOf(b):null;
+        var sx=sh?sh[0]:0,sy=sh?sh[1]:0,sz=sh?sh[2]:0;
+        add(b.atom1,a2.element,a1.x,a1.y,a1.z,a2.x+sx,a2.y+sy,a2.z+sz);
+        add(b.atom2,a1.element,a2.x,a2.y,a2.z,a1.x-sx,a1.y-sy,a1.z-sz);
+    }
+    var eligible=0;
+    for(i=0;i<n;i++){
+        var a=atoms[i];
+        if(!a||isGhostAtom(a)||!isPolyCenter(a.element))continue;
+        var list=nb[i];
+        if(!list||list.length<4)continue;
+        for(j=0;j<list.length;j++){if(!isPolyCenter(list[j].el)){eligible++;break}}
+    }
+    if(eligible===0||eligible>POLY_MAX_CENTERS)return null;
+    var faces=[],faceCols=[],edges=[],edgeCols=[];
+    var centers=0,triangles=0,segments=0;
+    for(i=0;i<n;i++){
+        var c=atoms[i];
+        if(!c||isGhostAtom(c)||!isPolyCenter(c.element))continue;
+        var shell=nb[i];
+        if(!shell||shell.length<4)continue;
+        var other=false;
+        for(j=0;j<shell.length;j++){if(!isPolyCenter(shell[j].el)){other=true;break}}
+        if(!other)continue;
+        if(shell.length>POLY_NEIGHBOURS_MAX){
+            shell.sort(function(p,q){
+                return (p.x*p.x+p.y*p.y+p.z*p.z)-(q.x*q.x+q.y*q.y+q.z*q.z);
+            });
+            shell.length=POLY_NEIGHBOURS_MAX;
+        }
+        var pts=[];
+        for(j=0;j<shell.length;j++)pts.push([shell[j].x,shell[j].y,shell[j].z]);
+        var hull=polyHull(pts);
+        if(!hull)continue;
+        centers++;
+        var rgb=polyRgb(c.color);
+        var er=rgb[0]*0.68,eg=rgb[1]*0.68,eb=rgb[2]*0.68;
+        for(j=0;j<hull.faces.length;j++){
+            var f=hull.faces[j];
+            for(t=0;t<3;t++){
+                var p=pts[f[t]];
+                faces.push(c.x+p[0]-cx,c.y+p[1]-cy,c.z+p[2]-cz);
+                faceCols.push(rgb[0],rgb[1],rgb[2]);
+            }
+            triangles++;
+        }
+        for(j=0;j<hull.edges.length;j++){
+            var e=hull.edges[j],p1=pts[e[0]],p2=pts[e[1]];
+            edges.push(c.x+p1[0]-cx,c.y+p1[1]-cy,c.z+p1[2]-cz,
+                       c.x+p2[0]-cx,c.y+p2[1]-cy,c.z+p2[2]-cz);
+            edgeCols.push(er,eg,eb,er,eg,eb);
+            segments++;
+        }
+    }
+    if(centers===0)return null;
+    return {faces:faces,faceColors:faceCols,edges:edges,edgeColors:edgeCols,
+        centers:centers,triangles:triangles,segments:segments};
+}
+// The lattice offset a bond's second endpoint is drawn at (the same shift
+// placeBondPieces applies), or null for a bond that stays inside the cell.
+function polyShiftVector(b){
+    if(!CRY||!b||!b.shift||!CRY.latticeVectors)return null;
+    var s=b.shift;
+    if(!s[0]&&!s[1]&&!s[2])return null;
+    var lv=CRY.latticeVectors;
+    return [s[0]*lv[0][0]+s[1]*lv[1][0]+s[2]*lv[2][0],
+            s[0]*lv[0][1]+s[1]*lv[1][1]+s[2]*lv[2][1],
+            s[0]*lv[0][2]+s[1]*lv[1][2]+s[2]*lv[2][2]];
+}
+// Turn a merged body into the two meshes the style draws: one for the faces,
+// one for the edges. A body with no segments (impossible in practice, but the
+// caller should not have to know) yields a null second mesh.
+function polyMeshPair(body,parent){
+    var fg=new THREE.BufferGeometry();
+    fg.setAttribute('position',new THREE.Float32BufferAttribute(body.faces,3));
+    fg.setAttribute('color',new THREE.Float32BufferAttribute(body.faceColors,3));
+    fg.computeVertexNormals();
+    var fm=new THREE.MeshPhongMaterial({vertexColors:true,transparent:true,opacity:0.36,
+        side:THREE.DoubleSide,depthWrite:false,shininess:30,specular:0x222222});
+    var faces=new THREE.Mesh(fg,fm);
+    // The hulls sit over the atoms and sticks on purpose; drawing them after
+    // the opaque geometry blends the faces over the picture, not into it.
+    faces.renderOrder=2;
+    parent.add(faces);
+    var edges=null;
+    if(body.segments>0){
+        var eg=new THREE.BufferGeometry();
+        eg.setAttribute('position',new THREE.Float32BufferAttribute(body.edges,3));
+        eg.setAttribute('color',new THREE.Float32BufferAttribute(body.edgeColors,3));
+        var em=new THREE.LineBasicMaterial({vertexColors:true,transparent:true,opacity:0.9});
+        edges=new THREE.LineSegments(eg,em);
+        edges.renderOrder=3;
+        parent.add(edges);
+    }
+    return [faces,edges];
+}
+function disposePolyMesh(m){
+    if(!m)return;
+    if(m.parent)m.parent.remove(m);
+    disposeMesh(m);
+}
+var polyFacesMesh=null;
+var polyEdgesMesh=null;
+function buildPolyhedra(){
+    disposePolyMesh(polyFacesMesh);
+    disposePolyMesh(polyEdgesMesh);
+    polyFacesMesh=null;polyEdgesMesh=null;
+    if(displayStyle!=='polyhedra')return;
+    var body=polyhedraGeometry(MD.atoms,MD.bonds,CX,CY,CZ,polyShiftVector);
+    if(!body)return;
+    var pair=polyMeshPair(body,moleculeGroup);
+    polyFacesMesh=pair[0];polyEdgesMesh=pair[1];
+}
+// A drag rewrites coordinates without rebuilding the scene; the hulls would
+// stay where the atoms were. They leave the picture for the duration of the
+// drag and the session's closing updateRotationCenter (or rebuildScene) puts
+// them back against the geometry the drag produced.
+function hidePolyhedra(){
+    if(polyFacesMesh)polyFacesMesh.visible=false;
+    if(polyEdgesMesh)polyEdgesMesh.visible=false;
 }
 
 function getOccupancyTexture(color,occupancy){
@@ -2308,7 +2892,73 @@ function detectCrystalBaseBondsFor(cry,inv){
 function detectCrystalBaseBonds(){
     if(!CRY||!CRY_INV)return;
     CRY.baseBonds=detectCrystalBaseBondsFor(CRY,CRY_INV);
+    mergeCrystalFileBonds();
     CRY.bondsDetected=true;
+}
+
+// The file's own bond table (_geom_bond), merged over the detected list once.
+//
+// The table is the depositor's statement, so it wins where it speaks: a bond it
+// lists keeps the author's order and valence instead of the perceived one, and
+// when perception finds nothing at all (an unusual element, a long bond outside
+// every radius cutoff) the table is the only connectivity there is and is used
+// as is.
+//
+// Where it is silent, detection stands. A table that lists only some of the
+// bonds — CCDC 142619 lists its heavy-atom bonds and no C-H at all — must not
+// orphan every hydrogen in the cell, so the detected bonds the file did not
+// mention stay. A row the table lists but perception did not find is counted
+// and reported, not drawn: one bad row must not put a bond through a molecule
+// that the geometry says is not there, and the panel line is where the file's
+// disagreement is visible.
+function mergeCrystalFileBonds(){
+    if(!CRY)return;
+    var file=CRY.fileBonds||[];
+    CRY.bondSource=null;
+    if(!file.length)return;
+    var bonds=CRY.baseBonds||[];
+    var i,f;
+    if(bonds.length===0){
+        var only=[];
+        for(f=0;f<file.length;f++){
+            var fbOnly=file[f];
+            if(!fbOnly||fbOnly.atom1===fbOnly.atom2)continue;
+            only.push({atom1:fbOnly.atom1,atom2:fbOnly.atom2,order:fbOnly.order||1,
+                shift:fbOnly.shift||ZERO_SHIFT,valence:fbOnly.valence});
+        }
+        CRY.baseBonds=only;
+        CRY.bondSource={file:file.length,detected:0,matched:only.length,fileOnly:0};
+        return;
+    }
+    // One entry per undirected pair and shift, in the (atom1 < atom2) direction
+    // the cell stores, so a table row written from either end finds the edge.
+    var byPair={};
+    for(i=0;i<bonds.length;i++){
+        var b=bonds[i];
+        var lo=b.atom1<b.atom2?b.atom1:b.atom2;
+        var hi=b.atom1<b.atom2?b.atom2:b.atom1;
+        var s=b.shift||ZERO_SHIFT;
+        if(b.atom1>b.atom2)s=[-s[0],-s[1],-s[2]];
+        byPair[lo+'_'+hi+'_'+s[0]+'_'+s[1]+'_'+s[2]]=b;
+    }
+    var matched=0;
+    for(f=0;f<file.length;f++){
+        var fb=file[f];
+        if(!fb||fb.atom1===fb.atom2)continue;
+        var lo2=fb.atom1<fb.atom2?fb.atom1:fb.atom2;
+        var hi2=fb.atom1<fb.atom2?fb.atom2:fb.atom1;
+        var fs=fb.shift||ZERO_SHIFT;
+        if(fb.atom1>fb.atom2)fs=[-fs[0],-fs[1],-fs[2]];
+        var hit=byPair[lo2+'_'+hi2+'_'+fs[0]+'_'+fs[1]+'_'+fs[2]];
+        // A tie between two equidistant images is stored with one shift; the
+        // file may state the other. It is the same edge either way.
+        if(!hit)hit=byPair[lo2+'_'+hi2+'_'+(-fs[0])+'_'+(-fs[1])+'_'+(-fs[2])];
+        if(!hit)continue;
+        matched++;
+        if(fb.order>0)hit.order=fb.order;
+        if(fb.valence>0)hit.valence=fb.valence;
+    }
+    CRY.bondSource={file:file.length,detected:bonds.length,matched:matched,fileOnly:file.length-matched};
 }
 
 // The connected components of a base bond list, each walked once with an
@@ -2435,6 +3085,39 @@ function rebuildCrystal(){
     if(!CRY.bondsDetected){
         detectCrystalBaseBonds();
         baseBonds=CRY.baseBonds;
+    }
+
+    // A disorder selection shows the ordered sites plus one alternative. The
+    // cell's own bond list is detected once on every site (so switching never
+    // re-perceives, and a bond an edit removed stays removed) and then cut down
+    // to the bonds whose two endpoints are on screen. The subset is remapped to
+    // local indices for the walk below; the display keeps the original baseIdx,
+    // because every commit and tooltip addresses the cell the file lists. A
+    // filter that names a group no site carries any more (its last atom was
+    // deleted) falls back to All here, before anything is placed.
+    if(CRY.disorderFilter){
+        var vgOk=false;
+        for(var vg=0;vg<baseAtoms.length;vg++){
+            if(baseAtoms[vg].disorderGroup===CRY.disorderFilter){vgOk=true;break}
+        }
+        if(!vgOk)CRY.disorderFilter=null;
+    }
+    if(CRY.disorderFilter){
+        var visMap=new Array(baseAtoms.length);
+        var visAtoms=[];
+        for(var va=0;va<baseAtoms.length;va++){
+            var baV=baseAtoms[va];
+            if(!baV.disorderGroup||baV.disorderGroup===CRY.disorderFilter){
+                visMap[va]=visAtoms.length;visAtoms.push(baV);
+            }else visMap[va]=-1;
+        }
+        var visBonds=[];
+        for(var vb=0;vb<baseBonds.length;vb++){
+            var bbV=baseBonds[vb];
+            var m1=visMap[bbV.atom1],m2=visMap[bbV.atom2];
+            if(m1>=0&&m2>=0)visBonds.push({atom1:m1,atom2:m2,order:bbV.order,shift:bbV.shift});
+        }
+        baseAtoms=visAtoms;baseBonds=visBonds;
     }
 
     // ===== Connected components, unwrapped =====
@@ -2686,6 +3369,7 @@ function rebuildCrystal(){
 
     MD.atoms=atoms;
     MD.bonds=bonds;
+    syncDisorderPanel();
     updateMolInfo();
     needsRender=true;
 }
@@ -2854,7 +3538,8 @@ function removeDisorder(){
         newBaseAtoms.push({
             element:ba.element,x:ba.x,y:ba.y,z:ba.z,
             index:newIdx,occupancy:newOcc,baseIdx:newIdx,color:color,
-            siteLabel:ba.siteLabel
+            siteLabel:ba.siteLabel,asymIdx:ba.asymIdx,symOp:ba.symOp,
+            constraint:ba.constraint,disorderGroup:ba.disorderGroup
         });
     });
     CRY.baseBonds=CRY.baseBonds.filter(function(b){
@@ -2871,6 +3556,14 @@ function removeDisorder(){
 var cellWireframe=null;      // the bounds' outer box
 var cellGridLines=null;      // the interior unit-cell division lines
 var cellEdgeLabels=[];       // the a/b/c sprites on the low corner's three edges
+// The cell panel's (hkl) calculator and the one plane it can draw. The state
+// lives up here because rebuildScene refreshes the plane, and that runs before
+// the section that defines the calculator (see "Lattice planes" below).
+var hklPlane={h:0,k:0,l:1};
+var hklPlane2={h:1,k:0,l:0};
+var hklShown=false;
+var hklPlaneMesh=null;
+var hklPlaneBorder=null;
 // One text sprite per call: the letter is drawn onto a small canvas (no font
 // file, no image load — the page's CSP allows nothing else) and the sprite
 // always faces the camera.
@@ -3771,6 +4464,15 @@ function rebuildScene(keepCenter){
     cellGridLines=null;
     cellEdgeLabels=[];
     rotAxisLineMesh=null;
+    neighLines=null;
+    // The plane is a child of the group the clear above emptied; hklRefresh at
+    // the end of the build puts the current one back.
+    hklPlaneMesh=null;
+    hklPlaneBorder=null;
+    // The polyhedra are children of that same group; buildPolyhedra below
+    // recreates them from the geometry this build produces.
+    polyFacesMesh=null;
+    polyEdgesMesh=null;
     // Recomputing the centroid is the default (the structure changed, the
     // centre follows it). A supercell bounds change passes keepCenter: the
     // atoms the old bounds already showed keep their exact screen positions
@@ -3819,6 +4521,7 @@ function rebuildScene(keepCenter){
     });
     sphereLayerBuild(mainSphereLayer,atomMeshes,moleculeGroup,segs,false);
     rebuildBondPieces();
+    buildPolyhedra();
     if(CRY)buildCellWireframe();
     highlightSelected();
     needsRender=true;
@@ -3829,6 +4532,17 @@ function rebuildScene(keepCenter){
     updateMolInfo();
     // 脚本的表面片 (Surf) 也要跟着新的几何重建; 中心刚算好, 放在最后。
     refreshVmdSurfaces();
+    // The contact lines are children of the molecule group the clear above
+    // removed: put them back against the geometry that was just built, so the
+    // panel and the picture never disagree after an edit, an undo or a switch.
+    if(neighActive)neighRefresh();
+    // The lattice-plane cut follows the cell it was drawn in: an edit, an undo
+    // or a supercell change rebuilds it against the new box.
+    hklRefresh();
+    // The powder pattern is a reading of the cell's contents, so an edit that
+    // moved an atom or changed a site's element must reach it too. The panel
+    // stays closed (and costs nothing) until it is opened.
+    xrdRefresh();
 }
 function updateScenePositions(keepCenter){
     if(!keepCenter){
@@ -3839,7 +4553,9 @@ function updateScenePositions(keepCenter){
     atomMeshes.forEach(function(m,i){var a=MD.atoms[i];if(a)m.position.set(a.x-CX,a.y-CY,a.z-CZ)});
     sphereLayerSyncPositions(mainSphereLayer);
     rebuildBondPieces();
+    buildPolyhedra();
     if(CRY)buildCellWireframe();
+    hklRefresh();
     highlightSelected();
     hideVmdSurfaces();
     needsRender=true;
@@ -3850,6 +4566,7 @@ function updateAtomMeshPositions(){
     // sphere positions + selection highlights only (no bond mesh rebuild).
     atomMeshes.forEach(function(m,i){var a=MD.atoms[i];if(a)m.position.set(a.x-CX,a.y-CY,a.z-CZ)});
     sphereLayerSyncPositions(mainSphereLayer);
+    hidePolyhedra();
     highlightSelected();
     hideVmdSurfaces();
 }
@@ -3885,8 +4602,15 @@ function updateRotationCenter(){
     }
     shiftAllMeshesForCenter(CX-oldX,CY-oldY,CZ-oldZ);
     if(rotAxisLineMesh)showRotAxisLine();   // 轴指示线也是相对中心画的
+    // 接触线同样相对中心存放, 中心一变就按新的几何重画。
+    if(neighActive)neighRefresh();
     // 中心变了, 表面片也要按新中心重摆 (签名里含中心, 没变时是空操作)。
     refreshVmdSurfaces();
+    // The hulls are baked against the centre the build used, so a centre that
+    // moved (a drag, a bake, an undo of an edit) rebuilds them from the very
+    // coordinates the atoms now have. The hide a drag put on them is lifted by
+    // the same rebuild.
+    buildPolyhedra();
     needsRender=true;
 }
 
@@ -4938,15 +5662,6 @@ if(CRY){
     // presets, Reset and Align Origin all go through applyBoundary, so the size
     // guard, the steady centre and the selection remap behave the same no
     // matter which one moved.
-    function crystalCellEstimate(nb){
-        var na=Math.ceil(nb.aMax)-Math.floor(nb.aMin);
-        var nbv=Math.ceil(nb.bMax)-Math.floor(nb.bMin);
-        var nc=Math.ceil(nb.cMax)-Math.floor(nb.cMin);
-        if(na<1)na=1;
-        if(nbv<1)nbv=1;
-        if(nc<1)nc=1;
-        return na*nbv*nc;
-    }
     function boundsEqual(a,b){
         return a.aMin===b.aMin&&a.aMax===b.aMax&&a.bMin===b.bMin&&a.bMax===b.bMax&&a.cMin===b.cMin&&a.cMax===b.cMax;
     }
@@ -5043,6 +5758,68 @@ if(CRY){
         // slab happened to be floating.
         applyBoundary({aMin:0,aMax:boundary.aMax-boundary.aMin,bMin:0,bMax:boundary.bMax-boundary.bMin,cMin:0,cMax:boundary.cMax-boundary.cMin});
     });
+    // Edit Cell: the six parameters are the one description of the box a
+    // reader can check against the file, so they are shown back as typed
+    // values. A site's fractional coordinates are the invariant across the
+    // edit — that is what makes the stretch along a bond along a, and only
+    // along a.
+    var editCellBtn=document.getElementById('bnd-edit-cell');
+    if(editCellBtn)editCellBtn.addEventListener('click',function(){
+        if(!CRY)return;
+        var rows=[['cell-a','a (Å)',CRY.a],['cell-b','b (Å)',CRY.b],['cell-c','c (Å)',CRY.c],
+                  ['cell-alpha','α (°)',CRY.alpha],['cell-beta','β (°)',CRY.beta],['cell-gamma','γ (°)',CRY.gamma]];
+        var body='';
+        rows.forEach(function(r){
+            body+='<div class="modal-row"><label for="'+r[0]+'">'+r[1]+'</label>'+
+                '<input type="number" id="'+r[0]+'" step="0.001" value="'+r[2].toFixed(6)+'"></div>';
+        });
+        showModal('<h3>Edit Cell</h3>'+
+            '<div class="current-val">Every site keeps its fractional coordinates: distances along an axis that changes scale with it, perpendicular distances do not.</div>'+
+            body+
+            '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button>'+
+            '<button class="mbtn mbtn-ok" id="m-ok">Apply</button></div>',null);
+        document.getElementById('m-cancel').addEventListener('click',hideModal);
+        document.getElementById('m-ok').addEventListener('click',function(){
+            var val={};
+            rows.forEach(function(r){val[r[0]]=parseFloat(document.getElementById(r[0]).value)});
+            if(applyCellEdit(val['cell-a'],val['cell-b'],val['cell-c'],val['cell-alpha'],val['cell-beta'],val['cell-gamma']))hideModal();
+        });
+    });
+    syncCellPanel();
+    // Disorder groups: All shows every alternative the file lists, a group
+    // shows the ordered part plus that alternative. The switch redraws the same
+    // cell through rebuildCrystal() like any edit, and it takes an undo step so
+    // Undo returns to the previous view (the snapshot carries the group state).
+    var disorderSel=document.getElementById('bnd-disorder');
+    if(disorderSel){
+        disorderSel.addEventListener('change',function(){
+            if(!CRY)return;
+            var want=disorderSel.value||null;
+            if((CRY.disorderFilter||null)===want){syncDisorderPanel();return}
+            if(moveDragActive||moveKeyActive||fragRotActive)stopMoveSession();
+            pushUndo();
+            var selKeys=selectedAtoms.map(function(i){
+                var a=MD.atoms[i];
+                return (a&&a.baseIdx!=null&&a.cellI!=null)?(a.baseIdx+'_'+a.cellI+'_'+a.cellJ+'_'+a.cellK):null;
+            });
+            CRY.disorderFilter=want;
+            rebuildCrystal();
+            var newIdx={};
+            MD.atoms.forEach(function(a,i){
+                if(a.baseIdx!=null&&a.cellI!=null){
+                    var k=a.baseIdx+'_'+a.cellI+'_'+a.cellJ+'_'+a.cellK;
+                    if(newIdx[k]===undefined)newIdx[k]=i;
+                }
+            });
+            selectedAtoms=selKeys.filter(function(k){
+                return k!=null&&newIdx[k]!==undefined;
+            }).map(function(k){return newIdx[k]});
+            rebuildScene(true);
+            refreshSelectionText();
+            mmSelectionChanged();
+            layoutPanels();
+        });
+    }
     var rmDisorderBtn=document.getElementById('bnd-remove-disorder');
     if(rmDisorderBtn){
         rmDisorderBtn.addEventListener('click',function(){
@@ -5825,7 +6602,7 @@ function mmCancelRun(){
     mmUpdateReopen();
 }
 
-var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',replaceAtom:'Replace Atom - Click atom(s) to select, click button again to confirm',addH:'Add H - Click atom(s) to select, click the button again to complete their hydrogens',selectAtoms:'Select Atoms - Input indices or element symbols',boxSelect:'Box Select - Drag a rectangle to select atoms',rotateGroup:'Rotate Group - Select group + axis atoms, then adjust angle',mmOpt:'Molecular Mechanics - Click atoms to select them; the panel optimizes only those atoms',moveAtoms:'Move Atoms - Select atoms; drag/arrows rotate view, right-drag pans; Ctrl+drag or Ctrl+arrows rotates group, Ctrl+right-drag moves group'};
+var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',neighbours:'Neighbours - Click an atom to list the atoms within the radius',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',replaceAtom:'Replace Atom - Click atom(s) to select, click button again to confirm',addH:'Add H - Click atom(s) to select, click the button again to complete their hydrogens',selectAtoms:'Select Atoms - Input indices or element symbols',boxSelect:'Box Select - Drag a rectangle to select atoms',rotateGroup:'Rotate Group - Select group + axis atoms, then adjust angle',mmOpt:'Molecular Mechanics - Click atoms to select them; the panel optimizes only those atoms',moveAtoms:'Move Atoms - Select atoms; drag/arrows rotate view, right-drag pans; Ctrl+drag or Ctrl+arrows rotates group, Ctrl+right-drag moves group'};
 
 function setMode(m){
     // An Alt-drag that is still running belongs to the mode it started in: a
@@ -5881,13 +6658,16 @@ function setMode(m){
     currentMode=m;
     bakeHintShown=false;
     updateBakeHint();
-    var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect'||oldMode==='replaceAtom'||oldMode==='addH'||oldMode==='rotateGroup'||oldMode==='moveAtoms'||oldMode==='mmOpt')&&(m==='selectAtoms'||m==='boxSelect'||m==='replaceAtom'||m==='addH'||m==='rotateGroup'||m==='moveAtoms'||m==='mmOpt'));
+    var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect'||oldMode==='replaceAtom'||oldMode==='addH'||oldMode==='rotateGroup'||oldMode==='moveAtoms'||oldMode==='mmOpt'||oldMode==='neighbours')&&(m==='selectAtoms'||m==='boxSelect'||m==='replaceAtom'||m==='addH'||m==='rotateGroup'||m==='moveAtoms'||m==='mmOpt'||m==='neighbours'));
     if(oldMode==='moveAtoms'&&m!=='moveAtoms')stopMoveSession();
     if(oldMode==='mmOpt'&&m!=='mmOpt')mmCancelRun();
     // Auto Rotate is a View-mode control: leaving the mode takes its panel away,
     // so the spin it started ends with it rather than running on with no way
     // back to the switch.
     if(oldMode==='view'&&m!=='view')stopSpin();
+    // The contact lines belong to the Neighbours panel: leaving the mode takes
+    // both away, and the panel starts empty the next time it is opened.
+    if(oldMode==='neighbours'&&m!=='neighbours')neighEndSession();
     if(!preserveSel){
         selectedAtoms=[];diffSelectedAtoms=[];originalCoords=null;
     }
@@ -5899,6 +6679,9 @@ function setMode(m){
     if(sp2)sp2.style.display=(m==='selectAtoms')?'block':'none';
     var rp2=document.getElementById('rotate-panel');
     if(rp2)rp2.style.display=(m==='rotateGroup')?'block':'none';
+    var np2=document.getElementById('neigh-panel');
+    if(np2)np2.style.display=(m==='neighbours')?'block':'none';
+    if(m==='neighbours'&&oldMode!=='neighbours')neighStartSession();
     var vp2=document.getElementById('view-panel');
     if(vp2)vp2.style.display=(m==='view')?'block':'none';
     // The Edit Coordinates card is the second half of the View-mode controls and
@@ -6339,6 +7122,14 @@ function pushUndo(){
         snap.baseAtoms=JSON.parse(JSON.stringify(CRY.baseAtoms));
         snap.baseBonds=JSON.parse(JSON.stringify(CRY.baseBonds));
         snap.boundary={aMin:boundary.aMin,aMax:boundary.aMax,bMin:boundary.bMin,bMax:boundary.bMax,cMin:boundary.cMin,cMax:boundary.cMax};
+        // The cell is part of the state an edit can change (Edit Cell), and a
+        // snapshot that restored the atoms but not the box would put them back
+        // into a different cell than the one they were cut from.
+        snap.cell={a:CRY.a,b:CRY.b,c:CRY.c,alpha:CRY.alpha,beta:CRY.beta,gamma:CRY.gamma,
+            latticeVectors:JSON.parse(JSON.stringify(CRY.latticeVectors))};
+        // The disorder selection is view state the base cell cannot rebuild
+        // from itself, so an undo of a group switch must put it back too.
+        snap.disorderFilter=CRY.disorderFilter||null;
     }else{
         snap.atoms=JSON.parse(JSON.stringify(MD.atoms));
         snap.bonds=JSON.parse(JSON.stringify(MD.bonds));
@@ -6373,6 +7164,16 @@ function doUndo(){
             boundary.cMin=snap.boundary.cMin;boundary.cMax=snap.boundary.cMax;
             syncBndInputs();
         }
+        if(snap.cell){
+            CRY.a=snap.cell.a;CRY.b=snap.cell.b;CRY.c=snap.cell.c;
+            CRY.alpha=snap.cell.alpha;CRY.beta=snap.cell.beta;CRY.gamma=snap.cell.gamma;
+            CRY.latticeVectors=snap.cell.latticeVectors;
+            computeCrystalInv();
+        }
+        // A snapshot taken before the disorder filter existed restores All,
+        // which is what it was showing.
+        CRY.disorderFilter=snap.disorderFilter||null;
+        syncCellPanel();
         rebuildCrystal();
     }else{
         MD.atoms=snap.atoms;MD.bonds=snap.bonds;
@@ -6428,6 +7229,9 @@ var diffData=null;
 var diffPivot=null;
 var diffMolGroup=null;
 var diffAtomMeshes=[];
+// The comparison's right-hand hulls, in the same style the left half draws.
+var diffPolyFacesMesh=null;
+var diffPolyEdgesMesh=null;
 // The comparison's bonds use the same instanced cylinders as the main
 // structure, in two pools: the plain one, and one whose material carries the
 // orange glow a highlighted bond is drawn with. A highlighted bond simply
@@ -7914,6 +8718,22 @@ function buildDiffModel(hiAtom,hiBond){
         addDiffBondPiece(mpx,mpy,mpz,ex-mpx,ey-mpy,ez-mpz,l/2,BOND_R,new THREE.Color(a2.color),bondKey,isHi);
     });
     diffBuildBondPools();
+    buildDiffPolyhedra();
+}
+
+// The right half wears the same display style as the left: the coordination
+// hulls of its metal/metalloid centres over its ball-and-stick picture. The
+// comparison's bonds carry no periodic image of their own (that half is built
+// against transformed coordinates), so there is no lattice offset to resolve.
+function buildDiffPolyhedra(){
+    disposePolyMesh(diffPolyFacesMesh);
+    disposePolyMesh(diffPolyEdgesMesh);
+    diffPolyFacesMesh=null;diffPolyEdgesMesh=null;
+    if(displayStyle!=='polyhedra'||!diffData||!diffMolGroup)return;
+    var body=polyhedraGeometry(diffData.atoms,diffData.bonds,diffCX,diffCY,diffCZ,null);
+    if(!body)return;
+    var pair=polyMeshPair(body,diffMolGroup);
+    diffPolyFacesMesh=pair[0];diffPolyEdgesMesh=pair[1];
 }
 
 // Rebuild that model from the state on screen, for a change of drawing style:
@@ -7933,6 +8753,12 @@ function rebuildDiffModel(){
 function enterDiffRender(diffs,mapping){
     if(vibActive||vibPaused)stopVibration();
     stopMoveSession();
+    // The contact search belongs to one structure; while two are on screen the
+    // panel says so and its lines leave the picture.
+    if(neighActive)neighRefresh();
+    // The lattice plane is one cell's reading aid and has no side in a
+    // comparison, so it leaves the picture with the second structure.
+    hklRefresh();
     // A comparison has two structures and two view states, so the panel stops
     // advertising Alt coordinate editing for as long as it is up.
     updateBakeHint();
@@ -8018,6 +8844,9 @@ function exitDiff(){
     diffBondPieces.length=0;
     sphereLayerClear(diffSphereLayer);
     diffAtomMeshes=[];
+    // The hull meshes left with the pivot above; the references must not
+    // outlive them, or a later style change would dispose them twice.
+    diffPolyFacesMesh=null;diffPolyEdgesMesh=null;
     diffSelectedAtoms=[];
     diffMapping=null;diffReverseMapping=null;
     diffBaseIndices=false;diffHasCrystal=false;diffLabelAtoms=null;
@@ -8043,6 +8872,10 @@ function exitDiff(){
     });
     highlightSelected();
     pivotGroup.visible=true;
+    // One structure again: the contact list and its lines come back with it.
+    if(neighActive)neighRefresh();
+    // ...and so does the lattice plane, against the one cell left on screen.
+    hklRefresh();
     var w=container.clientWidth||window.innerWidth;
     var h=container.clientHeight||(window.innerHeight-60);
     if(w<1)w=window.innerWidth;
@@ -9688,7 +10521,11 @@ function layoutPanels(){
         {id:'bake-panel',pr:3,anc:'br'},
         {id:'view-panel',pr:4,anc:'br'},
         {id:'select-panel',pr:3,anc:'bl'},
+        {id:'neigh-panel',pr:3,anc:'bl'},
         {id:'rotate-panel',pr:3,anc:'bl'},
+        // The powder panel is a reading aid opened from the crystal panel: it
+        // is stacked above the bottom-left tools, so it never covers them.
+        {id:'xrd-panel',pr:4,anc:'bl'},
         {id:'diff-label',pr:4,anc:'tc',pct:0.25},
         {id:'diff-label-right',pr:5,anc:'tc',pct:0.75},
         {id:'opt-panel',pr:7,anc:'tl'},
@@ -9828,6 +10665,15 @@ function selectAtom(idx){
         checkSelectionComplete();
         return;
     }
+    if(currentMode==='neighbours'){
+        // One atom is the centre of the search, not a member of a growing
+        // selection: a click moves the anchor and the panel follows it.
+        selectedAtoms=[idx];diffSelectedAtoms=[];originalCoords=null;
+        highlightSelected();
+        selInfoEl.textContent='';
+        neighSetAnchor(idx);
+        return;
+    }
     if(currentMode==='selectAtoms'||currentMode==='replaceAtom'||currentMode==='addH'||currentMode==='rotateGroup'||currentMode==='moveAtoms'||currentMode==='mmOpt'){
         var pos=selectedAtoms.indexOf(idx);
         if(pos>=0){
@@ -9904,6 +10750,1061 @@ function checkSelectionComplete(){
         selInfoEl.textContent='Selected for MM optimization: '+mnames+' ('+selectedAtoms.length+' atoms, click Start Optimization)';
     }
 }
+
+// ===== Neighbours / contact search =====
+// The panel answers "what is around this atom?" with one list, nearest first.
+// A crystal search runs in fractional space: every base site is placed at each
+// integer image that could reach inside the radius, so a contact across a cell
+// face is found even when that image is not drawn. A molecule is just the atoms
+// on screen. Bonds are hidden by default — the point of the search is the
+// non-covalent shell around an atom — and the checkbox brings them back.
+var neighActive=false;
+var neighAnchor=null;
+var neighRadius=3.5;
+var neighSkipBonded=true;
+var neighRows=[];
+var neighLines=null;
+var NEIGH_MAX_ROWS=200;
+var NEIGH_MAX_RADIUS=12;
+
+function neighListEl2(){return document.getElementById('ng-list')}
+function neighSummaryEl(){return document.getElementById('ng-summary')}
+
+// A site the drawing hides (the other alternative of a disorder group) has no
+// image on screen, so it is not a contact the reader can see either.
+function neighBaseVisible(ba){
+    return !!ba&&(!CRY||!CRY.disorderFilter||!ba.disorderGroup||ba.disorderGroup===CRY.disorderFilter);
+}
+
+function neighFractional(p){
+    var inv=CRY_INV;
+    return [inv[0][0]*p.x+inv[0][1]*p.y+inv[0][2]*p.z,
+            inv[1][0]*p.x+inv[1][1]*p.y+inv[1][2]*p.z,
+            inv[2][0]*p.x+inv[2][1]*p.y+inv[2][2]*p.z];
+}
+
+// Both directions of every base bond: a bond (a, b, shift s) is the contact
+// between image c of a and image c+s of b, and asking from b it is s on the
+// other side. Exact integer keys, so no tolerance is involved.
+function neighCrystalBondSet(){
+    var set={};
+    var list=(CRY&&CRY.baseBonds)||[];
+    for(var i=0;i<list.length;i++){
+        var b=list[i],s=b.shift||ZERO_SHIFT;
+        set[b.atom1+'_'+b.atom2+'_'+s[0]+','+s[1]+','+s[2]]=true;
+        set[b.atom2+'_'+b.atom1+'_'+(-s[0])+','+(-s[1])+','+(-s[2])]=true;
+    }
+    return set;
+}
+
+function neighDisplayMap(){
+    var map={};
+    for(var i=0;i<MD.atoms.length;i++){
+        var a=MD.atoms[i];
+        if(a.baseIdx!=null&&a.imgShift)map[a.baseIdx+'_'+a.imgShift.join(',')]=i;
+    }
+    return map;
+}
+
+function neighAnchorDisplayIndex(){
+    if(!neighAnchor)return -1;
+    if(neighAnchor.bi==null)return MD.atoms[neighAnchor.idx]?neighAnchor.idx:-1;
+    var s=neighAnchor.shift;
+    for(var i=0;i<MD.atoms.length;i++){
+        var a=MD.atoms[i];
+        if(a.baseIdx===neighAnchor.bi&&a.imgShift&&
+           a.imgShift[0]===s[0]&&a.imgShift[1]===s[1]&&a.imgShift[2]===s[2])return i;
+    }
+    return -1;
+}
+
+// The anchor's own Cartesian position, recomputed from the base site so it is
+// exact even if the image carrying it has just left the screen.
+function neighAnchorPoint(){
+    if(!neighAnchor)return null;
+    if(neighAnchor.bi!=null&&CRY&&CRY.baseAtoms&&CRY.latticeVectors){
+        var ba=CRY.baseAtoms[neighAnchor.bi],lv=CRY.latticeVectors,s=neighAnchor.shift;
+        if(!ba)return null;
+        return {x:ba.x+s[0]*lv[0][0]+s[1]*lv[1][0]+s[2]*lv[2][0],
+                y:ba.y+s[0]*lv[0][1]+s[1]*lv[1][1]+s[2]*lv[2][1],
+                z:ba.z+s[0]*lv[0][2]+s[1]*lv[1][2]+s[2]*lv[2][2]};
+    }
+    var a=MD.atoms[neighAnchor.idx];
+    return a?{x:a.x,y:a.y,z:a.z}:null;
+}
+
+function neighByDistance(a,b){
+    if(Math.abs(a.dist-b.dist)>1e-12)return a.dist-b.dist;
+    if(a.bi!=null&&b.bi!=null){
+        if(a.bi!==b.bi)return a.bi-b.bi;
+        return (a.s[0]-b.s[0])||(a.s[1]-b.s[1])||(a.s[2]-b.s[2]);
+    }
+    return (a.idx==null?0:a.idx)-(b.idx==null?0:b.idx);
+}
+
+function neighComputeMolecule(){
+    var out={rows:[],total:0,bonded:0};
+    var ai=neighAnchor.idx,a=MD.atoms[ai];
+    if(!a)return out;
+    var r2=neighRadius*neighRadius,bonded={},i;
+    for(i=0;i<MD.bonds.length;i++){
+        var b=MD.bonds[i];
+        if(b.atom1===ai)bonded[b.atom2]=true;
+        else if(b.atom2===ai)bonded[b.atom1]=true;
+    }
+    for(i=0;i<MD.atoms.length;i++){
+        if(i===ai)continue;
+        var q=MD.atoms[i];
+        var dx=q.x-a.x,dy=q.y-a.y,dz=q.z-a.z;
+        var d2=dx*dx+dy*dy+dz*dz;
+        if(d2>r2+1e-9)continue;
+        out.total++;
+        var isBond=!!bonded[i];
+        if(isBond)out.bonded++;
+        if(neighSkipBonded&&isBond)continue;
+        out.rows.push({idx:i,dist:Math.sqrt(d2),bonded:isBond,px:q.x,py:q.y,pz:q.z});
+    }
+    out.rows.sort(neighByDistance);
+    return out;
+}
+
+function neighComputeCrystal(){
+    var out={rows:[],total:0,bonded:0};
+    var abi=neighAnchor.bi,abase=CRY&&CRY.baseAtoms?CRY.baseAtoms[abi]:null;
+    if(!abase||!neighBaseVisible(abase))return out;
+    var as=neighAnchor.shift,lv=CRY.latticeVectors;
+    var fa=neighFractional(abase);
+    var widths=crystalPlaneWidths(lv);
+    // A displacement inside the radius cannot stray further than r/width along
+    // any axis, so this box holds every image that could qualify and nothing
+    // else. The repeat cap is the same one the rest of the page uses.
+    var lim=[1,1,1],k;
+    for(k=0;k<3;k++){
+        var q=widths[k]>1e-9?neighRadius/widths[k]:CRYSTAL_MAX_IMAGE_REPEAT;
+        lim[k]=Math.min(CRYSTAL_MAX_IMAGE_REPEAT,Math.max(1,Math.ceil(q+1e-9)));
+    }
+    var bondSet=neighCrystalBondSet();
+    var disp=neighDisplayMap();
+    var r2=neighRadius*neighRadius;
+    var ax0=abase.x+as[0]*lv[0][0]+as[1]*lv[1][0]+as[2]*lv[2][0];
+    var ay0=abase.y+as[0]*lv[0][1]+as[1]*lv[1][1]+as[2]*lv[2][1];
+    var az0=abase.z+as[0]*lv[0][2]+as[1]*lv[1][2]+as[2]*lv[2][2];
+    for(var bi=0;bi<CRY.baseAtoms.length;bi++){
+        var bj=CRY.baseAtoms[bi];
+        if(!neighBaseVisible(bj))continue;
+        var fj=neighFractional(bj);
+        var gx=fj[0]-fa[0],gy=fj[1]-fa[1],gz=fj[2]-fa[2];
+        var loX=Math.ceil(-gx-lim[0]-1e-9),hiX=Math.floor(-gx+lim[0]+1e-9);
+        var loY=Math.ceil(-gy-lim[1]-1e-9),hiY=Math.floor(-gy+lim[1]+1e-9);
+        var loZ=Math.ceil(-gz-lim[2]-1e-9),hiZ=Math.floor(-gz+lim[2]+1e-9);
+        for(var nx=loX;nx<=hiX;nx++){
+            var dx=gx+nx;
+            for(var ny=loY;ny<=hiY;ny++){
+                var dy=gy+ny;
+                for(var nz=loZ;nz<=hiZ;nz++){
+                    var dz=gz+nz;
+                    var vx=dx*lv[0][0]+dy*lv[1][0]+dz*lv[2][0];
+                    var vy=dx*lv[0][1]+dy*lv[1][1]+dz*lv[2][1];
+                    var vz=dx*lv[0][2]+dy*lv[1][2]+dz*lv[2][2];
+                    var d2=vx*vx+vy*vy+vz*vz;
+                    if(d2>r2+1e-9)continue;
+                    if(bi===abi&&nx===0&&ny===0&&nz===0)continue;
+                    out.total++;
+                    var isBond=!!bondSet[abi+'_'+bi+'_'+nx+','+ny+','+nz];
+                    if(isBond)out.bonded++;
+                    if(neighSkipBonded&&isBond)continue;
+                    var di=disp[bi+'_'+(as[0]+nx)+','+(as[1]+ny)+','+(as[2]+nz)];
+                    out.rows.push({bi:bi,s:[nx,ny,nz],dist:Math.sqrt(d2),bonded:isBond,
+                        idx:(di===undefined?-1:di),px:ax0+vx,py:ay0+vy,pz:az0+vz});
+                }
+            }
+        }
+    }
+    out.rows.sort(neighByDistance);
+    return out;
+}
+
+function neighAnchorText(){
+    if(!neighAnchor)return 'click an atom';
+    if(neighAnchor.bi!=null&&CRY&&CRY.baseAtoms){
+        var ba=CRY.baseAtoms[neighAnchor.bi];
+        if(ba)return atomLabel(ba,neighAnchor.bi);
+    }else{
+        var a=MD.atoms[neighAnchor.idx];
+        if(a)return atomLabel(a,neighAnchor.idx);
+    }
+    return 'click an atom';
+}
+
+function neighRowLabel(row){
+    if(row.bi!=null&&CRY&&CRY.baseAtoms){
+        var ba=CRY.baseAtoms[row.bi];
+        var nm=atomLabel(ba,row.bi);
+        var s=row.s;
+        if(s[0]||s[1]||s[2])nm+=' ['+s[0]+','+s[1]+','+s[2]+']';
+        return nm;
+    }
+    return atomLabel(MD.atoms[row.idx],row.idx);
+}
+
+function neighRowTitle(row){
+    if(row.bi!=null&&CRY&&CRY.baseAtoms){
+        var ba=CRY.baseAtoms[row.bi];
+        var t=(ba&&ba.siteLabel)?('site '+ba.siteLabel):('site #'+(row.bi+1));
+        return t+(row.idx>=0?' - click to select this image':' - this image is outside the drawn supercell');
+    }
+    return 'click to select this atom';
+}
+
+function neighPanelHint(){
+    var el=document.getElementById('ng-hint');
+    if(!el)return;
+    if(CRY&&!CRY_INV)el.textContent='The cell has no inverse, so only the atoms on screen are searched.';
+    else if(CRY)el.textContent='Click a row to select that atom. Crystal images outside the drawn cell are listed with their cell offset.';
+    else el.textContent='Click a row to select that atom.';
+}
+
+function neighClearLines(){
+    if(!neighLines)return;
+    if(neighLines.parent)moleculeGroup.remove(neighLines);
+    if(neighLines.geometry)neighLines.geometry.dispose();
+    if(neighLines.material)neighLines.material.dispose();
+    neighLines=null;
+    needsRender=true;
+}
+
+// One dashed segment per listed contact, from the anchor to the image itself.
+// An image outside the drawn cell still gets its line, so the picture shows
+// where the contact is even when the supercell does not reach it.
+function neighDrawLines(shown){
+    neighClearLines();
+    if(!neighActive||diffMode)return;
+    var p=neighAnchorPoint();
+    if(!p)return;
+    var pts=[],i;
+    for(i=0;i<shown&&i<neighRows.length;i++){
+        var r=neighRows[i];
+        if(r.px==null)continue;
+        pts.push(p.x-CX,p.y-CY,p.z-CZ,r.px-CX,r.py-CY,r.pz-CZ);
+    }
+    if(pts.length===0)return;
+    var geo=new THREE.BufferGeometry();
+    geo.setAttribute('position',new THREE.Float32BufferAttribute(pts,3));
+    var mat=new THREE.LineDashedMaterial({color:0xffb300,dashSize:0.16,gapSize:0.12,transparent:true,opacity:0.9});
+    var lines=new THREE.LineSegments(geo,mat);
+    lines.computeLineDistances();
+    moleculeGroup.add(lines);
+    neighLines=lines;
+    needsRender=true;
+}
+
+function neighRefresh(){
+    if(!neighActive)return;
+    var anchorEl=document.getElementById('ng-anchor'),sumEl=neighSummaryEl(),listEl=neighListEl2();
+    if(diffMode){
+        neighRows=[];
+        if(anchorEl)anchorEl.textContent='-';
+        if(sumEl)sumEl.textContent='Neighbours are not available in Diff.';
+        if(listEl)listEl.innerHTML='<div class="ng-empty">Close the comparison to search contacts.</div>';
+        neighClearLines();
+        return;
+    }
+    if(neighAnchor&&neighAnchor.bi!=null){
+        var ba=CRY&&CRY.baseAtoms?CRY.baseAtoms[neighAnchor.bi]:null;
+        if(!ba||!neighBaseVisible(ba))neighAnchor=null;
+    }else if(neighAnchor&&!MD.atoms[neighAnchor.idx]){
+        neighAnchor=null;
+    }
+    if(anchorEl)anchorEl.textContent=neighAnchorText();
+    neighPanelHint();
+    if(!neighAnchor){
+        neighRows=[];
+        if(sumEl)sumEl.textContent='Click an atom to choose the search centre.';
+        if(listEl)listEl.innerHTML='<div class="ng-empty">No anchor atom.</div>';
+        neighClearLines();
+        return;
+    }
+    var res=(CRY&&CRY_INV&&neighAnchor.bi!=null)?neighComputeCrystal():neighComputeMolecule();
+    neighRows=res.rows;
+    var shown=Math.min(neighRows.length,NEIGH_MAX_ROWS);
+    var txt;
+    if(neighRows.length===0)txt='No contacts within '+neighRadius.toFixed(2)+' A';
+    else txt=neighRows.length+' contact'+(neighRows.length===1?'':'s')+' within '+neighRadius.toFixed(2)+' A';
+    if(neighSkipBonded&&res.bonded>0)txt+=' ('+res.bonded+' bonded hidden)';
+    if(neighRows.length>shown)txt+=' - nearest '+shown+' shown';
+    if(sumEl)sumEl.textContent=txt;
+    var html='';
+    for(var i=0;i<shown;i++){
+        var row=neighRows[i];
+        var off=row.idx<0;
+        html+='<div class="ng-item'+(off?' ng-off':'')+'" data-row="'+i+'" title="'+escapeHtml(neighRowTitle(row))+'">'+
+            '<span class="ng-name">'+escapeHtml(neighRowLabel(row))+'</span>'+
+            '<span class="ng-d">'+row.dist.toFixed(3)+' A</span>'+
+            (off?'<span class="ng-cell">image</span>':'')+
+            '</div>';
+    }
+    if(listEl)listEl.innerHTML=html||'<div class="ng-empty">No contacts.</div>';
+    neighDrawLines(shown);
+}
+
+function neighSetAnchor(idx){
+    var a=MD.atoms[idx];
+    if(!a||!neighActive)return;
+    if(CRY&&CRY_INV&&a.baseIdx!=null&&a.imgShift){
+        neighAnchor={bi:a.baseIdx,shift:[a.imgShift[0],a.imgShift[1],a.imgShift[2]]};
+    }else{
+        neighAnchor={idx:idx};
+    }
+    neighRefresh();
+}
+
+function neighStartSession(){
+    neighActive=true;
+    neighAnchor=null;
+    neighRows=[];
+    var rEl=document.getElementById('ng-radius');
+    if(rEl)rEl.value=neighRadius.toFixed(1);
+    var sEl=document.getElementById('ng-skip');
+    if(sEl)sEl.checked=neighSkipBonded;
+    // An atom already selected when the mode opens is the obvious centre.
+    if(selectedAtoms.length===1&&MD.atoms[selectedAtoms[0]])neighSetAnchor(selectedAtoms[0]);
+    else neighRefresh();
+}
+
+function neighEndSession(){
+    neighActive=false;
+    neighClearLines();
+    neighRows=[];
+    neighAnchor=null;
+}
+
+function neighRowClick(rowIndex){
+    var row=neighRows[rowIndex];
+    if(!row)return;
+    if(row.idx<0){
+        modeInfoEl.textContent='Neighbour '+neighRowLabel(row)+' is outside the drawn supercell - grow the bounds to select it';
+        return;
+    }
+    var ai=neighAnchorDisplayIndex();
+    selectedAtoms=(ai>=0&&ai!==row.idx)?[ai,row.idx]:[row.idx];
+    diffSelectedAtoms=[];originalCoords=null;
+    highlightSelected();
+    selInfoEl.textContent='Selected: '+formatAtomList(selectedAtoms)+' ('+row.dist.toFixed(3)+' A from the anchor)';
+    modeInfoEl.textContent='Neighbour '+neighRowLabel(row)+' at '+row.dist.toFixed(3)+' A';
+}
+
+function neighSelectListed(){
+    var picks=[],seen={},i;
+    for(i=0;i<neighRows.length;i++){
+        var row=neighRows[i];
+        if(row.idx<0||seen[row.idx])continue;
+        seen[row.idx]=true;
+        picks.push(row.idx);
+    }
+    if(picks.length===0){
+        modeInfoEl.textContent='Neighbours: none of the listed images is in the drawn supercell';
+        return;
+    }
+    selectedAtoms=picks;diffSelectedAtoms=[];originalCoords=null;
+    highlightSelected();
+    selInfoEl.textContent='Selected: '+formatAtomList(selectedAtoms)+' ('+picks.length+' neighbour'+(picks.length===1?'':'s')+')';
+    modeInfoEl.textContent='Selected '+picks.length+' listed neighbour'+(picks.length===1?'':'s');
+}
+
+(function(){
+    var panel=document.getElementById('neigh-panel'),list=neighListEl2();
+    var skip=document.getElementById('ng-skip'),radius=document.getElementById('ng-radius');
+    var pick=document.getElementById('ng-select');
+    if(!panel||!list||!skip||!radius||!pick)return;
+    radius.addEventListener('input',function(){
+        var v=parseFloat(this.value);
+        // Let an empty or half-typed value be: the next keystroke may finish it.
+        if(!(v>0)||v>NEIGH_MAX_RADIUS)return;
+        neighRadius=v;
+        neighRefresh();
+    });
+    radius.addEventListener('change',function(){
+        var v=parseFloat(this.value);
+        if(!(v>0))v=3.5;
+        if(v>NEIGH_MAX_RADIUS)v=NEIGH_MAX_RADIUS;
+        neighRadius=v;this.value=v.toFixed(1);
+        neighRefresh();
+    });
+    skip.addEventListener('change',function(){neighSkipBonded=this.checked;neighRefresh()});
+    pick.addEventListener('click',neighSelectListed);
+    list.addEventListener('click',function(e){
+        var node=e.target;
+        while(node&&node!==list&&!(node.classList&&node.classList.contains('ng-item')))node=node.parentNode;
+        if(!node||node===list)return;
+        var idx=parseInt(node.getAttribute('data-row'),10);
+        if(idx>=0)neighRowClick(idx);
+    });
+})();
+
+// ===== Lattice planes (hkl) =====
+// The cell panel's spacing calculator: two integer triples, the d-spacing of
+// the first and the angle between the two plane normals. "Show Plane" draws
+// the (hkl) cross-section through the centre of the drawn box - the one plane
+// of the family every set of bounds is guaranteed to cut.
+function hklReciprocals(lv){
+    if(!lv||lv.length<3)return null;
+    var a=lv[0],b=lv[1],c=lv[2];
+    var bcx=b[1]*c[2]-b[2]*c[1],bcy=b[2]*c[0]-b[0]*c[2],bcz=b[0]*c[1]-b[1]*c[0];
+    var det=a[0]*bcx+a[1]*bcy+a[2]*bcz;
+    if(Math.abs(det)<1e-9)return null;
+    return [
+        {x:bcx/det,y:bcy/det,z:bcz/det},
+        {x:(c[1]*a[2]-c[2]*a[1])/det,y:(c[2]*a[0]-c[0]*a[2])/det,z:(c[0]*a[1]-c[1]*a[0])/det},
+        {x:(a[1]*b[2]-a[2]*b[1])/det,y:(a[2]*b[0]-a[0]*b[2])/det,z:(a[0]*b[1]-a[1]*b[0])/det}
+    ];
+}
+// The reciprocal vector g = h a* + k b* + l c*: its length is 1/d, its
+// direction the plane normal. (0 0 0) has neither.
+function hklNormal(rec,h,k,l){
+    if(!rec)return null;
+    var x=h*rec[0].x+k*rec[1].x+l*rec[2].x;
+    var y=h*rec[0].y+k*rec[1].y+l*rec[2].y;
+    var z=h*rec[0].z+k*rec[1].z+l*rec[2].z;
+    var len=Math.sqrt(x*x+y*y+z*z);
+    if(!(len>1e-9))return null;
+    return {x:x/len,y:y/len,z:z/len,len:len};
+}
+function hklAngleDeg(n1,n2){
+    if(!n1||!n2)return null;
+    // A plane is unoriented, so the acute angle between the normals is the
+    // angle between the planes.
+    var d=Math.abs(n1.x*n2.x+n1.y*n2.y+n1.z*n2.z);
+    if(d>1)return 0;
+    return Math.acos(d)*180/Math.PI;
+}
+function hklIndexText(p){return '('+p.h+' '+p.k+' '+p.l+')'}
+function hklUpdateReadout(){
+    var d1=document.getElementById('hk-d1'),d2=document.getElementById('hk-d2');
+    var rec=CRY?hklReciprocals(CRY.latticeVectors):null;
+    if(d1){
+        if(!CRY)d1.textContent='';
+        else if(!rec)d1.textContent='d = - (the cell has no volume)';
+        else{
+            var n=hklNormal(rec,hklPlane.h,hklPlane.k,hklPlane.l);
+            d1.textContent=n?('d'+hklIndexText(hklPlane)+' = '+(1/n.len).toFixed(4)+' A'):
+                ('d'+hklIndexText(hklPlane)+' = -');
+        }
+    }
+    if(d2){
+        if(!CRY)d2.textContent='';
+        else if(!rec)d2.textContent='angle = -';
+        else{
+            var a1=hklNormal(rec,hklPlane.h,hklPlane.k,hklPlane.l);
+            var a2=hklNormal(rec,hklPlane2.h,hklPlane2.k,hklPlane2.l);
+            var ang=hklAngleDeg(a1,a2);
+            d2.textContent=ang==null?('angle to '+hklIndexText(hklPlane2)+' = -'):
+                ('angle to '+hklIndexText(hklPlane2)+' = '+ang.toFixed(2)+' deg');
+        }
+    }
+}
+// The plane through the fractional centre of the drawn box, cut down to the
+// box: the 12 edges are tested, the crossings ordered around their centroid.
+// A box is convex, so its edge crossings already are the polygon.
+function hklPlanePolygon(lv,h,k,l){
+    var rec=hklReciprocals(lv),nrm=hklNormal(rec,h,k,l);
+    if(!nrm)return null;
+    var cf=[(boundary.aMin+boundary.aMax)/2,(boundary.bMin+boundary.bMax)/2,(boundary.cMin+boundary.cMax)/2];
+    var cx=cf[0]*lv[0][0]+cf[1]*lv[1][0]+cf[2]*lv[2][0];
+    var cy=cf[0]*lv[0][1]+cf[1]*lv[1][1]+cf[2]*lv[2][1];
+    var cz=cf[0]*lv[0][2]+cf[1]*lv[1][2]+cf[2]*lv[2][2];
+    var av=[boundary.aMin,boundary.aMax],bv=[boundary.bMin,boundary.bMax],cv=[boundary.cMin,boundary.cMax];
+    var vs=[],i,j,m;
+    for(i=0;i<2;i++)for(j=0;j<2;j++)for(m=0;m<2;m++){
+        var x=av[i]*lv[0][0]+bv[j]*lv[1][0]+cv[m]*lv[2][0];
+        var y=av[i]*lv[0][1]+bv[j]*lv[1][1]+cv[m]*lv[2][1];
+        var z=av[i]*lv[0][2]+bv[j]*lv[1][2]+cv[m]*lv[2][2];
+        vs.push([x,y,z,nrm.x*(x-cx)+nrm.y*(y-cy)+nrm.z*(z-cz)]);
+    }
+    var pts=[];
+    for(i=0;i<8;i++)if(Math.abs(vs[i][3])<1e-9)pts.push([vs[i][0],vs[i][1],vs[i][2]]);
+    var edges=[[0,1],[2,3],[4,5],[6,7],[0,2],[1,3],[4,6],[5,7],[0,4],[1,5],[2,6],[3,7]];
+    for(i=0;i<edges.length;i++){
+        var p0=vs[edges[i][0]],p1=vs[edges[i][1]];
+        if(p0[3]*p1[3]<-1e-18){
+            var t=p0[3]/(p0[3]-p1[3]);
+            pts.push([p0[0]+t*(p1[0]-p0[0]),p0[1]+t*(p1[1]-p0[1]),p0[2]+t*(p1[2]-p0[2])]);
+        }
+    }
+    var uniq=[];
+    for(i=0;i<pts.length;i++){
+        var dup=false;
+        for(j=0;j<uniq.length;j++){
+            var dx=pts[i][0]-uniq[j][0],dy=pts[i][1]-uniq[j][1],dz=pts[i][2]-uniq[j][2];
+            if(dx*dx+dy*dy+dz*dz<1e-12){dup=true;break}
+        }
+        if(!dup)uniq.push(pts[i]);
+    }
+    if(uniq.length<3)return null;
+    var gx=0,gy=0,gz=0;
+    for(i=0;i<uniq.length;i++){gx+=uniq[i][0];gy+=uniq[i][1];gz+=uniq[i][2]}
+    gx/=uniq.length;gy/=uniq.length;gz/=uniq.length;
+    var ux=uniq[0][0]-gx,uy=uniq[0][1]-gy,uz=uniq[0][2]-gz;
+    var ul=Math.sqrt(ux*ux+uy*uy+uz*uz);
+    if(ul<1e-9)return null;
+    ux/=ul;uy/=ul;uz/=ul;
+    var vx=nrm.y*uz-nrm.z*uy,vy=nrm.z*ux-nrm.x*uz,vz=nrm.x*uy-nrm.y*ux;
+    // Sort by polar angle in the plane's own frame (u, v = n x u), so the fan
+    // has no folds whichever way the box was cut.
+    var ordered=uniq.slice();
+    function ang2(p){return Math.atan2((p[0]-gx)*vx+(p[1]-gy)*vy+(p[2]-gz)*vz,(p[0]-gx)*ux+(p[1]-gy)*uy+(p[2]-gz)*uz)}
+    ordered.sort(function(p,q){return ang2(p)-ang2(q)});
+    return ordered;
+}
+function hklClearPlane(){
+    if(hklPlaneMesh){moleculeGroup.remove(hklPlaneMesh);disposeMesh(hklPlaneMesh);hklPlaneMesh=null;needsRender=true}
+    if(hklPlaneBorder){moleculeGroup.remove(hklPlaneBorder);disposeMesh(hklPlaneBorder);hklPlaneBorder=null;needsRender=true}
+}
+function hklRefresh(){
+    hklUpdateReadout();
+    hklClearPlane();
+    if(!hklShown||!CRY||diffMode)return;
+    var poly=hklPlanePolygon(CRY.latticeVectors,hklPlane.h,hklPlane.k,hklPlane.l);
+    if(!poly)return;
+    var tri=[],i;
+    for(i=1;i<poly.length-1;i++){
+        tri.push(poly[0][0]-CX,poly[0][1]-CY,poly[0][2]-CZ,
+                 poly[i][0]-CX,poly[i][1]-CY,poly[i][2]-CZ,
+                 poly[i+1][0]-CX,poly[i+1][1]-CY,poly[i+1][2]-CZ);
+    }
+    var geo=new THREE.BufferGeometry();
+    geo.setAttribute('position',new THREE.Float32BufferAttribute(tri,3));
+    // transparent and depthWrite off: the plane is a reading aid, not matter,
+    // so it never hides an atom behind it.
+    hklPlaneMesh=new THREE.Mesh(geo,new THREE.MeshBasicMaterial({color:0x66ccff,transparent:true,opacity:0.22,side:THREE.DoubleSide,depthWrite:false}));
+    moleculeGroup.add(hklPlaneMesh);
+    var loop=[];
+    for(i=0;i<poly.length;i++)loop.push(poly[i][0]-CX,poly[i][1]-CY,poly[i][2]-CZ);
+    var bgeo=new THREE.BufferGeometry();
+    bgeo.setAttribute('position',new THREE.Float32BufferAttribute(loop,3));
+    hklPlaneBorder=new THREE.LineLoop(bgeo,new THREE.LineBasicMaterial({color:0x66ccff,transparent:true,opacity:0.9,depthWrite:false}));
+    moleculeGroup.add(hklPlaneBorder);
+    needsRender=true;
+}
+(function(){
+    var showBtn=document.getElementById('hk-show');
+    if(!showBtn)return;
+    function readInt(id,fallback){
+        var e=document.getElementById(id);
+        if(!e)return fallback;
+        var v=parseInt(e.value,10);
+        return isNaN(v)?fallback:v;
+    }
+    function sync(){
+        hklPlane={h:readInt('hk-h',0),k:readInt('hk-k',0),l:readInt('hk-l',1)};
+        hklPlane2={h:readInt('hk2-h',1),k:readInt('hk2-k',0),l:readInt('hk2-l',0)};
+        hklRefresh();
+    }
+    ['hk-h','hk-k','hk-l','hk2-h','hk2-k','hk2-l'].forEach(function(id){
+        var e=document.getElementById(id);
+        if(e)e.addEventListener('change',sync);
+    });
+    showBtn.addEventListener('click',function(){
+        hklShown=!hklShown;
+        this.textContent=hklShown?'Hide Plane':'Show Plane';
+        hklRefresh();
+        layoutPanels();
+    });
+    sync();
+})();
+
+// ===== Powder X-ray diffraction =====
+// The unit cell drawn on screen is a crystal, so it owns a powder pattern the
+// way it owns a spacing and a plane. Every triple (h k l) in the reciprocal
+// sphere is enumerated - one loop, no symmetry shortcuts - and each acceptor
+// is turned into a structure factor over the cell's atoms, so a systematic
+// absence (bcc's (100), fcc's (200)) is zero because the atoms cancel, not
+// because a rule was applied. Reflections that share a 2theta naturally add up
+// in the same bin, which is exactly what a powder does to them, so no
+// multiplicity table is needed either. The peaks are then broadened with the
+// Caglioti variance of a laboratory diffractometer and normalised to 100.
+//
+// The form factors are the International Tables for Crystallography, Vol. C
+// (1992), Table 6.1.1.4 coefficients for neutral atoms, laid out as
+// [a1,b1,a2,b2,a3,b3,a4,b4,c] with f(s) = sum a_i exp(-b_i s^2) + c and
+// s = sin(theta)/lambda in 1/A. Elements outside the table are left out of
+// the pattern and named in the panel's note; a deuterium reads as hydrogen.
+var XRD_FORM_FACTORS={
+H:[0.493002,10.5109,0.322912,26.1257,0.140191,3.14236,0.04081,57.7997,0.003038],
+He:[0.8734,9.1037,0.6309,3.3568,0.3112,22.9276,0.178,0.9821,0.0064],
+Li:[1.1282,3.9546,0.7508,1.0524,0.6175,85.3905,0.4653,168.261,0.0377],
+Be:[1.5919,43.6427,1.1278,1.8623,0.5391,103.483,0.7029,0.542,0.0385],
+B:[2.0545,23.2185,1.3326,1.021,1.0979,60.3498,0.7068,0.1403,-0.1932],
+C:[2.31,20.8439,1.02,10.2075,1.5886,0.5687,0.865,51.6512,0.2156],
+N:[12.2126,0.0057,3.1322,9.8933,2.0125,28.9975,1.1663,0.5826,-11.529],
+O:[3.0485,13.2771,2.2868,5.7011,1.5463,0.3239,0.867,32.9089,0.2508],
+F:[3.5392,10.2825,2.6412,4.2944,1.517,0.2615,1.0243,26.1476,0.2776],
+Ne:[3.9553,8.4042,3.1125,3.4262,1.4546,0.2306,1.1251,21.7184,0.3515],
+Na:[4.7626,3.285,3.1736,8.8422,1.2674,0.3136,1.1128,129.424,0.676],
+Mg:[5.4204,2.8275,2.1735,79.2611,1.2269,0.3808,2.3073,7.1937,0.8584],
+Al:[6.4202,3.0387,1.9002,0.7426,1.5936,31.5472,1.9646,85.0886,1.1151],
+Si:[6.2915,2.4386,3.0353,32.3337,1.9891,0.6785,1.541,81.6937,1.1407],
+P:[6.4345,1.9067,4.1791,27.157,1.78,0.526,1.4908,68.1645,1.1149],
+S:[6.9053,1.4679,5.2034,22.2151,1.4379,0.2536,1.5863,56.172,0.8669],
+Cl:[11.4604,0.0104,7.1964,1.1662,6.2556,18.5194,1.6455,47.7784,-9.5574],
+Ar:[7.4845,0.9072,6.7723,14.8407,0.6539,43.8983,1.6442,33.3929,1.4445],
+K:[8.2186,12.7949,7.4398,0.7748,1.0519,213.187,0.8659,41.6841,1.4228],
+Ca:[8.6266,10.4421,7.3873,0.6599,1.5899,85.7484,1.0211,178.437,1.3751],
+Sc:[9.189,9.0213,7.3679,0.5729,1.6409,136.108,1.468,51.3531,1.3329],
+Ti:[9.7595,7.8508,7.3558,0.5,1.6991,35.6338,1.9021,116.105,1.2807],
+V:[10.2971,6.8657,7.3511,0.4385,2.0703,26.8938,2.0571,102.478,1.2199],
+Cr:[10.6406,6.1038,7.3537,0.392,3.324,20.2626,1.4922,98.7399,1.1832],
+Mn:[11.2819,5.3409,7.3573,0.3432,3.0193,17.8674,2.2441,83.7543,1.0896],
+Fe:[11.7695,4.7611,7.3573,0.3072,3.5222,15.3535,2.3045,76.8805,1.0369],
+Co:[12.2841,4.2791,7.3409,0.2784,4.0034,13.5359,2.3488,71.1692,1.0118],
+Ni:[12.8376,3.8785,7.292,0.2565,4.4438,12.1763,2.38,66.3421,1.0341],
+Cu:[13.338,3.5828,7.1676,0.247,5.6158,11.3966,1.6735,64.8126,1.191],
+Zn:[14.0743,3.2655,7.0318,0.2333,5.1652,10.3163,2.41,58.7097,1.3041],
+Ga:[15.2354,3.0669,6.7006,0.2412,4.3591,10.7805,2.9623,61.4135,1.7189],
+Ge:[16.0816,2.8509,6.3747,0.2516,3.7068,11.4468,3.683,54.7625,2.1313],
+As:[16.6723,2.6345,6.0701,0.2647,3.4313,12.9479,4.2779,47.7972,2.531],
+Se:[17.0006,2.4098,5.8196,0.2726,3.9731,15.2372,4.3543,43.8163,2.8409],
+Br:[17.1789,2.1723,5.2358,16.5796,5.6377,0.2609,3.9851,41.4328,2.9557],
+Kr:[17.3555,1.9384,6.7286,16.5623,5.5493,0.2261,3.5375,39.3972,2.825],
+Rb:[17.1784,1.7888,9.6435,17.3151,5.1399,0.2748,1.5292,164.934,3.4873],
+Sr:[17.5663,1.5564,9.8184,14.0988,5.422,0.1664,2.6694,132.376,2.5064],
+Y:[17.776,1.4029,10.2946,12.8006,5.72629,0.125599,3.26588,104.354,1.91213],
+Zr:[17.8765,1.27618,10.948,11.916,5.41732,0.117622,3.65721,87.6627,2.06929],
+Nb:[17.6142,1.18865,12.0144,11.766,4.04183,0.204785,3.53346,69.7957,3.75591],
+Mo:[3.7025,0.2772,17.2356,1.0958,12.8876,11.004,3.7429,61.6584,4.3875],
+Tc:[19.1301,0.864132,11.0948,8.14487,4.64901,21.5707,2.71263,86.8472,5.40428],
+Ru:[19.2674,0.80852,12.9182,8.43467,4.86337,24.7997,1.56756,94.2928,5.37874],
+Rh:[19.2957,0.751536,14.3501,8.21758,4.73425,25.8749,1.28918,98.6062,5.328],
+Pd:[19.3319,0.698655,15.5017,7.98929,5.29537,25.2052,0.605844,76.8986,5.26593],
+Ag:[19.2808,0.6446,16.6885,7.4726,4.8045,24.6605,1.0463,99.8156,5.179],
+Cd:[19.2214,0.5946,17.6444,6.9089,4.461,24.7008,1.6029,87.4825,5.0694],
+In:[19.1624,0.5476,18.5596,6.3776,4.2948,25.8499,2.0396,92.8029,4.9391],
+Sn:[19.1889,5.8303,19.1005,0.5031,4.4585,26.8909,2.4663,83.9571,4.7821],
+Sb:[19.6418,5.3034,19.0455,0.4607,5.0371,27.9074,2.6827,75.2825,4.5909],
+Te:[19.9644,4.81742,19.0138,0.420885,6.14487,28.5284,2.5239,70.8403,4.352],
+I:[20.1472,4.347,18.9949,0.3814,7.5138,27.766,2.2735,66.8776,4.0712],
+Xe:[20.2933,3.9282,19.0298,0.344,8.9767,26.4659,1.99,64.2658,3.7118],
+Cs:[20.3892,3.569,19.1062,0.3107,10.662,24.3879,1.4953,213.904,3.3352],
+Ba:[20.3361,3.216,19.297,0.2756,10.888,20.2073,2.6959,167.202,2.7731],
+La:[20.578,2.94817,19.599,0.244475,11.3727,18.7726,3.28719,133.124,2.14678],
+Ce:[21.1671,2.81219,19.7695,0.226836,11.8513,17.6083,3.33049,127.113,1.86264],
+Pr:[22.044,2.77393,19.6697,0.222087,12.3856,16.7669,2.82428,143.644,2.0583],
+Nd:[22.6845,2.66248,19.6847,0.210628,12.774,15.885,2.85137,137.903,1.98486],
+Pm:[23.3405,2.5627,19.6095,0.202088,13.1235,15.1009,2.87516,132.721,2.02876],
+Sm:[24.0042,2.47274,19.4258,0.196451,13.4396,14.3996,2.89604,128.007,2.20963],
+Eu:[24.6274,2.3879,19.0886,0.1942,13.7603,13.7546,2.9227,123.174,2.5745],
+Gd:[25.0709,2.25341,19.0798,0.181951,13.8518,12.9331,3.54545,101.398,2.4196],
+Tb:[25.8976,2.24256,18.2185,0.196143,14.3167,12.6648,2.95354,115.362,3.58324],
+Dy:[26.507,2.1802,17.6383,0.202172,14.5596,12.1899,2.96577,111.874,4.29728],
+Ho:[26.9049,2.07051,17.294,0.19794,14.5583,11.4407,3.63837,92.6566,4.56796],
+Er:[27.6563,2.07356,16.4285,0.223545,14.9779,11.3604,2.98233,105.703,5.92046],
+Tm:[28.1819,2.02859,15.8851,0.238849,15.1542,10.9975,2.98706,102.961,6.75621],
+Yb:[28.6641,1.9889,15.4345,0.257119,15.3087,10.6647,2.98963,100.417,7.56672],
+Lu:[28.9476,1.90182,15.2208,9.98519,15.1,0.261033,3.71601,84.3298,7.97628],
+Hf:[29.144,1.83262,15.1726,9.5999,14.7586,0.275116,4.30013,72.029,8.58154],
+Ta:[29.2024,1.77333,15.2293,9.37046,14.5135,0.295977,4.76492,63.3644,9.24354],
+W:[29.0818,1.72029,15.43,9.2259,14.4327,0.321703,5.11982,57.056,9.8875],
+Re:[28.7621,1.67191,15.7189,9.09227,14.5564,0.3505,5.44174,52.0861,10.472],
+Os:[28.1894,1.62903,16.155,8.97948,14.9305,0.382661,5.67589,48.1647,11.0005],
+Ir:[27.3049,1.59279,16.7296,8.86553,15.6115,0.417916,5.83377,45.0011,11.4722],
+Pt:[27.0059,1.51293,17.7639,8.81174,15.7131,0.424593,5.7837,38.6103,11.6883],
+Au:[16.8819,0.4611,18.5913,8.6216,25.5582,1.4826,5.86,36.3956,12.0658],
+Hg:[20.6809,0.545,19.0417,8.4484,21.6575,1.5729,5.9676,38.3246,12.6089],
+Tl:[27.5446,0.65515,19.1584,8.70751,15.538,1.96347,5.52593,45.8149,13.1746],
+Pb:[31.0617,0.6902,13.0637,2.3576,18.442,8.618,5.9696,47.2579,13.4118],
+Bi:[33.3689,0.704,12.951,2.9238,16.5877,8.7937,6.4692,48.0093,13.5782],
+Po:[34.6726,0.700999,15.4733,3.55078,13.1138,9.55642,7.02588,47.0045,13.677],
+At:[35.3163,0.68587,19.0211,3.97458,9.49887,11.3824,7.42518,45.4715,13.7108],
+Rn:[35.5631,0.6631,21.2816,4.0691,8.0037,14.0422,7.4433,44.2473,13.6905],
+Fr:[35.9299,0.646453,23.0547,4.17619,12.1439,23.1052,2.11253,150.645,13.7247],
+Ra:[35.763,0.616341,22.9064,3.87135,12.4739,19.9887,3.21097,142.325,13.6211],
+Ac:[35.6597,0.589092,23.1032,3.65155,12.5977,18.599,4.08655,117.02,13.5266],
+Th:[35.5645,0.563359,23.4219,3.46204,12.7473,17.8309,4.80703,99.1722,13.4314],
+Pa:[35.8847,0.547751,23.2948,3.41519,14.1891,16.9235,4.17287,105.251,13.4287],
+U:[36.0228,0.5293,23.4128,3.3253,14.9491,16.0927,4.188,100.613,13.3966],
+Np:[36.1874,0.511929,23.5964,3.25396,15.6402,15.3622,4.1855,97.4908,13.3573],
+Pu:[36.5254,0.499384,23.8083,3.26371,16.7707,14.9455,3.47947,105.98,13.3812],
+Am:[36.6706,0.483629,24.0992,3.20647,17.3415,14.3136,3.49331,102.273,13.3592],
+Cm:[36.6488,0.465154,24.4096,3.08997,17.399,13.4346,4.21665,88.4834,13.2887],
+Bk:[36.7881,0.451018,24.7736,3.04619,17.8919,12.8946,4.23284,86.003,13.2754],
+Cf:[36.9185,0.437533,25.1995,3.00775,18.3317,12.4044,4.24391,83.7881,13.2674]
+};
+var XRD_RADIATIONS=[
+    {id:'CuKa1',label:'Cu Kα1',lambda:1.54056},
+    {id:'CuKa',label:'Cu Kα',lambda:1.54184},
+    {id:'MoKa1',label:'Mo Kα1',lambda:0.70930},
+    {id:'MoKa',label:'Mo Kα',lambda:0.71073},
+    {id:'CoKa1',label:'Co Kα1',lambda:1.78897},
+    {id:'FeKa1',label:'Fe Kα1',lambda:1.93604},
+    {id:'CrKa1',label:'Cr Kα1',lambda:2.28970},
+    {id:'AgKa1',label:'Ag Kα1',lambda:0.55941}
+];
+var XRD_TWO_THETA_CHOICES=[60,90,120,150];
+var XRD_2THETA_MIN=2;
+var XRD_MAX_INDEX=40;
+var XRD_MAX_REFLECTIONS=20000;
+var XRD_STEP=0.02;
+var XRD_LIST_MAX=30;
+// Caglioti FWHM^2 = U tan^2(theta) + V tan(theta) + W, in degrees squared; the
+// values describe a routine laboratory powder diffractometer and keep the
+// variance positive over 0-180 degrees.
+var XRD_CAGLIOTI_U=0.004;
+var XRD_CAGLIOTI_V=-0.002;
+var XRD_CAGLIOTI_W=0.008;
+var xrdOpen=false;
+var xrdRadiation='CuKa1';
+var xrdTwoThetaMax=90;
+var xrdResult=null;
+
+function xrdFormFactor(el,s){
+    var ff=XRD_FORM_FACTORS[el];
+    if(!ff)return null;
+    var s2=s*s;
+    return ff[0]*Math.exp(-ff[1]*s2)+ff[2]*Math.exp(-ff[3]*s2)+
+        ff[4]*Math.exp(-ff[5]*s2)+ff[6]*Math.exp(-ff[7]*s2)+ff[8];
+}
+function xrdRadiationById(id){
+    for(var i=0;i<XRD_RADIATIONS.length;i++){
+        if(XRD_RADIATIONS[i].id===id)return XRD_RADIATIONS[i];
+    }
+    return XRD_RADIATIONS[0];
+}
+// Lorentz-polarisation for an unpolarised laboratory beam, in the powder form.
+function xrdLp(twoDeg){
+    var t=twoDeg*Math.PI/180;
+    var sh=Math.sin(t/2),ch=Math.cos(t/2);
+    if(!(sh>1e-8)||!(ch>1e-8))return 0;
+    return (1+Math.cos(t)*Math.cos(t))/(sh*sh*ch);
+}
+function xrdCagliotiFwhm(twoDeg){
+    var t=Math.tan(twoDeg*Math.PI/360);
+    var f2=XRD_CAGLIOTI_U*t*t+XRD_CAGLIOTI_V*t+XRD_CAGLIOTI_W;
+    return f2>0?Math.sqrt(f2):0;
+}
+function xrdReciprocalForm(rec){
+    function dot(p,q){return p.x*q.x+p.y*q.y+p.z*q.z}
+    return {
+        aa:dot(rec[0],rec[0]),bb:dot(rec[1],rec[1]),cc:dot(rec[2],rec[2]),
+        ab:2*dot(rec[0],rec[1]),ac:2*dot(rec[0],rec[2]),bc:2*dot(rec[1],rec[2])
+    };
+}
+// The atoms whose electrons scatter: the drawn cell, reduced by the disorder
+// filter and without ghosts, each with its fractional coordinates.
+function xrdCellSites(){
+    if(!CRY||!CRY.baseAtoms||!CRY_INV)return null;
+    var sites=[],missing={},i;
+    for(i=0;i<CRY.baseAtoms.length;i++){
+        var ba=CRY.baseAtoms[i];
+        if(isGhostAtom(ba))continue;
+        if(!neighBaseVisible(ba))continue;
+        var el=ba.element==='D'?'H':ba.element;
+        if(!XRD_FORM_FACTORS[el]){missing[el]=true;continue}
+        var occ=(ba.occupancy==null?1:ba.occupancy);
+        if(!(occ>0))continue;
+        var f=neighFractional(ba);
+        sites.push({el:el,f:[f[0],f[1],f[2]],occ:occ});
+    }
+    var miss=[];
+    for(var k in missing){
+        if(Object.prototype.hasOwnProperty.call(missing,k))miss.push(k);
+    }
+    miss.sort();
+    return {sites:sites,missing:miss};
+}
+// Pure: sites + lattice + wavelength + limit in, pattern out. The index bounds
+// are the dual relation |h| = |g.a| <= |g||a|, so a reflection inside the
+// reciprocal sphere can never fall outside the loops.
+function xrdPattern(sites,lv,lambda,twoMax){
+    if(!sites||sites.length===0||!(lambda>0)||!(twoMax>XRD_2THETA_MIN))return null;
+    var rec=hklReciprocals(lv);
+    if(!rec)return null;
+    var form=xrdReciprocalForm(rec);
+    var gmax=2*Math.sin(twoMax*Math.PI/360)/lambda;
+    function len(v){return Math.sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2])}
+    var indexCapped=len(lv[0])*gmax>XRD_MAX_INDEX||len(lv[1])*gmax>XRD_MAX_INDEX||len(lv[2])*gmax>XRD_MAX_INDEX;
+    var limA=Math.min(XRD_MAX_INDEX,Math.ceil(len(lv[0])*gmax)+1);
+    var limB=Math.min(XRD_MAX_INDEX,Math.ceil(len(lv[1])*gmax)+1);
+    var limC=Math.min(XRD_MAX_INDEX,Math.ceil(len(lv[2])*gmax)+1);
+    var list=[],h,k,l;
+    for(h=-limA;h<=limA;h++){
+        for(k=-limB;k<=limB;k++){
+            for(l=-limC;l<=limC;l++){
+                var g2=form.aa*h*h+form.bb*k*k+form.cc*l*l+form.ab*h*k+form.ac*h*l+form.bc*k*l;
+                if(!(g2>1e-12))continue;
+                var g=Math.sqrt(g2);
+                var sinT=lambda*g/2;
+                if(sinT>=1)continue;
+                var two=2*Math.asin(sinT)*180/Math.PI;
+                if(two<XRD_2THETA_MIN||two>twoMax+1e-9)continue;
+                list.push({two:two,h:h,k:k,l:l,s:g/2});
+            }
+        }
+    }
+    list.sort(function(p,q){
+        if(p.two!==q.two)return p.two-q.two;
+        if(p.h!==q.h)return p.h-q.h;
+        if(p.k!==q.k)return p.k-q.k;
+        return p.l-q.l;
+    });
+    var found=list.length;
+    var capped=found>XRD_MAX_REFLECTIONS;
+    if(capped)list.length=XRD_MAX_REFLECTIONS;
+    var peaks=[],i,j;
+    for(i=0;i<list.length;i++){
+        var r=list[i],re=0,im=0;
+        for(j=0;j<sites.length;j++){
+            var st=sites[j];
+            var f=xrdFormFactor(st.el,r.s)*st.occ;
+            if(!f)continue;
+            var ph=2*Math.PI*(r.h*st.f[0]+r.k*st.f[1]+r.l*st.f[2]);
+            re+=f*Math.cos(ph);im+=f*Math.sin(ph);
+        }
+        var inten=(re*re+im*im)*xrdLp(r.two);
+        var last=peaks.length>0?peaks[peaks.length-1]:null;
+        if(last&&Math.abs(r.two-last.two)<=1e-4){
+            last.I+=inten;last.n++;
+            if(inten>last.rawI){last.rawI=inten;last.hkl=[r.h,r.k,r.l]}
+        }else{
+            peaks.push({two:r.two,d:1/(2*r.s),hkl:[r.h,r.k,r.l],I:inten,rawI:inten,n:1});
+        }
+    }
+    // A systematic absence is zero only in exact arithmetic: the structure
+    // factor of a forbidden reflection leaves rounding noise (about 1e-30 of
+    // the strongest line), so the cut is relative to the pattern's own peak.
+    var keep=[],imax=0;
+    for(i=0;i<peaks.length;i++)if(peaks[i].I>imax)imax=peaks[i].I;
+    if(!(imax>0))imax=1;
+    for(i=0;i<peaks.length;i++){
+        if(!(peaks[i].I>imax*1e-12))continue;
+        // (h k l) and (-h -k -l) are one plane: label the line by the reading
+        // whose first nonzero index is positive, which is how it is written.
+        var hh=peaks[i].hkl;
+        if(hh[0]<0||(hh[0]===0&&(hh[1]<0||(hh[1]===0&&hh[2]<0))))peaks[i].hkl=[-hh[0],-hh[1],-hh[2]];
+        keep.push(peaks[i]);
+    }
+    peaks=keep;
+    for(i=0;i<peaks.length;i++)peaks[i].rel=peaks[i].I/imax*100;
+    var n=Math.floor((twoMax-XRD_2THETA_MIN)/XRD_STEP+1e-9)+1;
+    if(n<2)n=2;
+    var prof=new Float64Array(n),kk;
+    var k4=4*Math.LN2;
+    for(i=0;i<peaks.length;i++){
+        var p=peaks[i];
+        var fwhm=xrdCagliotiFwhm(p.two);
+        if(!(fwhm>0.005))fwhm=0.005;
+        if(fwhm>4)fwhm=4;
+        var half=2.5*fwhm;
+        var i0=Math.max(0,Math.ceil((p.two-half-XRD_2THETA_MIN)/XRD_STEP));
+        var i1=Math.min(n-1,Math.floor((p.two+half-XRD_2THETA_MIN)/XRD_STEP));
+        for(kk=i0;kk<=i1;kk++){
+            var dx=(XRD_2THETA_MIN+kk*XRD_STEP-p.two)/fwhm;
+            prof[kk]+=p.I*Math.exp(-k4*dx*dx);
+        }
+    }
+    var pmax=0;
+    for(kk=0;kk<n;kk++)if(prof[kk]>pmax)pmax=prof[kk];
+    if(!(pmax>0))pmax=1;
+    for(kk=0;kk<n;kk++)prof[kk]=prof[kk]/pmax*100;
+    return {
+        atoms:sites.length,peaks:peaks,reflections:list.length,found:found,
+        capped:capped,indexCapped:indexCapped,
+        twoMax:twoMax,min:XRD_2THETA_MIN,step:XRD_STEP,values:prof
+    };
+}
+function xrdCompute(){
+    if(!CRY||!CRY.latticeVectors)return {ok:false,message:'Not a crystal structure.'};
+    var cell=xrdCellSites();
+    if(!cell)return {ok:false,message:'Not a crystal structure.'};
+    if(cell.sites.length===0)return {ok:false,message:'No atom in the cell has a scattering factor.',missing:cell.missing};
+    var rad=xrdRadiationById(xrdRadiation);
+    var pat=xrdPattern(cell.sites,CRY.latticeVectors,rad.lambda,xrdTwoThetaMax);
+    if(!pat)return {ok:false,message:'The cell has no volume, so no lattice can be built.',missing:cell.missing};
+    return {ok:true,rad:rad,pattern:pat,missing:cell.missing};
+}
+function xrdDraw(pat,message){
+    var cv=document.getElementById('xrd-canvas');
+    if(!cv)return;
+    var cw=Math.max(220,Math.round(cv.clientWidth||440));
+    var ch=150;
+    var dpr=Math.min(2,window.devicePixelRatio||1);
+    cv.width=Math.round(cw*dpr);cv.height=Math.round(ch*dpr);
+    var g=cv.getContext('2d');
+    if(!g)return;
+    g.setTransform(dpr,0,0,dpr,0,0);
+    g.fillStyle='#0d1117';g.fillRect(0,0,cw,ch);
+    var L=38,R=10,T=10,B=22;
+    var pw=cw-L-R,ph=ch-T-B;
+    var twoMax=pat?pat.twoMax:xrdTwoThetaMax;
+    var twoMin=pat?pat.min:XRD_2THETA_MIN;
+    g.lineWidth=1;
+    g.strokeStyle='rgba(128,128,128,0.25)';
+    var gi;
+    for(gi=0;gi<=4;gi++){
+        var yy=Math.round(T+ph*gi/4)+0.5;
+        g.beginPath();g.moveTo(L,yy);g.lineTo(L+pw,yy);g.stroke();
+    }
+    var span=twoMax-twoMin;
+    var tickStep=span>60?20:(span>30?10:5);
+    g.fillStyle='#8b949e';
+    g.font='10px sans-serif';
+    g.textBaseline='middle';g.textAlign='right';
+    g.fillText('100',L-4,T+2);g.fillText('50',L-4,T+ph/2);g.fillText('0',L-4,T+ph-2);
+    g.textAlign='center';g.textBaseline='top';
+    for(var tt=Math.ceil(twoMin/tickStep)*tickStep;tt<=twoMax+1e-9;tt+=tickStep){
+        var xx=Math.round(L+(tt-twoMin)/span*pw)+0.5;
+        g.beginPath();g.moveTo(xx,T);g.lineTo(xx,T+ph);g.stroke();
+        g.fillText(String(tt),xx,T+ph+4);
+    }
+    g.textAlign='left';g.fillText('I (%)',L+3,T+1);
+    g.textAlign='right';g.fillText('2theta (deg)',L+pw,T+1);
+    if(!pat||!pat.values||pat.values.length<2){
+        if(message){
+            g.fillStyle='#8b949e';g.textAlign='center';g.textBaseline='middle';
+            g.font='11px sans-serif';
+            g.fillText(message,L+pw/2,T+ph/2);
+        }
+        return;
+    }
+    var vals=pat.values,n=vals.length,i;
+    function xOf(i){return L+i/(n-1)*pw}
+    function yOf(v){return T+ph*(1-v/100)}
+    g.beginPath();g.moveTo(xOf(0),yOf(0));
+    for(i=0;i<n;i++)g.lineTo(xOf(i),yOf(vals[i]));
+    g.lineTo(xOf(n-1),yOf(0));g.closePath();
+    g.fillStyle='rgba(78,201,176,0.16)';g.fill();
+    g.beginPath();g.moveTo(xOf(0),yOf(vals[0]));
+    for(i=1;i<n;i++)g.lineTo(xOf(i),yOf(vals[i]));
+    g.strokeStyle='#4ec9b0';g.lineWidth=1.2;g.stroke();
+}
+function xrdUpdate(){
+    var res=xrdCompute();
+    xrdResult=res;
+    var sumEl=document.getElementById('xrd-summary');
+    var noteEl=document.getElementById('xrd-note');
+    var listEl=document.getElementById('xrd-list');
+    var expBtn=document.getElementById('xrd-export');
+    if(!res.ok){
+        if(sumEl)sumEl.textContent=res.message||'';
+        var nm=[];
+        if(res.missing&&res.missing.length)nm.push('No scattering factor for '+res.missing.join(', ')+' in the cell.');
+        if(noteEl)noteEl.textContent=nm.join(' ');
+        if(listEl)listEl.innerHTML='<div class="xr-empty">No pattern.</div>';
+        if(expBtn)expBtn.disabled=true;
+        xrdDraw(null,res.message||'');
+        return;
+    }
+    var pat=res.pattern,rad=res.rad;
+    if(sumEl){
+        sumEl.textContent=rad.label+' '+rad.lambda.toFixed(4)+' A - '+pat.peaks.length+' peak'+
+            (pat.peaks.length===1?'':'s')+' from '+pat.reflections+' reflection'+
+            (pat.reflections===1?'':'s')+' ('+pat.min+'-'+pat.twoMax+' deg)';
+    }
+    var notes=[];
+    if(pat.capped)notes.push('Only the '+XRD_MAX_REFLECTIONS+' lowest-angle reflections were kept (the cell is too large for the rest).');
+    if(pat.indexCapped)notes.push('Reflections needing an index above '+XRD_MAX_INDEX+' are not enumerated.');
+    if(res.missing.length)notes.push('No scattering factor for '+res.missing.join(', ')+' - those atoms are not in the pattern.');
+    if(noteEl)noteEl.textContent=notes.join(' ');
+    if(expBtn)expBtn.disabled=false;
+    var rows=pat.peaks.slice();
+    rows.sort(function(a,b){return b.rel-a.rel});
+    rows=rows.slice(0,XRD_LIST_MAX);
+    rows.sort(function(a,b){return a.two-b.two});
+    var html='<div class="xr-head"><span class="xr-c1">2theta</span><span class="xr-c2">d (A)</span><span class="xr-c3">(h k l)</span><span class="xr-c4">I %</span><span class="xr-c5">x</span></div>';
+    for(var ri=0;ri<rows.length;ri++){
+        var rp=rows[ri];
+        html+='<div class="xr-row"><span class="xr-c1">'+rp.two.toFixed(3)+'</span>'+
+            '<span class="xr-c2">'+rp.d.toFixed(4)+'</span>'+
+            '<span class="xr-c3">('+rp.hkl.join(' ')+')</span>'+
+            '<span class="xr-c4">'+rp.rel.toFixed(1)+'</span>'+
+            '<span class="xr-c5">'+rp.n+'</span></div>';
+    }
+    if(rows.length===0)html+='<div class="xr-empty">No reflections in this range.</div>';
+    if(listEl)listEl.innerHTML=html;
+    xrdDraw(pat,'');
+}
+function xrdRefresh(){
+    if(!xrdOpen)return;
+    var radSel=document.getElementById('xrd-rad');
+    if(radSel&&radSel.value)xrdRadiation=radSel.value;
+    var maxSel=document.getElementById('xrd-2max');
+    if(maxSel){
+        var mv=parseInt(maxSel.value,10);
+        if(mv>XRD_2THETA_MIN&&mv<=180)xrdTwoThetaMax=mv;
+    }
+    xrdUpdate();
+}
+function xrdFillControls(){
+    var rad=document.getElementById('xrd-rad');
+    var i;
+    if(rad&&rad.options.length===0){
+        for(i=0;i<XRD_RADIATIONS.length;i++){
+            var o=document.createElement('option');
+            o.value=XRD_RADIATIONS[i].id;
+            o.textContent=XRD_RADIATIONS[i].label+' ('+XRD_RADIATIONS[i].lambda.toFixed(4)+' A)';
+            rad.appendChild(o);
+        }
+    }
+    if(rad)rad.value=xrdRadiation;
+    var mx=document.getElementById('xrd-2max');
+    if(mx&&mx.options.length===0){
+        for(i=0;i<XRD_TWO_THETA_CHOICES.length;i++){
+            var o2=document.createElement('option');
+            o2.value=String(XRD_TWO_THETA_CHOICES[i]);
+            o2.textContent=XRD_TWO_THETA_CHOICES[i]+'\u00b0';
+            mx.appendChild(o2);
+        }
+    }
+    if(mx)mx.value=String(xrdTwoThetaMax);
+}
+function xrdOpenPanel(){
+    var panel=document.getElementById('xrd-panel');
+    if(!panel||!CRY)return;
+    xrdOpen=true;
+    xrdFillControls();
+    panel.style.display='block';
+    layoutPanels();
+    xrdUpdate();
+}
+function xrdClosePanel(){
+    var panel=document.getElementById('xrd-panel');
+    if(panel)panel.style.display='none';
+    xrdOpen=false;
+    layoutPanels();
+}
+function xrdExport(){
+    if(!xrdResult||!xrdResult.ok||!xrdResult.pattern)return;
+    var pat=xrdResult.pattern,rad=xrdResult.rad;
+    var out=[];
+    out.push('# Molecular Viewer - powder X-ray diffraction');
+    out.push('# Radiation: '+rad.label+' (lambda = '+rad.lambda.toFixed(5)+' A)');
+    out.push('# Structure: '+(MD.title||'crystal'));
+    out.push('# Range: '+pat.min.toFixed(2)+' - '+(pat.min+pat.step*(pat.values.length-1)).toFixed(2)+' deg, step '+pat.step+' deg');
+    out.push('# 2theta(deg) intensity');
+    for(var i=0;i<pat.values.length;i++){
+        out.push((pat.min+i*pat.step).toFixed(3)+' '+pat.values[i].toFixed(4));
+    }
+    var base=provBaseName(MD.filePath)||'structure.xyz';
+    var stem=base;
+    var dot=base.lastIndexOf('.');
+    if(dot>0)stem=base.substring(0,dot);
+    vscodeApi.postMessage({command:'saveFile',content:out.join('\\n')+'\\n',suggestedName:stem+'.xy',filePath:MD.filePath||''});
+}
+(function(){
+    var openBtn=document.getElementById('xrd-open');
+    var panel=document.getElementById('xrd-panel');
+    if(!openBtn||!panel)return;
+    openBtn.addEventListener('click',xrdOpenPanel);
+    var closeBtn=document.getElementById('xrd-close');
+    if(closeBtn)closeBtn.addEventListener('click',xrdClosePanel);
+    var rad=document.getElementById('xrd-rad');
+    if(rad)rad.addEventListener('change',xrdRefresh);
+    var mx=document.getElementById('xrd-2max');
+    if(mx)mx.addEventListener('change',xrdRefresh);
+    var reBtn=document.getElementById('xrd-refresh');
+    if(reBtn)reBtn.addEventListener('click',xrdRefresh);
+    var exBtn=document.getElementById('xrd-export');
+    if(exBtn)exBtn.addEventListener('click',xrdExport);
+    xrdFillControls();
+})();
 
 function fmtMeasurement(kind,sel,atomsArr){
     if(!sel||sel.length===0)return null;
@@ -10105,6 +12006,23 @@ function showBondLengthModal(){
     }
     var a1=MD.atoms[selectedAtoms[0]],a2=MD.atoms[selectedAtoms[1]];
     var cur=dist(a1,a2);
+    // In a crystal the two atoms picked can be two periodic images rather than
+    // the two ends of one bond in the cell. The distance on screen is what the
+    // dialog edits, but the structure's own distance between those atoms is
+    // the shortest periodic image of the displacement, and when the two differ
+    // the number being edited is not a bond length at all. The row is read-only:
+    // editing semantics (which reject a split bond outright) are unchanged.
+    var shortestRow='';
+    if(CRY&&CRY_INV){
+        var lvS=CRY.latticeVectors,invS=CRY_INV;
+        var fdx=invS[0][0]*(a2.x-a1.x)+invS[0][1]*(a2.y-a1.y)+invS[0][2]*(a2.z-a1.z);
+        var fdy=invS[1][0]*(a2.x-a1.x)+invS[1][1]*(a2.y-a1.y)+invS[1][2]*(a2.z-a1.z);
+        var fdz=invS[2][0]*(a2.x-a1.x)+invS[2][1]*(a2.y-a1.y)+invS[2][2]*(a2.z-a1.z);
+        var nearS=crystalShortestFractional(fdx,fdy,fdz,cur,lvS,crystalPlaneWidths(lvS));
+        var offImage=Math.abs(nearS.dist-cur)>1e-3;
+        shortestRow='<div class="current-val">Shortest image: '+nearS.dist.toFixed(4)+' A'+
+            (offImage?' (these two images are not the nearest pair of their atoms)':'')+'</div>';
+    }
     var existingBond=MD.bonds.find(function(b){return(b.atom1===selectedAtoms[0]&&b.atom2===selectedAtoms[1])||(b.atom1===selectedAtoms[1]&&b.atom2===selectedAtoms[0])});
     var curOrder=existingBond?existingBond.order:1;
     var hadBondAtOpen=!!existingBond;
@@ -10112,6 +12030,7 @@ function showBondLengthModal(){
     var n1=atomLabel(a1,selectedAtoms[0]),n2=atomLabel(a2,selectedAtoms[1]);
     showModal('<h3>Adjust Bond Length</h3>'+
         '<div class="current-val">Current: '+cur.toFixed(4)+' A, Bond order: '+curOrder+'</div>'+
+        shortestRow+
         '<label>Fix atom:</label><select id="m-fix"><option value="1">Fix '+n1+' (move '+n2+')</option><option value="2">Fix '+n2+' (move '+n1+')</option></select>'+
         '<label>Move:</label><select id="m-move"><option value="group">Translate Group (atom + connected)</option><option value="atom">Translate Atom (only)</option></select>'+
         '<label>Bond order:</label><select id="m-order"><option value="0"'+(curOrder===0?' selected':'')+'>None (0) - Remove bond</option><option value="1"'+(curOrder===1?' selected':'')+'>Single (1.0)</option><option value="1.5"'+(curOrder===1.5?' selected':'')+'>Aromatic (1.5)</option><option value="2"'+(curOrder===2?' selected':'')+'>Double (2.0)</option><option value="3"'+(curOrder===3?' selected':'')+'>Triple (3.0)</option></select>'+
@@ -10627,7 +12546,8 @@ function batchDeleteSelected(){
             var color=ba.color||((MD.atomColors&&MD.atomColors[ba.element])||'#FF1493');
             newBaseAtoms.push({element:ba.element,x:ba.x,y:ba.y,z:ba.z,
                 index:newIdx,occupancy:ba.occupancy!=null?ba.occupancy:1,baseIdx:newIdx,color:color,
-                siteLabel:ba.siteLabel});
+                siteLabel:ba.siteLabel,asymIdx:ba.asymIdx,symOp:ba.symOp,
+                constraint:ba.constraint,disorderGroup:ba.disorderGroup});
         });
         CRY.baseBonds=CRY.baseBonds.filter(function(b){
             return !baseToDelete[b.atom1]&&!baseToDelete[b.atom2];
@@ -11101,7 +13021,7 @@ function doSave(){
         // shows), one count per site. A partial occupancy is written as the
         // full site it is: _chemical_formula_sum describes the sites a file
         // lists, and the occupancy column already says how much of each.
-        cifContent+='_chemical_formula_sum \\''+crystalFormulaSum(CRY.baseAtoms)+'\\'\\n';
+        cifContent+='_chemical_formula_sum \\''+crystalFormulaSum(crystalVisibleBaseAtoms())+'\\'\\n';
         cifContent+='_cell_length_a '+CRY.a.toFixed(6)+'\\n';
         cifContent+='_cell_length_b '+CRY.b.toFixed(6)+'\\n';
         cifContent+='_cell_length_c '+CRY.c.toFixed(6)+'\\n';
@@ -11112,13 +13032,54 @@ function doSave(){
         cifContent+='_symmetry_space_group_name_H-M \\'P 1\\'\\n';
         cifContent+='loop_\\n_symmetry_equiv_pos_as_xyz\\n\\'x, y, z\\'\\n';
         cifContent+='loop_\\n_atom_site_label\\n_atom_site_type_symbol\\n_atom_site_fract_x\\n_atom_site_fract_y\\n_atom_site_fract_z\\n_atom_site_occupancy\\n_atom_site_site_symmetry_multiplicity\\n';
-        CRY.baseAtoms.forEach(function(ba,i){
+        // The save follows the disorder selection: the file describes the
+        // alternative the picture shows, not every alternative at once.
+        var cifBase=crystalVisibleBaseAtoms();
+        var cifAtomOf={};
+        var cifLabelOf={};
+        cifBase.forEach(function(ba,i){
             var f=crystalFracWrapped(ba.x,ba.y,ba.z);
             var label=ba.element+(i+1);
             var occ=(ba.occupancy!=null?ba.occupancy:1).toFixed(3);
+            cifAtomOf[ba.baseIdx!=null?ba.baseIdx:i]=ba;
+            cifLabelOf[ba.baseIdx!=null?ba.baseIdx:i]=label;
             // P1 has one operation, so every site is its own multiplicity.
             cifContent+=label+' '+ba.element+' '+f[0].toFixed(6)+' '+f[1].toFixed(6)+' '+f[2].toFixed(6)+' '+occ+' 1\\n';
         });
+        // The bond table, in the labels just written. The cell is declared P1,
+        // so a bond that points into a neighbouring cell is stated with the one
+        // operation and a translation (1_455 is -a): the file carries the
+        // same connectivity it was drawn with, and reading it back rebuilds the
+        // same base bonds instead of a face cut. A bond whose endpoint is not
+        // on screen (a disorder alternative that is not selected) is left out
+        // with the site it names.
+        var cifBonds=CRY.baseBonds||[];
+        var cifAnyValence=false;
+        cifBonds.forEach(function(bb){if(bb.valence>0)cifAnyValence=true});
+        var cifBondRows='';
+        cifBonds.forEach(function(bb){
+            var l1=cifLabelOf[bb.atom1],l2=cifLabelOf[bb.atom2];
+            var ba1=cifAtomOf[bb.atom1],ba2=cifAtomOf[bb.atom2];
+            if(!l1||!l2||!ba1||!ba2)return;
+            var s=bb.shift||[0,0,0];
+            if(Math.abs(s[0])>4||Math.abs(s[1])>4||Math.abs(s[2])>4)return;
+            var code=(s[0]||s[1]||s[2])?'1_'+(s[0]+5)+(s[1]+5)+(s[2]+5):'.';
+            var lvC=CRY.latticeVectors;
+            var dx=ba2.x+s[0]*lvC[0][0]+s[1]*lvC[1][0]+s[2]*lvC[2][0]-ba1.x;
+            var dy=ba2.y+s[0]*lvC[0][1]+s[1]*lvC[1][1]+s[2]*lvC[2][1]-ba1.y;
+            var dz=ba2.z+s[0]*lvC[0][2]+s[1]*lvC[1][2]+s[2]*lvC[2][2]-ba1.z;
+            var dist=Math.sqrt(dx*dx+dy*dy+dz*dz);
+            var ord=(bb.order>0?bb.order:1);
+            cifBondRows+=l1+' '+l2+' '+dist.toFixed(4)+' '+code+' '+ord;
+            if(cifAnyValence)cifBondRows+=' '+(bb.valence>0?bb.valence:'?');
+            cifBondRows+='\\n';
+        });
+        if(cifBondRows!==''){
+            cifContent+='loop_\\n_geom_bond_atom_site_label_1\\n_geom_bond_atom_site_label_2\\n'+
+                '_geom_bond_distance\\n_geom_bond_site_symmetry_2\\n_geom_bond_order\\n';
+            if(cifAnyValence)cifContent+='_geom_bond_valence\\n';
+            cifContent+=cifBondRows;
+        }
     }
 
     // ===== VASP POSCAR =====
@@ -11132,13 +13093,26 @@ function doSave(){
     var vaspContent='';
     if(CRY){
         var lv=CRY.latticeVectors;
-        var base=CRY.baseAtoms;
+        var base=crystalVisibleBaseAtoms();
         var elemOrder=[];
         var elemCounts={};
+        var elemAtoms={};
         base.forEach(function(ba){
-            if(elemCounts[ba.element]===undefined){elemOrder.push(ba.element);elemCounts[ba.element]=0}
+            if(elemCounts[ba.element]===undefined){
+                elemOrder.push(ba.element);elemCounts[ba.element]=0;elemAtoms[ba.element]=[];
+            }
             elemCounts[ba.element]++;
+            elemAtoms[ba.element].push(ba);
         });
+        // POSCAR assigns elements through the order of the symbol line and the
+        // counts line, so the coordinates must be written grouped the same way.
+        // A base cell in site order (Na, Cl, Na) against a two-name header
+        // would relabel the second Na site as Cl on the next read.
+        var vaspAtoms=[];
+        elemOrder.forEach(function(e){elemAtoms[e].forEach(function(ba){vaspAtoms.push(ba)})});
+        // Selective dynamics is written only when some atom carries flags; an
+        // atom without any is free, which is T T T.
+        var anyConstraint=base.some(function(ba){return !!ba.constraint});
         var vaspTitle=provTitle(MD.title||'Modified structure',true,'unit cell, '+base.length+' atoms (not the displayed supercell)');
         vaspContent=vaspTitle+'\\n';
         vaspContent+='1.0\\n';
@@ -11147,10 +13121,16 @@ function doSave(){
         }
         vaspContent+=elemOrder.join('  ')+'\\n';
         vaspContent+=elemOrder.map(function(e){return elemCounts[e]}).join('  ')+'\\n';
+        if(anyConstraint)vaspContent+='Selective dynamics\\n';
         vaspContent+='Direct\\n';
-        base.forEach(function(ba){
+        vaspAtoms.forEach(function(ba){
             var f=crystalFracWrapped(ba.x,ba.y,ba.z);
-            vaspContent+='  '+f[0].toFixed(8)+'  '+f[1].toFixed(8)+'  '+f[2].toFixed(8)+'\\n';
+            var line='  '+f[0].toFixed(8)+'  '+f[1].toFixed(8)+'  '+f[2].toFixed(8);
+            if(anyConstraint){
+                var flags=(ba.constraint&&/^[TF] [TF] [TF]$/.test(ba.constraint))?ba.constraint:'T T T';
+                line+='  '+flags;
+            }
+            vaspContent+=line+'\\n';
         });
     }
 
@@ -11165,11 +13145,11 @@ function doSave(){
     // presses Save, because the grid size is chosen in the dialog.
     var vestaContent='';
     if(CRY){
-        var vestaTitle=provTitle(MD.title||'Modified structure',true,'unit cell, '+CRY.baseAtoms.length+' atoms');
+        var vestaTitle=provTitle(MD.title||'Modified structure',true,'unit cell, '+crystalVisibleBaseAtoms().length+' atoms');
         vestaContent='#VESTA_FORMAT_VERSION 3.5.4\\n\\n\\nCRYSTAL\\n\\nTITLE\\n'+vestaTitle+'\\n\\nGROUP\\n    1   1 P 1\\n\\nSYMOP\\n 0.000000  0.000000  0.000000  1  0  0   0  1  0   0  0  1   1\\n-1.0 -1.0 -1.0  1 0 0  0 0 0  0 0 0\\n\\nTRANM 0\\n 0.000000  0.000000  0.000000  1  0  0   0  1  0   0  0  1\\n\\nLTRANSL\\n -1\\n 0.000000  0.000000  0.000000  0.000000  0.000000  0.000000\\n\\nLORIENT\\n -1   0   0   0   0\\n 1.000000  0.000000  0.000000  1.000000  0.000000  0.000000\\n 0.000000  0.000000  1.000000  0.000000  0.000000  1.000000\\n\\nLMATRIX\\n 1.000000  0.000000  0.000000  0.000000\\n 0.000000  1.000000  0.000000  0.000000\\n 0.000000  0.000000  1.000000  0.000000\\n 0.000000  0.000000  0.000000  1.000000\\n 0.000000  0.000000  0.000000\\n\\nCELLP\\n';
         vestaContent+=' '+CRY.a.toFixed(6)+'  '+CRY.b.toFixed(6)+'  '+CRY.c.toFixed(6)+'  '+CRY.alpha.toFixed(6)+'  '+CRY.beta.toFixed(6)+'  '+CRY.gamma.toFixed(6)+'\\n';
         vestaContent+=' 0.000000  0.000000  0.000000  0.000000  0.000000  0.000000\\n\\nSTRUC\\n';
-        CRY.baseAtoms.forEach(function(ba,i){
+        crystalVisibleBaseAtoms().forEach(function(ba,i){
             var f=crystalFracWrapped(ba.x,ba.y,ba.z);
             var label=ba.element+(i+1);
             var occ=(ba.occupancy!=null?ba.occupancy:1).toFixed(4);
@@ -11468,7 +13448,9 @@ function buildClusterGjf(keepWhole){
  */
 function buildCubeContent(nGrid){
     var lv=CRY.latticeVectors;
-    var base=CRY.baseAtoms;
+    // The cube follows the disorder selection like every other crystal export,
+    // so a QM job starts from the alternative that is on screen.
+    var base=crystalVisibleBaseAtoms();
     var title=provTitle(MD.title||'Modified structure',true,'unit cell, '+base.length+' atoms, '+nGrid+'^3 zero grid');
     var out='Molecular Viewer export\\n'+title+'\\n';
     out+=base.length+'  0.000000  0.000000  0.000000\\n';
@@ -12203,7 +14185,15 @@ canvas.addEventListener('mousemove',function(e){
             tip+=' · frac ('+tfx.toFixed(3)+', '+tfy.toFixed(3)+', '+tfz.toFixed(3)+')';
             tip+=' · cell ('+a.cellI+','+a.cellJ+','+a.cellK+')';
             var tba=CRY.baseAtoms[a.baseIdx];
-            if(tba&&tba.siteLabel)tip+=' · site '+tba.siteLabel;
+            if(tba&&tba.siteLabel){
+                tip+=' · site '+tba.siteLabel;
+                // G9: the operation that placed this image, by its position in
+                // the file's own table. Only atoms expanded from an asymmetric
+                // unit have it; a POSCAR's atoms have no operation to name.
+                if(tba.symOp!=null&&CRY.symmetryOps&&CRY.symmetryOps[tba.symOp]!=null){
+                    tip+=' (op #'+(tba.symOp+1)+': '+CRY.symmetryOps[tba.symOp]+')';
+                }
+            }
             if(a.occupancy!=null)tip+=' · occ '+a.occupancy;
         }
         tooltipEl.textContent=tip;
@@ -12371,6 +14361,9 @@ function escapeOneLevel(){
         isBoxSelecting=false;boxRectEl.style.display='none';boxStart=null;
         needsRender=true;layoutPanels();return true;
     }
+    // The powder pattern is a reading aid with a close button of its own: Esc
+    // backs out of it before it takes away a tool or a selection.
+    if(xrdOpen){xrdClosePanel();return true}
     if(currentMode!=='view'){setMode('view');return true}
     if(selectedAtoms.length>0||diffSelectedAtoms.length>0){resetSelection();return true}
     return false;
