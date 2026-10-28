@@ -1820,6 +1820,16 @@ function computeCrystalInv(){
     ];
 }
 computeCrystalInv();
+// The six bounds inputs show the boundary in force. It lives outside the
+// crystal panel's own block because an undo restores the boundary together with
+// the base cell, and has to put the inputs back with it.
+function syncBndInputs(){
+    [['bnd-a-min','aMin'],['bnd-a-max','aMax'],['bnd-b-min','bMin'],
+     ['bnd-b-max','bMax'],['bnd-c-min','cMin'],['bnd-c-max','cMax']].forEach(function(pr){
+        var el=document.getElementById(pr[0]);
+        if(el)el.value=boundary[pr[1]];
+    });
+}
 function formulaFromAtoms(arr){
     var counts={};
     // A ghost contributes no atom to the formula: it has no nucleus, so the
@@ -2119,6 +2129,7 @@ function detectCrystalBaseBonds(){
         }
     }
     CRY.baseBonds=bonds;
+    CRY.bondsDetected=true;
 }
 
 function rebuildCrystal(){
@@ -2133,7 +2144,11 @@ function rebuildCrystal(){
     if(!CRY_INV){MD.atoms=[];MD.bonds=[];updateMolInfo();return}
     var inv=CRY_INV;
 
-    if(baseBonds.length===0||!baseBonds[0].shift){
+    // Detect the base connectivity exactly once per session. An empty list is
+    // a result too (a structure the detector finds no bond in, or a cell whose
+    // bonds the user has all deleted), and re-detecting then would resurrect a
+    // bond an edit removed and quietly disagree with the file being saved.
+    if(!CRY.bondsDetected){
         detectCrystalBaseBonds();
         baseBonds=CRY.baseBonds;
     }
@@ -2232,7 +2247,12 @@ function rebuildCrystal(){
         var fx=inv[0][0]*ba.x+inv[0][1]*ba.y+inv[0][2]*ba.z;
         var fy=inv[1][0]*ba.x+inv[1][1]*ba.y+inv[1][2]*ba.z;
         var fz=inv[2][0]*ba.x+inv[2][1]*ba.y+inv[2][2]*ba.z;
-        fx-=Math.floor(fx);fy-=Math.floor(fy);fz-=Math.floor(fz);
+        // The integer cell offset this image sits at, measured from the base
+        // site's own (unwrapped) fractional position. It is the one number
+        // commitCrystalCoords() needs to turn a move of this image back into a
+        // move of the site: display - base - imgShift is the edit alone.
+        var floorX=Math.floor(fx),floorY=Math.floor(fy),floorZ=Math.floor(fz);
+        fx-=floorX;fy-=floorY;fz-=floorZ;
         for(var ci=iMin;ci<=iMax;ci++){
             for(var cj=jMin;cj<=jMax;cj++){
                 for(var ck=kMin;ck<=kMax;ck++){
@@ -2251,7 +2271,8 @@ function rebuildCrystal(){
                         occupancy:ba.occupancy,
                         color:color,
                         baseIdx:ba.baseIdx!=null?ba.baseIdx:bi,
-                        cellI:ci,cellJ:cj,cellK:ck
+                        cellI:ci,cellJ:cj,cellK:ck,
+                        imgShift:[ci-floorX,cj-floorY,ck-floorZ]
                     });
                     cellMap[bi+'_'+ci+'_'+cj+'_'+ck]=idx;
                     rememberCell(bi,ci,cj,ck);
@@ -2322,7 +2343,11 @@ function rebuildCrystal(){
                             occupancy:ba3.occupancy,
                             color:color,
                             baseIdx:ba3.baseIdx!=null?ba3.baseIdx:bi3,
-                            cellI:ci3,cellJ:cj3,cellK:ck3
+                            cellI:ci3,cellJ:cj3,cellK:ck3,
+                            // The whole-copy placement puts the atom at
+                            // base + (offset - t + cell), so that integer is its
+                            // image offset (see commitCrystalCoords()).
+                            imgShift:[ci3,cj3,ck3]
                         });
                         cellMap[bi3+'_'+ci3+'_'+cj3+'_'+ck3]=idx;
                         rememberCell(bi3,ci3,cj3,ck3);
@@ -2403,6 +2428,148 @@ function rebuildCrystal(){
     MD.bonds=bonds;
     updateMolInfo();
     needsRender=true;
+}
+
+// ===== Writing an edit of the picture back into the base cell =====
+//
+// A crystal's file content is its base cell, while the picture is a supercell:
+// one base site may be on screen several times, at an integer number of cells
+// from where the file lists it. Saving CIF/VESTA writes baseAtoms, and any
+// rebuildCrystal() (a bounds change, an undo, a removed atom) redraws from it —
+// so a coordinate edit that stays in MD.atoms alone is lost by both, and the
+// same session would save two different structures depending on the format.
+//
+// rebuildCrystal() records each image's integer cell offset as imgShift, so
+// the displacement the edit made to one image is exactly
+//
+//   delta_frac = frac(image) − frac(base) − imgShift
+//
+// and adding it to the base site carries the edit into the cell. A site that is
+// on screen more than once (a 2x2x2 supercell shows each site eight times) gets
+// the delta of its **most-moved** image: an edit moves one image's copy, or
+// translates a group of them by the same vector, while the untouched copies all
+// report zero — summing them would multiply the edit by the number of images.
+// displayIdxList names the atoms the edit actually moved. A session that
+// commits one step at a time (Rotate Group) keeps the other images at the
+// geometry of an earlier commit, and for those the apparent delta is the
+// previous step, not this one, so a step must only write back its own atoms.
+function commitCrystalCoords(displayIdxList){
+    if(!CRY||!CRY_INV)return;
+    var inv=CRY_INV;
+    var list=displayIdxList||null;
+    var n=list?list.length:MD.atoms.length;
+    var best={};
+    for(var k=0;k<n;k++){
+        var i=list?list[k]:k;
+        var a=MD.atoms[i];
+        if(!a||!a.imgShift||a.baseIdx==null)continue;
+        var ba=CRY.baseAtoms[a.baseIdx];
+        if(!ba)continue;
+        var ax=a.x-ba.x,ay=a.y-ba.y,az=a.z-ba.z;
+        var dx=inv[0][0]*ax+inv[0][1]*ay+inv[0][2]*az-a.imgShift[0];
+        var dy=inv[1][0]*ax+inv[1][1]*ay+inv[1][2]*az-a.imgShift[1];
+        var dz=inv[2][0]*ax+inv[2][1]*ay+inv[2][2]*az-a.imgShift[2];
+        var d2=dx*dx+dy*dy+dz*dz;
+        // A site that sits exactly where it was built moves nothing; skipping it
+        // keeps a run of commits from creeping the base by round-off.
+        if(d2<1e-18)continue;
+        var cur=best[a.baseIdx];
+        if(!cur||d2>cur.d2)best[a.baseIdx]={dx:dx,dy:dy,dz:dz,d2:d2};
+    }
+    // The base is written back through the same inverse the delta was read
+    // with, so cart → frac → cart closes on the value the display already had
+    // (to the last bits of the double).
+    var lv=CRY.latticeVectors;
+    var keys=Object.keys(best);
+    for(var q=0;q<keys.length;q++){
+        var key=keys[q];
+        var b=CRY.baseAtoms[key];
+        if(!b)continue;
+        var d=best[key];
+        var fx=inv[0][0]*b.x+inv[0][1]*b.y+inv[0][2]*b.z+d.dx;
+        var fy=inv[1][0]*b.x+inv[1][1]*b.y+inv[1][2]*b.z+d.dy;
+        var fz=inv[2][0]*b.x+inv[2][1]*b.y+inv[2][2]*b.z+d.dz;
+        b.x=fx*lv[0][0]+fy*lv[1][0]+fz*lv[2][0];
+        b.y=fx*lv[0][1]+fy*lv[1][1]+fz*lv[2][1];
+        b.z=fx*lv[0][2]+fy*lv[1][2]+fz*lv[2][2];
+    }
+}
+
+// The bond a crystal state actually holds, for a bond drawn between two images:
+// its endpoints are the two sites, and its shift is the number of cells between
+// the images the two atoms sit in (a split bond adds the shift of the stub it
+// was drawn as). A bond object created by hand (no image labels yet) is read
+// from the two display atoms it is about to join.
+function crystalBaseBondFromDisplay(b){
+    if(!CRY||!b)return null;
+    var a1=MD.atoms[b.atom1],a2=MD.atoms[b.atom2];
+    if(!a1||!a2)return null;
+    if(a1.baseIdx==null||a2.baseIdx==null)return null;
+    var s=b.shift||ZERO_SHIFT;
+    var c1x=a1.cellI||0,c1y=a1.cellJ||0,c1z=a1.cellK||0;
+    var c2x=a2.cellI||0,c2y=a2.cellJ||0,c2z=a2.cellK||0;
+    return {atom1:a1.baseIdx,atom2:a2.baseIdx,
+        shift:[c2x+s[0]-c1x,c2y+s[1]-c1y,c2z+s[2]-c1z]};
+}
+// The base bond equivalent to the one a display bond describes, or null.
+// Direction is not part of a bond's identity, so the reversed spelling with the
+// opposite shift is the same bond.
+function crystalFindBaseBond(desc){
+    if(!CRY||!desc)return null;
+    var s=desc.shift;
+    for(var i=0;i<CRY.baseBonds.length;i++){
+        var x=CRY.baseBonds[i];
+        var xs=x.shift||ZERO_SHIFT;
+        if(x.atom1===desc.atom1&&x.atom2===desc.atom2&&xs[0]===s[0]&&xs[1]===s[1]&&xs[2]===s[2])return x;
+        if(x.atom1===desc.atom2&&x.atom2===desc.atom1&&xs[0]===-s[0]&&xs[1]===-s[1]&&xs[2]===-s[2])return x;
+    }
+    return null;
+}
+// A bond drawn as a stub across a cell face: the two atoms on screen are a whole
+// cell apart on purpose, so the distance between them is not the bond's length
+// and editing it would write back a displacement the bond does not have.
+function crystalCrossFaceBondBetween(i1,i2){
+    if(!CRY)return null;
+    for(var i=0;i<MD.bonds.length;i++){
+        var b=MD.bonds[i];
+        if(!((b.atom1===i1&&b.atom2===i2)||(b.atom1===i2&&b.atom2===i1)))continue;
+        var s=b.shift||ZERO_SHIFT;
+        if(s[0]||s[1]||s[2])return b;
+    }
+    return null;
+}
+// Direction from "from" to the periodic image of "to" that a bond shift names,
+// as a unit vector. A molecule that straddles a cell face holds its neighbours a
+// whole cell away in the file, and the raw difference would point a new atom
+// straight through the wall instead of away from its neighbours.
+function crystalImageDirection(from,to,sign,shift){
+    var dx=to.x-from.x,dy=to.y-from.y,dz=to.z-from.z;
+    if(CRY_INV){
+        var inv=CRY_INV,lv=CRY.latticeVectors;
+        var fx=inv[0][0]*(to.x-from.x)+inv[0][1]*(to.y-from.y)+inv[0][2]*(to.z-from.z)+sign*shift[0];
+        var fy=inv[1][0]*(to.x-from.x)+inv[1][1]*(to.y-from.y)+inv[1][2]*(to.z-from.z)+sign*shift[1];
+        var fz=inv[2][0]*(to.x-from.x)+inv[2][1]*(to.y-from.y)+inv[2][2]*(to.z-from.z)+sign*shift[2];
+        // The nearest image of that neighbour is the one the anchor is bonded
+        // to as far as the free direction is concerned.
+        fx-=Math.round(fx);fy-=Math.round(fy);fz-=Math.round(fz);
+        dx=fx*lv[0][0]+fy*lv[1][0]+fz*lv[2][0];
+        dy=fx*lv[0][1]+fy*lv[1][1]+fz*lv[2][1];
+        dz=fx*lv[0][2]+fy*lv[1][2]+fz*lv[2][2];
+    }
+    var l=Math.sqrt(dx*dx+dy*dy+dz*dz);
+    if(l<1e-10)return null;
+    return {x:dx/l,y:dy/l,z:dz/l};
+}
+
+// Put a crystal's base cell back the way the snapshot on top of the undo stack
+// recorded it. A dialog's Cancel calls this just before it pops that snapshot,
+// so the base state it hands back is not one the stack keeps a reference to.
+function restoreCrystalBaseFromUndoTop(){
+    if(!CRY||undoStack.length===0)return;
+    var snap=undoStack[undoStack.length-1];
+    if(!snap.baseAtoms||!snap.baseBonds)return;
+    CRY.baseAtoms=snap.baseAtoms;
+    CRY.baseBonds=snap.baseBonds;
 }
 
 function removeDisorder(){
@@ -4320,13 +4487,6 @@ if(CRY){
         if(nc<1)nc=1;
         return na*nbv*nc;
     }
-    function syncBndInputs(){
-        [['bnd-a-min','aMin'],['bnd-a-max','aMax'],['bnd-b-min','bMin'],
-         ['bnd-b-max','bMax'],['bnd-c-min','cMin'],['bnd-c-max','cMax']].forEach(function(pr){
-            var el=document.getElementById(pr[0]);
-            if(el)el.value=boundary[pr[1]];
-        });
-    }
     function boundsEqual(a,b){
         return a.aMin===b.aMin&&a.aMax===b.aMax&&a.bMin===b.bMin&&a.bMax===b.bMax&&a.cMin===b.cMin&&a.cMax===b.cMax;
     }
@@ -5294,6 +5454,9 @@ function setMode(m){
         syncRotatePanelGroupField();
     }
     if(oldMode==='rotateGroup'&&m!=='rotateGroup'){
+        // A previewed angle is the geometry the user leaves the mode on, so it
+        // is carried into the base cell before the mode's state is dropped.
+        if(rotActive&&CRY)commitCrystalCoords(rotMovedDisplayAtoms());
         removeRotAxisLine();
         // 分组旋转可能已经改变了质心: 离开该模式时重定旋转中心
         updateRotationCenter();
@@ -5388,8 +5551,44 @@ var rotateAxisAtoms=[];
 var rotAxisParams=null;
 var rotAxisLineMesh=null;
 var rotCommittedAngle=0;
+// Where in the undo stack this rotation session began. Reset takes the session
+// back as a whole and needs its own first snapshot, not an earlier session's.
+var rotUndoMark=0;
 
+// The atoms a rotation actually turned (the group minus its axis): what a
+// crystal write-back has to carry into the base cell for this step.
+function rotMovedDisplayAtoms(){
+    var axisSet={};
+    rotateAxisAtoms.forEach(function(i){axisSet[i]=true});
+    var out=[];
+    for(var i=0;i<rotateGroupAtoms.length;i++){
+        var idx=rotateGroupAtoms[i];
+        if(axisSet[idx])continue;
+        out.push(idx);
+    }
+    return out;
+}
+// The base cell this rotation session started from: the earliest snapshot the
+// session pushed — taken at its first committed angle, before that angle's
+// geometry reached the base. Reset drops the session's snapshots, so this has
+// to be read before they are popped.
+function restoreRotSessionBase(){
+    if(!CRY)return false;
+    var from=rotUndoMark>0?rotUndoMark:0;
+    for(var i=from;i<undoStack.length;i++){
+        var s=undoStack[i];
+        if(s.rotAngle!=null&&s.baseAtoms&&s.baseBonds){
+            CRY.baseAtoms=s.baseAtoms;CRY.baseBonds=s.baseBonds;
+            return true;
+        }
+    }
+    return false;
+}
 function resetRotAxisState(){
+    // A previewed angle still on screen when the session ends (Done, Clear, a
+    // mode switch) is its last word: carry it into the base cell before the set
+    // of moved atoms is cleared.
+    if(rotActive&&CRY)commitCrystalCoords(rotMovedDisplayAtoms());
     rotActive=false;
     rotateGroupAtoms=[];
     rotateAxisAtoms=[];
@@ -5508,6 +5707,9 @@ function commitRotAngle(newAngle){
         undoStack[undoStack.length-1].rotAngle=rotCommittedAngle;
         restoreOriginal();
         applyGroupRotation(newAngle);
+        // The new angle is the geometry the file has to keep, and a preview
+        // alone never reaches the base cell: write this step back now.
+        if(CRY)commitCrystalCoords(rotMovedDisplayAtoms());
         rotCommittedAngle=newAngle;
         // 一次角度调整落定后质心可能变了, 立刻重定旋转中心 (与滑块拖动中的
         // 实时预览不同: 预览期间中心保持不变, 免得整屏跟着跳)。
@@ -5561,7 +5763,9 @@ function commitRotAngle(newAngle){
         rotAxisParams=params;
         // Capture the session baseline WITHOUT pushing an undo snapshot here —
         // each committed angle adjustment pushes its own snapshot, so undo
-        // steps back one angle adjustment at a time.
+        // steps back one angle adjustment at a time. The mark is where Reset
+        // starts looking for the session's own first snapshot.
+        rotUndoMark=undoStack.length;
         originalCoords=MD.atoms.map(function(a){return{x:a.x,y:a.y,z:a.z}});
         rotCommittedAngle=0;
         var sw=document.getElementById('rp-slider-wrap');if(sw)sw.style.display='block';
@@ -5610,6 +5814,10 @@ function commitRotAngle(newAngle){
     });
     resetBtn.addEventListener('click',function(){
         if(originalCoords)restoreOriginal();
+        // A crystal's base cell carries the session's committed angles, so Reset
+        // restores it from the session's own first snapshot as well — the display
+        // is not the whole state any more.
+        if(restoreRotSessionBase())rebuildCrystal();
         rebuildScene();
         // Remove all undo snapshots pushed by this rotation session (tagged
         // with rotAngle) so Reset reverts the whole session at once.
@@ -5661,8 +5869,20 @@ function pushUndo(){
     // false→true, and an undo of that import must restore it, otherwise Move
     // Atoms would keep using the explicit-bonds (deletion-only) path on what
     // is an auto-detected structure again.
-    var snap={atoms:JSON.parse(JSON.stringify(MD.atoms)),bonds:JSON.parse(JSON.stringify(MD.bonds)),hasExplicitBonds:!!MD.hasExplicitBonds,prov:provClone()};
-    if(CRY){snap.baseAtoms=JSON.parse(JSON.stringify(CRY.baseAtoms));snap.baseBonds=JSON.parse(JSON.stringify(CRY.baseBonds))}
+    var snap={hasExplicitBonds:!!MD.hasExplicitBonds,prov:provClone()};
+    if(CRY){
+        // A crystal's picture is a pure function of three things — the base
+        // cell, its bonds and the bounds — so those three are the snapshot, and
+        // the displayed supercell is not stored at all: a 2x2x2 view then costs
+        // exactly what a 1x1x1 view does, and doUndo() rebuilds the picture from
+        // the cell it restores.
+        snap.baseAtoms=JSON.parse(JSON.stringify(CRY.baseAtoms));
+        snap.baseBonds=JSON.parse(JSON.stringify(CRY.baseBonds));
+        snap.boundary={aMin:boundary.aMin,aMax:boundary.aMax,bMin:boundary.bMin,bMax:boundary.bMax,cMin:boundary.cMin,cMax:boundary.cMax};
+    }else{
+        snap.atoms=JSON.parse(JSON.stringify(MD.atoms));
+        snap.bonds=JSON.parse(JSON.stringify(MD.bonds));
+    }
     undoStack.push(snap);
     if(undoStack.length>MAX_UNDO)undoStack.shift();
     updateUndoBtn();
@@ -5678,13 +5898,26 @@ function doUndo(){
     // nothing left to be measured from — it is dropped, not committed.
     vdEnd();
     var snap=undoStack.pop();
-    MD.atoms=snap.atoms;MD.bonds=snap.bonds;
     MD.hasExplicitBonds=!!snap.hasExplicitBonds;
     // The provenance belongs to the geometry: an undone edit is not in the
     // structure any more, so its clause comes off the title with it.
     provRestore(snap.prov);
-    if(CRY&&snap.baseAtoms){CRY.baseAtoms=snap.baseAtoms;CRY.baseBonds=snap.baseBonds}
-    if(CRY){rebuildCrystal()}rebuildScene();updateUndoBtn();
+    if(CRY&&snap.baseAtoms&&snap.baseBonds){
+        // A crystal snapshot holds the base cell and the bounds, and the picture
+        // is rebuilt from them — this is the step that keeps a large supercell's
+        // undo as cheap as a unit cell's.
+        CRY.baseAtoms=snap.baseAtoms;CRY.baseBonds=snap.baseBonds;
+        if(snap.boundary){
+            boundary.aMin=snap.boundary.aMin;boundary.aMax=snap.boundary.aMax;
+            boundary.bMin=snap.boundary.bMin;boundary.bMax=snap.boundary.bMax;
+            boundary.cMin=snap.boundary.cMin;boundary.cMax=snap.boundary.cMax;
+            syncBndInputs();
+        }
+        rebuildCrystal();
+    }else{
+        MD.atoms=snap.atoms;MD.bonds=snap.bonds;
+    }
+    rebuildScene();updateUndoBtn();
     if(diffMode)resetSelection();
     if(currentMode==='mmOpt'){
         // The panel's last-run block describes a geometry that has just been
@@ -8986,10 +9219,19 @@ function showModal(html,cb){if(vibActive||vibPaused)stopVibration();stopMoveSess
 function hideModal(){modalOverlay.classList.remove('show');modalCallback=null}
 
 function showBondLengthModal(){
+    // A bond drawn as a stub across a cell face has its two atoms a whole cell
+    // apart on purpose: the distance on screen is not the bond's length, and
+    // writing that distance "back" would move the cell by a displacement the
+    // bond does not have. Both ends have to belong to one periodic image.
+    if(crystalCrossFaceBondBetween(selectedAtoms[0],selectedAtoms[1])){
+        modeInfoEl.textContent='Bond Length: this bond crosses a cell face - both atoms must be in one periodic image (grow the supercell and pick them there)';
+        return;
+    }
     var a1=MD.atoms[selectedAtoms[0]],a2=MD.atoms[selectedAtoms[1]];
     var cur=dist(a1,a2);
     var existingBond=MD.bonds.find(function(b){return(b.atom1===selectedAtoms[0]&&b.atom2===selectedAtoms[1])||(b.atom1===selectedAtoms[1]&&b.atom2===selectedAtoms[0])});
     var curOrder=existingBond?existingBond.order:1;
+    var hadBondAtOpen=!!existingBond;
     saveOriginal();
     var n1=atomLabel(a1,selectedAtoms[0]),n2=atomLabel(a2,selectedAtoms[1]);
     showModal('<h3>Adjust Bond Length</h3>'+
@@ -9008,7 +9250,16 @@ function showBondLengthModal(){
     orderEl.addEventListener('change',function(){
         var newOrder=parseFloat(this.value);
         if(newOrder===0){
-            if(existingBond){MD.bonds=MD.bonds.filter(function(b){return b!==existingBond});existingBond=null;rebuildScene()}
+            if(existingBond){
+                // A crystal's bonds on screen are drawn from its base bonds, so a
+                // removal has to reach the cell bond the picture was drawn from;
+                // otherwise the next rebuildCrystal() would draw it again.
+                if(CRY){
+                    var gone=crystalFindBaseBond(crystalBaseBondFromDisplay(existingBond));
+                    if(gone)CRY.baseBonds.splice(CRY.baseBonds.indexOf(gone),1);
+                }
+                MD.bonds=MD.bonds.filter(function(b){return b!==existingBond});existingBond=null;rebuildScene()
+            }
         }else{
             if(!existingBond){
                 // A ghost has no valence, so this pair cannot be given a bond
@@ -9023,19 +9274,50 @@ function showBondLengthModal(){
                     return;
                 }
                 existingBond={atom1:selectedAtoms[0],atom2:selectedAtoms[1],order:newOrder};
+                // A bond a crystal did not have lives in the base cell too: its
+                // shift is the number of cells between the two images picked.
+                if(CRY){
+                    var made=crystalBaseBondFromDisplay(existingBond);
+                    if(made&&!crystalFindBaseBond(made))CRY.baseBonds.push({atom1:made.atom1,atom2:made.atom2,order:newOrder,shift:made.shift});
+                }
                 MD.bonds.push(existingBond);
-            }else{existingBond.order=newOrder}
+            }else{
+                existingBond.order=newOrder;
+                if(CRY){
+                    var baseBond=crystalFindBaseBond(crystalBaseBondFromDisplay(existingBond));
+                    if(baseBond)baseBond.order=newOrder;
+                }
+            }
             rebuildScene();
         }
     });
-    document.getElementById('m-ok').addEventListener('click',function(){provMarkIfMoved('bondLen');hideModal();originalCoords=null;resetSelection()});
+    document.getElementById('m-ok').addEventListener('click',function(){
+        // The dialog edits the picture from the moment it opens; a crystal saves
+        // its base cell, so the previewed geometry is carried there now, before
+        // the session baseline this dialog captured is dropped.
+        if(CRY)commitCrystalCoords();
+        provMarkIfMoved('bondLen');hideModal();originalCoords=null;resetSelection()
+    });
     document.getElementById('m-cancel').addEventListener('click',function(){
         if(existingBond&&originalCoords){existingBond.order=curOrder}
+        // A bond this dialog created is not part of the structure it opened on,
+        // so cancelling takes it out of the picture as well as out of the cell.
+        if(existingBond&&!hadBondAtOpen)MD.bonds=MD.bonds.filter(function(b){return b!==existingBond});
+        // A bond-order change went into the base cell as it was made; the
+        // snapshot this dialog opened with is the state to put back before the
+        // snapshot is dropped.
+        if(CRY)restoreCrystalBaseFromUndoTop();
         restoreOriginal();rebuildScene();undoStack.pop();updateUndoBtn();hideModal();originalCoords=null;resetSelection()
     });
 }
 
 function showBondAngleModal(){
+    // Same rule as the bond length: an angle read off a bond drawn across a
+    // face is an angle between two different images, not the angle in the cell.
+    if(crystalCrossFaceBondBetween(selectedAtoms[0],selectedAtoms[1])||crystalCrossFaceBondBetween(selectedAtoms[1],selectedAtoms[2])){
+        modeInfoEl.textContent='Bond Angle: a bond here crosses a cell face - both atoms of each bond must be in one periodic image';
+        return;
+    }
     var a1=MD.atoms[selectedAtoms[0]],a2=MD.atoms[selectedAtoms[1]],a3=MD.atoms[selectedAtoms[2]];
     var cur=angle(a1,a2,a3);
     saveOriginal();
@@ -9052,11 +9334,17 @@ function showBondAngleModal(){
     valEl.addEventListener('input',function(){sliderEl.value=this.value;applyBondAngle(parseFloat(this.value),fixEl.value==='1',moveEl.value)});
     fixEl.addEventListener('change',function(){applyBondAngle(parseFloat(valEl.value),this.value==='1',moveEl.value)});
     moveEl.addEventListener('change',function(){applyBondAngle(parseFloat(valEl.value),fixEl.value==='1',this.value)});
-    document.getElementById('m-ok').addEventListener('click',function(){provMarkIfMoved('bondAngle');hideModal();originalCoords=null;resetSelection()});
+    document.getElementById('m-ok').addEventListener('click',function(){if(CRY)commitCrystalCoords();provMarkIfMoved('bondAngle');hideModal();originalCoords=null;resetSelection()});
     document.getElementById('m-cancel').addEventListener('click',function(){restoreOriginal();rebuildScene();undoStack.pop();updateUndoBtn();hideModal();originalCoords=null;resetSelection()});
 }
 
 function showDihedralModal(){
+    // And the dihedral: any of its three bonds crossing a face makes the
+    // measured angle one between images rather than the cell's own.
+    if(crystalCrossFaceBondBetween(selectedAtoms[0],selectedAtoms[1])||crystalCrossFaceBondBetween(selectedAtoms[1],selectedAtoms[2])||crystalCrossFaceBondBetween(selectedAtoms[2],selectedAtoms[3])){
+        modeInfoEl.textContent='Dihedral: a bond here crosses a cell face - both atoms of each bond must be in one periodic image';
+        return;
+    }
     var a1=MD.atoms[selectedAtoms[0]],a2=MD.atoms[selectedAtoms[1]],a3=MD.atoms[selectedAtoms[2]],a4=MD.atoms[selectedAtoms[3]];
     var cur=dihedral(a1,a2,a3,a4);
     saveOriginal();
@@ -9073,7 +9361,7 @@ function showDihedralModal(){
     valEl.addEventListener('input',function(){sliderEl.value=this.value;applyDihedral(parseFloat(this.value),fixEl.value==='1',moveEl.value)});
     fixEl.addEventListener('change',function(){applyDihedral(parseFloat(valEl.value),this.value==='1',moveEl.value)});
     moveEl.addEventListener('change',function(){applyDihedral(parseFloat(valEl.value),fixEl.value==='1',this.value)});
-    document.getElementById('m-ok').addEventListener('click',function(){provMarkIfMoved('dihedral');hideModal();originalCoords=null;resetSelection()});
+    document.getElementById('m-ok').addEventListener('click',function(){if(CRY)commitCrystalCoords();provMarkIfMoved('dihedral');hideModal();originalCoords=null;resetSelection()});
     document.getElementById('m-cancel').addEventListener('click',function(){restoreOriginal();rebuildScene();undoStack.pop();updateUndoBtn();hideModal();originalCoords=null;resetSelection()});
 }
 
@@ -9174,24 +9462,49 @@ function showAddAtomModal(){
         if(CRY){
             var baseAnchorIdx=anchor.baseIdx!=null?anchor.baseIdx:anchorIdx;
             var baseAnchor=CRY.baseAtoms[baseAnchorIdx];
-            var bondedBase=[];
+            // Neighbour directions are read through the image each bond names,
+            // not through the raw Cartesian difference: a molecule wrapped
+            // across a cell face stores those neighbours a whole cell away, and
+            // the raw difference would point the new atom through the wall.
+            var nbrs=[];
             CRY.baseBonds.forEach(function(b){
-                if(b.atom1===baseAnchorIdx)bondedBase.push(b.atom2);
-                if(b.atom2===baseAnchorIdx)bondedBase.push(b.atom1);
+                var s=b.shift||ZERO_SHIFT;
+                var other=-1,sign=0;
+                if(b.atom1===baseAnchorIdx){other=b.atom2;sign=1}
+                else if(b.atom2===baseAnchorIdx){other=b.atom1;sign=-1}
+                if(other<0||!CRY.baseAtoms[other])return;
+                var v=crystalImageDirection(baseAnchor,CRY.baseAtoms[other],sign,s);
+                if(v)nbrs.push(v);
             });
-            if(bondedBase.length>0){
-                var nbrs=bondedBase.map(function(bi){
-                    var ba=CRY.baseAtoms[bi];
-                    var dx=ba.x-baseAnchor.x,dy=ba.y-baseAnchor.y,dz=ba.z-baseAnchor.z;
-                    var dl=Math.sqrt(dx*dx+dy*dy+dz*dz);
-                    if(dl<1e-10)return{x:0,y:0,z:1};
-                    return{x:dx/dl,y:dy/dl,z:dz/dl};
-                });
-                dir=pickFreeDirection(nbrs);
+            if(nbrs.length>0)dir=pickFreeDirection(nbrs);
+            // The new site is wrapped into the cell — that is where every other
+            // base atom lives and where rebuildCrystal() would put it anyway, so
+            // the display and the file agree — and the bond records which image
+            // of it the anchor is bonded to. Without that shift a site added
+            // across a face would be drawn as one long bond straight through the
+            // cell instead of as a bond into the next cell.
+            var newX=baseAnchor.x+dir.x*bl,newY=baseAnchor.y+dir.y*bl,newZ=baseAnchor.z+dir.z*bl;
+            var newShift=[0,0,0];
+            if(CRY_INV){
+                var invC=CRY_INV,lvC=CRY.latticeVectors;
+                var afx=invC[0][0]*baseAnchor.x+invC[0][1]*baseAnchor.y+invC[0][2]*baseAnchor.z;
+                var afy=invC[1][0]*baseAnchor.x+invC[1][1]*baseAnchor.y+invC[1][2]*baseAnchor.z;
+                var afz=invC[2][0]*baseAnchor.x+invC[2][1]*baseAnchor.y+invC[2][2]*baseAnchor.z;
+                var nfx=invC[0][0]*newX+invC[0][1]*newY+invC[0][2]*newZ;
+                var nfy=invC[1][0]*newX+invC[1][1]*newY+invC[1][2]*newZ;
+                var nfz=invC[2][0]*newX+invC[2][1]*newY+invC[2][2]*newZ;
+                // The image of the new site that the bond points at: the one
+                // whose position is the spot that was just computed, measured
+                // from the cell the anchor's own coordinates sit in.
+                newShift=[Math.floor(nfx)-Math.floor(afx),Math.floor(nfy)-Math.floor(afy),Math.floor(nfz)-Math.floor(afz)];
+                var wfx=nfx-Math.floor(nfx),wfy=nfy-Math.floor(nfy),wfz=nfz-Math.floor(nfz);
+                newX=wfx*lvC[0][0]+wfy*lvC[1][0]+wfz*lvC[2][0];
+                newY=wfx*lvC[0][1]+wfy*lvC[1][1]+wfz*lvC[2][1];
+                newZ=wfx*lvC[0][2]+wfy*lvC[1][2]+wfz*lvC[2][2];
             }
             var newBaseIdx=CRY.baseAtoms.length;
-            CRY.baseAtoms.push({element:el,x:baseAnchor.x+dir.x*bl,y:baseAnchor.y+dir.y*bl,z:baseAnchor.z+dir.z*bl,index:newBaseIdx,baseIdx:newBaseIdx,occupancy:1});
-            CRY.baseBonds.push({atom1:baseAnchorIdx,atom2:newBaseIdx,order:bondOrder});
+            CRY.baseAtoms.push({element:el,x:newX,y:newY,z:newZ,index:newBaseIdx,baseIdx:newBaseIdx,occupancy:1});
+            CRY.baseBonds.push({atom1:baseAnchorIdx,atom2:newBaseIdx,order:bondOrder,shift:newShift});
             rebuildCrystal();rebuildScene();hideModal();originalCoords=null;resetSelection();
         }else{
             var bonded=[];
