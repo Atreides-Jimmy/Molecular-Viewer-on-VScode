@@ -1726,6 +1726,26 @@ canvas{display:block}
 #route-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
 #route-reopen.show{display:block}
 #route-reopen:hover{background:var(--vscode-button-background,#0e639c)}
+/* One header row, one close control and one chip for the panels that used to
+   have neither: the x folds the panel into its chip, the chip puts it back,
+   and layoutPanels() gives both a collision box, so a panel can never cover
+   another panel or the chip that belongs to it. */
+.pn-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+#crystal-panel .pn-head h4{margin:0;font-size:11px;font-weight:600}
+#view-panel .pn-head .vp-title,#bake-panel .pn-head .vp-title,
+#select-panel .pn-head .sp-title,#neigh-panel .pn-head .ng-title,
+#rotate-panel .pn-head .rp-title{margin-bottom:0}
+.pn-close{background:none;border:none;color:inherit;font:inherit;font-size:15px;line-height:1;cursor:pointer;opacity:0.7;padding:0 2px}
+.pn-close:hover{opacity:1;color:var(--vscode-errorForeground,#f66)}
+.pn-chip{display:none;position:absolute;z-index:52;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto;white-space:nowrap;max-width:calc(100% - 16px);overflow:hidden;text-overflow:ellipsis}
+.pn-chip.show{display:block}
+.pn-chip:hover{background:var(--vscode-button-background,#0e639c)}
+#crystal-reopen,#egg-reopen{top:8px;right:8px}
+#view-reopen,#bake-reopen{right:8px;bottom:40px}
+#select-reopen,#neigh-reopen,#rotate-reopen,#xrd-reopen{left:8px;bottom:40px}
+/* A panel whose height the layout had to cap scrolls inside itself instead of
+   spilling over its neighbours. */
+#view-panel,#bake-panel,#select-panel,#neigh-panel,#rotate-panel{overflow:auto}
 @media (max-width:600px){.tbtn{padding:3px 6px;font-size:10px}#frame-info{font-size:10px}#toolbar .trow{gap:1px}}
 </style>
 </head>
@@ -1774,7 +1794,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><h4>Supercell Bounds</h4><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-p2" title="Eight unit cells, 0..2 along every axis">2×2×2</button><button class="bnd-mini" id="bnd-p3" title="Twenty-seven unit cells, 0..3 along every axis">3×3×3</button><button class="bnd-mini" id="bnd-p4" title="Sixty-four unit cells, 0..4 along every axis">4×4×4</button></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-reset" title="Back to the single unit cell, 0..1 along every axis">Reset</button><button class="bnd-mini" id="bnd-origin" title="Keep the spans, move the low corner onto the lattice origin">Align Origin</button></div><div class="bnd-cell" id="bnd-cell-line"></div><div class="bnd-row"><label>Disorder</label><select id="bnd-disorder" title="Show the ordered part plus one disorder group; All shows every alternative the cell lists"><option value="">All</option></select></div><div class="hk-title">Lattice Planes (h k l)</div><div class="bnd-row hk-row"><label>(h k l)</label><input type="number" id="hk-h" value="0" step="1" title="h"><input type="number" id="hk-k" value="0" step="1" title="k"><input type="number" id="hk-l" value="1" step="1" title="l"></div><div class="hk-val" id="hk-d1"></div><div class="bnd-row hk-row"><label>2nd</label><input type="number" id="hk2-h" value="1" step="1" title="h of the second plane"><input type="number" id="hk2-k" value="0" step="1" title="k of the second plane"><input type="number" id="hk2-l" value="0" step="1" title="l of the second plane"></div><div class="hk-val" id="hk-d2"></div><button id="hk-show" class="bnd-btn" title="Draw the (hkl) plane through the centre of the box">Show Plane</button><button id="xrd-open" class="bnd-btn" title="Calculate the powder X-ray diffraction pattern of the unit cell">Powder XRD Pattern...</button><button id="bnd-edit-cell" class="bnd-btn" title="Change the cell parameters; every site keeps its fractional coordinates">Edit Cell...</button><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="vp-title">Auto Rotate</div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div><div class="vp-title vp-sub">Display</div><select id="style-select" title="How the structure is drawn: ball and stick (the default), van der Waals spheres, sticks without the atom spheres, or coordination polyhedra around metal and metalloid centres"><option value="ball">Ball &amp; Stick</option><option value="spacefill">Space-filling</option><option value="stick">Stick</option><option value="polyhedra">Polyhedra</option></select></div><div id="bake-panel"><div class="vp-title">Edit Coordinates</div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="sp-title">Select Atoms</div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="neigh-panel"><div class="ng-title">Neighbours</div><div class="ng-line"><label for="ng-radius">Radius (A)</label><input type="number" id="ng-radius" value="3.5" min="0.1" max="12" step="0.1"><label class="ng-chk" for="ng-skip"><input type="checkbox" id="ng-skip" checked>skip bonded</label></div><div class="ng-line"><label>Anchor</label><span class="ng-anchor" id="ng-anchor">click an atom</span></div><div class="ng-summary" id="ng-summary"></div><div class="ng-list" id="ng-list"></div><div class="ng-btns"><button id="ng-select">Select listed</button></div><div class="ng-hint" id="ng-hint">Click a row to select that atom. Crystal images outside the drawn cell are listed with their cell offset.</div></div><div id="xrd-panel"><div class="xr-title"><span>Powder XRD</span><button class="xr-close" id="xrd-close" title="Close (Esc)">&times;</button></div><div class="xr-line"><label for="xrd-rad">Radiation</label><select id="xrd-rad" title="The X-ray wavelength the pattern is calculated for"></select><label for="xrd-2max">2&theta; max</label><select id="xrd-2max" class="xr-narrow" title="The highest diffraction angle in the pattern"></select></div><div class="xr-summary" id="xrd-summary"></div><canvas id="xrd-canvas" width="440" height="150"></canvas><div class="xr-note" id="xrd-note"></div><div class="xr-list" id="xrd-list"></div><div class="xr-btns"><button id="xrd-refresh" class="xr-secondary" title="Recalculate after the structure changed">Recalculate</button><button id="xrd-export" title="Save the drawn curve as a two-column text file">Export .xy</button></div><div class="xr-hint">Pattern of the unit cell on screen (the supercell bounds do not change it) with Cromer-Mann form factors, Lorenz-polarisation and a Caglioti Gaussian profile.</div></div><div id="rotate-panel"><div class="rp-title">Rotate Group Around Axis</div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><div class="pn-head"><h4>Supercell Bounds</h4><button class="pn-close" id="crystal-close" type="button" title="Minimize the crystal panel">&times;</button></div><div class="bnd-row"><label>a min</label><input type="number" id="bnd-a-min" value="0" step="0.1"></div><div class="bnd-row"><label>a max</label><input type="number" id="bnd-a-max" value="1" step="0.1"></div><div class="bnd-row"><label>b min</label><input type="number" id="bnd-b-min" value="0" step="0.1"></div><div class="bnd-row"><label>b max</label><input type="number" id="bnd-b-max" value="1" step="0.1"></div><div class="bnd-row"><label>c min</label><input type="number" id="bnd-c-min" value="0" step="0.1"></div><div class="bnd-row"><label>c max</label><input type="number" id="bnd-c-max" value="1" step="0.1"></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-p2" title="Eight unit cells, 0..2 along every axis">2×2×2</button><button class="bnd-mini" id="bnd-p3" title="Twenty-seven unit cells, 0..3 along every axis">3×3×3</button><button class="bnd-mini" id="bnd-p4" title="Sixty-four unit cells, 0..4 along every axis">4×4×4</button></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-reset" title="Back to the single unit cell, 0..1 along every axis">Reset</button><button class="bnd-mini" id="bnd-origin" title="Keep the spans, move the low corner onto the lattice origin">Align Origin</button></div><div class="bnd-cell" id="bnd-cell-line"></div><div class="bnd-row"><label>Disorder</label><select id="bnd-disorder" title="Show the ordered part plus one disorder group; All shows every alternative the cell lists"><option value="">All</option></select></div><div class="hk-title">Lattice Planes (h k l)</div><div class="bnd-row hk-row"><label>(h k l)</label><input type="number" id="hk-h" value="0" step="1" title="h"><input type="number" id="hk-k" value="0" step="1" title="k"><input type="number" id="hk-l" value="1" step="1" title="l"></div><div class="hk-val" id="hk-d1"></div><div class="bnd-row hk-row"><label>2nd</label><input type="number" id="hk2-h" value="1" step="1" title="h of the second plane"><input type="number" id="hk2-k" value="0" step="1" title="k of the second plane"><input type="number" id="hk2-l" value="0" step="1" title="l of the second plane"></div><div class="hk-val" id="hk-d2"></div><button id="hk-show" class="bnd-btn" title="Draw the (hkl) plane through the centre of the box">Show Plane</button><button id="xrd-open" class="bnd-btn" title="Calculate the powder X-ray diffraction pattern of the unit cell">Powder XRD Pattern...</button><button id="bnd-edit-cell" class="bnd-btn" title="Change the cell parameters; every site keeps its fractional coordinates">Edit Cell...</button><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="pn-head"><span class="vp-title">Auto Rotate</span><button class="pn-close" id="view-close" type="button" title="Minimize the View controls">&times;</button></div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div><div class="vp-title vp-sub">Display</div><select id="style-select" title="How the structure is drawn: ball and stick (the default), van der Waals spheres, sticks without the atom spheres, or coordination polyhedra around metal and metalloid centres"><option value="ball">Ball &amp; Stick</option><option value="spacefill">Space-filling</option><option value="stick">Stick</option><option value="polyhedra">Polyhedra</option></select></div><div id="bake-panel"><div class="pn-head"><span class="vp-title">Edit Coordinates</span><button class="pn-close" id="bake-close" type="button" title="Minimize the Edit Coordinates card">&times;</button></div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="pn-head"><span class="sp-title">Select Atoms</span><button class="pn-close" id="select-close" type="button" title="Minimize the selection panel">&times;</button></div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="neigh-panel"><div class="pn-head"><span class="ng-title">Neighbours</span><button class="pn-close" id="neigh-close" type="button" title="Minimize the neighbour list">&times;</button></div><div class="ng-line"><label for="ng-radius">Radius (A)</label><input type="number" id="ng-radius" value="3.5" min="0.1" max="12" step="0.1"><label class="ng-chk" for="ng-skip"><input type="checkbox" id="ng-skip" checked>skip bonded</label></div><div class="ng-line"><label>Anchor</label><span class="ng-anchor" id="ng-anchor">click an atom</span></div><div class="ng-summary" id="ng-summary"></div><div class="ng-list" id="ng-list"></div><div class="ng-btns"><button id="ng-select">Select listed</button></div><div class="ng-hint" id="ng-hint">Click a row to select that atom. Crystal images outside the drawn cell are listed with their cell offset.</div></div><div id="xrd-panel"><div class="xr-title"><span>Powder XRD</span><button class="xr-close" id="xrd-close" title="Close (Esc)">&times;</button></div><div class="xr-line"><label for="xrd-rad">Radiation</label><select id="xrd-rad" title="The X-ray wavelength the pattern is calculated for"></select><label for="xrd-2max">2&theta; max</label><select id="xrd-2max" class="xr-narrow" title="The highest diffraction angle in the pattern"></select></div><div class="xr-summary" id="xrd-summary"></div><canvas id="xrd-canvas" width="440" height="150"></canvas><div class="xr-note" id="xrd-note"></div><div class="xr-list" id="xrd-list"></div><div class="xr-btns"><button id="xrd-refresh" class="xr-secondary" title="Recalculate after the structure changed">Recalculate</button><button id="xrd-export" title="Save the drawn curve as a two-column text file">Export .xy</button></div><div class="xr-hint">Pattern of the unit cell on screen (the supercell bounds do not change it) with Cromer-Mann form factors, Lorenz-polarisation and a Caglioti Gaussian profile.</div></div><div id="rotate-panel"><div class="pn-head"><span class="rp-title">Rotate Group Around Axis</span><button class="pn-close" id="rotate-close" type="button" title="Minimize the rotate panel">&times;</button></div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div><div id="crystal-reopen" class="pn-chip" title="Open the crystal panel">Crystal</div><div id="egg-reopen" class="pn-chip" title="Open the egg list">Eggs</div><div id="view-reopen" class="pn-chip" title="Open the View controls">View</div><div id="bake-reopen" class="pn-chip" title="Open the Edit Coordinates card">Coordinates</div><div id="select-reopen" class="pn-chip" title="Open the Select Atoms panel">Select Atoms</div><div id="neigh-reopen" class="pn-chip" title="Open the Neighbours panel">Neighbours</div><div id="rotate-reopen" class="pn-chip" title="Open the Rotate Group panel">Rotate Group</div><div id="xrd-reopen" class="pn-chip" title="Open the powder XRD panel">Powder XRD</div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="box-select-rect"></div>
@@ -4397,8 +4417,11 @@ function rebuildEggPanel(){
     var list=eggSegments();
     updateEggButton();
     if(list.length===0){
-        // The current molecule draws no eggs: no panel, choices forgotten.
+        // The current molecule draws no eggs: no panel, no chip, choices
+        // forgotten.
         panel.classList.remove('show');
+        var chip0=document.getElementById('egg-reopen');
+        if(chip0)chip0.classList.remove('show');
         vmdHiddenSegments={};
         return;
     }
@@ -4413,7 +4436,9 @@ function rebuildEggPanel(){
               '<span class="ep-units">units '+formatUnitList(e.units)+'</span></label>';
     }
     panel.innerHTML=html;
-    panel.classList.add('show');
+    // A minimized list stays folded while the structure is rebuilt underneath
+    // it; only an explicit open (the toolbar button or the chip) unfolds it.
+    panel.classList.toggle('show',!panelMinState.egg);
     var boxes=panel.querySelectorAll('input[type=checkbox]');
     for(var b=0;b<boxes.length;b++){
         boxes[b].addEventListener('change',function(){
@@ -4436,8 +4461,21 @@ function rebuildEggPanel(){
         });
     }
     var close=document.getElementById('egg-close');
-    // 关闭只隐藏面板; 工具栏的 Eggs 按钮随时可以再打开。
-    if(close)close.addEventListener('click',function(){panel.classList.remove('show')});
+    // The x folds the list into its chip; the chip (or the toolbar's Eggs
+    // button) unfolds it again.
+    if(close)close.addEventListener('click',function(){
+        panelMinState.egg=true;
+        panel.classList.remove('show');
+        syncPanelChips();
+        layoutPanels();
+    });
+    syncPanelChips();
+    layoutPanels();
+}
+function openEggPanel(){
+    panelMinState.egg=false;
+    rebuildEggPanel();
+    layoutPanels();
 }
 var eggBtnWired=false;
 function wireEggPanelButton(){
@@ -4447,7 +4485,7 @@ function wireEggPanelButton(){
     eggBtnWired=true;
     // 工具栏按钮永远"打开"面板 (幂等): 关闭只由面板内的 × 负责, 这样任何
     // 时候都有地方可以再打开。重复点击只是刷新面板内容。
-    btn.addEventListener('click',function(){rebuildEggPanel()});
+    btn.addEventListener('click',function(){openEggPanel()});
 }
 
 function rebuildScene(keepCenter){
@@ -5235,6 +5273,11 @@ var keyState={ArrowUp:false,ArrowDown:false,ArrowLeft:false,ArrowRight:false};
 var keyRotSpeed=0.03;
 var rotQuat=new THREE.Quaternion();
 var currentMode='view';
+// Which panels are folded into their chip. The x sets a flag, the chip clears
+// it, and syncPanelChips() is the one place that turns the flags (plus the
+// mode and the loaded data) into display, so a panel and its chip can never
+// both be visible and neither can be lost.
+var panelMinState={crystal:false,egg:false,view:false,bake:false,select:false,neigh:false,rotate:false,xrd:false};
 var selectedAtoms=[];
 var originalCoords=null;
 var modalCallback=null;
@@ -6629,13 +6672,16 @@ function setMode(m){
         return;
     }
     if(currentMode===m){
+        // Pressing the mode's own toolbar button toggles its panel. A hidden
+        // panel is a minimized one now, so hiding it leaves the chip that
+        // brings it back rather than nothing at all.
         if(m==='selectAtoms'){
             var sp=document.getElementById('select-panel');
-            if(sp)sp.style.display=(sp.style.display==='none'?'block':'none');
+            if(sp)panelMinState.select=window.getComputedStyle(sp).display!=='none';
         }
         if(m==='rotateGroup'){
             var rp=document.getElementById('rotate-panel');
-            if(rp)rp.style.display=(rp.style.display==='none'?'block':'none');
+            if(rp)panelMinState.rotate=window.getComputedStyle(rp).display!=='none';
         }
         if(m==='replaceAtom'){
             if(selectedAtoms.length>0){showReplaceAtomModal();return}
@@ -6656,6 +6702,12 @@ function setMode(m){
     }
     var oldMode=currentMode;
     currentMode=m;
+    // Entering a mode opens its panels again: a chip folded away in an earlier
+    // visit belongs to that visit, not to this one.
+    if(m==='view'){panelMinState.view=false;panelMinState.bake=false}
+    if(m==='selectAtoms')panelMinState.select=false;
+    if(m==='neighbours')panelMinState.neigh=false;
+    if(m==='rotateGroup')panelMinState.rotate=false;
     bakeHintShown=false;
     updateBakeHint();
     var preserveSel=((oldMode==='selectAtoms'||oldMode==='boxSelect'||oldMode==='replaceAtom'||oldMode==='addH'||oldMode==='rotateGroup'||oldMode==='moveAtoms'||oldMode==='mmOpt'||oldMode==='neighbours')&&(m==='selectAtoms'||m==='boxSelect'||m==='replaceAtom'||m==='addH'||m==='rotateGroup'||m==='moveAtoms'||m==='mmOpt'||m==='neighbours'));
@@ -10490,21 +10542,113 @@ function getMoleculeScreenBox(){
     return {left:Math.max(0,minX-pad),top:Math.max(0,minY-pad),
             right:Math.min(w,maxX+pad),bottom:Math.min(h,maxY+pad)};
 }
+// One place where a panel and its chip cannot both be visible. The × of a
+// panel sets its flag, the chip clears it, and the mode (or the data) decides
+// whether the pair applies at all. Rebuilt panels (Molecular Mechanics, eggs,
+// Diff, convergence, modes, route) refresh their own chip in the code that
+// builds them; the static panels call this helper after any state change.
+function panelChip(id,on){
+    var el=document.getElementById(id);
+    if(el)el.classList.toggle('show',!!on);
+}
+function panelMinimize(name){
+    panelMinState[name]=true;
+    syncPanelChips();
+    layoutPanels();
+}
+function panelRestore(name){
+    panelMinState[name]=false;
+    syncPanelChips();
+    layoutPanels();
+}
+function syncPanelChips(){
+    var st=panelMinState;
+    var cp=document.getElementById('crystal-panel');
+    if(cp)cp.style.display=(CRY&&!st.crystal)?'block':'none';
+    panelChip('crystal-reopen',!!CRY&&st.crystal);
+    // The egg list only exists while the molecule draws patches: without rows
+    // there is neither a panel nor a chip to fold it into.
+    var eggs=eggSegments().length;
+    var ep=document.getElementById('egg-panel');
+    if(ep){
+        if(!eggs)ep.classList.remove('show');
+        else ep.classList.toggle('show',!st.egg);
+    }
+    panelChip('egg-reopen',eggs>0&&st.egg);
+    var inView=currentMode==='view';
+    var vp=document.getElementById('view-panel');
+    if(vp)vp.style.display=(inView&&!st.view)?'block':'none';
+    panelChip('view-reopen',inView&&st.view);
+    var bp=document.getElementById('bake-panel');
+    if(bp)bp.style.display=(inView&&!st.bake)?'block':'none';
+    panelChip('bake-reopen',inView&&st.bake);
+    var sp=document.getElementById('select-panel');
+    if(sp)sp.style.display=(currentMode==='selectAtoms'&&!st.select)?'block':'none';
+    panelChip('select-reopen',currentMode==='selectAtoms'&&st.select);
+    var np=document.getElementById('neigh-panel');
+    if(np)np.style.display=(currentMode==='neighbours'&&!st.neigh)?'block':'none';
+    panelChip('neigh-reopen',currentMode==='neighbours'&&st.neigh);
+    var rp=document.getElementById('rotate-panel');
+    if(rp)rp.style.display=(currentMode==='rotateGroup'&&!st.rotate)?'block':'none';
+    panelChip('rotate-reopen',currentMode==='rotateGroup'&&st.rotate);
+    var xp=document.getElementById('xrd-panel');
+    if(xp)xp.style.display=(xrdOpen&&!st.xrd)?'block':'none';
+    panelChip('xrd-reopen',!!(xrdOpen&&CRY&&st.xrd));
+}
+// Turning a floating panel into a chip and back is one click each way for the
+// static panels; the rebuilt panels bind their own in the code that builds
+// them. Bound once, by id, so a rebuilt innerHTML cannot leave a dead handler.
+(function(){
+    function on(id,fn){var el=document.getElementById(id);if(el)el.addEventListener('click',fn)}
+    on('crystal-close',function(){panelMinimize('crystal')});
+    on('crystal-reopen',function(){panelRestore('crystal')});
+    on('view-close',function(){panelMinimize('view')});
+    on('view-reopen',function(){panelRestore('view')});
+    on('bake-close',function(){panelMinimize('bake')});
+    on('bake-reopen',function(){panelRestore('bake')});
+    on('select-close',function(){panelMinimize('select')});
+    on('select-reopen',function(){panelRestore('select')});
+    on('neigh-close',function(){panelMinimize('neigh')});
+    on('neigh-reopen',function(){panelRestore('neigh')});
+    on('rotate-close',function(){panelMinimize('rotate')});
+    on('rotate-reopen',function(){panelRestore('rotate')});
+    on('xrd-reopen',function(){xrdOpenPanel()});
+    on('egg-reopen',function(){openEggPanel()});
+})();
+/**
+ * Place every visible panel without letting two of them (or a panel and a
+ * chip) overlap.
+ *
+ * The panels are visited in priority order and each takes the first free slot
+ * on its own edge, nearest that edge first, scanning in one-pixel steps. Before
+ * anything is placed, each side of the container is given a width budget (a
+ * wider panel is narrowed and wraps or scrolls its content) and each stack a
+ * height budget (scrollable panels shrink proportionally, down to a floor), so
+ * a tall panel cannot use up the strip its neighbours need. A panel whose
+ * natural height still does not fit is capped to the largest free strip at
+ * that edge and scrolls inside itself, which is what turns "they cannot all be
+ * full size" into "they are all readable", not into "they cover each other".
+ * The molecule's screen box is honoured by the two Diff labels, which are
+ * moved along the top edge until they clear it; the corner panels keep their
+ * corner, as they always have.
+ *
+ * Every measurement is container-relative: a slot is converted to inline
+ * left/top, so a panel cannot drift with a CSS anchor after a resize.
+ */
 function layoutPanels(){
     // The Molecular Mechanics reopen button follows the mode (and the run) the
     // way the other reopen buttons follow their panels, so it is refreshed
     // before the layout measures anything.
     mmUpdateReopen();
+    syncPanelChips();
     var container=document.getElementById('container');
     if(!container){mmDrawCurves();return;}
     var cRect=container.getBoundingClientRect();
-    var cTop=cRect.top,cLeft=cRect.left,cW=cRect.width,cH=cRect.height;
+    var cW=cRect.width,cH=cRect.height;
+    if(cW<2||cH<2){mmDrawCurves();return;}
+    var margin=8,gap=2,minH=16;
     var molBox=getMoleculeScreenBox();
-    var molVR=null;
-    if(molBox){
-        molVR={left:cLeft+molBox.left,top:cTop+molBox.top,
-               right:cLeft+molBox.right,bottom:cTop+molBox.bottom};
-    }
+    var molRect=molBox?{l:molBox.left,t:molBox.top,r:molBox.right,b:molBox.bottom}:null;
     var defs=[
         {id:'mol-info',pr:0,anc:'tl'},
         {id:'mm-panel',pr:1,anc:'tl'},
@@ -10515,7 +10659,9 @@ function layoutPanels(){
         // covered them instead of giving way.
         {id:'egg-panel',pr:1,anc:'tr'},
         {id:'diff-panel',pr:2,anc:'br'},
-        {id:'diff-reopen',pr:2,anc:'br'},
+        {id:'diff-reopen',pr:2,anc:'br',chip:true},
+        {id:'crystal-reopen',pr:2,anc:'tr',chip:true},
+        {id:'egg-reopen',pr:2,anc:'tr',chip:true},
         // Auto Rotate and Edit Coordinates are two cards, each with its own
         // collision box, stacked bottom-up in that reading order.
         {id:'bake-panel',pr:3,anc:'br'},
@@ -10523,83 +10669,289 @@ function layoutPanels(){
         {id:'select-panel',pr:3,anc:'bl'},
         {id:'neigh-panel',pr:3,anc:'bl'},
         {id:'rotate-panel',pr:3,anc:'bl'},
+        {id:'select-reopen',pr:3,anc:'bl',chip:true},
+        {id:'neigh-reopen',pr:3,anc:'bl',chip:true},
+        {id:'rotate-reopen',pr:3,anc:'bl',chip:true},
         // The powder panel is a reading aid opened from the crystal panel: it
         // is stacked above the bottom-left tools, so it never covers them.
         {id:'xrd-panel',pr:4,anc:'bl'},
+        {id:'xrd-reopen',pr:4,anc:'bl',chip:true},
         {id:'diff-label',pr:4,anc:'tc',pct:0.25},
         {id:'diff-label-right',pr:5,anc:'tc',pct:0.75},
+        {id:'bake-reopen',pr:3,anc:'br',chip:true},
+        {id:'view-reopen',pr:4,anc:'br',chip:true},
         {id:'opt-panel',pr:7,anc:'tl'},
         {id:'freq-panel',pr:8,anc:'tl'},
         {id:'route-panel',pr:8,anc:'tl'},
-        {id:'mm-reopen',pr:9,anc:'tl'},
-        {id:'opt-reopen',pr:9,anc:'tl'},
-        {id:'freq-reopen',pr:10,anc:'tl'},
-        {id:'route-reopen',pr:10,anc:'tl'},
-        {id:'axes-indicator',pr:6,anc:'bl'}
+        {id:'mm-reopen',pr:9,anc:'tl',chip:true},
+        {id:'opt-reopen',pr:9,anc:'tl',chip:true},
+        {id:'freq-reopen',pr:10,anc:'tl',chip:true},
+        {id:'route-reopen',pr:10,anc:'tl',chip:true}
     ];
     var vis=[];
     defs.forEach(function(d){
         var el=document.getElementById(d.id);
-        if(!el||window.getComputedStyle(el).display==='none')return;
+        if(!el)return;
+        // A cap from the previous layout belongs to the layout, not to the
+        // panel (the Molecular Mechanics panel keeps a height the user
+        // dragged): the original value goes back before measuring.
+        if(el.__lpMaxH!==undefined){el.style.maxHeight=el.__lpMaxH;el.__lpMaxH=undefined;}
         el.style.top='';el.style.bottom='';el.style.left='';el.style.right='';
         el.style.transform='';el.style.maxWidth='';el.style.fontSize='';
-        vis.push({d:d,el:el});
+        if(window.getComputedStyle(el).display==='none')return;
+        vis.push({d:d,el:el,sz:measure(el)});
     });
     vis.sort(function(a,b){return a.d.pr-b.d.pr;});
-    function rect(el){return el.getBoundingClientRect();}
-    function ov(a,b){return !(a.right<=b.left+1||a.left>=b.right-1||a.bottom<=b.top+1||a.top>=b.bottom-1);}
-    for(var i=0;i<vis.length;i++){
-        var cur=vis[i];
-        for(var pass=0;pass<8;pass++){
-            var cr=rect(cur.el);
-            var conf=null,cfR=null,isMol=false;
-            if(molVR&&ov(cr,molVR)){conf='mol';cfR=molVR;isMol=true}
-            if(!conf){
-                for(var j=0;j<i;j++){
-                    var rr=rect(vis[j].el);
-                    if(ov(cr,rr)){conf=vis[j];cfR=rr;break;}
-                }
-            }
-            if(!conf)break;
-            var a=cur.d.anc;
-            var resolved=false;
-            if(isMol&&a==='tc'&&!resolved){
-                var cc=(cr.left+cr.right)/2;
-                var contC=cLeft+cW/2;
-                if(cc<contC){
-                    var tl=molBox.left-cr.width-4;
-                    if(tl>=2){cur.el.style.left=tl+'px';cur.el.style.transform='none';cur.el.style.right='auto';resolved=true;}
-                }else{
-                    var tr=cW-molBox.right-cr.width-4;
-                    if(tr>=2){cur.el.style.right=tr+'px';cur.el.style.left='auto';cur.el.style.transform='none';resolved=true;}
-                }
-            }
-            if(!resolved&&!isMol&&(a==='tc'||a==='tl'||a==='tr')){
-                var nt=cfR.bottom-cTop+4;
-                if(nt+cr.height<cH-8){cur.el.style.top=nt+'px';resolved=true;}
-            }
-            if(!resolved&&!isMol&&(a==='bl'||a==='br')){
-                var nb=cH-(cfR.top-cTop)+4;
-                if(nb+cr.height<cH-8){cur.el.style.bottom=nb+'px';resolved=true;}
-            }
-            if(!resolved){
-                var mw=parseInt(window.getComputedStyle(cur.el).maxWidth)||1000;
-                if(mw>80){cur.el.style.maxWidth=Math.max(80,mw-30)+'px';resolved=true;}
-            }
-            if(!resolved){
-                var fs=parseInt(window.getComputedStyle(cur.el).fontSize)||11;
-                if(fs>8){cur.el.style.fontSize=(fs-1)+'px';resolved=true;}
-            }
-            if(!resolved&&!isMol&&conf.el){
-                var cmw=parseInt(window.getComputedStyle(conf.el).maxWidth)||1000;
-                if(cmw>80){conf.el.style.maxWidth=Math.max(80,cmw-30)+'px';resolved=true;}
-            }
-            if(!resolved&&!isMol&&conf.el){
-                var cfs=parseInt(window.getComputedStyle(conf.el).fontSize)||11;
-                if(cfs>8){conf.el.style.fontSize=(cfs-1)+'px';resolved=true;}
-            }
-            if(!resolved)break;
+    var placed=[];
+    function measure(el){var r=el.getBoundingClientRect();return {w:r.width,h:r.height};}
+    // A gap of 2 px between boxes, so two panels that touch are still two
+    // panels and a chip can be clicked without catching its neighbour.
+    function hit(r,q){return r.l<q.r+gap&&r.r>q.l-gap&&r.t<q.b+gap&&r.b>q.t-gap;}
+    function hitsPanel(r){for(var i=0;i<placed.length;i++){if(hit(r,placed[i]))return true}return false;}
+    function hitsMol(r){return !!(molRect&&r.l<molRect.r&&r.r>molRect.l&&r.t<molRect.b&&r.b>molRect.t);}
+    function capHeight(el,h){
+        if(el.__lpMaxH===undefined)el.__lpMaxH=el.style.maxHeight;
+        el.style.maxHeight=Math.max(20,Math.floor(h))+'px';
+    }
+    function restoreCap(el){
+        if(el.__lpMaxH!==undefined){el.style.maxHeight=el.__lpMaxH;el.__lpMaxH=undefined;}
+    }
+    function place(el,x,y){
+        el.style.left=Math.round(x)+'px';
+        el.style.top=Math.round(y)+'px';
+        el.style.right='auto';
+        el.style.bottom='auto';
+        el.style.transform='none';
+    }
+    function xFor(anc,pct,w){
+        if(pct!=null)return Math.max(margin,Math.min(cW-margin-w,cW*pct-w/2));
+        if(anc==='tr'||anc==='br')return Math.max(margin,cW-margin-w);
+        if(anc==='tc')return Math.max(margin,cW/2-w/2);
+        return margin;
+    }
+    // Boxes that hug the same edge share that edge's strip, so the strip is
+    // budgeted before anything is placed: the widest boxes on a side are
+    // capped to their share of the container width, and the tallest
+    // scrollable one gives up height until the stack fits. Without this a
+    // tall panel in a narrow window leaves no strip for the cards below it,
+    // and those cards are pushed to the far side, on top of the other column.
+    var sides={l:[],r:[]};
+    vis.forEach(function(v){
+        if(v.d.anc==='tl'||v.d.anc==='bl')sides.l.push(v);
+        else if(v.d.anc==='tr'||v.d.anc==='br')sides.r.push(v);
+    });
+    function sideW(list){
+        var w=0;
+        list.forEach(function(v){if(v.sz.w>w)w=v.sz.w;});
+        return w;
+    }
+    var availW=cW-2*margin-gap,fairW=availW/2;
+    var lw=sideW(sides.l),rw=sideW(sides.r);
+    var capL=lw,capR=rw;
+    if(lw+rw>availW){
+        // The narrower side keeps its width; the wider one takes the rest,
+        // but never less than an even split when both are wide.
+        if(lw>=rw){capL=Math.max(availW-rw,fairW);capR=Math.min(rw,availW-capL);}
+        else{capR=Math.max(availW-lw,fairW);capL=Math.min(lw,availW-capR);}
+    }
+    function capWidth(list,w){
+        list.forEach(function(v){
+            if(v.sz.w<=w+0.5)return;
+            v.el.style.maxWidth=Math.floor(w)+'px';
+            v.sz=measure(v.el);
+        });
+    }
+    capWidth(sides.l,capL);
+    capWidth(sides.r,capR);
+    // The information card and the Diff labels are one-shot text: clipping
+    // them would hide words, so they are never height-capped. The other
+    // panels scroll their own content.
+    function canShrink(v){
+        if(v.d.chip)return false;
+        if(v.d.id==='mol-info'||v.d.id==='diff-label'||v.d.id==='diff-label-right')return false;
+        var oy=window.getComputedStyle(v.el).overflowY;
+        return oy==='auto'||oy==='scroll'||oy==='hidden';
+    }
+    function budgetH(list){
+        var availH=cH-2*margin,pass=0;
+        function sum(){
+            var t=0;
+            for(var k=0;k<list.length;k++)t+=list[k].sz.h+(k?gap:0);
+            return t;
         }
+        while(sum()>availH+0.5&&pass++<8){
+            var fixedH=(list.length-1)*gap,shrinkH=0;
+            for(var k=0;k<list.length;k++){
+                if(canShrink(list[k])&&list[k].sz.h>40)shrinkH+=list[k].sz.h;
+                else fixedH+=list[k].sz.h;
+            }
+            var room=availH-fixedH;
+            if(shrinkH<=0||room<=0)break;
+            var f=room/shrinkH,changed=false;
+            for(var k2=0;k2<list.length;k2++){
+                var v=list[k2];
+                if(!canShrink(v)||v.sz.h<=40)continue;
+                var target=Math.max(40,v.sz.h*f);
+                if(target>=v.sz.h-0.5||v.__lpStuck)continue;
+                var before=v.sz.h;
+                capHeight(v.el,target);
+                v.sz=measure(v.el);
+                if(v.sz.h<before-0.5)changed=true;
+                else v.__lpStuck=true;
+            }
+            if(!changed)break;
+        }
+    }
+    budgetH(sides.l);
+    budgetH(sides.r);
+    // Own edge first, then the opposite edge on the same side, then the other
+    // side: a panel only leaves its corner when that corner has no free strip
+    // left at all.
+    function anchorOrder(anc){
+        var order=[anc];
+        var opp={tl:'bl',bl:'tl',tr:'br',br:'tr',tc:'tl'}[anc];
+        if(opp&&order.indexOf(opp)<0)order.push(opp);
+        var mir={tl:'tr',tr:'tl',bl:'br',br:'bl',tc:'tr'}[anc];
+        if(mir&&order.indexOf(mir)<0)order.push(mir);
+        ['tl','tr','bl','br'].forEach(function(a){if(order.indexOf(a)<0)order.push(a)});
+        return order;
+    }
+    // The first free slot along one edge, nearest that edge first. A placement
+    // label (a Diff label) also looks for a row clear of the molecule, which is
+    // what keeps the labels off the structure when there is room.
+    function findSlot(d,anc,w,h,avoidMol){
+        var x=xFor(anc,anc===d.anc?d.pct:null,w);
+        var last=cH-margin-h;
+        if(last<margin)return null;
+        var bottom=(anc==='bl'||anc==='br');
+        var first=null;
+        // One pixel per step: two stacked cards can be left with only a
+        // couple of pixels of clearance, and a coarse grid stepped straight
+        // past the one row that fits.
+        var step=1;
+        for(var y=bottom?Math.floor(last):margin;
+                bottom?y>=margin-0.01:y<=last+0.01;
+                y+=bottom?-step:step){
+            var r={l:x,t:y,r:x+w,b:y+h};
+            if(r.l<margin-0.5||r.r>cW-margin+0.5)continue;
+            if(hitsPanel(r))continue;
+            if(!first)first=r;
+            if(!avoidMol||!hitsMol(r))return r;
+        }
+        return first;
+    }
+    // Free vertical strips in one x column, excluding the panels already
+    // placed there (or across it). Used when the natural height does not fit.
+    function freeGaps(anc,w){
+        var x=xFor(anc,null,w);
+        var bars=[];
+        for(var i=0;i<placed.length;i++){
+            var q=placed[i];
+            if(q.r+gap<=x||q.l-gap>=x+w)continue;
+            bars.push(q);
+        }
+        bars.sort(function(p,q){return p.t-q.t});
+        var gaps=[],top=margin;
+        for(var b=0;b<bars.length;b++){
+            if(bars[b].t-gap>top)gaps.push({t:top,b:bars[b].t-gap});
+            if(bars[b].b+gap>top)top=bars[b].b+gap;
+        }
+        if(cH-margin>top)gaps.push({t:top,b:cH-margin});
+        return gaps;
+    }
+    // Cap a panel to a free strip rather than let it overlap: its own CSS (or
+    // the overflow rule added for these cards) makes the rest scrollable. The
+    // strip nearest the panel's edge wins.
+    function findShrunkSlot(el,d,anc,sz){
+        if(d.chip)return null;
+        var w=Math.min(sz.w,cW-2*margin);
+        var gaps=freeGaps(anc,w);
+        var bottom=(anc==='bl'||anc==='br');
+        gaps.sort(function(p,q){
+            var dp=Math.abs(bottom?(cH-margin-p.b):(p.t-margin));
+            var dq=Math.abs(bottom?(cH-margin-q.b):(q.t-margin));
+            return dp-dq;
+        });
+        for(var i=0;i<gaps.length;i++){
+            var g=gaps[i],room=g.b-g.t;
+            if(room<minH)continue;
+            capHeight(el,Math.min(sz.h,room));
+            var sz2=measure(el);
+            var x=xFor(anc,null,sz2.w);
+            var y=bottom?g.b-sz2.h:g.t;
+            var r={l:x,t:y,r:x+sz2.w,b:y+sz2.h};
+            // Capping can add a scrollbar and widen the box; the fresh box is
+            // what has to fit, not the one the gaps were measured from.
+            if(r.l<margin-0.5||r.r>cW-margin+0.5)continue;
+            if(hitsPanel(r))continue;
+            return r;
+        }
+        // The cap belonged to this attempt only; the caller may still find a
+        // full-height slot under another anchor or width.
+        restoreCap(el);
+        return null;
+    }
+    for(var i=0;i<vis.length;i++){
+        var el=vis[i].el,d=vis[i].d;
+        var sz=measure(el);
+        if(sz.h>cH-2*margin){capHeight(el,cH-2*margin);sz=measure(el);}
+        if(sz.w>cW-2*margin){el.style.maxWidth=Math.floor(cW-2*margin)+'px';sz=measure(el);}
+        var slot=null;
+        var order=anchorOrder(d.anc);
+        for(var a=0;a<order.length&&!slot;a++){
+            slot=findSlot(d,order[a],sz.w,sz.h,order[a]==='tc');
+        }
+        if(!slot){
+            for(var a2=0;a2<order.length&&!slot;a2++){
+                slot=findShrunkSlot(el,d,order[a2],sz);
+            }
+        }
+        if(!slot&&!d.chip){
+            // Neither corner nor a shortened strip fit the natural width: a
+            // narrower box can slip beside a tall neighbour. Widths come
+            // from the edges of what is already placed, widest first, so the
+            // least content is hidden.
+            var ws=[];
+            for(var pi=0;pi<placed.length;pi++){
+                var pw=[placed[pi].l-margin-gap,cW-margin-placed[pi].r-gap];
+                for(var pj=0;pj<2;pj++){
+                    var w0=Math.floor(pw[pj]);
+                    if(w0>=120&&w0<sz.w-0.5&&ws.indexOf(w0)<0)ws.push(w0);
+                }
+            }
+            ws.sort(function(a,b){return b-a});
+            for(var wi=0;wi<ws.length&&!slot;wi++){
+                restoreCap(el);
+                el.style.maxWidth=ws[wi]+'px';
+                var sw=measure(el);
+                for(var wa=0;wa<order.length&&!slot;wa++){
+                    slot=findSlot(d,order[wa],sw.w,sw.h,order[wa]==='tc');
+                }
+                for(var wb=0;wb<order.length&&!slot;wb++){
+                    slot=findShrunkSlot(el,d,order[wb],sw);
+                }
+                if(!slot)el.style.maxWidth='';
+            }
+        }
+        if(!slot){
+            // A viewport too small for every box at once: the panel keeps its
+            // own corner (undoing any cap) rather than disappearing. Each other
+            // panel has already been given a free slot around it, so only a
+            // window smaller than the panel itself can leave a residue.
+            restoreCap(el);
+            el.style.maxWidth='';
+            sz=measure(el);
+            if(sz.h>cH-2*margin){capHeight(el,cH-2*margin);sz=measure(el);}
+            if(sz.w>cW-2*margin){el.style.maxWidth=Math.floor(cW-2*margin)+'px';sz=measure(el);}
+            var bw=sz.w,bh=sz.h;
+            var bx=xFor(d.anc,d.pct,bw);
+            var by=(d.anc==='bl'||d.anc==='br')?cH-margin-bh:margin;
+            slot={l:bx,t:by,r:bx+bw,b:by+bh};
+        }
+        place(el,slot.l,slot.t);
+        var fr=el.getBoundingClientRect();
+        placed.push({l:fr.left-cRect.left,t:fr.top-cRect.top,
+                     r:fr.right-cRect.left,b:fr.bottom-cRect.top});
     }
     // A reflow (a window resize, the panel being moved or restyled) changes the
     // box the curves are drawn into, and they are sized from that box — so they
@@ -11730,7 +12082,10 @@ function xrdRefresh(){
         var mv=parseInt(maxSel.value,10);
         if(mv>XRD_2THETA_MIN&&mv<=180)xrdTwoThetaMax=mv;
     }
+    // A new radiation or range can add or drop a long note above the plot and
+    // change the panel height; the layout is told about the new size.
     xrdUpdate();
+    layoutPanels();
 }
 function xrdFillControls(){
     var rad=document.getElementById('xrd-rad');
@@ -11759,15 +12114,29 @@ function xrdOpenPanel(){
     var panel=document.getElementById('xrd-panel');
     if(!panel||!CRY)return;
     xrdOpen=true;
+    panelMinState.xrd=false;
     xrdFillControls();
     panel.style.display='block';
-    layoutPanels();
+    // The pattern fills the panel in before the layout measures it, or the
+    // box the layout made room for is the old (usually much shorter) one.
     xrdUpdate();
+    syncPanelChips();
+    layoutPanels();
+}
+// The x folds the pattern into its chip; the crystal panel's button and the
+// chip both open it again, with the choices it was left on.
+function xrdMinimizePanel(){
+    if(!xrdOpen)return;
+    panelMinState.xrd=true;
+    syncPanelChips();
+    layoutPanels();
 }
 function xrdClosePanel(){
     var panel=document.getElementById('xrd-panel');
     if(panel)panel.style.display='none';
     xrdOpen=false;
+    panelMinState.xrd=false;
+    syncPanelChips();
     layoutPanels();
 }
 function xrdExport(){
@@ -11794,7 +12163,7 @@ function xrdExport(){
     if(!openBtn||!panel)return;
     openBtn.addEventListener('click',xrdOpenPanel);
     var closeBtn=document.getElementById('xrd-close');
-    if(closeBtn)closeBtn.addEventListener('click',xrdClosePanel);
+    if(closeBtn)closeBtn.addEventListener('click',xrdMinimizePanel);
     var rad=document.getElementById('xrd-rad');
     if(rad)rad.addEventListener('change',xrdRefresh);
     var mx=document.getElementById('xrd-2max');
@@ -13838,12 +14207,19 @@ function updateBakeHint(){
     if(!hint)return;
     // CRY never changes within a session; only a comparison can come and go, and
     // every path that enters or leaves one calls this.
+    var key=(diffMode||CRY)?('x:'+bakeUnavailableReason()):'y';
+    if(hint.__hpKey===key)return;
+    hint.__hpKey=key;
     if(diffMode||CRY){
         hint.textContent=bakeUnavailableReason()+'.';
     }else{
         hint.innerHTML='Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. '+
             'The atom coordinates change, so Save writes the new geometry.';
     }
+    // The two hints are not the same height, and the card is laid out from its
+    // measured height: a swap without a re-layout left the column budget (and
+    // the cards below it) sized for the old text until something else moved.
+    layoutPanels();
 }
 updateBakeHint();
 
