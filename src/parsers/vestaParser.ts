@@ -9,7 +9,7 @@ import {
     symOpKey,
     symOpToString,
     wrapFrac
-} from './crystalGeometry';
+} from '../tools/crystalGeometry';
 
 /**
  * VESTA reader.

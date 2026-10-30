@@ -10,9 +10,9 @@ import {
     parseSymOp,
     SymOp,
     wrapFrac
-} from './crystalGeometry';
-import { lookupSpaceGroupOps, SpaceGroupOps } from './spaceGroupTable';
-import { AnisoTensor, rotateAnisoTensor, symOpCartesianRotation } from './adp';
+} from '../tools/crystalGeometry';
+import { lookupSpaceGroupOps, SpaceGroupOps } from '../tools/spaceGroupTable';
+import { AnisoTensor, rotateAnisoTensor, symOpCartesianRotation } from '../tools/adp';
 
 /**
  * CIF reader.

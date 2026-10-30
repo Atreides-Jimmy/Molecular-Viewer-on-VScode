@@ -1,6 +1,6 @@
 import { Atom, Bond, MolecularData } from '../types';
 import { perceiveBonds } from './bondPerception';
-import { stripGhostBonds } from '../parsers/ghostAtoms';
+import { stripGhostBonds } from './ghostAtoms';
 
 /**
  * Bond detection for structures that arrive without a bond table.
