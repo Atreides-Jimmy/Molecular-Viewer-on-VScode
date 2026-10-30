@@ -3591,7 +3591,7 @@ function bvsResultOfBase(baseIdx){
 // were. The silence above BVS_HOVER_LIMIT is the same promise — a hover must
 // never sit and compute a framework's worth of contacts.
 function bvsTooltipSuffix(a){
-    if(!CRY||!a||a.baseIdx==null)return '';
+    if(!CRY||diffMode||!a||a.baseIdx==null)return '';
     if(!bvsCache&&(CRY.baseAtoms||[]).length>BVS_HOVER_LIMIT)return '';
     var r=bvsResultOfBase(a.baseIdx);
     if(!r)return '';
@@ -3600,6 +3600,15 @@ function bvsTooltipSuffix(a){
 
 function showBvsReport(){
     if(!CRY)return;
+    // The sums describe one cell; a comparison shows two structures, and the
+    // left one alone would be a report about half the picture.
+    if(diffMode){
+        showModal('<h3>Bond Valence (BVS)</h3>'+
+            '<div class="current-val">Bond-valence sums read one unit cell, and Diff shows two structures. Close the comparison to inspect a cell.</div>'+
+            '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-close">Close</button></div>',null,true);
+        document.getElementById('m-close').addEventListener('click',hideModal);
+        return;
+    }
     var wrapped=bvsEnsureReport();
     var rep=wrapped&&wrapped.report;
     if(!rep||!rep.ok){
@@ -5248,7 +5257,10 @@ function rebuildScene(keepCenter){
         // pass still reads "position", "userData" and "visible" exactly as
         // before.
         var mesh=atomHandle();
-        var aniso=(ortepEnabled&&!gh&&a.uAniso)?anisoEllipsoid(a.uAniso):null;
+        // Polyhedra draws the centre atom as a marker under its hull, not as
+        // the ball an ellipsoid stands in for: the ellipsoid is held back
+        // there, and the switch's chosen state returns with the ball style.
+        var aniso=(ortepEnabled&&displayStyle!=='polyhedra'&&!gh&&a.uAniso)?anisoEllipsoid(a.uAniso):null;
         mesh.position.set(a.x-CX,a.y-CY,a.z-CZ);
         mesh.userData={element:a.element,index:i,baseColor:col,occ:occ,ghost:gh,
                        radius:drawn?(aniso?aniso.r:r):0,drawn:drawn,hlState:0,
@@ -9449,6 +9461,10 @@ function crystalDiffRefresh(){
     updateDiffHighlights(diffs);
 }
 function startDiff(msg){
+    // A powder pattern or a cavity report describes one cell, and the
+    // comparison has two: the reading aids go away before the second structure
+    // is drawn, so neither can cover its half of the view.
+    closeAnalysisPanelsForDiff();
     // The comparison has two structures to choose from, so a molecular-mechanics
     // panel has nothing to act on while it is open; it comes back on exit, and a
     // run that was still going is dropped rather than left writing coordinates
@@ -11636,6 +11652,13 @@ function panelRestore(name){
     panelMinState[name]=false;
     syncPanelChips();
     layoutPanels();
+}
+// The powder pattern, the cavity report and the BVS table each read one unit
+// cell; a comparison shows two structures, so starting Diff folds them away
+// rather than leaving a reading aid over the right-hand half.
+function closeAnalysisPanelsForDiff(){
+    if(xrdOpen)xrdClosePanel();
+    if(cavOpen)cavityClosePanel();
 }
 function syncPanelChips(){
     var st=panelMinState;
@@ -14300,7 +14323,10 @@ function xrdCellSites(){
         if(!neighBaseVisible(ba))continue;
         var el=ba.element==='D'?'H':ba.element;
         if(!XRD_FORM_FACTORS[el]){missing[el]=true;continue}
-        var occ=(ba.occupancy==null?1:ba.occupancy);
+        // The same occupancy the formula, the density and every save read: a
+        // selected disorder group at full occupancy weighs 1 in the pattern
+        // too, not the file's 0.5.
+        var occ=crystalOccOf(ba);
         if(!(occ>0))continue;
         var f=neighFractional(ba);
         // The file's displacement tensor, when it has a usable one: the six
@@ -14322,12 +14348,32 @@ function xrdCellSites(){
     miss.sort();
     return {sites:sites,missing:miss};
 }
-// Pure: sites + lattice + wavelength + limit in, pattern out. The index bounds
+// The pattern is built as a resumable job so a large cell cannot freeze the
+// page: enumeration, structure factors, peak merging and profile broadening
+// each remember where they stopped, and xrdPatternStep runs until the slice's
+// deadline. The sums and the order of the stages are the ones the pattern
+// always had; only the chunking is new. xrdPattern() drives the same job to
+// completion in one call, which is what the engine tests read.
+function xrdProfileAdd(job,two,inten){
+    var fwhm=xrdCagliotiFwhm(two);
+    if(!(fwhm>0.005))fwhm=0.005;
+    if(fwhm>4)fwhm=4;
+    var half=2.5*fwhm;
+    var n=job.n,step=XRD_STEP,min=XRD_2THETA_MIN,prof=job.prof;
+    var i0=Math.max(0,Math.ceil((two-half-min)/step));
+    var i1=Math.min(n-1,Math.floor((two+half-min)/step));
+    var k4=4*Math.LN2;
+    for(var q=i0;q<=i1;q++){
+        var dx=(min+q*step-two)/fwhm;
+        prof[q]+=inten*Math.exp(-k4*dx*dx);
+    }
+}
+// Pure: sites + lattice + wavelength + limit in, a job out. The index bounds
 // are the dual relation |h| = |g.a| <= |g||a|, so a reflection inside the
 // reciprocal sphere can never fall outside the loops. A second wavelength
 // (lambda2) profiles the Kalpha2 line of every peak beside its Kalpha1 line,
 // at the tube's 2:1 ratio; without it the pattern is the single line.
-function xrdPattern(sites,lv,lambda,twoMax,lambda2){
+function xrdPatternStart(sites,lv,lambda,twoMax,lambda2){
     if(!sites||sites.length===0||!(lambda>0)||!(twoMax>XRD_2THETA_MIN))return null;
     if(!(lambda2>0)||lambda2===lambda)lambda2=0;
     var rec=hklReciprocals(lv);
@@ -14339,106 +14385,174 @@ function xrdPattern(sites,lv,lambda,twoMax,lambda2){
     var limA=Math.min(XRD_MAX_INDEX,Math.ceil(len(lv[0])*gmax)+1);
     var limB=Math.min(XRD_MAX_INDEX,Math.ceil(len(lv[1])*gmax)+1);
     var limC=Math.min(XRD_MAX_INDEX,Math.ceil(len(lv[2])*gmax)+1);
-    var list=[],h,k,l;
-    for(h=-limA;h<=limA;h++){
-        for(k=-limB;k<=limB;k++){
-            for(l=-limC;l<=limC;l++){
-                var g2=form.aa*h*h+form.bb*k*k+form.cc*l*l+form.ab*h*k+form.ac*h*l+form.bc*k*l;
-                if(!(g2>1e-12))continue;
-                var g=Math.sqrt(g2);
-                var sinT=lambda*g/2;
-                if(sinT>=1)continue;
-                var two=2*Math.asin(sinT)*180/Math.PI;
-                if(two<XRD_2THETA_MIN||two>twoMax+1e-9)continue;
-                list.push({two:two,h:h,k:k,l:l,s:g/2});
-            }
-        }
-    }
-    list.sort(function(p,q){
-        if(p.two!==q.two)return p.two-q.two;
-        if(p.h!==q.h)return p.h-q.h;
-        if(p.k!==q.k)return p.k-q.k;
-        return p.l-q.l;
-    });
-    var found=list.length;
-    var capped=found>XRD_MAX_REFLECTIONS;
-    if(capped)list.length=XRD_MAX_REFLECTIONS;
-    var peaks=[],i,j;
-    for(i=0;i<list.length;i++){
-        var r=list[i],re=0,im=0;
-        for(j=0;j<sites.length;j++){
-            var st=sites[j];
-            var f=xrdFormFactor(st.el,r.s)*st.occ;
-            if(!f)continue;
-            if(st.u)f*=xrdDwb(st.u,r.h,r.k,r.l,rec);
-            var ph=2*Math.PI*(r.h*st.f[0]+r.k*st.f[1]+r.l*st.f[2]);
-            re+=f*Math.cos(ph);im+=f*Math.sin(ph);
-        }
-        var inten=(re*re+im*im)*xrdLp(r.two);
-        var last=peaks.length>0?peaks[peaks.length-1]:null;
-        if(last&&Math.abs(r.two-last.two)<=1e-4){
-            last.I+=inten;last.n++;
-            if(inten>last.rawI){last.rawI=inten;last.hkl=[r.h,r.k,r.l]}
-        }else{
-            peaks.push({two:r.two,d:1/(2*r.s),hkl:[r.h,r.k,r.l],I:inten,rawI:inten,n:1});
-        }
-    }
-    // A systematic absence is zero only in exact arithmetic: the structure
-    // factor of a forbidden reflection leaves rounding noise (about 1e-30 of
-    // the strongest line), so the cut is relative to the pattern's own peak.
-    var keep=[],imax=0;
-    for(i=0;i<peaks.length;i++)if(peaks[i].I>imax)imax=peaks[i].I;
-    if(!(imax>0))imax=1;
-    for(i=0;i<peaks.length;i++){
-        if(!(peaks[i].I>imax*1e-12))continue;
-        // (h k l) and (-h -k -l) are one plane: label the line by the reading
-        // whose first nonzero index is positive, which is how it is written.
-        var hh=peaks[i].hkl;
-        if(hh[0]<0||(hh[0]===0&&(hh[1]<0||(hh[1]===0&&hh[2]<0))))peaks[i].hkl=[-hh[0],-hh[1],-hh[2]];
-        keep.push(peaks[i]);
-    }
-    peaks=keep;
-    for(i=0;i<peaks.length;i++)peaks[i].rel=peaks[i].I/imax*100;
-    var n=Math.floor((twoMax-XRD_2THETA_MIN)/XRD_STEP+1e-9)+1;
-    if(n<2)n=2;
-    var prof=new Float64Array(n),kk;
-    var k4=4*Math.LN2;
-    function addLine(two,inten){
-        var fwhm=xrdCagliotiFwhm(two);
-        if(!(fwhm>0.005))fwhm=0.005;
-        if(fwhm>4)fwhm=4;
-        var half=2.5*fwhm;
-        var i0=Math.max(0,Math.ceil((two-half-XRD_2THETA_MIN)/XRD_STEP));
-        var i1=Math.min(n-1,Math.floor((two+half-XRD_2THETA_MIN)/XRD_STEP));
-        for(var q=i0;q<=i1;q++){
-            var dx=(XRD_2THETA_MIN+q*XRD_STEP-two)/fwhm;
-            prof[q]+=inten*Math.exp(-k4*dx*dx);
-        }
-    }
-    var w2=lambda2?XRD_K2_RATIO/(1+XRD_K2_RATIO):0;
-    var w1=1-w2;
-    for(i=0;i<peaks.length;i++){
-        var p=peaks[i];
-        addLine(p.two,p.I*w1);
-        if(w2>0){
-            var sin2=lambda2/(2*p.d);
-            if(sin2<1){
-                var two2=2*Math.asin(sin2)*180/Math.PI;
-                if(two2>=XRD_2THETA_MIN&&two2<=twoMax+1e-9)addLine(two2,p.I*w2);
-            }
-        }
-    }
-    var pmax=0;
-    for(kk=0;kk<n;kk++)if(prof[kk]>pmax)pmax=prof[kk];
-    if(!(pmax>0))pmax=1;
-    for(kk=0;kk<n;kk++)prof[kk]=prof[kk]/pmax*100;
     return {
-        atoms:sites.length,peaks:peaks,reflections:list.length,found:found,
-        capped:capped,indexCapped:indexCapped,doublet:w2>0,
-        twoMax:twoMax,min:XRD_2THETA_MIN,step:XRD_STEP,values:prof
+        sites:sites,rec:rec,form:form,lambda:lambda,lambda2:lambda2,twoMax:twoMax,
+        indexCapped:indexCapped,limA:limA,limB:limB,limC:limC,
+        phase:'enum',h:-limA,k:-limB,list:[],
+        found:0,capped:false,i:0,peaks:[],
+        peakIndex:0,n:0,prof:null
     };
 }
-function xrdCompute(){
+function xrdPatternStep(job,deadline){
+    for(;;){
+        if(job.phase==='enum'){
+            var form=job.form;
+            while(job.h<=job.limA){
+                var h=job.h;
+                while(job.k<=job.limB){
+                    var k=job.k;
+                    for(var l=-job.limC;l<=job.limC;l++){
+                        var g2=form.aa*h*h+form.bb*k*k+form.cc*l*l+form.ab*h*k+form.ac*h*l+form.bc*k*l;
+                        if(!(g2>1e-12))continue;
+                        var g=Math.sqrt(g2);
+                        var sinT=job.lambda*g/2;
+                        if(sinT>=1)continue;
+                        var two=2*Math.asin(sinT)*180/Math.PI;
+                        if(two<XRD_2THETA_MIN||two>job.twoMax+1e-9)continue;
+                        job.list.push({two:two,h:h,k:k,l:l,s:g/2});
+                    }
+                    job.k++;
+                    if(deadline!==Infinity&&Date.now()>=deadline)return false;
+                }
+                job.k=-job.limB;
+                job.h++;
+                if(deadline!==Infinity&&Date.now()>=deadline)return false;
+            }
+            job.phase='sort';
+            continue;
+        }
+        if(job.phase==='sort'){
+            job.list.sort(function(p,q){
+                if(p.two!==q.two)return p.two-q.two;
+                if(p.h!==q.h)return p.h-q.h;
+                if(p.k!==q.k)return p.k-q.k;
+                return p.l-q.l;
+            });
+            job.found=job.list.length;
+            job.capped=job.found>XRD_MAX_REFLECTIONS;
+            if(job.capped)job.list.length=XRD_MAX_REFLECTIONS;
+            job.phase='sf';
+            continue;
+        }
+        if(job.phase==='sf'){
+            var list=job.list,sites=job.sites,rec=job.rec,peaks=job.peaks;
+            while(job.i<list.length){
+                var r=list[job.i],re=0,im=0;
+                for(var j=0;j<sites.length;j++){
+                    var st=sites[j];
+                    var f=xrdFormFactor(st.el,r.s)*st.occ;
+                    if(!f)continue;
+                    if(st.u)f*=xrdDwb(st.u,r.h,r.k,r.l,rec);
+                    var ph=2*Math.PI*(r.h*st.f[0]+r.k*st.f[1]+r.l*st.f[2]);
+                    re+=f*Math.cos(ph);im+=f*Math.sin(ph);
+                }
+                var inten=(re*re+im*im)*xrdLp(r.two);
+                var last=peaks.length>0?peaks[peaks.length-1]:null;
+                if(last&&Math.abs(r.two-last.two)<=1e-4){
+                    last.I+=inten;last.n++;
+                    if(inten>last.rawI){last.rawI=inten;last.hkl=[r.h,r.k,r.l]}
+                }else{
+                    peaks.push({two:r.two,d:1/(2*r.s),hkl:[r.h,r.k,r.l],I:inten,rawI:inten,n:1});
+                }
+                job.i++;
+                if(deadline!==Infinity&&Date.now()>=deadline)return false;
+            }
+            job.phase='keep';
+            continue;
+        }
+        if(job.phase==='keep'){
+            // A systematic absence is zero only in exact arithmetic: the
+            // structure factor of a forbidden reflection leaves rounding noise
+            // (about 1e-30 of the strongest line), so the cut is relative to
+            // the pattern's own peak.
+            var pk=job.peaks,imax=0,i;
+            for(i=0;i<pk.length;i++)if(pk[i].I>imax)imax=pk[i].I;
+            if(!(imax>0))imax=1;
+            var keep=[];
+            for(i=0;i<pk.length;i++){
+                if(!(pk[i].I>imax*1e-12))continue;
+                // (h k l) and (-h -k -l) are one plane: label the line by the
+                // reading whose first nonzero index is positive, which is how
+                // it is written.
+                var hh=pk[i].hkl;
+                if(hh[0]<0||(hh[0]===0&&(hh[1]<0||(hh[1]===0&&hh[2]<0))))pk[i].hkl=[-hh[0],-hh[1],-hh[2]];
+                keep.push(pk[i]);
+            }
+            job.peaks=keep;
+            for(i=0;i<keep.length;i++)keep[i].rel=keep[i].I/imax*100;
+            job.n=Math.floor((job.twoMax-XRD_2THETA_MIN)/XRD_STEP+1e-9)+1;
+            if(job.n<2)job.n=2;
+            job.prof=new Float64Array(job.n);
+            job.peakIndex=0;
+            job.phase='profile';
+            continue;
+        }
+        if(job.phase==='profile'){
+            var w2=job.lambda2?XRD_K2_RATIO/(1+XRD_K2_RATIO):0;
+            var w1=1-w2;
+            while(job.peakIndex<job.peaks.length){
+                var p=job.peaks[job.peakIndex];
+                xrdProfileAdd(job,p.two,p.I*w1);
+                if(w2>0){
+                    var sin2=job.lambda2/(2*p.d);
+                    if(sin2<1){
+                        var two2=2*Math.asin(sin2)*180/Math.PI;
+                        if(two2>=XRD_2THETA_MIN&&two2<=job.twoMax+1e-9)xrdProfileAdd(job,two2,p.I*w2);
+                    }
+                }
+                job.peakIndex++;
+                if(deadline!==Infinity&&Date.now()>=deadline)return false;
+            }
+            job.phase='normalize';
+            continue;
+        }
+        if(job.phase==='normalize'){
+            var kk,pmax=0;
+            for(kk=0;kk<job.n;kk++)if(job.prof[kk]>pmax)pmax=job.prof[kk];
+            if(!(pmax>0))pmax=1;
+            for(kk=0;kk<job.n;kk++)job.prof[kk]=job.prof[kk]/pmax*100;
+            job.phase='done';
+            return true;
+        }
+        return true;
+    }
+}
+function xrdPatternResult(job){
+    return {
+        atoms:job.sites.length,peaks:job.peaks,reflections:job.list.length,found:job.found,
+        capped:job.capped,indexCapped:job.indexCapped,doublet:job.lambda2>0,
+        twoMax:job.twoMax,min:XRD_2THETA_MIN,step:XRD_STEP,values:job.prof
+    };
+}
+function xrdPattern(sites,lv,lambda,twoMax,lambda2){
+    var job=xrdPatternStart(sites,lv,lambda,twoMax,lambda2);
+    if(!job)return null;
+    while(!xrdPatternStep(job,Infinity)){}
+    return xrdPatternResult(job);
+}
+// How far along the slice job is, for the panel's summary line while it runs.
+function xrdPatternProgress(job){
+    if(job.phase==='enum')return 3;
+    if(job.phase==='sort')return 10;
+    if(job.phase==='sf'){
+        var n=job.list.length||1;
+        return 10+Math.floor(job.i/n*70);
+    }
+    if(job.phase==='keep')return 82;
+    if(job.phase==='profile'){
+        var pn=job.peaks.length||1;
+        return 83+Math.floor(job.peakIndex/pn*16);
+    }
+    return 99;
+}
+function xrdJobProgressText(job){
+    var txt='Calculating the powder pattern... '+xrdPatternProgress(job)+'%';
+    if(job.phase==='sf')txt+=' ('+job.i+' of '+job.list.length+' reflections)';
+    else if(job.phase==='profile')txt+=' ('+job.peakIndex+' of '+job.peaks.length+' lines)';
+    return txt;
+}
+// The panel's reading of the cell: the sites, the radiation and a started job.
+function xrdPrepareJob(){
     if(!CRY||!CRY.latticeVectors)return {ok:false,message:'Not a crystal structure.'};
     var cell=xrdCellSites();
     if(!cell)return {ok:false,message:'Not a crystal structure.'};
@@ -14447,9 +14561,18 @@ function xrdCompute(){
     // A Kalpha entry carries both lines of the doublet; the primary wavelength
     // places the peaks (the table lists the Kalpha1 reading) and the secondary
     // one profiles the weak line beside each of them.
-    var pat=xrdPattern(cell.sites,CRY.latticeVectors,rad.k1||rad.lambda,xrdTwoThetaMax,rad.k2||0);
-    if(!pat)return {ok:false,message:'The cell has no volume, so no lattice can be built.',missing:cell.missing};
-    return {ok:true,rad:rad,pattern:pat,missing:cell.missing};
+    var job=xrdPatternStart(cell.sites,CRY.latticeVectors,rad.k1||rad.lambda,xrdTwoThetaMax,rad.k2||0);
+    if(!job)return {ok:false,message:'The cell has no volume, so no lattice can be built.',missing:cell.missing};
+    job.rad=rad;
+    job.missing=cell.missing;
+    return {ok:true,rad:rad,job:job,missing:cell.missing};
+}
+function xrdCompute(){
+    var prep=xrdPrepareJob();
+    if(!prep.ok)return {ok:false,message:prep.message,missing:prep.missing};
+    var job=prep.job;
+    while(!xrdPatternStep(job,Infinity)){}
+    return {ok:true,rad:prep.rad,pattern:xrdPatternResult(job),missing:prep.missing};
 }
 // The measured pattern is a plain two-column text file: 2theta then intensity,
 // one sample a line. Comment lines (#, ;, //), comma separators, extra columns
@@ -14527,6 +14650,13 @@ function xrdPeakInfoText(){
         var d=p.two-near.peak.two;
         text+='nearest experimental peak at '+near.peak.two.toFixed(3)+' deg, delta 2theta (calc - exp) = '+
             (d>=0?'+':'')+d.toFixed(3)+' deg.';
+        // The calculated position is the Kalpha1 line; a measured maximum is
+        // the Kalpha1/Kalpha2 blend at the line's own width, so part of the
+        // delta is systematic and grows with 2theta.
+        if(xrdResult&&xrdResult.ok&&xrdResult.pattern&&xrdResult.pattern.doublet){
+            text+=' The calculated value is the Kα1 line while the experimental maximum is the Kα1/Kα2 blend, '+
+                'so part of the delta is systematic (it grows with 2theta and depends on the line width).';
+        }
     }else{
         text+='no experimental peak within '+XRD_EXP_MATCH_WINDOW.toFixed(1)+' deg (nearest at '+
             near.distance.toFixed(2)+' deg away).';
@@ -14715,29 +14845,44 @@ function xrdDraw(pat,message){
     xrdDrawExperimental(g,xrdPlot);
     xrdDrawMarkers(g,xrdPlot);
 }
-function xrdUpdate(){
-    var res=xrdCompute();
-    xrdResult=res;
-    // A new pattern invalidates the marked line: the peak it pointed at may not
-    // exist any more.
-    xrdSelection=null;
+// The panel's calculation is one job at a time: a new structure, radiation or
+// range drops the old job (its next tick sees a stale sequence and stops), and
+// a job that takes longer than a slice reports its progress and keeps the page
+// responsive. The Recalculate button becomes Cancel while it runs.
+var xrdJob=null,xrdJobSeq=0;
+var XRD_SLICE_MS=14;
+
+function xrdAbortJob(){
+    if(!xrdJob)return false;
+    xrdJob=null;
+    xrdJobSeq++;
+    return true;
+}
+function xrdSetRunButton(label,title){
+    var btn=document.getElementById('xrd-refresh');
+    if(btn){btn.textContent=label;btn.title=title}
+}
+function xrdRenderError(res){
     var sumEl=document.getElementById('xrd-summary');
     var noteEl=document.getElementById('xrd-note');
     var listEl=document.getElementById('xrd-list');
     var expBtn=document.getElementById('xrd-export');
-    if(!res.ok){
-        if(sumEl)sumEl.textContent=res.message||'';
-        var nm=[];
-        if(res.missing&&res.missing.length)nm.push('No scattering factor for '+res.missing.join(', ')+' in the cell.');
-        if(noteEl)noteEl.textContent=nm.join(' ');
-        if(listEl)listEl.innerHTML='<div class="xr-empty">No pattern.</div>';
-        if(expBtn)expBtn.disabled=true;
-        xrdPeakInfoText();
-        xrdExpInfo();
-        xrdDraw(null,res.message||'');
-        return;
-    }
+    if(sumEl)sumEl.textContent=res.message||'';
+    var nm=[];
+    if(res.missing&&res.missing.length)nm.push('No scattering factor for '+res.missing.join(', ')+' in the cell.');
+    if(noteEl)noteEl.textContent=nm.join(' ');
+    if(listEl)listEl.innerHTML='<div class="xr-empty">No pattern.</div>';
+    if(expBtn)expBtn.disabled=true;
+    xrdPeakInfoText();
+    xrdExpInfo();
+    xrdDraw(null,res.message||'');
+}
+function xrdRenderResult(res){
     var pat=res.pattern,rad=res.rad;
+    var sumEl=document.getElementById('xrd-summary');
+    var noteEl=document.getElementById('xrd-note');
+    var listEl=document.getElementById('xrd-list');
+    var expBtn=document.getElementById('xrd-export');
     if(sumEl){
         sumEl.textContent=rad.label+' '+rad.lambda.toFixed(4)+' A - '+pat.peaks.length+' peak'+
             (pat.peaks.length===1?'':'s')+' from '+pat.reflections+' reflection'+
@@ -14746,7 +14891,8 @@ function xrdUpdate(){
     var notes=[];
     if(pat.capped)notes.push('Only the '+XRD_MAX_REFLECTIONS+' lowest-angle reflections were kept (the cell is too large for the rest).');
     if(pat.indexCapped)notes.push('Reflections needing an index above '+XRD_MAX_INDEX+' are not enumerated.');
-    if(pat.doublet)notes.push('The curve carries the Kα1/Kα2 doublet at its 2:1 ratio; the peak list is the Kα1 line.');
+    if(pat.doublet)notes.push('The curve carries the Kα1/Kα2 doublet at its 2:1 ratio; the peak list is the Kα1 line, '+
+        'so a 2theta read off an experimental maximum sits slightly higher at high angle (the Kα2 blend).');
     if(res.missing.length)notes.push('No scattering factor for '+res.missing.join(', ')+' - those atoms are not in the pattern.');
     if(noteEl)noteEl.textContent=notes.join(' ');
     if(expBtn)expBtn.disabled=false;
@@ -14768,6 +14914,83 @@ function xrdUpdate(){
     xrdPeakInfoText();
     xrdExpInfo();
     xrdDraw(pat,'');
+}
+function xrdJobTick(seq){
+    if(!xrdJob||seq!==xrdJobSeq)return;
+    var job=xrdJob;
+    var done;
+    try{
+        done=xrdPatternStep(job,Date.now()+XRD_SLICE_MS);
+    }catch(e){
+        xrdJob=null;
+        xrdJobSeq++;
+        xrdSetRunButton('Recalculate','Recalculate after the structure changed');
+        xrdResult=null;
+        xrdRenderError({message:'The powder calculation stopped: '+
+            (e&&e.message?e.message:'unexpected error')});
+        if(xrdOpen)layoutPanels();
+        return;
+    }
+    if(!xrdJob||seq!==xrdJobSeq)return;
+    if(!done){
+        var sum=document.getElementById('xrd-summary');
+        if(sum)sum.textContent=xrdJobProgressText(job);
+        setTimeout(function(){xrdJobTick(seq)},0);
+        return;
+    }
+    xrdJob=null;
+    xrdSetRunButton('Recalculate','Recalculate after the structure changed');
+    xrdResult={ok:true,rad:job.rad,pattern:xrdPatternResult(job),missing:job.missing};
+    xrdRenderResult(xrdResult);
+    if(xrdOpen)layoutPanels();
+}
+function xrdCancelCompute(){
+    if(!xrdAbortJob())return;
+    xrdSetRunButton('Recalculate','Recalculate after the structure changed');
+    xrdResult=null;
+    xrdSelection=null;
+    var sumEl=document.getElementById('xrd-summary');
+    var noteEl=document.getElementById('xrd-note');
+    var listEl=document.getElementById('xrd-list');
+    var expBtn=document.getElementById('xrd-export');
+    if(sumEl)sumEl.textContent='Calculation cancelled.';
+    if(noteEl)noteEl.textContent='';
+    if(listEl)listEl.innerHTML='<div class="xr-empty">Calculation cancelled. Recalculate to start again.</div>';
+    if(expBtn)expBtn.disabled=true;
+    xrdPeakInfoText();
+    xrdDraw(null,'Calculation cancelled.');
+    if(xrdOpen)layoutPanels();
+}
+function xrdUpdate(){
+    // A new pattern invalidates the marked line: the peak it pointed at may not
+    // exist any more.
+    xrdAbortJob();
+    xrdSelection=null;
+    xrdResult=null;
+    var expBtn=document.getElementById('xrd-export');
+    if(expBtn)expBtn.disabled=true;
+    var prep=xrdPrepareJob();
+    if(!prep.ok){
+        xrdSetRunButton('Recalculate','Recalculate after the structure changed');
+        xrdRenderError(prep);
+        return;
+    }
+    var job=prep.job;
+    xrdJob=job;
+    var seq=++xrdJobSeq;
+    xrdSetRunButton('Cancel','Stop the powder calculation');
+    var sumEl=document.getElementById('xrd-summary');
+    if(sumEl)sumEl.textContent=xrdJobProgressText(job);
+    var noteEl=document.getElementById('xrd-note');
+    if(noteEl)noteEl.textContent='';
+    var listEl=document.getElementById('xrd-list');
+    if(listEl)listEl.innerHTML='<div class="xr-empty">Calculating...</div>';
+    xrdPeakInfoText();
+    xrdExpInfo();
+    xrdDraw(null,'Calculating the powder pattern...');
+    // The first slice runs now, so a cell that fits in one slice is finished
+    // before this function returns and the panel is complete for the layout.
+    xrdJobTick(seq);
 }
 function xrdRefresh(){
     if(!xrdOpen)return;
@@ -14809,12 +15032,18 @@ function xrdFillControls(){
 function xrdOpenPanel(){
     var panel=document.getElementById('xrd-panel');
     if(!panel||!CRY)return;
+    // The pattern is of the cell, not of the pair a comparison draws; the
+    // right-hand structure has no pattern to show beside it.
+    if(diffMode){
+        modeInfoEl.textContent='Powder XRD is not available in diff mode';
+        return;
+    }
     xrdOpen=true;
     panelMinState.xrd=false;
     xrdFillControls();
     panel.style.display='block';
-    // The pattern fills the panel in before the layout measures it, or the
-    // box the layout made room for is the old (usually much shorter) one.
+    // A small cell finishes its first slice before the layout measures the
+    // panel; a large one reports progress and is laid out again when it ends.
     xrdUpdate();
     syncPanelChips();
     layoutPanels();
@@ -14828,6 +15057,8 @@ function xrdMinimizePanel(){
     layoutPanels();
 }
 function xrdClosePanel(){
+    // A running job has no panel to fill; stop it with the panel.
+    if(xrdAbortJob())xrdSetRunButton('Recalculate','Recalculate after the structure changed');
     var panel=document.getElementById('xrd-panel');
     if(panel)panel.style.display='none';
     xrdOpen=false;
@@ -14867,7 +15098,9 @@ function xrdExport(){
     var mx=document.getElementById('xrd-2max');
     if(mx)mx.addEventListener('change',xrdRefresh);
     var reBtn=document.getElementById('xrd-refresh');
-    if(reBtn)reBtn.addEventListener('click',xrdRefresh);
+    if(reBtn)reBtn.addEventListener('click',function(){
+        if(xrdJob)xrdCancelCompute();else xrdRefresh();
+    });
     var exBtn=document.getElementById('xrd-export');
     if(exBtn)exBtn.addEventListener('click',xrdExport);
     var importBtn=document.getElementById('xrd-import');
@@ -15641,6 +15874,12 @@ function cavityOpenPanel(){
     if(!CRY)return;
     var panel=document.getElementById('cav-panel');
     if(!panel)return;
+    // The scan reads one cell; in a comparison it would cover the right-hand
+    // structure and report voids for the left one only.
+    if(diffMode){
+        modeInfoEl.textContent='Cavity analysis is not available in diff mode';
+        return;
+    }
     cavOpen=true;
     panelMinState.cav=false;
     panel.style.display='block';
@@ -15660,6 +15899,8 @@ function cavityMinimizePanel(){
 }
 
 function cavityClosePanel(){
+    // A scan still running has no panel to report to; stop it with the report.
+    if(cavAbortJob())cavSetRunButton('Analyse','Scan the unit cell with this probe');
     var panel=document.getElementById('cav-panel');
     if(panel)panel.style.display='none';
     cavOpen=false;
@@ -17637,12 +17878,17 @@ function syncOrtepControl(){
         if(a&&isAnisoUsable(a.uAniso)){any=true;break}
     }
     if(!any)ortepEnabled=false;
-    chk.disabled=!any;
-    chk.checked=ortepEnabled;
+    // A polyhedron's centre marker is not a ball for an ellipsoid to replace,
+    // so the switch is held off while that style is on. The choice itself is
+    // kept: switching back to Ball & Stick brings the ellipsoids back.
+    var poly=displayStyle==='polyhedra';
+    chk.disabled=!any||poly;
+    chk.checked=ortepEnabled&&!poly;
     if(line){
-        if(any)line.classList.remove('off');else line.classList.add('off');
-        line.title=any?'Draw atoms that carry anisotropic displacement parameters as 50% probability ellipsoids':
-            'This structure states no anisotropic displacement parameters';
+        if(any&&!poly)line.classList.remove('off');else line.classList.add('off');
+        line.title=!any?'This structure states no anisotropic displacement parameters':
+            poly?'Thermal ellipsoids are not drawn in Polyhedra style; the chosen state returns in Ball & Stick':
+            'Draw atoms that carry anisotropic displacement parameters as 50% probability ellipsoids';
     }
 }
 var ortepChkEl=document.getElementById('ortep-chk');
