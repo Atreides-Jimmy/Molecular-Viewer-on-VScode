@@ -1612,6 +1612,8 @@ input,textarea{-webkit-user-select:text;user-select:text}
 #int-panel .ng-type-xb{background:#ffb74d}
 #int-panel .ng-type-cb{background:#ffd54f}
 #int-panel .ng-type-pn{background:#ce93d8}
+#int-panel .ng-type-pp{background:#81c784}
+#int-panel .ng-type-chpi{background:#f06292}
 #int-panel .ng-a{color:var(--vscode-descriptionForeground,#999);font-variant-numeric:tabular-nums}
 #xrd-panel{display:none;position:absolute;bottom:40px;left:8px;z-index:50;background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:4px;padding:8px;width:456px;max-width:calc(100% - 16px);max-height:calc(100% - 16px);overflow-y:auto;box-shadow:0 2px 8px rgba(0,0,0,0.3)}
 #xrd-panel .xr-title{display:flex;align-items:center;justify-content:space-between;font-size:12px;font-weight:bold;margin-bottom:4px}
@@ -1904,7 +1906,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><div class="pn-head"><h4>Supercell Bounds</h4><button class="pn-close" id="crystal-close" type="button" title="Minimize the crystal panel">&times;</button></div><div class="bnd-row bnd-axis"><label for="bnd-a-min">a</label><input type="number" id="bnd-a-min" value="0" step="0.1" title="lower bound along a" aria-label="lower bound along a"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-a-max" value="1" step="0.1" title="upper bound along a" aria-label="upper bound along a"></div><div class="bnd-row bnd-axis"><label for="bnd-b-min">b</label><input type="number" id="bnd-b-min" value="0" step="0.1" title="lower bound along b" aria-label="lower bound along b"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-b-max" value="1" step="0.1" title="upper bound along b" aria-label="upper bound along b"></div><div class="bnd-row bnd-axis"><label for="bnd-c-min">c</label><input type="number" id="bnd-c-min" value="0" step="0.1" title="lower bound along c" aria-label="lower bound along c"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-c-max" value="1" step="0.1" title="upper bound along c" aria-label="upper bound along c"></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-p2" title="Eight unit cells, 0..2 along every axis">2×2×2</button><button class="bnd-mini" id="bnd-p3" title="Twenty-seven unit cells, 0..3 along every axis">3×3×3</button><button class="bnd-mini" id="bnd-p4" title="Sixty-four unit cells, 0..4 along every axis">4×4×4</button></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-reset" title="Back to the single unit cell, 0..1 along every axis">Reset</button><button class="bnd-mini" id="bnd-origin" title="Keep the spans, move the low corner onto the lattice origin">Align Origin</button></div><div class="bnd-cell" id="bnd-cell-line"></div><div class="bnd-sym" id="bnd-sym-note" style="display:none"></div><div class="bnd-row"><label>Disorder</label><select id="bnd-disorder" title="Show the ordered part plus one disorder group; All shows every alternative the cell lists"><option value="">All</option></select></div><label class="bnd-occ off" id="bnd-occ-label" for="bnd-occ-normalize" title="When one disorder group is selected, count its sites at occupancy 1 in the formula, density and saved files, so the cell describes the ordered variant on screen. All keeps every occupancy the file states."><input type="checkbox" id="bnd-occ-normalize" checked disabled>Selected group fully occupied</label><div class="hk-title">Lattice Planes (h k l)</div><div class="bnd-row hk-row"><label>(h k l)</label><input type="number" id="hk-h" value="0" step="1" title="h"><input type="number" id="hk-k" value="0" step="1" title="k"><input type="number" id="hk-l" value="1" step="1" title="l"></div><div class="hk-val" id="hk-d1"></div><div class="bnd-row hk-row"><label>2nd</label><input type="number" id="hk2-h" value="1" step="1" title="h of the second plane"><input type="number" id="hk2-k" value="0" step="1" title="k of the second plane"><input type="number" id="hk2-l" value="0" step="1" title="l of the second plane"></div><div class="hk-val" id="hk-d2"></div><button id="hk-show" class="bnd-btn" title="Draw the (hkl) plane through the centre of the box">Show Plane</button><button id="xrd-open" class="bnd-btn" title="Calculate the powder X-ray diffraction pattern of the unit cell">Powder XRD Pattern...</button><button id="bvs-open" class="bnd-btn" title="Bond-valence sums per site: how well the coordination around each cation and anion matches its formal valence (read-only)">Bond Valence (BVS)...</button><button id="cav-open" class="bnd-btn" title="Probe the unit cell for closed cavities and open channels and report their volume (read-only)">Cavities...</button><button id="bnd-edit-cell" class="bnd-btn" title="Change the cell parameters; every site keeps its fractional coordinates">Edit Cell...</button><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="pn-head"><span class="vp-title">Auto Rotate</span><button class="pn-close" id="view-close" type="button" title="Minimize the View controls">&times;</button></div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div><div class="vp-title vp-sub">Display</div><select id="style-select" title="How the structure is drawn: ball and stick (the default), van der Waals spheres, sticks without the atom spheres, or coordination polyhedra for a crystal"><option value="ball">Ball &amp; Stick</option><option value="spacefill">Space-filling</option><option value="stick">Stick</option>${(function(){try{return JSON.parse(jsonData).crystal?'<option value="polyhedra">Polyhedra</option>':'';}catch(e){return '';}}())}</select><label class="vp-check off" id="ortep-line" title="Draw atoms that carry anisotropic displacement parameters as 50% probability ellipsoids"><input type="checkbox" id="ortep-chk" disabled> Thermal ellipsoids (50%)</label></div><div id="bake-panel"><div class="pn-head"><span class="vp-title">Edit Coordinates</span><button class="pn-close" id="bake-close" type="button" title="Minimize the Edit Coordinates card">&times;</button></div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="pn-head"><span class="sp-title">Select Atoms</span><button class="pn-close" id="select-close" type="button" title="Minimize the selection panel">&times;</button></div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="neigh-panel"><div class="pn-head"><span class="ng-title">Neighbours</span><button class="pn-close" id="neigh-close" type="button" title="Minimize the neighbour list">&times;</button></div><div class="ng-line"><label for="ng-radius">Radius (A)</label><input type="number" id="ng-radius" value="3.5" min="0.1" max="12" step="0.1"><label class="ng-chk" for="ng-skip"><input type="checkbox" id="ng-skip" checked>skip bonded</label></div><div class="ng-line"><label>Anchor</label><span class="ng-anchor" id="ng-anchor">click an atom</span></div><div class="ng-summary" id="ng-summary"></div><div class="ng-list" id="ng-list"></div><div class="ng-btns"><button id="ng-select">Select listed</button></div><div class="ng-hint" id="ng-hint">Click a row to select that atom. Crystal images outside the drawn cell are listed with their cell offset.</div></div><div id="int-panel"><div class="pn-head"><span class="ng-title">Non-covalent Interactions</span><button class="pn-close" id="int-close" type="button" title="Minimize the interaction list">&times;</button></div><div class="ng-line ng-types"><label class="ng-chk" for="int-hb"><input type="checkbox" id="int-hb" checked>H-bond</label><label class="ng-chk" for="int-xb"><input type="checkbox" id="int-xb" checked>halogen</label><label class="ng-chk" for="int-cb"><input type="checkbox" id="int-cb" checked>chalcogen</label><label class="ng-chk" for="int-pn"><input type="checkbox" id="int-pn" checked>pnictogen</label></div><div class="ng-line"><label class="ng-chk" for="int-show"><input type="checkbox" id="int-show" checked>draw dashed lines</label></div><div class="ng-summary" id="int-summary"></div><div class="ng-list" id="int-list"></div><div class="ng-hint" id="int-hint">H-bond: d(H&middot;&middot;&middot;A) &lt; 2.5 &Aring; and D-H&middot;&middot;&middot;A &gt; 120&deg;. Halogen, chalcogen and pnictogen bonds: d(X&middot;&middot;&middot;A) &lt; vdW sum &minus; 0.1 &Aring; and D-X&middot;&middot;&middot;A &gt; 130&deg;; acceptors N, O, S, F, Cl, Br, I.</div></div><div id="xrd-panel"><div class="xr-title"><span>Powder XRD</span><button class="xr-close" id="xrd-close" title="Close (Esc)">&times;</button></div><div class="xr-line"><label for="xrd-rad">Radiation</label><select id="xrd-rad" title="The X-ray wavelength the pattern is calculated for"></select><label for="xrd-2max">2&theta; max</label><select id="xrd-2max" class="xr-narrow" title="The highest diffraction angle in the pattern"></select></div><div class="xr-summary" id="xrd-summary"></div><canvas id="xrd-canvas" width="440" height="150"></canvas><div class="xr-note" id="xrd-peak-info"></div><div class="xr-note" id="xrd-exp-info"></div><div class="xr-note" id="xrd-note"></div><div class="xr-list" id="xrd-list"></div><div class="xr-btns"><button id="xrd-refresh" class="xr-secondary" title="Recalculate after the structure changed">Recalculate</button><button id="xrd-export" title="Save the drawn curve as a two-column text file">Export .xy</button></div><div class="xr-btns"><button id="xrd-import" class="xr-secondary" title="Overlay a measured two-column 2theta/intensity pattern">Import experimental .xy...</button><button id="xrd-clear-exp" class="xr-secondary" disabled title="Remove the experimental curve">Clear exp.</button></div><input type="file" id="xrd-file" accept=".xy,.txt,.csv,text/plain" style="display:none"><div class="xr-hint">Pattern of the unit cell on screen (the supercell bounds do not change it) with Cromer-Mann form factors, Lorenz-polarisation and a Caglioti Gaussian profile. Click a calculated peak to read its position against the experimental curve.</div></div><div id="cav-panel"><div class="cv-title"><span>Voids and Cavities</span><button class="cv-close" id="cav-close" title="Close (Esc)">&times;</button></div><div class="cv-line"><label for="cav-probe">Probe radius</label><input type="number" id="cav-probe" value="1.2" min="0" max="20" step="0.1" title="Radius of the spherical probe rolled through the cell"><span style="font-size:10px;opacity:.7">&Aring;</span><button id="cav-run" title="Scan the unit cell with this probe">Analyse</button><button id="cav-clear" class="cv-secondary" title="Remove the drawn surface">Clear</button></div><div class="cv-summary" id="cav-summary">Not analysed yet.</div><div class="cv-note" id="cav-note"></div><div class="cv-list" id="cav-list"></div><div class="cv-hint">A point is free when a probe of this radius fits there without touching an atom (van der Waals radii, periodic images included). The free space is split into components: one whose walk winds through a cell face is an open channel, otherwise it is a closed cavity. Click a row to draw that void as a translucent surface. Volumes are per unit cell, so a supercell shows the same numbers; pockets under 0.5 &Aring;&sup3; are ignored. r_free is the largest sphere that fits at the void's deepest point.</div></div><div id="rotate-panel"><div class="pn-head"><span class="rp-title">Rotate Group Around Axis</span><button class="pn-close" id="rotate-close" type="button" title="Minimize the rotate panel">&times;</button></div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div><div id="crystal-reopen" class="pn-chip" title="Open the crystal panel">Crystal</div><div id="egg-reopen" class="pn-chip" title="Open the egg list">Eggs</div><div id="view-reopen" class="pn-chip" title="Open the View controls">View</div><div id="bake-reopen" class="pn-chip" title="Open the Edit Coordinates card">Coordinates</div><div id="select-reopen" class="pn-chip" title="Open the Select Atoms panel">Select Atoms</div><div id="neigh-reopen" class="pn-chip" title="Open the Neighbours panel">Neighbours</div><div id="int-reopen" class="pn-chip" title="Open the Non-covalent Interactions panel">Interactions</div><div id="rotate-reopen" class="pn-chip" title="Open the Rotate Group panel">Rotate Group</div><div id="xrd-reopen" class="pn-chip" title="Open the powder XRD panel">Powder XRD</div><div id="cav-reopen" class="pn-chip" title="Open the cavity and void analysis">Cavities</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><div class="pn-head"><h4>Supercell Bounds</h4><button class="pn-close" id="crystal-close" type="button" title="Minimize the crystal panel">&times;</button></div><div class="bnd-row bnd-axis"><label for="bnd-a-min">a</label><input type="number" id="bnd-a-min" value="0" step="0.1" title="lower bound along a" aria-label="lower bound along a"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-a-max" value="1" step="0.1" title="upper bound along a" aria-label="upper bound along a"></div><div class="bnd-row bnd-axis"><label for="bnd-b-min">b</label><input type="number" id="bnd-b-min" value="0" step="0.1" title="lower bound along b" aria-label="lower bound along b"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-b-max" value="1" step="0.1" title="upper bound along b" aria-label="upper bound along b"></div><div class="bnd-row bnd-axis"><label for="bnd-c-min">c</label><input type="number" id="bnd-c-min" value="0" step="0.1" title="lower bound along c" aria-label="lower bound along c"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-c-max" value="1" step="0.1" title="upper bound along c" aria-label="upper bound along c"></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-p2" title="Eight unit cells, 0..2 along every axis">2×2×2</button><button class="bnd-mini" id="bnd-p3" title="Twenty-seven unit cells, 0..3 along every axis">3×3×3</button><button class="bnd-mini" id="bnd-p4" title="Sixty-four unit cells, 0..4 along every axis">4×4×4</button></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-reset" title="Back to the single unit cell, 0..1 along every axis">Reset</button><button class="bnd-mini" id="bnd-origin" title="Keep the spans, move the low corner onto the lattice origin">Align Origin</button></div><div class="bnd-cell" id="bnd-cell-line"></div><div class="bnd-sym" id="bnd-sym-note" style="display:none"></div><div class="bnd-row"><label>Disorder</label><select id="bnd-disorder" title="Show the ordered part plus one disorder group; All shows every alternative the cell lists"><option value="">All</option></select></div><label class="bnd-occ off" id="bnd-occ-label" for="bnd-occ-normalize" title="When one disorder group is selected, count its sites at occupancy 1 in the formula, density and saved files, so the cell describes the ordered variant on screen. All keeps every occupancy the file states."><input type="checkbox" id="bnd-occ-normalize" checked disabled>Selected group fully occupied</label><div class="hk-title">Lattice Planes (h k l)</div><div class="bnd-row hk-row"><label>(h k l)</label><input type="number" id="hk-h" value="0" step="1" title="h"><input type="number" id="hk-k" value="0" step="1" title="k"><input type="number" id="hk-l" value="1" step="1" title="l"></div><div class="hk-val" id="hk-d1"></div><div class="bnd-row hk-row"><label>2nd</label><input type="number" id="hk2-h" value="1" step="1" title="h of the second plane"><input type="number" id="hk2-k" value="0" step="1" title="k of the second plane"><input type="number" id="hk2-l" value="0" step="1" title="l of the second plane"></div><div class="hk-val" id="hk-d2"></div><button id="hk-show" class="bnd-btn" title="Draw the (hkl) plane through the centre of the box">Show Plane</button><button id="xrd-open" class="bnd-btn" title="Calculate the powder X-ray diffraction pattern of the unit cell">Powder XRD Pattern...</button><button id="bvs-open" class="bnd-btn" title="Bond-valence sums per site: how well the coordination around each cation and anion matches its formal valence (read-only)">Bond Valence (BVS)...</button><button id="cav-open" class="bnd-btn" title="Probe the unit cell for closed cavities and open channels and report their volume (read-only)">Cavities...</button><button id="bnd-edit-cell" class="bnd-btn" title="Change the cell parameters; every site keeps its fractional coordinates">Edit Cell...</button><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="pn-head"><span class="vp-title">Auto Rotate</span><button class="pn-close" id="view-close" type="button" title="Minimize the View controls">&times;</button></div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div><div class="vp-title vp-sub">Display</div><select id="style-select" title="How the structure is drawn: ball and stick (the default), van der Waals spheres, sticks without the atom spheres, or coordination polyhedra for a crystal"><option value="ball">Ball &amp; Stick</option><option value="spacefill">Space-filling</option><option value="stick">Stick</option>${(function(){try{return JSON.parse(jsonData).crystal?'<option value="polyhedra">Polyhedra</option>':'';}catch(e){return '';}}())}</select><label class="vp-check off" id="ortep-line" title="Draw atoms that carry anisotropic displacement parameters as 50% probability ellipsoids"><input type="checkbox" id="ortep-chk" disabled> Thermal ellipsoids (50%)</label></div><div id="bake-panel"><div class="pn-head"><span class="vp-title">Edit Coordinates</span><button class="pn-close" id="bake-close" type="button" title="Minimize the Edit Coordinates card">&times;</button></div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="pn-head"><span class="sp-title">Select Atoms</span><button class="pn-close" id="select-close" type="button" title="Minimize the selection panel">&times;</button></div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="neigh-panel"><div class="pn-head"><span class="ng-title">Neighbours</span><button class="pn-close" id="neigh-close" type="button" title="Minimize the neighbour list">&times;</button></div><div class="ng-line"><label for="ng-radius">Radius (A)</label><input type="number" id="ng-radius" value="3.5" min="0.1" max="12" step="0.1"><label class="ng-chk" for="ng-skip"><input type="checkbox" id="ng-skip" checked>skip bonded</label></div><div class="ng-line"><label>Anchor</label><span class="ng-anchor" id="ng-anchor">click an atom</span></div><div class="ng-summary" id="ng-summary"></div><div class="ng-list" id="ng-list"></div><div class="ng-btns"><button id="ng-select">Select listed</button></div><div class="ng-hint" id="ng-hint">Click a row to select that atom. Crystal images outside the drawn cell are listed with their cell offset.</div></div><div id="int-panel"><div class="pn-head"><span class="ng-title">Non-covalent Interactions</span><button class="pn-close" id="int-close" type="button" title="Minimize the interaction list">&times;</button></div><div class="ng-line ng-types"><label class="ng-chk" for="int-hb"><input type="checkbox" id="int-hb" checked>H-bond</label><label class="ng-chk" for="int-xb"><input type="checkbox" id="int-xb" checked>halogen</label><label class="ng-chk" for="int-cb"><input type="checkbox" id="int-cb" checked>chalcogen</label><label class="ng-chk" for="int-pn"><input type="checkbox" id="int-pn" checked>pnictogen</label><label class="ng-chk" for="int-pp"><input type="checkbox" id="int-pp" checked>&pi;-&pi;</label><label class="ng-chk" for="int-chpi"><input type="checkbox" id="int-chpi" checked>CH-&pi;</label></div><div class="ng-line"><label class="ng-chk" for="int-show"><input type="checkbox" id="int-show" checked>draw dashed lines</label></div><div class="ng-summary" id="int-summary"></div><div class="ng-list" id="int-list"></div><div class="ng-hint" id="int-hint">H-bond: d(H&middot;&middot;&middot;A) &lt; 2.5 &Aring; and D-H&middot;&middot;&middot;A &gt; 120&deg;. Halogen, chalcogen and pnictogen bonds: d(X&middot;&middot;&middot;A) &lt; vdW sum &minus; 0.1 &Aring; and D-X&middot;&middot;&middot;A &gt; 130&deg;; acceptors N, O, S, F, Cl, Br, I. &pi;-&pi;: aromatic 5&ndash;7 rings with a plane angle &le; 30&deg;, centroid distance &le; 4.5 &Aring; and a 2.8&ndash;3.8 &Aring; face gap (parallel/offset), or a &ge; 60&deg; T-shape with one ring edge 3.0&ndash;5.5 &Aring; over the other face. CH-&pi;: H&middot;&middot;&middot;centroid &lt; 3.0 &Aring;, C-H&middot;&middot;&middot;centroid &gt; 120&deg; and the H at least 1.0 &Aring; above the ring face.</div></div><div id="xrd-panel"><div class="xr-title"><span>Powder XRD</span><button class="xr-close" id="xrd-close" title="Close (Esc)">&times;</button></div><div class="xr-line"><label for="xrd-rad">Radiation</label><select id="xrd-rad" title="The X-ray wavelength the pattern is calculated for"></select><label for="xrd-2max">2&theta; max</label><select id="xrd-2max" class="xr-narrow" title="The highest diffraction angle in the pattern"></select></div><div class="xr-summary" id="xrd-summary"></div><canvas id="xrd-canvas" width="440" height="150"></canvas><div class="xr-note" id="xrd-peak-info"></div><div class="xr-note" id="xrd-exp-info"></div><div class="xr-note" id="xrd-note"></div><div class="xr-list" id="xrd-list"></div><div class="xr-btns"><button id="xrd-refresh" class="xr-secondary" title="Recalculate after the structure changed">Recalculate</button><button id="xrd-export" title="Save the drawn curve as a two-column text file">Export .xy</button></div><div class="xr-btns"><button id="xrd-import" class="xr-secondary" title="Overlay a measured two-column 2theta/intensity pattern">Import experimental .xy...</button><button id="xrd-clear-exp" class="xr-secondary" disabled title="Remove the experimental curve">Clear exp.</button></div><input type="file" id="xrd-file" accept=".xy,.txt,.csv,text/plain" style="display:none"><div class="xr-hint">Pattern of the unit cell on screen (the supercell bounds do not change it) with Cromer-Mann form factors, Lorenz-polarisation and a Caglioti Gaussian profile. Click a calculated peak to read its position against the experimental curve.</div></div><div id="cav-panel"><div class="cv-title"><span>Voids and Cavities</span><button class="cv-close" id="cav-close" title="Close (Esc)">&times;</button></div><div class="cv-line"><label for="cav-probe">Probe radius</label><input type="number" id="cav-probe" value="1.2" min="0" max="20" step="0.1" title="Radius of the spherical probe rolled through the cell"><span style="font-size:10px;opacity:.7">&Aring;</span><button id="cav-run" title="Scan the unit cell with this probe">Analyse</button><button id="cav-clear" class="cv-secondary" title="Remove the drawn surface">Clear</button></div><div class="cv-summary" id="cav-summary">Not analysed yet.</div><div class="cv-note" id="cav-note"></div><div class="cv-list" id="cav-list"></div><div class="cv-hint">A point is free when a probe of this radius fits there without touching an atom (van der Waals radii, periodic images included). The free space is split into components: one whose walk winds through a cell face is an open channel, otherwise it is a closed cavity. Click a row to draw that void as a translucent surface. Volumes are per unit cell, so a supercell shows the same numbers; pockets under 0.5 &Aring;&sup3; are ignored. r_free is the largest sphere that fits at the void's deepest point.</div></div><div id="rotate-panel"><div class="pn-head"><span class="rp-title">Rotate Group Around Axis</span><button class="pn-close" id="rotate-close" type="button" title="Minimize the rotate panel">&times;</button></div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div><div id="crystal-reopen" class="pn-chip" title="Open the crystal panel">Crystal</div><div id="egg-reopen" class="pn-chip" title="Open the egg list">Eggs</div><div id="view-reopen" class="pn-chip" title="Open the View controls">View</div><div id="bake-reopen" class="pn-chip" title="Open the Edit Coordinates card">Coordinates</div><div id="select-reopen" class="pn-chip" title="Open the Select Atoms panel">Select Atoms</div><div id="neigh-reopen" class="pn-chip" title="Open the Neighbours panel">Neighbours</div><div id="int-reopen" class="pn-chip" title="Open the Non-covalent Interactions panel">Interactions</div><div id="rotate-reopen" class="pn-chip" title="Open the Rotate Group panel">Rotate Group</div><div id="xrd-reopen" class="pn-chip" title="Open the powder XRD panel">Powder XRD</div><div id="cav-reopen" class="pn-chip" title="Open the cavity and void analysis">Cavities</div></div>
 <div id="error-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="box-select-rect"></div>
@@ -7367,7 +7369,7 @@ function mmCancelRun(){
     mmUpdateReopen();
 }
 
-var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',neighbours:'Neighbours - Click an atom to list the atoms within the radius',interactions:'Interactions - Non-covalent contacts detected from geometry; click a row to select its two sites',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',replaceAtom:'Replace Atom - Click atom(s) to select, click button again to confirm',addH:'Add H - Click atom(s) to select, click the button again to complete their hydrogens',selectAtoms:'Select Atoms - Input indices or element symbols',boxSelect:'Box Select - Drag a rectangle to select atoms',rotateGroup:'Rotate Group - Select group + axis atoms, then adjust angle',mmOpt:'Molecular Mechanics - Click atoms to select them; the panel optimizes only those atoms',moveAtoms:'Move Atoms - Select atoms; drag/arrows rotate view, right-drag pans; Ctrl+drag or Ctrl+arrows rotates group, Ctrl+right-drag moves group'};
+var MODE_INFO={view:'View Mode',bondLength:'Bond Length - Click 2 atoms',bondAngle:'Bond Angle - Click 3 atoms (central 2nd)',dihedral:'Dihedral - Click 4 atoms',neighbours:'Neighbours - Click an atom to list the atoms within the radius',interactions:'Interactions - Non-covalent contacts detected from geometry: H-bonds, sigma-hole contacts, pi-pi stacking and CH-pi; click a row to select its sites',addAtom:'Add Atom - Click anchor atom',deleteAtom:'Delete Atom - Click atom to delete',replaceAtom:'Replace Atom - Click atom(s) to select, click button again to confirm',addH:'Add H - Click atom(s) to select, click the button again to complete their hydrogens',selectAtoms:'Select Atoms - Input indices or element symbols',boxSelect:'Box Select - Drag a rectangle to select atoms',rotateGroup:'Rotate Group - Select group + axis atoms, then adjust angle',mmOpt:'Molecular Mechanics - Click atoms to select them; the panel optimizes only those atoms',moveAtoms:'Move Atoms - Select atoms; drag/arrows rotate view, right-drag pans; Ctrl+drag or Ctrl+arrows rotates group, Ctrl+right-drag moves group'};
 
 function setMode(m){
     // An Alt-drag that is still running belongs to the mode it started in: a
@@ -12551,7 +12553,7 @@ function neighSelectListed(){
 // across a cell face is the contact it really is; a molecule is read from the
 // atoms on screen, because that is all there is.
 var intActive=false;
-var intShowTypes={hb:true,xb:true,cb:true,pn:true};
+var intShowTypes={hb:true,xb:true,cb:true,pn:true,pp:true,chpi:true};
 var intShowLines=true;
 var intRows=[];
 var intLines=null;
@@ -12564,9 +12566,61 @@ var INT_VDW_SLACK=0.1;          // d(X...A) < r_vdw(X) + r_vdw(A) - 0.1
 var INT_ACCEPTORS={N:1,O:1,S:1,F:1,Cl:1,Br:1,I:1};
 // The elements that carry a sigma-hole, and the interaction each one names.
 var INT_SIGMA={Cl:'xb',Br:'xb',I:'xb',S:'cb',Se:'cb',Te:'cb',P:'pn',As:'pn',Sb:'pn',Bi:'pn'};
-var INT_TYPE_NAME={hb:'H-bond',xb:'halogen bond',cb:'chalcogen bond',pn:'pnictogen bond'};
-var INT_TYPE_TAG={hb:'HB',xb:'XB',cb:'CB',pn:'PN'};
-var INT_TYPE_COLOR={hb:0x4fc3f7,xb:0xffb74d,cb:0xffd54f,pn:0xce93d8};
+var INT_SIGMA_TYPE={xb:1,cb:1,pn:1};
+var INT_TYPE_ORDER=['hb','xb','cb','pn','pp','chpi'];
+var INT_TYPE_NAME={hb:'H-bond',xb:'halogen bond',cb:'chalcogen bond',pn:'pnictogen bond',
+    pp:'\u03c0-\u03c0 contact',chpi:'CH-\u03c0 contact'};
+var INT_TYPE_PLURAL={hb:'H-bonds',xb:'halogen bonds',cb:'chalcogen bonds',pn:'pnictogen bonds',
+    pp:'\u03c0-\u03c0 contacts',chpi:'CH-\u03c0 contacts'};
+var INT_TYPE_TAG={hb:'HB',xb:'XB',cb:'CB',pn:'PN',pp:'\u03c0\u03c0',chpi:'CH\u03c0'};
+var INT_TYPE_COLOR={hb:0x4fc3f7,xb:0xffb74d,cb:0xffd54f,pn:0xce93d8,pp:0x81c784,chpi:0xf06292};
+
+// Aromatic rings and the pi contacts they make. A ring is a planar chordless
+// cycle of 5-7 atoms drawn from the element set below, with every edge at
+// aromatic order (1.5) - or, for a file that states only single bonds, with
+// bond lengths only a delocalised ring gives (intRingAromatic). The contact
+// criteria are stated here and nowhere else, as the sigma-hole ones are:
+// parallel rings need a 2.8-3.8 A plane gap and at most 2.5 A of slip; a
+// T-shaped pair needs the centroid of the edge-on ring 3+ A above the other
+// ring's face, within 2.5 A of its centre; CH-pi is a C-H hydrogen over a ring
+// face, pointing at the ring centroid. Rings are read from the drawn atoms for
+// a molecule and from the base cell's bonds plus integer images for a crystal.
+var INT_RING_MIN=5;
+var INT_RING_MAX=7;
+var INT_RING_PLANAR=0.30;       // max atom distance from the ring plane
+var INT_MAX_RINGS=3000;
+var INT_RING_WORK=3000000;      // cycle-search budget, so a huge lattice cannot stall a redraw
+var INT_RING_ELEM={B:1,C:1,N:1,O:1,P:1,S:1,Se:1};
+var INT_RING_MAX_SINGLE={
+    'B-B':1.60,'B-C':1.55,'B-N':1.46,'B-O':1.39,'B-P':1.90,'B-S':1.86,'B-Se':2.02,
+    'C-C':1.47,'C-N':1.42,'C-O':1.41,'C-P':1.84,'C-S':1.76,'C-Se':1.92,
+    'N-N':1.42,'N-O':1.40,'N-P':1.76,'N-S':1.73,'N-Se':1.89,
+    'O-O':1.44,'O-P':1.70,'O-S':1.70,'O-Se':1.86,
+    'P-P':2.24,'P-S':2.12,'P-Se':2.26,
+    'S-S':2.02,'S-Se':2.14,'Se-Se':2.30};
+var INT_RING_MAX_DOUBLE={
+    'B-C':1.38,'B-N':1.36,'C-C':1.42,'C-N':1.38,'C-O':1.34,'C-P':1.70,'C-S':1.66,'C-Se':1.82,
+    'N-N':1.32,'N-O':1.30,'N-P':1.62,'N-S':1.62,'N-Se':1.78,
+    'O-O':1.30,'O-P':1.56,'O-S':1.58,'O-Se':1.74,
+    'P-P':2.06,'P-S':1.98,'P-Se':2.12,
+    'S-S':1.90,'S-Se':2.02,'Se-Se':2.18};
+var INT_PP_ANGLE=30;            // angle between the ring planes, deg
+var INT_PP_DISTANCE=4.5;        // centroid-centroid
+var INT_PP_MIN_GAP=2.8;         // interplanar distance
+var INT_PP_MAX_GAP=3.8;
+var INT_PP_LATERAL=2.5;         // in-plane slip
+var INT_PP_PD_OFFSET=1.2;       // slip at which a parallel pair is 'displaced'
+var INT_PP_ATOM_CUT=3.9;        // closest atom-atom contact
+var INT_T_ANGLE=60;             // angle between the ring planes, deg
+var INT_T_DISTANCE=5.5;         // centroid-centroid
+var INT_T_HEIGHT=3.0;           // edge centroid above the face plane
+var INT_T_LATERAL=2.5;          // edge centroid inside the face
+var INT_T_ATOM_CUT=4.0;         // closest atom-atom contact
+var INT_PI_MIN_ATOM=2.6;        // bonded or fused rings are not a stacking contact
+var INT_CHPI_HC=3.0;            // d(H...centroid)
+var INT_CHPI_ANGLE=120;         // C-H...centroid
+var INT_CHPI_MIN_HEIGHT=1.0;    // H above the ring plane
+var INT_CHPI_OVERHANG=0.8;      // H projection within the ring radius plus this
 
 // Angle at the common origin of two vectors, in degrees.
 function intAngleVectors(ax,ay,az,bx,by,bz){
@@ -12577,10 +12631,655 @@ function intAngleVectors(ax,ay,az,bx,by,bz){
     return Math.acos(c)*180/Math.PI;
 }
 
+function intPairKey2(a,b){return a<b?(a+'-'+b):(b+'-'+a)}
+
+function intShiftText(s){
+    if(!s[0]&&!s[1]&&!s[2])return '';
+    return ' ['+s[0]+','+s[1]+','+s[2]+']';
+}
+
+// An image pair (ring, ring + t) and (ring + t, ring) are the same physical
+// contact; of t and -t the lexicographically positive one names it.
+function intShiftCanonical(s){
+    if(s[0]!==0)return s[0]>0;
+    if(s[1]!==0)return s[1]>0;
+    return s[2]>0;
+}
+
+// A cycle's identity independent of the direction it was walked: atom order
+// sorted, with the integer image each atom sits in. The minimum-index atom is
+// the root and has shift zero, so the key is the same in both directions.
+function intCycleKey(idx,shifts){
+    var pairs=[],i;
+    for(i=0;i<idx.length;i++)pairs.push({i:idx[i],s:shifts[i]});
+    pairs.sort(function(a,b){return a.i-b.i});
+    var out=[];
+    for(i=0;i<pairs.length;i++)out.push(pairs[i].i+':'+pairs[i].s[0]+','+pairs[i].s[1]+','+pairs[i].s[2]);
+    return out.join(';');
+}
+
+// Every chordless cycle of INT_RING_MIN..INT_RING_MAX atoms, once per root:
+// the smallest atom in the cycle is the root, so a cycle is found only from
+// it. A path never takes an atom adjacent to an earlier path atom (that would
+// be a chord); the one exception is an atom adjacent to the root, which can
+// only be the closing atom. A periodic cycle whose accumulated image shifts
+// do not cancel is a helix, not a ring, and is dropped. The callback receives
+// (atoms, edge orders, per-atom shifts relative to the root); returning false
+// stops the search.
+function intRingCycles(adj,fn){
+    var n=adj.length,mark=new Int32Array(n),token=0,stop=false,work=0;
+    var root=0,pathAtoms=[],pathEdges=[],pathShifts=[];
+    function edgeTo(j,i){
+        var list=adj[j],k;
+        if(!list)return null;
+        for(k=0;k<list.length;k++)if(list[k].j===i)return list[k];
+        return null;
+    }
+    function dfs(cur){
+        if(stop)return;
+        var L=pathAtoms.length,list=adj[cur]||[],e;
+        for(e=0;e<list.length;e++){
+            if(++work>INT_RING_WORK){stop=true;return;}
+            var en=list[e],j=en.j;
+            if(j<root||j===root)continue;
+            if(mark[j]===token)continue;
+            var chord=false,q;
+            for(q=1;q<L-1;q++){
+                if(edgeTo(j,pathAtoms[q])){chord=true;break;}
+            }
+            if(chord)continue;
+            var closeEdge=(cur===root)?null:edgeTo(j,root);
+            var ns=[pathShifts[L-1][0]+en.sh[0],
+                    pathShifts[L-1][1]+en.sh[1],
+                    pathShifts[L-1][2]+en.sh[2]];
+            if(closeEdge){
+                if(L+1>=INT_RING_MIN&&L+1<=INT_RING_MAX&&
+                   ns[0]+closeEdge.sh[0]===0&&ns[1]+closeEdge.sh[1]===0&&ns[2]+closeEdge.sh[2]===0){
+                    if(fn(pathAtoms.concat([j]),pathEdges.concat([en.order,closeEdge.order]),pathShifts.concat([ns]))===false){
+                        stop=true;return;
+                    }
+                }
+                continue;
+            }
+            if(L>=INT_RING_MAX)continue;
+            mark[j]=token;
+            pathAtoms.push(j);pathEdges.push(en.order);pathShifts.push(ns);
+            dfs(j);
+            pathAtoms.pop();pathEdges.pop();pathShifts.pop();
+            mark[j]=0;
+            if(stop)return;
+        }
+    }
+    for(root=0;root<n;root++){
+        var rl=adj[root];
+        if(!rl||rl.length<2)continue;
+        token++;
+        mark[root]=token;
+        pathAtoms=[root];pathEdges=[];pathShifts=[[0,0,0]];
+        dfs(root);
+        if(stop)break;
+    }
+}
+
+function intMakeRingLabel(atoms,idx,shifts){
+    var s='ring(',i;
+    for(i=0;i<idx.length;i++){
+        if(i)s+=',';
+        s+=atomLabel(atoms[idx[i]],idx[i]);
+        if(shifts&&(shifts[i][0]||shifts[i][1]||shifts[i][2]))s+=intShiftText(shifts[i]);
+    }
+    return s+')';
+}
+
+// The list row names a ring by its first atoms and its size; the full atom
+// list stays in the row's title, where it can be read without truncation.
+function intMakeRingShortLabel(atoms,idx){
+    var s='ring(',lim=Math.min(3,idx.length),i;
+    for(i=0;i<lim;i++){
+        if(i)s+=',';
+        s+=atomLabel(atoms[idx[i]],idx[i]);
+    }
+    if(idx.length>lim)s+='+'+(idx.length-lim);
+    return s+')';
+}
+
+// A ring is aromatic when every edge has the perceived aromatic order, or -
+// for a file that states only single bonds (a PDB CONECT table, a CIF with no
+// bond orders) - when a planar 5/6-ring of sp2-capable atoms has either all
+// short single edges or a Kekule alternation, each edge inside the length band
+// its element pair allows for that order. Saturated rings are longer than the
+// single-bond ceilings (cyclopentane C-C 1.54, THF C-O 1.43), so they cannot
+// pass by accident.
+function intRingAromatic(elem,orders,lens,deg){
+    var n=elem.length,i,allArom=true,ord;
+    for(i=0;i<n;i++)if(!isAromaticOrder(orders[i])){allArom=false;break;}
+    if(allArom)return true;
+    if(n!==5&&n!==6)return false;
+    for(i=0;i<n;i++){
+        var z=deg[i];
+        if(typeof z==='number'&&z>3)return false;
+    }
+    var allSingle=true,dbl=0,pkey,mx;
+    for(i=0;i<n;i++){
+        ord=orders[i];
+        pkey=intPairKey2(elem[i],elem[(i+1)%n]);
+        if(ord>=2.5)return false;
+        if(ord>=1.75){
+            allSingle=false;dbl++;
+            mx=INT_RING_MAX_DOUBLE[pkey];
+            if(!(mx&&lens[i]<=mx))return false;
+        }else if(ord<1.25){
+            mx=INT_RING_MAX_SINGLE[pkey];
+            if(!(mx&&lens[i]<=mx))return false;
+        }else return false;
+    }
+    if(allSingle)return true;
+    if(dbl!==Math.floor(n/2))return false;
+    var shared=new Array(n);
+    for(i=0;i<n;i++)shared[i]=0;
+    for(i=0;i<n;i++)if(orders[i]>=1.75){shared[i]++;shared[(i+1)%n]++;}
+    for(i=0;i<n;i++)if(shared[i]>1)return false;
+    return true;
+}
+
+// Turn a cycle into a ring record: positions (an image shift applied for a
+// crystal), centroid, Newell normal, planarity, radius and the atom offsets
+// from the centroid. An off-plane or non-aromatic cycle is not a ring.
+function intMakeRing(idx,orders,shifts,cfg){
+    var n=idx.length,i,atoms=cfg.atoms;
+    if(n<INT_RING_MIN||n>INT_RING_MAX)return null;
+    var px=[],py=[],pz=[],elem=[],deg=[];
+    for(i=0;i<n;i++){
+        var ai=idx[i],a=atoms[ai];
+        if(!a||isGhostAtom(a)||!INT_RING_ELEM[a.element])return null;
+        var sh=shifts[i],x=a.x,y=a.y,z=a.z;
+        if(cfg.lv){
+            x+=sh[0]*cfg.lv[0][0]+sh[1]*cfg.lv[1][0]+sh[2]*cfg.lv[2][0];
+            y+=sh[0]*cfg.lv[0][1]+sh[1]*cfg.lv[1][1]+sh[2]*cfg.lv[2][1];
+            z+=sh[0]*cfg.lv[0][2]+sh[1]*cfg.lv[1][2]+sh[2]*cfg.lv[2][2];
+        }
+        px.push(x);py.push(y);pz.push(z);
+        elem.push(a.element);deg.push(cfg.deg[ai]);
+    }
+    var cx=0,cy=0,cz=0;
+    for(i=0;i<n;i++){cx+=px[i];cy+=py[i];cz+=pz[i];}
+    cx/=n;cy/=n;cz/=n;
+    var nx=0,ny=0,nz=0,rx=[],ry=[],rz=[];
+    for(i=0;i<n;i++){
+        var k=(i+1)%n;
+        var xi=px[i]-cx,yi=py[i]-cy,zi=pz[i]-cz;
+        var xj=px[k]-cx,yj=py[k]-cy,zj=pz[k]-cz;
+        rx.push(xi);ry.push(yi);rz.push(zi);
+        nx+=yi*zj-zi*yj;ny+=zi*xj-xi*zj;nz+=xi*yj-yi*xj;
+    }
+    var nl=Math.sqrt(nx*nx+ny*ny+nz*nz);
+    if(!(nl>1e-9))return null;
+    nx/=nl;ny/=nl;nz/=nl;
+    var dev=0,radius=0;
+    for(i=0;i<n;i++){
+        var d=Math.abs(rx[i]*nx+ry[i]*ny+rz[i]*nz);
+        if(d>dev)dev=d;
+        var rr=Math.sqrt(rx[i]*rx[i]+ry[i]*ry[i]+rz[i]*rz[i]);
+        if(rr>radius)radius=rr;
+    }
+    if(!(dev<=INT_RING_PLANAR))return null;
+    var lens=[];
+    for(i=0;i<n;i++){
+        var k2=(i+1)%n;
+        var dx=px[k2]-px[i],dy=py[k2]-py[i],dz=pz[k2]-pz[i];
+        lens.push(Math.sqrt(dx*dx+dy*dy+dz*dz));
+    }
+    if(!intRingAromatic(elem,orders,lens,deg))return null;
+    var ring={
+        idx:idx.slice(0),orders:orders.slice(0),shifts:shifts.slice(0),n:n,
+        cx:cx,cy:cy,cz:cz,nx:nx,ny:ny,nz:nz,radius:radius,
+        rel:[],label:intMakeRingLabel(atoms,idx,shifts),
+        shortLabel:intMakeRingShortLabel(atoms,idx)
+    };
+    for(i=0;i<n;i++)ring.rel.push([rx[i],ry[i],rz[i]]);
+    if(cfg.lv){
+        var fx=0,fy=0,fz=0;
+        for(i=0;i<n;i++){
+            var f=cfg.fracs[idx[i]];
+            fx+=f[0]+shifts[i][0];fy+=f[1]+shifts[i][1];fz+=f[2]+shifts[i][2];
+        }
+        ring.fc=[fx/n,fy/n,fz/n];
+    }
+    return ring;
+}
+
+function intCollectRings(adj,cfg){
+    var rings=[],seen={};
+    intRingCycles(adj,function(idx,orders,shifts){
+        if(rings.length>=INT_MAX_RINGS)return false;
+        var key=intCycleKey(idx,shifts);
+        if(seen[key])return true;
+        seen[key]=1;
+        var r=intMakeRing(idx,orders,shifts,cfg);
+        if(r)rings.push(r);
+        return rings.length<INT_MAX_RINGS;
+    });
+    return rings;
+}
+
+// The ring graph keeps only edges whose two ends could belong to an aromatic
+// ring, and the full degree counts every bond (hydrogens included) so the
+// length fallback can tell an sp2 centre from an sp3 one.
+function intMoleculeRingGraph(atoms,bonds){
+    var adj=new Array(atoms.length),deg=new Array(atoms.length),i;
+    for(i=0;i<atoms.length;i++){adj[i]=[];deg[i]=0;}
+    for(i=0;i<bonds.length;i++){
+        var b=bonds[i];
+        if(!b||b.atom1==null||b.atom2==null)continue;
+        var i1=b.atom1,i2=b.atom2;
+        if(i1===i2)continue;
+        var a1=atoms[i1],a2=atoms[i2];
+        if(!a1||!a2||isGhostAtom(a1)||isGhostAtom(a2))continue;
+        deg[i1]++;deg[i2]++;
+        if(!INT_RING_ELEM[a1.element]||!INT_RING_ELEM[a2.element])continue;
+        var order=(typeof b.order==='number')?b.order:1;
+        if(order>=2.75)continue;
+        adj[i1].push({j:i2,order:order,sh:ZERO_SHIFT});
+        adj[i2].push({j:i1,order:order,sh:ZERO_SHIFT});
+    }
+    return {adj:adj,deg:deg};
+}
+
+function intBuildMoleculeRings(){
+    var atoms=MD.atoms||[],bonds=MD.bonds||[];
+    if(atoms.length<INT_RING_MIN)return [];
+    var g=intMoleculeRingGraph(atoms,bonds);
+    return intCollectRings(g.adj,{atoms:atoms,deg:g.deg});
+}
+
+function intCrystalRingGraph(base,bonds){
+    var n=base.length,adj=new Array(n),deg=new Array(n),i;
+    for(i=0;i<n;i++){adj[i]=[];deg[i]=0;}
+    for(i=0;i<bonds.length;i++){
+        var b=bonds[i];
+        if(!b||b.atom1==null||b.atom2==null)continue;
+        var i1=b.atom1,i2=b.atom2;
+        if(i1===i2)continue;
+        var a1=base[i1],a2=base[i2];
+        if(!a1||!a2||isGhostAtom(a1)||isGhostAtom(a2))continue;
+        if(!neighBaseVisible(a1)||!neighBaseVisible(a2))continue;
+        deg[i1]++;deg[i2]++;
+        if(!INT_RING_ELEM[a1.element]||!INT_RING_ELEM[a2.element])continue;
+        var order=(typeof b.order==='number')?b.order:1;
+        if(order>=2.75)continue;
+        var s=b.shift||ZERO_SHIFT;
+        adj[i1].push({j:i2,order:order,sh:[s[0],s[1],s[2]]});
+        adj[i2].push({j:i1,order:order,sh:[-s[0],-s[1],-s[2]]});
+    }
+    return {adj:adj,deg:deg};
+}
+
+function intBuildCrystalRings(fracs){
+    var base=CRY.baseAtoms||[],bonds=CRY.baseBonds||[],lv=CRY.latticeVectors;
+    if(!lv||base.length<INT_RING_MIN)return [];
+    var g=intCrystalRingGraph(base,bonds);
+    return intCollectRings(g.adj,{atoms:base,deg:g.deg,lv:lv,fracs:fracs||intBaseFracs()});
+}
+
+// A lower bound on the shortest image of a fractional displacement, from the
+// spacing of the lattice planes each axis moves a point across. A pair whose
+// bound is already past the cutoff owns no image inside it.
+function intFracLowerBound(fx,fy,fz,widths){
+    var w0=widths[0]||0,w1=widths[1]||0,w2=widths[2]||0;
+    var ax=Math.abs(fx-Math.round(fx)),
+        ay=Math.abs(fy-Math.round(fy)),
+        az=Math.abs(fz-Math.round(fz));
+    return Math.max(ax*w0,ay*w1,az*w2);
+}
+
+// Every image of one fractional point inside a sphere around another, with
+// its integer shift and Cartesian displacement.
+function intForEachPointImage(center,site,lim,radius,fn){
+    var lv=CRY.latticeVectors,r2=radius*radius;
+    var gx=site[0]-center[0],gy=site[1]-center[1],gz=site[2]-center[2];
+    var loX=Math.ceil(-gx-lim[0]-1e-9),hiX=Math.floor(-gx+lim[0]+1e-9);
+    var loY=Math.ceil(-gy-lim[1]-1e-9),hiY=Math.floor(-gy+lim[1]+1e-9);
+    var loZ=Math.ceil(-gz-lim[2]-1e-9),hiZ=Math.floor(-gz+lim[2]+1e-9);
+    for(var nx=loX;nx<=hiX;nx++){
+        var dx=gx+nx;
+        for(var ny=loY;ny<=hiY;ny++){
+            var dy=gy+ny;
+            for(var nz=loZ;nz<=hiZ;nz++){
+                var dz=gz+nz;
+                var vx=dx*lv[0][0]+dy*lv[1][0]+dz*lv[2][0];
+                var vy=dx*lv[0][1]+dy*lv[1][1]+dz*lv[2][1];
+                var vz=dx*lv[0][2]+dy*lv[1][2]+dz*lv[2][2];
+                var d2=vx*vx+vy*vy+vz*vz;
+                if(d2>r2+1e-9)continue;
+                fn([nx,ny,nz],vx,vy,vz,Math.sqrt(d2));
+            }
+        }
+    }
+}
+
+// Closest atom-atom contact between two rings when the second ring's centroid
+// is at dx,dy,dz from the first's. Ring atom offsets are relative to their own
+// centroids, so no per-image array has to be built.
+function intRingMinContact(a,b,dx,dy,dz){
+    var min=Infinity,ra=a.rel,rb=b.rel,i,j;
+    for(i=0;i<ra.length;i++){
+        var ax=ra[i][0]-dx,ay=ra[i][1]-dy,az=ra[i][2]-dz;
+        for(j=0;j<rb.length;j++){
+            var vx=ax-rb[j][0],vy=ay-rb[j][1],vz=az-rb[j][2];
+            var d2=vx*vx+vy*vy+vz*vz;
+            if(d2<min)min=d2;
+        }
+    }
+    return Math.sqrt(min);
+}
+
+// The pi-pi criteria: one parallel family (plane angle at most 30 degrees,
+// centroid distance at most 4.5 A, plane gap 2.8-3.8 A, slip at most 2.5 A)
+// and one T family (planes at least 60 degrees apart, an edge centroid 3+ A
+// above the other ring's face and within 2.5 A of its centre, centroid
+// distance at most 5.5 A). Both demand a closest atom contact between 2.6 and
+// 3.9/4.0 A, which keeps bonded and fused rings out. A parallel pair is called
+// displaced once its slip reaches 1.2 A.
+function intPiRow(a,b,dx,dy,dz){
+    var R=Math.sqrt(dx*dx+dy*dy+dz*dz);
+    if(!(R<=INT_T_DISTANCE))return null;
+    var c=Math.abs(a.nx*b.nx+a.ny*b.ny+a.nz*b.nz);
+    if(c>1)c=1;
+    var theta=Math.acos(c)*180/Math.PI;
+    var contact=intRingMinContact(a,b,dx,dy,dz);
+    if(!(contact>=INT_PI_MIN_ATOM))return null;
+    if(theta<=INT_PP_ANGLE&&R<=INT_PP_DISTANCE&&contact<=INT_PP_ATOM_CUT){
+        var gap=Math.abs(dx*a.nx+dy*a.ny+dz*a.nz);
+        if(gap>=INT_PP_MIN_GAP&&gap<=INT_PP_MAX_GAP){
+            var lat=Math.sqrt(Math.max(0,R*R-gap*gap));
+            if(lat<=INT_PP_LATERAL){
+                return {type:'pp',subtype:(lat>=INT_PP_PD_OFFSET?'PD':'P'),d:R,angle:theta};
+            }
+        }
+    }
+    if(theta>=INT_T_ANGLE&&contact<=INT_T_ATOM_CUT){
+        var hA=Math.abs(dx*a.nx+dy*a.ny+dz*a.nz);
+        var hB=Math.abs(dx*b.nx+dy*b.ny+dz*b.nz);
+        var latA=Math.sqrt(Math.max(0,R*R-hA*hA));
+        var latB=Math.sqrt(Math.max(0,R*R-hB*hB));
+        if((hA>=INT_T_HEIGHT&&latA<=INT_T_LATERAL)||(hB>=INT_T_HEIGHT&&latB<=INT_T_LATERAL)){
+            return {type:'pp',subtype:'T',d:R,angle:theta};
+        }
+    }
+    return null;
+}
+
+function intRingImageLabel(r,t){
+    var s=r.shortLabel||r.label;
+    if(t[0]||t[1]||t[2])s+=' ['+t[0]+','+t[1]+','+t[2]+']';
+    return s;
+}
+
+function intCollectMoleculePiPi(rings,rows){
+    if(!rings||!rings.length)return;
+    var cell=INT_T_DISTANCE,grid={},i;
+    for(i=0;i<rings.length;i++){
+        var r=rings[i];
+        var key=Math.floor(r.cx/cell)+','+Math.floor(r.cy/cell)+','+Math.floor(r.cz/cell);
+        (grid[key]||(grid[key]=[])).push(i);
+    }
+    for(i=0;i<rings.length;i++){
+        var a=rings[i];
+        var gx=Math.floor(a.cx/cell),gy=Math.floor(a.cy/cell),gz=Math.floor(a.cz/cell);
+        for(var ox=-1;ox<=1;ox++)for(var oy=-1;oy<=1;oy++)for(var oz=-1;oz<=1;oz++){
+            var list=grid[(gx+ox)+','+(gy+oy)+','+(gz+oz)];
+            if(!list)continue;
+            for(var q=0;q<list.length;q++){
+                var j=list[q];
+                if(j<=i)continue;
+                var b=rings[j];
+                var dx=b.cx-a.cx,dy=b.cy-a.cy,dz=b.cz-a.cz;
+                if(dx*dx+dy*dy+dz*dz>INT_T_DISTANCE*INT_T_DISTANCE)continue;
+                var row=intPiRow(a,b,dx,dy,dz);
+                if(!row)continue;
+                row.mol=true;
+                row.ringALabel=a.shortLabel;row.ringBLabel=b.shortLabel;
+                row.ringAFull=a.label;row.ringBFull=b.label;
+                row.cx=a.cx;row.cy=a.cy;row.cz=a.cz;
+                row.ax=b.cx;row.ay=b.cy;row.az=b.cz;
+                row.selAtoms=a.idx.concat(b.idx);
+                row.key='ppm_'+i+'_'+j;
+                rows.push(row);
+            }
+        }
+    }
+}
+
+// A crystal owns each distinct ring pair once: ring i stays in its home cell
+// and ring j is moved through the images near it (i < j), while a ring's own
+// images are walked for t and -t but once. The home-cell fractional bound
+// skips a pair no image can bring within reach before any image is enumerated.
+function intCollectCrystalPiPi(rings,rows){
+    if(!rings||!rings.length)return;
+    var lv=CRY.latticeVectors,widths=crystalPlaneWidths(lv);
+    var lim=intImageLimit(widths,INT_T_DISTANCE),i,j;
+    for(i=0;i<rings.length;i++){
+        var a=rings[i];
+        for(j=i;j<rings.length;j++){
+            var b=rings[j];
+            var fx=b.fc[0]-a.fc[0],fy=b.fc[1]-a.fc[1],fz=b.fc[2]-a.fc[2];
+            if(intFracLowerBound(fx,fy,fz,widths)>INT_T_DISTANCE+1e-9)continue;
+            intForEachPointImage(a.fc,b.fc,lim,INT_T_DISTANCE,function(t,vx,vy,vz){
+                if(j===i&&t[0]===0&&t[1]===0&&t[2]===0)return;
+                if(j===i&&!intShiftCanonical(t))return;
+                var row=intPiRow(a,b,vx,vy,vz);
+                if(!row)return;
+                row.ringALabel=a.shortLabel;
+                row.ringBLabel=intRingImageLabel(b,t);
+                row.ringAFull=a.label;row.ringBFull=b.label;
+                row.cx=a.cx;row.cy=a.cy;row.cz=a.cz;
+                row.ax=a.cx+vx;row.ay=a.cy+vy;row.az=a.cz+vz;
+                row.sitesA=[];row.sitesB=[];
+                var k;
+                for(k=0;k<a.idx.length;k++)row.sitesA.push({bi:a.idx[k],sh:a.shifts[k]});
+                for(k=0;k<b.idx.length;k++)row.sitesB.push({bi:b.idx[k],
+                    sh:[b.shifts[k][0]+t[0],b.shifts[k][1]+t[1],b.shifts[k][2]+t[2]]});
+                row.key='ppc_'+i+'_'+j+'_'+t.join(',');
+                rows.push(row);
+            });
+        }
+    }
+}
+
+function intAdjHits(adj,idx,set){
+    var list=adj[idx];
+    if(!list)return false;
+    for(var i=0;i<list.length;i++)if(set[list[i]])return true;
+    return false;
+}
+
+function intMoleculeHList(atoms,bonds){
+    var adj=new Array(atoms.length),i;
+    for(i=0;i<atoms.length;i++)adj[i]=[];
+    for(i=0;i<bonds.length;i++){
+        var b=bonds[i];
+        if(!b||b.atom1==null||b.atom2==null)continue;
+        var i1=b.atom1,i2=b.atom2;
+        if(i1===i2)continue;
+        var a1=atoms[i1],a2=atoms[i2];
+        if(!a1||!a2||isGhostAtom(a1)||isGhostAtom(a2))continue;
+        adj[i1].push(i2);adj[i2].push(i1);
+    }
+    var list=[];
+    for(i=0;i<atoms.length;i++){
+        var a=atoms[i];
+        if(!a||a.element!=='H'||isGhostAtom(a))continue;
+        var nb=adj[i];
+        if(nb.length!==1)continue;
+        var c=nb[0],ca=atoms[c];
+        if(!ca||ca.element!=='C'||isGhostAtom(ca))continue;
+        list.push({h:i,c:c});
+    }
+    return {list:list,adj:adj};
+}
+
+// CH-pi: a carbon-bound H within 3.0 A of a ring centroid, pointing at it
+// (C-H...centroid > 120 degrees), at least 1.0 A above the ring plane and
+// projecting inside the ring face. An H or C bonded to the ring itself is not
+// a CH-pi contact and is skipped.
+function intCollectMoleculeChPi(rings,rows){
+    if(!rings||!rings.length)return;
+    var atoms=MD.atoms||[],bonds=MD.bonds||[];
+    var hs=intMoleculeHList(atoms,bonds);
+    if(!hs.list.length)return;
+    var cell=INT_CHPI_HC,grid={},i;
+    for(i=0;i<hs.list.length;i++){
+        var H=atoms[hs.list[i].h];
+        var key=Math.floor(H.x/cell)+','+Math.floor(H.y/cell)+','+Math.floor(H.z/cell);
+        (grid[key]||(grid[key]=[])).push(i);
+    }
+    for(i=0;i<rings.length;i++){
+        var r=rings[i],set={},q;
+        for(q=0;q<r.idx.length;q++)set[r.idx[q]]=1;
+        var gx=Math.floor(r.cx/cell),gy=Math.floor(r.cy/cell),gz=Math.floor(r.cz/cell);
+        for(var ox=-1;ox<=1;ox++)for(var oy=-1;oy<=1;oy++)for(var oz=-1;oz<=1;oz++){
+            var list=grid[(gx+ox)+','+(gy+oy)+','+(gz+oz)];
+            if(!list)continue;
+            for(var li=0;li<list.length;li++){
+                var rec=hs.list[list[li]],hIdx=rec.h,cIdx=rec.c;
+                if(set[hIdx]||set[cIdx])continue;
+                if(intAdjHits(hs.adj,hIdx,set)||intAdjHits(hs.adj,cIdx,set))continue;
+                var hh=atoms[hIdx],cc=atoms[cIdx];
+                var dx=hh.x-r.cx,dy=hh.y-r.cy,dz=hh.z-r.cz;
+                var d2=dx*dx+dy*dy+dz*dz;
+                if(!(d2<INT_CHPI_HC*INT_CHPI_HC))continue;
+                var d=Math.sqrt(d2);
+                var ang=intAngleVectors(cc.x-hh.x,cc.y-hh.y,cc.z-hh.z,-dx,-dy,-dz);
+                if(!(ang>INT_CHPI_ANGLE))continue;
+                var hpl=Math.abs(dx*r.nx+dy*r.ny+dz*r.nz);
+                if(hpl<INT_CHPI_MIN_HEIGHT)continue;
+                var lat=Math.sqrt(Math.max(0,d2-hpl*hpl));
+                if(lat>r.radius+INT_CHPI_OVERHANG)continue;
+                rows.push({type:'chpi',mol:true,d:d,angle:ang,
+                    hLabel:atomLabel(hh,hIdx),cLabel:atomLabel(cc,cIdx),
+                    ringLabel:r.shortLabel,ringFull:r.label,
+                    cx:hh.x,cy:hh.y,cz:hh.z,ax:r.cx,ay:r.cy,az:r.cz,
+                    selAtoms:r.idx.concat([cIdx,hIdx]),
+                    key:'chpim_'+i+'_'+hIdx});
+            }
+        }
+    }
+}
+
+// The crystal CH-pi search fixes the ring in its home cell and walks the H
+// images near it; the C-H bond's own integer shift carries the carbon along.
+// The H and C are skipped when a base-cell bond already joins either to a ring
+// atom (an N-H or a benzylic C-H pointing at its own ring is not CH-pi).
+function intCollectCrystalChPi(rings,rows,fracs){
+    if(!rings||!rings.length)return;
+    var base=CRY.baseAtoms,lv=CRY.latticeVectors,bonds=CRY.baseBonds||[];
+    if(!base||!lv)return;
+    if(!fracs)fracs=intBaseFracs();
+    var widths=crystalPlaneWidths(lv);
+    var lim=intImageLimit(widths,INT_CHPI_HC);
+    var adj=new Array(base.length),shiftMap={},i;
+    for(i=0;i<base.length;i++)adj[i]=[];
+    for(i=0;i<bonds.length;i++){
+        var b=bonds[i];
+        if(!b||b.atom1==null||b.atom2==null)continue;
+        var i1=b.atom1,i2=b.atom2;
+        if(i1===i2)continue;
+        var a1=base[i1],a2=base[i2];
+        if(!a1||!a2||isGhostAtom(a1)||isGhostAtom(a2))continue;
+        adj[i1].push(i2);adj[i2].push(i1);
+        var s=b.shift||ZERO_SHIFT;
+        if(shiftMap[i1+'_'+i2]===undefined){
+            shiftMap[i1+'_'+i2]=[s[0],s[1],s[2]];
+            shiftMap[i2+'_'+i1]=[-s[0],-s[1],-s[2]];
+        }
+    }
+    var hlist=[];
+    for(i=0;i<base.length;i++){
+        var a=base[i];
+        if(!a||a.element!=='H'||isGhostAtom(a)||!neighBaseVisible(a))continue;
+        var nb=adj[i];
+        if(!nb||nb.length!==1)continue;
+        var c=nb[0],ca=base[c];
+        if(!ca||ca.element!=='C'||isGhostAtom(ca)||!neighBaseVisible(ca))continue;
+        var csh=shiftMap[i+'_'+c];
+        if(!csh)continue;
+        hlist.push({h:i,c:c,csh:csh});
+    }
+    if(!hlist.length)return;
+    // A fractional-space grid whose cells are the search radius wide along
+    // each axis: an H within reach of a ring has to be in the same or an
+    // adjacent cell, wrapped through the cell faces. It keeps the scan local
+    // in a supercell that carries thousands of ring hydrogens.
+    var step=[],cells=[],hgrid={},q;
+    for(q=0;q<3;q++){
+        step[q]=widths[q]>INT_CHPI_HC?INT_CHPI_HC/widths[q]:1;
+        cells[q]=Math.max(1,Math.ceil(1/step[q]-1e-9));
+    }
+    function hCell(f,k){
+        var v=Math.floor(f/step[k])%cells[k];
+        return v<0?v+cells[k]:v;
+    }
+    for(q=0;q<hlist.length;q++){
+        var hf=fracs[hlist[q].h];
+        var hk=hCell(hf[0],0)+','+hCell(hf[1],1)+','+hCell(hf[2],2);
+        (hgrid[hk]||(hgrid[hk]=[])).push(q);
+    }
+    for(i=0;i<rings.length;i++){
+        var r=rings[i],set={};
+        for(q=0;q<r.idx.length;q++)set[r.idx[q]]=1;
+        var ci=[hCell(r.fc[0],0),hCell(r.fc[1],1),hCell(r.fc[2],2)];
+        for(var ox=-1;ox<=1;ox++)for(var oy=-1;oy<=1;oy++)for(var oz=-1;oz<=1;oz++){
+            var gx=((ci[0]+ox)%cells[0]+cells[0])%cells[0],
+                gy=((ci[1]+oy)%cells[1]+cells[1])%cells[1],
+                gz=((ci[2]+oz)%cells[2]+cells[2])%cells[2];
+            var cand=hgrid[gx+','+gy+','+gz];
+            if(!cand)continue;
+            for(var li=0;li<cand.length;li++){
+                var rec=hlist[cand[li]];
+                if(set[rec.h]||set[rec.c])continue;
+                if(intAdjHits(adj,rec.h,set)||intAdjHits(adj,rec.c,set))continue;
+                var fh=fracs[rec.h];
+                if(intFracLowerBound(fh[0]-r.fc[0],fh[1]-r.fc[1],fh[2]-r.fc[2],widths)>INT_CHPI_HC+1e-9)continue;
+                intForEachPointImage(r.fc,fh,lim,INT_CHPI_HC,function(t,vx,vy,vz,d){
+                    if(!(d<INT_CHPI_HC))return;
+                    var hx=r.cx+vx,hy=r.cy+vy,hz=r.cz+vz;
+                    var hb=base[rec.h],cb=base[rec.c];
+                    var ux=cb.x-hb.x+rec.csh[0]*lv[0][0]+rec.csh[1]*lv[1][0]+rec.csh[2]*lv[2][0];
+                    var uy=cb.y-hb.y+rec.csh[0]*lv[0][1]+rec.csh[1]*lv[1][1]+rec.csh[2]*lv[2][1];
+                    var uz=cb.z-hb.z+rec.csh[0]*lv[0][2]+rec.csh[1]*lv[1][2]+rec.csh[2]*lv[2][2];
+                    var ang=intAngleVectors(ux,uy,uz,r.cx-hx,r.cy-hy,r.cz-hz);
+                    if(!(ang>INT_CHPI_ANGLE))return;
+                    var hpl=Math.abs((hx-r.cx)*r.nx+(hy-r.cy)*r.ny+(hz-r.cz)*r.nz);
+                    if(hpl<INT_CHPI_MIN_HEIGHT)return;
+                    var lat=Math.sqrt(Math.max(0,d*d-hpl*hpl));
+                    if(lat>r.radius+INT_CHPI_OVERHANG)return;
+                    var csh=[t[0]+rec.csh[0],t[1]+rec.csh[1],t[2]+rec.csh[2]];
+                    var row={type:'chpi',d:d,angle:ang,
+                        hLabel:atomLabel(hb,rec.h)+intShiftText(t),
+                        cLabel:atomLabel(cb,rec.c)+intShiftText(csh),
+                        ringLabel:r.shortLabel,ringFull:r.label,
+                        cx:hx,cy:hy,cz:hz,ax:r.cx,ay:r.cy,az:r.cz,
+                        sitesA:[],sitesB:[
+                            {bi:rec.c,sh:csh},
+                            {bi:rec.h,sh:[t[0],t[1],t[2]]}],
+                        key:'chpic_'+i+'_'+rec.h+'_'+t.join(',')};
+                    for(var k=0;k<r.idx.length;k++)row.sitesA.push({bi:r.idx[k],sh:r.shifts[k]});
+                    rows.push(row);
+                });
+            }
+        }
+    }
+}
+
 function intByDistance(a,b){
     if(Math.abs(a.d-b.d)>1e-9)return a.d-b.d;
     if(a.type!==b.type)return a.type<b.type?-1:1;
     if(!!a.mol!==!!b.mol)return a.mol?1:-1;
+    if(a.key!=null||b.key!=null){
+        var ak=a.key||'',bk=b.key||'';
+        if(ak!==bk)return ak<bk?-1:1;
+        return 0;
+    }
     if(a.mol)return (a.dIdx-b.dIdx)||((a.aIdx||0)-(b.aIdx||0));
     return (a.dBi-b.dBi)||(a.aBi-b.aBi)||
         ((a.aShift[0]-b.aShift[0])||(a.aShift[1]-b.aShift[1])||(a.aShift[2]-b.aShift[2]));
@@ -12588,11 +13287,12 @@ function intByDistance(a,b){
 
 // One entry per physical X...A contact: the substituents of X are only the
 // reference the sigma-hole angle is measured from, so the most linear one wins.
+// Hydrogen bonds and the ring contacts are already one row per contact.
 function intDedupeSigma(rows){
     var out=[],map={},i;
     for(i=0;i<rows.length;i++){
         var r=rows[i];
-        if(r.type==='hb'){out.push(r);continue;}
+        if(!INT_SIGMA_TYPE[r.type]){out.push(r);continue;}
         var key=r.mol?('m'+r.type+'_'+r.xIdx+'_'+r.aIdx)
                      :('c'+r.type+'_'+r.xBi+'_'+r.aBi+'_'+r.aShift.join(','));
         var at=map[key];
@@ -12655,6 +13355,11 @@ function intCollectMolecule(rows){
                 cx:X.x,cy:X.y,cz:X.z,ax:A2.x,ay:A2.y,az:A2.z});
         }
     }
+    if(intShowTypes.pp||intShowTypes.chpi){
+        var rings=intBuildMoleculeRings();
+        if(intShowTypes.pp)intCollectMoleculePiPi(rings,rows);
+        if(intShowTypes.chpi)intCollectMoleculeChPi(rings,rows);
+    }
 }
 
 function intBaseFracs(){
@@ -12663,10 +13368,11 @@ function intBaseFracs(){
     return out;
 }
 
-function intImageLimit(widths){
+function intImageLimit(widths,radius){
+    radius=radius==null?INT_SEARCH_RADIUS:radius;
     var lim=[1,1,1],k;
     for(k=0;k<3;k++){
-        var q=widths[k]>1e-9?INT_SEARCH_RADIUS/widths[k]:CRYSTAL_MAX_IMAGE_REPEAT;
+        var q=widths[k]>1e-9?radius/widths[k]:CRYSTAL_MAX_IMAGE_REPEAT;
         lim[k]=Math.min(CRYSTAL_MAX_IMAGE_REPEAT,Math.max(1,Math.ceil(q+1e-9)));
     }
     return lim;
@@ -12674,8 +13380,9 @@ function intImageLimit(widths){
 
 // Every image of an acceptor site inside the search sphere around the centre,
 // handed to the callback with the vector and distance from that centre.
-function intForEachImage(fracs,acceptors,fc,lim,fn){
-    var lv=CRY.latticeVectors,r2=INT_SEARCH_RADIUS*INT_SEARCH_RADIUS;
+function intForEachImage(fracs,acceptors,fc,lim,fn,radius){
+    var lv=CRY.latticeVectors,rr=radius==null?INT_SEARCH_RADIUS:radius;
+    var r2=rr*rr;
     for(var q=0;q<acceptors.length;q++){
         var ai=acceptors[q],fa=fracs[ai];
         var gx=fa[0]-fc[0],gy=fa[1]-fc[1],gz=fa[2]-fc[2];
@@ -12772,6 +13479,11 @@ function intCollectCrystal(rows){
                 cx:xb.x,cy:xb.y,cz:xb.z,ax:xb.x+vx,ay:xb.y+vy,az:xb.z+vz});
         });
     }
+    if(intShowTypes.pp||intShowTypes.chpi){
+        var rings=intBuildCrystalRings(fracs);
+        if(intShowTypes.pp)intCollectCrystalPiPi(rings,rows);
+        if(intShowTypes.chpi)intCollectCrystalChPi(rings,rows,fracs);
+    }
 }
 
 function intCollect(){
@@ -12783,14 +13495,28 @@ function intCollect(){
     return rows;
 }
 
+function intRowTypeName(row){
+    if(row.type==='pp'){
+        if(row.subtype==='T')return '\u03c0-\u03c0 stacking (T-shaped)';
+        if(row.subtype==='PD')return '\u03c0-\u03c0 stacking (parallel-displaced)';
+        return '\u03c0-\u03c0 stacking (parallel)';
+    }
+    return INT_TYPE_NAME[row.type]||row.type;
+}
+
 function intRowName(row){
     if(row.type==='hb')return row.dLabel+'-'+row.hLabel+'...'+row.aLabel;
+    if(row.type==='pp')return row.ringALabel+'...'+row.ringBLabel;
+    if(row.type==='chpi')return row.hLabel+'...'+row.ringLabel;
     return row.dLabel+'-'+row.xLabel+'...'+row.aLabel;
 }
 
 function intRowTitle(row){
-    return INT_TYPE_NAME[row.type]+': '+intRowName(row)+', '+row.d.toFixed(3)+' A, '+
-        row.angle.toFixed(1)+' deg - click to select the two sites';
+    var extra='';
+    if(row.type==='pp'&&row.ringAFull)extra=' (rings '+row.ringAFull+' and '+row.ringBFull+')';
+    else if(row.type==='chpi'&&row.ringFull)extra=' (ring '+row.ringFull+')';
+    return intRowTypeName(row)+': '+intRowName(row)+', '+row.d.toFixed(3)+' A, '+
+        row.angle.toFixed(1)+' deg'+extra+' - click to select its sites';
 }
 
 function intDisplayIndexFor(bi,shift){
@@ -12820,20 +13546,63 @@ function intDisplayPair(row){
     return null;
 }
 
+// A crystal ring contact names several atoms at each end, each with its own
+// image shift. Anchor the first site-A atom on any image drawn on screen, then
+// take every other site in the cell that anchor's image actually sits in.
+function intDisplaySites(row){
+    var A=row.sitesA,B=row.sitesB;
+    if(!A||!B||!A.length||!B.length)return null;
+    var map={},i;
+    for(i=0;i<MD.atoms.length;i++){
+        var a=MD.atoms[i];
+        if(a.baseIdx==null||!a.imgShift)continue;
+        map[a.baseIdx+'_'+a.imgShift[0]+'_'+a.imgShift[1]+'_'+a.imgShift[2]]=i;
+    }
+    function at(bi,sh){return map[bi+'_'+sh[0]+'_'+sh[1]+'_'+sh[2]];}
+    var anchor=A[0];
+    for(i=0;i<MD.atoms.length;i++){
+        var d=MD.atoms[i];
+        if(d.baseIdx!==anchor.bi||!d.imgShift)continue;
+        var ox=d.imgShift[0]-anchor.sh[0],
+            oy=d.imgShift[1]-anchor.sh[1],
+            oz=d.imgShift[2]-anchor.sh[2];
+        var picks=[],ok=true,q,j;
+        for(q=0;q<A.length;q++){
+            j=at(A[q].bi,[A[q].sh[0]+ox,A[q].sh[1]+oy,A[q].sh[2]+oz]);
+            if(j===undefined){ok=false;break;}
+            picks.push(j);
+        }
+        if(!ok)continue;
+        for(q=0;q<B.length;q++){
+            j=at(B[q].bi,[B[q].sh[0]+ox,B[q].sh[1]+oy,B[q].sh[2]+oz]);
+            if(j===undefined){ok=false;break;}
+            picks.push(j);
+        }
+        if(ok)return picks;
+    }
+    return null;
+}
+
 function intRowClick(index){
     var row=intRows[index];
     if(!row)return;
     var picks;
-    if(row.mol)picks=[row.xIdx!=null?row.xIdx:row.dIdx,row.aIdx];
-    else picks=intDisplayPair(row);
-    if(!picks){
+    if(row.selAtoms)picks=row.selAtoms;
+    else if(row.mol)picks=[row.xIdx!=null?row.xIdx:row.dIdx,row.aIdx];
+    else picks=intDisplaySites(row)||intDisplayPair(row);
+    if(!picks||!picks.length){
         modeInfoEl.textContent='Interaction '+intRowName(row)+' is outside the drawn supercell - grow the bounds to select it';
         return;
     }
     selectedAtoms=picks;diffSelectedAtoms=[];originalCoords=null;
     highlightSelected();
-    selInfoEl.textContent='Selected: '+formatAtomList(picks)+' ('+INT_TYPE_NAME[row.type]+', '+row.d.toFixed(3)+' A)';
-    modeInfoEl.textContent=INT_TYPE_NAME[row.type]+' '+intRowName(row)+': '+row.d.toFixed(3)+
+    var tname=intRowTypeName(row);
+    if(row.selAtoms||row.sitesA){
+        selInfoEl.textContent='Selected: '+picks.length+' atoms ('+(INT_TYPE_NAME[row.type]||tname)+', '+row.d.toFixed(3)+' A)';
+    }else{
+        selInfoEl.textContent='Selected: '+formatAtomList(picks)+' ('+tname+', '+row.d.toFixed(3)+' A)';
+    }
+    modeInfoEl.textContent=tname+' '+intRowName(row)+': '+row.d.toFixed(3)+
         ' A, '+row.angle.toFixed(1)+' deg';
 }
 
@@ -12870,6 +13639,11 @@ function intDrawLines(shown){
     needsRender=true;
 }
 
+function intTypeCountText(t,n){
+    if(n===1)return INT_TYPE_NAME[t]||t;
+    return INT_TYPE_PLURAL[t]||((INT_TYPE_NAME[t]||t)+'s');
+}
+
 function intRefresh(){
     if(!intActive)return;
     var sumEl=document.getElementById('int-summary'),listEl=document.getElementById('int-list');
@@ -12883,15 +13657,16 @@ function intRefresh(){
     var all=intCollect();
     var shown=all.length>INT_MAX_ROWS?all.slice(0,INT_MAX_ROWS):all;
     intRows=shown;
-    var count={hb:0,xb:0,cb:0,pn:0},i;
-    for(i=0;i<all.length;i++)count[all[i].type]++;
+    var count={},i;
+    for(i=0;i<INT_TYPE_ORDER.length;i++)count[INT_TYPE_ORDER[i]]=0;
+    for(i=0;i<all.length;i++)if(count[all[i].type]!=null)count[all[i].type]++;
     var txt;
     if(all.length===0){
         txt='No non-covalent interactions match the geometry criteria';
     }else{
         var parts=[];
-        ['hb','xb','cb','pn'].forEach(function(t){
-            if(count[t]>0)parts.push(count[t]+' '+INT_TYPE_NAME[t]+(count[t]===1?'':'s'));
+        INT_TYPE_ORDER.forEach(function(t){
+            if(count[t]>0)parts.push(count[t]+' '+intTypeCountText(t,count[t]));
         });
         txt=all.length+' interaction'+(all.length===1?'':'s')+': '+parts.join(', ');
         if(all.length>shown.length)txt+=' - nearest '+shown.length+' listed';
@@ -12900,8 +13675,10 @@ function intRefresh(){
     var html='';
     for(i=0;i<shown.length;i++){
         var row=shown[i];
+        var tag=INT_TYPE_TAG[row.type]||row.type;
+        if(row.subtype)tag+=' '+row.subtype;
         html+='<div class="ng-item" data-row="'+i+'" title="'+escapeHtml(intRowTitle(row))+'">'+
-            '<span class="ng-type ng-type-'+row.type+'">'+INT_TYPE_TAG[row.type]+'</span>'+
+            '<span class="ng-type ng-type-'+row.type+'">'+escapeHtml(tag)+'</span>'+
             '<span class="ng-name">'+escapeHtml(intRowName(row))+'</span>'+
             '<span class="ng-a">'+row.angle.toFixed(0)+'&deg;</span>'+
             '<span class="ng-d">'+row.d.toFixed(3)+' A</span>'+
@@ -12916,7 +13693,7 @@ function intStartSession(){
     intRows=[];
     var show=document.getElementById('int-show');
     if(show)show.checked=intShowLines;
-    ['hb','xb','cb','pn'].forEach(function(t){
+    INT_TYPE_ORDER.forEach(function(t){
         var el=document.getElementById('int-'+t);
         if(el)el.checked=!!intShowTypes[t];
     });
@@ -12932,7 +13709,7 @@ function intEndSession(){
 (function(){
     var list=document.getElementById('int-list');
     if(!list)return;
-    ['hb','xb','cb','pn'].forEach(function(t){
+    INT_TYPE_ORDER.forEach(function(t){
         var el=document.getElementById('int-'+t);
         if(!el)return;
         el.addEventListener('change',function(){intShowTypes[t]=this.checked;intRefresh()});
