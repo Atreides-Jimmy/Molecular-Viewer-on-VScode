@@ -2222,7 +2222,13 @@ function syncDisorderPanel(){
     var sel=document.getElementById('bnd-disorder');
     if(!sel||!CRY)return;
     var groups=crystalDisorderGroups();
-    if(CRY.disorderFilter&&groups.indexOf(CRY.disorderFilter)<0)CRY.disorderFilter=null;
+    if(CRY.disorderFilter&&groups.indexOf(CRY.disorderFilter)<0){
+        CRY.disorderFilter=null;
+        // The group the title named is gone with the atoms that carried it;
+        // All is the state on screen now, so neither clause is true any more.
+        provUnmark('disorderGroup');
+        provUnmark('occNormalize');
+    }
     var want=CRY.disorderFilter||'';
     var opts='<option value="">All</option>';
     for(var i=0;i<groups.length;i++){
@@ -2283,6 +2289,10 @@ function applyCellEdit(a,b,c,al,be,ga){
         return false;
     }
     if(moveDragActive||moveKeyActive||fragRotActive)stopMoveSession();
+    // Applying the cell that is already in force is not an edit: the sites are
+    // put back where they are, and the title has nothing to add.
+    var cellChanged=Math.abs(CRY.a-a)>1e-9||Math.abs(CRY.b-b)>1e-9||Math.abs(CRY.c-c)>1e-9||
+        Math.abs(CRY.alpha-al)>1e-9||Math.abs(CRY.beta-be)>1e-9||Math.abs(CRY.gamma-ga)>1e-9;
     pushUndo();
     var base=CRY.baseAtoms;
     var fracs=[];
@@ -2306,6 +2316,10 @@ function applyCellEdit(a,b,c,al,be,ga){
     // neighbouring cells are still joined by the same bond.
     rebuildCrystal();
     syncCellPanel();
+    if(cellChanged){
+        provSet('cellEdit',a.toFixed(3)+' x '+b.toFixed(3)+' x '+c.toFixed(3)+' A, '+
+            al.toFixed(1)+'/'+be.toFixed(1)+'/'+ga.toFixed(1)+' deg');
+    }
     rebuildScene(true);
     mmSelectionChanged();
     layoutPanels();
@@ -5168,6 +5182,10 @@ function wireEggPanelButton(){
 }
 
 function rebuildScene(keepCenter){
+    // Every structural change passes through here; the interaction cache is a
+    // reading of that structure, so it is retired with it. View-only updates
+    // that do not rebuild the scene (a checkbox toggle) keep the cache.
+    intStructRev++;
     // The surface group rides inside the molecule group (so that it keeps
     // following the view transform); lift it out before the clear, drop its
     // meshes here, and put it back — refreshVmdSurfaces rebuilds them below.
@@ -6560,6 +6578,17 @@ if(CRY){
             });
             CRY.disorderFilter=want;
             rebuildCrystal();
+            // The variant on screen is what a saved file will contain, so the
+            // title says which alternative it shows; All is the file's own
+            // state and drops the clause again.
+            if(CRY.disorderFilter){
+                provSet('disorderGroup',CRY.disorderFilter);
+                if(disorderOccNormalize)provSet('occNormalize');
+                else provUnmark('occNormalize');
+            }else{
+                provUnmark('disorderGroup');
+                provUnmark('occNormalize');
+            }
             var newIdx={};
             MD.atoms.forEach(function(a,i){
                 if(a.baseIdx!=null&&a.cellI!=null){
@@ -6584,6 +6613,11 @@ if(CRY){
     if(occNormChk){
         occNormChk.addEventListener('change',function(){
             disorderOccNormalize=!!occNormChk.checked;
+            // The choice changes the cell's formula, density and occupancies
+            // in every export, so the saved title states it; with no group on
+            // screen it has no effect and no clause.
+            if(disorderOccNormalize&&CRY&&CRY.disorderFilter)provSet('occNormalize');
+            else provUnmark('occNormalize');
             updateMolInfo();
         });
     }
@@ -7908,8 +7942,13 @@ function pushUndo(symmetryState){
         snap.cell={a:CRY.a,b:CRY.b,c:CRY.c,alpha:CRY.alpha,beta:CRY.beta,gamma:CRY.gamma,
             latticeVectors:JSON.parse(JSON.stringify(CRY.latticeVectors))};
         // The disorder selection is view state the base cell cannot rebuild
-        // from itself, so an undo of a group switch must put it back too.
+        // from itself, so an undo of a group switch must put it back too. The
+        // occupancy switch changes what a group view exports, so it is part of
+        // the same state: a snapshot that restored the group but not the way
+        // its sites are counted would save a different composition than the
+        // one on screen when the snapshot was taken.
         snap.disorderFilter=CRY.disorderFilter||null;
+        snap.disorderOccNormalize=!!disorderOccNormalize;
         // Only a symmetry switch passes this: the operations and sites are not
         // part of an ordinary edit, and snapshotting them every time would
         // double the undo memory for a state that never changes.
@@ -7957,6 +7996,9 @@ function doUndo(){
         // A snapshot taken before the disorder filter existed restores All,
         // which is what it was showing.
         CRY.disorderFilter=snap.disorderFilter||null;
+        // Same for the occupancy switch: it was on unless the snapshot says
+        // otherwise, and rebuildCrystal() below re-syncs the checkbox to it.
+        disorderOccNormalize=snap.disorderOccNormalize!==false;
         // A symmetry switch changes the operation set and the sites together,
         // so undoing one must restore them together — the atoms in the snapshot
         // were expanded under the operations it also carries.
@@ -8241,7 +8283,7 @@ function importStructure(msg){
 // be pasted into another panel; if storage is unavailable the fragment simply
 // stays in memory for this panel.
 var CLIP_KEY='molecularViewer3d.fragment';
-var PASTE_ATOM_LIMIT=20000;   // the ceiling a single imported block is held to
+var PASTE_ATOM_LIMIT=30000;   // the same ceiling as MAX_CRYSTAL_ATOMS: a crystal that can be cut can be pasted
 var clipFrag=null;
 
 function clipStore(){
@@ -12558,6 +12600,16 @@ var intShowLines=true;
 var intRows=[];
 var intLines=null;
 var INT_MAX_ROWS=400;
+// The pi-pi pair search is the one quadratic loop in the panel: rings are
+// paired through a grid now, but a pathological cell could still offer a huge
+// number of image pairs, so the number of image checks is capped and the
+// summary says when the cap was reached.
+var INT_PP_WORK=2000000;
+// Per-type rows, valid until the scene is rebuilt. A checkbox toggle re-reads
+// the types already computed instead of repeating the search; a structural
+// change bumps intStructRev in rebuildScene() and the cache falls with it.
+var intStructRev=0;
+var intCache=null;
 var INT_SEARCH_RADIUS=4.5;      // longest sigma-hole contact, with margin
 var INT_HB_DISTANCE=2.5;        // d(H...A)
 var INT_HB_ANGLE=120;           // D-H...A
@@ -12932,9 +12984,78 @@ function intFracLowerBound(fx,fy,fz,widths){
     return Math.max(ax*w0,ay*w1,az*w2);
 }
 
+// A wrapped fractional bin grid over candidate sites, one cell wide in each
+// plane spacing. Moving a fractional coordinate by step_k along axis k changes
+// the distance to the k-th plane family by step_k*width_k = radius, so two
+// sites within the radius of each other are always in the same bin or in a
+// neighbouring one - the grid can only skip pairs that are out of reach.
+// Bins are counted from floor(f/step) and wrapped at the cell, the convention
+// the CH-pi grid already uses.
+function intFracGridBuild(bins,widths,radius){
+    var step=[],cells=[],offs=[],grid={},i,q;
+    for(q=0;q<3;q++){
+        var w=widths[q]>1e-9?widths[q]:1;
+        step[q]=w>radius?radius/w:1;
+        cells[q]=Math.max(1,Math.ceil(1/step[q]-1e-9));
+        // A wrap of -1 and +1 is the same bin when the grid has fewer than
+        // three cells; the offsets are chosen so every bin is visited once.
+        offs[q]=cells[q]>=3?[-1,0,1]:(cells[q]===2?[0,1]:[0]);
+    }
+    for(i=0;i<bins.length;i++){
+        var f=bins[i],s='';
+        for(q=0;q<3;q++){
+            var v=Math.floor(f[q]/step[q])%cells[q];
+            if(v<0)v+=cells[q];
+            s+=(q?',':'')+v;
+        }
+        (grid[s]||(grid[s]=[])).push(i);
+    }
+    return {step:step,cells:cells,offs:offs,grid:grid,count:bins.length};
+}
+function intFracGridVisit(g,f,fn){
+    if(!g||!g.count)return;
+    var st=g.step,ce=g.cells,of=g.offs;
+    var bx=Math.floor(f[0]/st[0]),by=Math.floor(f[1]/st[1]),bz=Math.floor(f[2]/st[2]);
+    for(var a=0;a<of[0].length;a++){
+        var cx=((bx+of[0][a])%ce[0]+ce[0])%ce[0];
+        for(var b=0;b<of[1].length;b++){
+            var cy=((by+of[1][b])%ce[1]+ce[1])%ce[1];
+            for(var c=0;c<of[2].length;c++){
+                var cz=((bz+of[2][c])%ce[2]+ce[2])%ce[2];
+                var list=g.grid[cx+','+cy+','+cz];
+                if(!list)continue;
+                for(var i=0;i<list.length;i++)fn(list[i]);
+            }
+        }
+    }
+}
+// The molecule counterpart: a plain Cartesian grid with no wrapping, since a
+// molecule has no periodic images. Buckets hold atom indices themselves.
+function intCartGridBuild(atoms,list,cell){
+    var grid={},i;
+    for(i=0;i<list.length;i++){
+        var a=atoms[list[i]];
+        var key=Math.floor(a.x/cell)+','+Math.floor(a.y/cell)+','+Math.floor(a.z/cell);
+        (grid[key]||(grid[key]=[])).push(list[i]);
+    }
+    return {cell:cell,grid:grid,count:list.length};
+}
+function intCartGridVisit(g,x,y,z,fn){
+    if(!g||!g.count)return;
+    var cell=g.cell,gx=Math.floor(x/cell),gy=Math.floor(y/cell),gz=Math.floor(z/cell);
+    for(var ox=-1;ox<=1;ox++)for(var oy=-1;oy<=1;oy++)for(var oz=-1;oz<=1;oz++){
+        var list=g.grid[(gx+ox)+','+(gy+oy)+','+(gz+oz)];
+        if(!list)continue;
+        for(var i=0;i<list.length;i++)fn(list[i]);
+    }
+}
+
 // Every image of one fractional point inside a sphere around another, with
-// its integer shift and Cartesian displacement.
-function intForEachPointImage(center,site,lim,radius,fn){
+// its integer shift and Cartesian displacement. The optional budget carries
+// the caller's remaining image tests: one is spent per image tried, and the
+// walk stops when the budget is gone, so a caller pairing thousands of sites
+// cannot stall the page.
+function intForEachPointImage(center,site,lim,radius,fn,budget){
     var lv=CRY.latticeVectors,r2=radius*radius;
     var gx=site[0]-center[0],gy=site[1]-center[1],gz=site[2]-center[2];
     var loX=Math.ceil(-gx-lim[0]-1e-9),hiX=Math.floor(-gx+lim[0]+1e-9);
@@ -12945,6 +13066,7 @@ function intForEachPointImage(center,site,lim,radius,fn){
         for(var ny=loY;ny<=hiY;ny++){
             var dy=gy+ny;
             for(var nz=loZ;nz<=hiZ;nz++){
+                if(budget&&--budget.left<0){budget.hit=true;return}
                 var dz=gz+nz;
                 var vx=dx*lv[0][0]+dy*lv[1][0]+dz*lv[2][0];
                 var vy=dx*lv[0][1]+dy*lv[1][1]+dz*lv[2][1];
@@ -13015,7 +13137,7 @@ function intRingImageLabel(r,t){
     return s;
 }
 
-function intCollectMoleculePiPi(rings,rows){
+function intCollectMoleculePiPi(rings,rows,trunc){
     if(!rings||!rings.length)return;
     var cell=INT_T_DISTANCE,grid={},i;
     for(i=0;i<rings.length;i++){
@@ -13023,15 +13145,17 @@ function intCollectMoleculePiPi(rings,rows){
         var key=Math.floor(r.cx/cell)+','+Math.floor(r.cy/cell)+','+Math.floor(r.cz/cell);
         (grid[key]||(grid[key]=[])).push(i);
     }
-    for(i=0;i<rings.length;i++){
+    var budget={left:INT_PP_WORK,hit:false};
+    for(i=0;i<rings.length&&!budget.hit;i++){
         var a=rings[i];
         var gx=Math.floor(a.cx/cell),gy=Math.floor(a.cy/cell),gz=Math.floor(a.cz/cell);
-        for(var ox=-1;ox<=1;ox++)for(var oy=-1;oy<=1;oy++)for(var oz=-1;oz<=1;oz++){
+        for(var ox=-1;ox<=1&&!budget.hit;ox++)for(var oy=-1;oy<=1&&!budget.hit;oy++)for(var oz=-1;oz<=1&&!budget.hit;oz++){
             var list=grid[(gx+ox)+','+(gy+oy)+','+(gz+oz)];
             if(!list)continue;
             for(var q=0;q<list.length;q++){
                 var j=list[q];
                 if(j<=i)continue;
+                if(--budget.left<0){budget.hit=true;break}
                 var b=rings[j];
                 var dx=b.cx-a.cx,dy=b.cy-a.cy,dz=b.cz-a.cz;
                 if(dx*dx+dy*dy+dz*dz>INT_T_DISTANCE*INT_T_DISTANCE)continue;
@@ -13048,42 +13172,64 @@ function intCollectMoleculePiPi(rings,rows){
             }
         }
     }
+    if(budget.hit&&trunc)trunc.pp=true;
 }
 
-// A crystal owns each distinct ring pair once: ring i stays in its home cell
-// and ring j is moved through the images near it (i < j), while a ring's own
-// images are walked for t and -t but once. The home-cell fractional bound
-// skips a pair no image can bring within reach before any image is enumerated.
-function intCollectCrystalPiPi(rings,rows){
+// One crystal pi-pi row; the second ring is the image t of ring b. The same
+// construction serves the ring's own images (b is a) and a distinct pair.
+function intCrystalPiRow(a,b,ti,tj,t,vx,vy,vz,rows){
+    var row=intPiRow(a,b,vx,vy,vz);
+    if(!row)return;
+    row.ringALabel=a.shortLabel;
+    row.ringBLabel=intRingImageLabel(b,t);
+    row.ringAFull=a.label;row.ringBFull=b.label;
+    row.cx=a.cx;row.cy=a.cy;row.cz=a.cz;
+    row.ax=a.cx+vx;row.ay=a.cy+vy;row.az=a.cz+vz;
+    row.sitesA=[];row.sitesB=[];
+    var k;
+    for(k=0;k<a.idx.length;k++)row.sitesA.push({bi:a.idx[k],sh:a.shifts[k]});
+    for(k=0;k<b.idx.length;k++)row.sitesB.push({bi:b.idx[k],
+        sh:[b.shifts[k][0]+t[0],b.shifts[k][1]+t[1],b.shifts[k][2]+t[2]]});
+    row.key='ppc_'+ti+'_'+tj+'_'+t.join(',');
+    rows.push(row);
+}
+
+// Ring centroids are paired through a fractional grid at the centroid cutoff,
+// so a cell with thousands of rings no longer runs the all-pairs scan. Every
+// pair that owns any image within reach still lands in this bin or a
+// neighbour; each image tested is charged to INT_PP_WORK, and the summary says
+// when that cap stopped the walk.
+function intCollectCrystalPiPi(rings,rows,trunc){
     if(!rings||!rings.length)return;
     var lv=CRY.latticeVectors,widths=crystalPlaneWidths(lv);
-    var lim=intImageLimit(widths,INT_T_DISTANCE),i,j;
-    for(i=0;i<rings.length;i++){
+    var lim=intImageLimit(widths,INT_T_DISTANCE),i;
+    var bins=new Array(rings.length);
+    for(i=0;i<rings.length;i++)bins[i]=rings[i].fc;
+    var grid=intFracGridBuild(bins,widths,INT_T_DISTANCE);
+    var budget={left:INT_PP_WORK,hit:false};
+    for(i=0;i<rings.length&&!budget.hit;i++){
         var a=rings[i];
-        for(j=i;j<rings.length;j++){
+        var self=i;
+        // The ring's own images: reachable only in a small cell, and the
+        // canonical shift keeps one name for the pair t/-t.
+        intForEachPointImage(a.fc,a.fc,lim,INT_T_DISTANCE,function(t,vx,vy,vz){
+            if(t[0]===0&&t[1]===0&&t[2]===0)return;
+            if(!intShiftCanonical(t))return;
+            intCrystalPiRow(a,a,self,self,t,vx,vy,vz,rows);
+        },budget);
+        if(budget.hit)break;
+        intFracGridVisit(grid,a.fc,function(j){
+            if(budget.hit||j<=self)return;
             var b=rings[j];
             var fx=b.fc[0]-a.fc[0],fy=b.fc[1]-a.fc[1],fz=b.fc[2]-a.fc[2];
-            if(intFracLowerBound(fx,fy,fz,widths)>INT_T_DISTANCE+1e-9)continue;
+            if(intFracLowerBound(fx,fy,fz,widths)>INT_T_DISTANCE+1e-9)return;
             intForEachPointImage(a.fc,b.fc,lim,INT_T_DISTANCE,function(t,vx,vy,vz){
-                if(j===i&&t[0]===0&&t[1]===0&&t[2]===0)return;
-                if(j===i&&!intShiftCanonical(t))return;
-                var row=intPiRow(a,b,vx,vy,vz);
-                if(!row)return;
-                row.ringALabel=a.shortLabel;
-                row.ringBLabel=intRingImageLabel(b,t);
-                row.ringAFull=a.label;row.ringBFull=b.label;
-                row.cx=a.cx;row.cy=a.cy;row.cz=a.cz;
-                row.ax=a.cx+vx;row.ay=a.cy+vy;row.az=a.cz+vz;
-                row.sitesA=[];row.sitesB=[];
-                var k;
-                for(k=0;k<a.idx.length;k++)row.sitesA.push({bi:a.idx[k],sh:a.shifts[k]});
-                for(k=0;k<b.idx.length;k++)row.sitesB.push({bi:b.idx[k],
-                    sh:[b.shifts[k][0]+t[0],b.shifts[k][1]+t[1],b.shifts[k][2]+t[2]]});
-                row.key='ppc_'+i+'_'+j+'_'+t.join(',');
-                rows.push(row);
-            });
-        }
+                if(budget.hit)return;
+                intCrystalPiRow(a,b,self,j,t,vx,vy,vz,rows);
+            },budget);
+        });
     }
+    if(budget.hit&&trunc)trunc.pp=true;
 }
 
 function intAdjHits(adj,idx,set){
@@ -13302,9 +13448,14 @@ function intDedupeSigma(rows){
     return out;
 }
 
-function intCollectMolecule(rows){
+// The molecule search's fixed data: the donors, the sigma-hole centres and the
+// acceptor grid, built once per structure and shared by every type that reads
+// it. Each donor then looks only at acceptors in its own or a neighbouring
+// cell of a Cartesian grid whose cell is the search radius, instead of every
+// atom in the structure.
+function intMoleculePrep(){
     var atoms=MD.atoms||[],bonds=MD.bonds||[],i;
-    var hbonds=[],sigmas=[];
+    var hbonds=[],sigmas=[],acceptors=[];
     for(i=0;i<bonds.length;i++){
         var bb=bonds[i];
         if(!bb)continue;
@@ -13315,50 +13466,55 @@ function intCollectMolecule(rows){
         if(INT_SIGMA[a.element])sigmas.push({type:INT_SIGMA[a.element],x:bb.atom1,d:bb.atom2});
         if(INT_SIGMA[b.element])sigmas.push({type:INT_SIGMA[b.element],x:bb.atom2,d:bb.atom1});
     }
-    if(intShowTypes.hb){
-        for(i=0;i<hbonds.length;i++){
-            var p=hbonds[i],D=atoms[p.d],H=atoms[p.h];
-            if(!D||!H)continue;
-            for(var ai=0;ai<atoms.length;ai++){
-                if(ai===p.h||ai===p.d)continue;
-                var A=atoms[ai];
-                if(isGhostAtom(A)||!INT_ACCEPTORS[A.element])continue;
-                var dx=A.x-H.x,dy=A.y-H.y,dz=A.z-H.z;
-                var d=Math.sqrt(dx*dx+dy*dy+dz*dz);
-                if(!(d<INT_HB_DISTANCE))continue;
-                var ang=intAngleVectors(D.x-H.x,D.y-H.y,D.z-H.z,dx,dy,dz);
-                if(!(ang>INT_HB_ANGLE))continue;
-                rows.push({type:'hb',mol:true,d:d,angle:ang,dIdx:p.d,hIdx:p.h,aIdx:ai,
-                    dLabel:atomLabel(D,p.d),hLabel:atomLabel(H,p.h),aLabel:atomLabel(A,ai),
-                    cx:H.x,cy:H.y,cz:H.z,ax:A.x,ay:A.y,az:A.z});
-            }
-        }
+    for(i=0;i<atoms.length;i++){
+        var at=atoms[i];
+        if(isGhostAtom(at)||!INT_ACCEPTORS[at.element])continue;
+        acceptors.push(i);
     }
-    for(i=0;i<sigmas.length;i++){
-        var q=sigmas[i];
-        if(!intShowTypes[q.type])continue;
+    return {atoms:atoms,hbonds:hbonds,sigmas:sigmas,rings:null,
+        accGridHb:intCartGridBuild(atoms,acceptors,INT_HB_DISTANCE),
+        accGridSigma:intCartGridBuild(atoms,acceptors,INT_SEARCH_RADIUS)};
+}
+function intMoleculeHbRows(prep,rows){
+    var atoms=prep.atoms;
+    for(var i=0;i<prep.hbonds.length;i++){
+        var p=prep.hbonds[i],D=atoms[p.d],H=atoms[p.h];
+        if(!D||!H)continue;
+        intCartGridVisit(prep.accGridHb,H.x,H.y,H.z,function(ai){
+            if(ai===p.h||ai===p.d)return;
+            var A=atoms[ai];
+            var dx=A.x-H.x,dy=A.y-H.y,dz=A.z-H.z;
+            var d=Math.sqrt(dx*dx+dy*dy+dz*dz);
+            if(!(d<INT_HB_DISTANCE))return;
+            var ang=intAngleVectors(D.x-H.x,D.y-H.y,D.z-H.z,dx,dy,dz);
+            if(!(ang>INT_HB_ANGLE))return;
+            rows.push({type:'hb',mol:true,d:d,angle:ang,dIdx:p.d,hIdx:p.h,aIdx:ai,
+                dLabel:atomLabel(D,p.d),hLabel:atomLabel(H,p.h),aLabel:atomLabel(A,ai),
+                cx:H.x,cy:H.y,cz:H.z,ax:A.x,ay:A.y,az:A.z});
+        });
+    }
+}
+function intMoleculeSigmaRows(prep,type,rows){
+    var atoms=prep.atoms;
+    for(var i=0;i<prep.sigmas.length;i++){
+        var q=prep.sigmas[i];
+        if(q.type!==type)continue;
         var X=atoms[q.x],sub=atoms[q.d];
         if(!X||!sub)continue;
         var svx=sub.x-X.x,svy=sub.y-X.y,svz=sub.z-X.z;
-        for(var aj=0;aj<atoms.length;aj++){
-            if(aj===q.x||aj===q.d)continue;
+        intCartGridVisit(prep.accGridSigma,X.x,X.y,X.z,function(aj){
+            if(aj===q.x||aj===q.d)return;
             var A2=atoms[aj];
-            if(isGhostAtom(A2)||!INT_ACCEPTORS[A2.element])continue;
             var vx=A2.x-X.x,vy=A2.y-X.y,vz=A2.z-X.z;
             var dd=Math.sqrt(vx*vx+vy*vy+vz*vz);
             var cut=(VDW_R[X.element]||DEFAULT_VDW_R)+(VDW_R[A2.element]||DEFAULT_VDW_R)-INT_VDW_SLACK;
-            if(!(dd<cut))continue;
+            if(!(dd<cut))return;
             var ag=intAngleVectors(svx,svy,svz,vx,vy,vz);
-            if(!(ag>INT_SIGMA_ANGLE))continue;
+            if(!(ag>INT_SIGMA_ANGLE))return;
             rows.push({type:q.type,mol:true,d:dd,angle:ag,xIdx:q.x,dIdx:q.d,aIdx:aj,
                 dLabel:atomLabel(sub,q.d),xLabel:atomLabel(X,q.x),aLabel:atomLabel(A2,aj),
                 cx:X.x,cy:X.y,cz:X.z,ax:A2.x,ay:A2.y,az:A2.z});
-        }
-    }
-    if(intShowTypes.pp||intShowTypes.chpi){
-        var rings=intBuildMoleculeRings();
-        if(intShowTypes.pp)intCollectMoleculePiPi(rings,rows);
-        if(intShowTypes.chpi)intCollectMoleculeChPi(rings,rows);
+        });
     }
 }
 
@@ -13378,45 +13534,23 @@ function intImageLimit(widths,radius){
     return lim;
 }
 
-// Every image of an acceptor site inside the search sphere around the centre,
-// handed to the callback with the vector and distance from that centre.
-function intForEachImage(fracs,acceptors,fc,lim,fn,radius){
-    var lv=CRY.latticeVectors,rr=radius==null?INT_SEARCH_RADIUS:radius;
-    var r2=rr*rr;
-    for(var q=0;q<acceptors.length;q++){
-        var ai=acceptors[q],fa=fracs[ai];
-        var gx=fa[0]-fc[0],gy=fa[1]-fc[1],gz=fa[2]-fc[2];
-        var loX=Math.ceil(-gx-lim[0]-1e-9),hiX=Math.floor(-gx+lim[0]+1e-9);
-        var loY=Math.ceil(-gy-lim[1]-1e-9),hiY=Math.floor(-gy+lim[1]+1e-9);
-        var loZ=Math.ceil(-gz-lim[2]-1e-9),hiZ=Math.floor(-gz+lim[2]+1e-9);
-        for(var nx=loX;nx<=hiX;nx++){
-            var dx=gx+nx;
-            for(var ny=loY;ny<=hiY;ny++){
-                var dy=gy+ny;
-                for(var nz=loZ;nz<=hiZ;nz++){
-                    var dz=gz+nz;
-                    var vx=dx*lv[0][0]+dy*lv[1][0]+dz*lv[2][0];
-                    var vy=dx*lv[0][1]+dy*lv[1][1]+dz*lv[2][1];
-                    var vz=dx*lv[0][2]+dy*lv[1][2]+dz*lv[2][2];
-                    var d2=vx*vx+vy*vy+vz*vz;
-                    if(d2>r2+1e-9)continue;
-                    fn(ai,[nx,ny,nz],vx,vy,vz,Math.sqrt(d2));
-                }
-            }
-        }
-    }
-}
-
-function intCollectCrystal(rows){
+// The crystal search's fixed data. The acceptors are binned in fractional
+// space at the search radius, so a donor reads the few sites its own or a
+// neighbouring cell holds instead of every acceptor in the cell; the donors
+// and sigma-hole centres are read from the cell's bond table once.
+function intCrystalPrep(){
     var base=CRY.baseAtoms,lv=CRY.latticeVectors;
-    if(!base||!lv||!CRY_INV)return;
     var fracs=intBaseFracs();
-    var lim=intImageLimit(crystalPlaneWidths(lv));
-    var acceptors=[],bi;
+    var widths=crystalPlaneWidths(lv);
+    var lim=intImageLimit(widths);
+    var limHb=intImageLimit(widths,INT_HB_DISTANCE);
+    var accList=[],accBins=[],bi;
     for(bi=0;bi<base.length;bi++){
         var ba=base[bi];
         if(!ba||isGhostAtom(ba)||!neighBaseVisible(ba))continue;
-        if(INT_ACCEPTORS[ba.element])acceptors.push(bi);
+        if(!INT_ACCEPTORS[ba.element])continue;
+        accList.push(bi);
+        accBins.push(fracs[bi]);
     }
     var hbonds=[],sigmas=[],bonds=CRY.baseBonds||[],i;
     for(i=0;i<bonds.length;i++){
@@ -13431,17 +13565,25 @@ function intCollectCrystal(rows){
         if(INT_SIGMA[a2.element])sigmas.push({type:INT_SIGMA[a2.element],x:bb.atom2,d:bb.atom1,dShift:[s[0],s[1],s[2]]});
         if(INT_SIGMA[a1.element])sigmas.push({type:INT_SIGMA[a1.element],x:bb.atom1,d:bb.atom2,dShift:[-s[0],-s[1],-s[2]]});
     }
-    if(intShowTypes.hb){
-        for(i=0;i<hbonds.length;i++){
-            var p=hbonds[i],db=base[p.d],hb=base[p.h];
-            if(!db||!hb)continue;
-            var hs=p.hShift;
-            var hx=hb.x+hs[0]*lv[0][0]+hs[1]*lv[1][0]+hs[2]*lv[2][0];
-            var hy=hb.y+hs[0]*lv[0][1]+hs[1]*lv[1][1]+hs[2]*lv[2][1];
-            var hz=hb.z+hs[0]*lv[0][2]+hs[1]*lv[1][2]+hs[2]*lv[2][2];
-            var dvx=db.x-hx,dvy=db.y-hy,dvz=db.z-hz;
-            var fc=[fracs[p.h][0]+hs[0],fracs[p.h][1]+hs[1],fracs[p.h][2]+hs[2]];
-            intForEachImage(fracs,acceptors,fc,lim,function(ai,shift,vx,vy,vz,d){
+    return {base:base,lv:lv,fracs:fracs,widths:widths,lim:lim,limHb:limHb,
+        hbonds:hbonds,sigmas:sigmas,accList:accList,rings:null,
+        accGridHb:intFracGridBuild(accBins,widths,INT_HB_DISTANCE),
+        accGridSigma:intFracGridBuild(accBins,widths,INT_SEARCH_RADIUS)};
+}
+function intCrystalHbRows(prep,rows){
+    var base=prep.base,lv=prep.lv,fracs=prep.fracs;
+    for(var i=0;i<prep.hbonds.length;i++){
+        var p=prep.hbonds[i],db=base[p.d],hb=base[p.h];
+        if(!db||!hb)continue;
+        var hs=p.hShift;
+        var hx=hb.x+hs[0]*lv[0][0]+hs[1]*lv[1][0]+hs[2]*lv[2][0];
+        var hy=hb.y+hs[0]*lv[0][1]+hs[1]*lv[1][1]+hs[2]*lv[2][1];
+        var hz=hb.z+hs[0]*lv[0][2]+hs[1]*lv[1][2]+hs[2]*lv[2][2];
+        var dvx=db.x-hx,dvy=db.y-hy,dvz=db.z-hz;
+        var fc=[fracs[p.h][0]+hs[0],fracs[p.h][1]+hs[1],fracs[p.h][2]+hs[2]];
+        intFracGridVisit(prep.accGridHb,fc,function(m){
+            var ai=prep.accList[m];
+            intForEachPointImage(fc,fracs[ai],prep.limHb,INT_HB_DISTANCE,function(shift,vx,vy,vz,d){
                 if(!(d<INT_HB_DISTANCE))return;
                 if(ai===p.h&&shift[0]===0&&shift[1]===0&&shift[2]===0)return;
                 if(ai===p.d&&shift[0]===0&&shift[1]===0&&shift[2]===0)return;
@@ -13454,42 +13596,78 @@ function intCollectCrystal(rows){
                     aLabel:atomLabel(base[ai],ai)+((shift[0]||shift[1]||shift[2])?' ['+shift[0]+','+shift[1]+','+shift[2]+']':''),
                     cx:hx,cy:hy,cz:hz,ax:hx+vx,ay:hy+vy,az:hz+vz});
             });
-        }
+        });
     }
-    for(i=0;i<sigmas.length;i++){
-        var q=sigmas[i];
-        if(!intShowTypes[q.type])continue;
+}
+function intCrystalSigmaRows(prep,type,rows){
+    var base=prep.base,lv=prep.lv,fracs=prep.fracs;
+    for(var i=0;i<prep.sigmas.length;i++){
+        var q=prep.sigmas[i];
+        if(q.type!==type)continue;
         var xb=base[q.x],sub=base[q.d];
         if(!xb||!sub)continue;
         var ps=q.dShift;
         var svx=sub.x+ps[0]*lv[0][0]+ps[1]*lv[1][0]+ps[2]*lv[2][0]-xb.x;
         var svy=sub.y+ps[0]*lv[0][1]+ps[1]*lv[1][1]+ps[2]*lv[2][1]-xb.y;
         var svz=sub.z+ps[0]*lv[0][2]+ps[1]*lv[1][2]+ps[2]*lv[2][2]-xb.z;
-        intForEachImage(fracs,acceptors,fracs[q.x],lim,function(ai,shift,vx,vy,vz,d){
-            if(ai===q.x&&shift[0]===0&&shift[1]===0&&shift[2]===0)return;
-            var el=base[ai].element;
-            var cut=(VDW_R[xb.element]||DEFAULT_VDW_R)+(VDW_R[el]||DEFAULT_VDW_R)-INT_VDW_SLACK;
-            if(!(d<cut))return;
-            var ang=intAngleVectors(svx,svy,svz,vx,vy,vz);
-            if(!(ang>INT_SIGMA_ANGLE))return;
-            rows.push({type:q.type,d:d,angle:ang,
-                xBi:q.x,dBi:q.d,aBi:ai,aShift:[shift[0],shift[1],shift[2]],
-                dLabel:atomLabel(sub,q.d),xLabel:atomLabel(xb,q.x),
-                aLabel:atomLabel(base[ai],ai)+((shift[0]||shift[1]||shift[2])?' ['+shift[0]+','+shift[1]+','+shift[2]+']':''),
-                cx:xb.x,cy:xb.y,cz:xb.z,ax:xb.x+vx,ay:xb.y+vy,az:xb.z+vz});
+        intFracGridVisit(prep.accGridSigma,fracs[q.x],function(m){
+            var ai=prep.accList[m];
+            intForEachPointImage(fracs[q.x],fracs[ai],prep.lim,INT_SEARCH_RADIUS,function(shift,vx,vy,vz,d){
+                if(ai===q.x&&shift[0]===0&&shift[1]===0&&shift[2]===0)return;
+                var el=base[ai].element;
+                var cut=(VDW_R[xb.element]||DEFAULT_VDW_R)+(VDW_R[el]||DEFAULT_VDW_R)-INT_VDW_SLACK;
+                if(!(d<cut))return;
+                var ang=intAngleVectors(svx,svy,svz,vx,vy,vz);
+                if(!(ang>INT_SIGMA_ANGLE))return;
+                rows.push({type:q.type,d:d,angle:ang,
+                    xBi:q.x,dBi:q.d,aBi:ai,aShift:[shift[0],shift[1],shift[2]],
+                    dLabel:atomLabel(sub,q.d),xLabel:atomLabel(xb,q.x),
+                    aLabel:atomLabel(base[ai],ai)+((shift[0]||shift[1]||shift[2])?' ['+shift[0]+','+shift[1]+','+shift[2]+']':''),
+                    cx:xb.x,cy:xb.y,cz:xb.z,ax:xb.x+vx,ay:xb.y+vy,az:xb.z+vz});
+            });
         });
-    }
-    if(intShowTypes.pp||intShowTypes.chpi){
-        var rings=intBuildCrystalRings(fracs);
-        if(intShowTypes.pp)intCollectCrystalPiPi(rings,rows);
-        if(intShowTypes.chpi)intCollectCrystalChPi(rings,rows,fracs);
     }
 }
 
+// The rows of every type asked for, computed once per structure. A checkbox
+// that turns a type off and on again re-reads its cached rows; the search runs
+// again only for a type that has not been computed yet, or after a scene
+// rebuild (which bumps intStructRev).
 function intCollect(){
-    var rows=[];
-    if(CRY&&CRY_INV&&CRY.baseAtoms&&CRY.baseAtoms.length&&CRY.latticeVectors)intCollectCrystal(rows);
-    else intCollectMolecule(rows);
+    var crystal=!!(CRY&&CRY_INV&&CRY.baseAtoms&&CRY.baseAtoms.length&&CRY.latticeVectors);
+    if(!intCache||intCache.rev!==intStructRev||intCache.crystal!==crystal){
+        intCache={rev:intStructRev,crystal:crystal,rows:{},prep:null,trunc:{}};
+    }
+    var c=intCache;
+    if(crystal){
+        if(!c.prep)c.prep=intCrystalPrep();
+        var cp=c.prep;
+        if(intShowTypes.hb&&!c.rows.hb){c.rows.hb=[];intCrystalHbRows(cp,c.rows.hb);}
+        if(intShowTypes.xb&&!c.rows.xb){c.rows.xb=[];intCrystalSigmaRows(cp,'xb',c.rows.xb);}
+        if(intShowTypes.cb&&!c.rows.cb){c.rows.cb=[];intCrystalSigmaRows(cp,'cb',c.rows.cb);}
+        if(intShowTypes.pn&&!c.rows.pn){c.rows.pn=[];intCrystalSigmaRows(cp,'pn',c.rows.pn);}
+        if((intShowTypes.pp||intShowTypes.chpi)&&!cp.rings)cp.rings=intBuildCrystalRings(cp.fracs);
+        if(intShowTypes.pp&&!c.rows.pp){c.rows.pp=[];intCollectCrystalPiPi(cp.rings,c.rows.pp,c.trunc);}
+        if(intShowTypes.chpi&&!c.rows.chpi){c.rows.chpi=[];intCollectCrystalChPi(cp.rings,c.rows.chpi,cp.fracs);}
+    }else{
+        if(!c.prep)c.prep=intMoleculePrep();
+        var mp=c.prep;
+        if(intShowTypes.hb&&!c.rows.hb){c.rows.hb=[];intMoleculeHbRows(mp,c.rows.hb);}
+        if(intShowTypes.xb&&!c.rows.xb){c.rows.xb=[];intMoleculeSigmaRows(mp,'xb',c.rows.xb);}
+        if(intShowTypes.cb&&!c.rows.cb){c.rows.cb=[];intMoleculeSigmaRows(mp,'cb',c.rows.cb);}
+        if(intShowTypes.pn&&!c.rows.pn){c.rows.pn=[];intMoleculeSigmaRows(mp,'pn',c.rows.pn);}
+        if((intShowTypes.pp||intShowTypes.chpi)&&!mp.rings)mp.rings=intBuildMoleculeRings();
+        if(intShowTypes.pp&&!c.rows.pp){c.rows.pp=[];intCollectMoleculePiPi(mp.rings,c.rows.pp,c.trunc);}
+        if(intShowTypes.chpi&&!c.rows.chpi){c.rows.chpi=[];intCollectMoleculeChPi(mp.rings,c.rows.chpi);}
+    }
+    var rows=[],i,j,list;
+    for(i=0;i<INT_TYPE_ORDER.length;i++){
+        var t=INT_TYPE_ORDER[i];
+        if(!intShowTypes[t])continue;
+        list=c.rows[t];
+        if(!list)continue;
+        for(j=0;j<list.length;j++)rows.push(list[j]);
+    }
     rows=intDedupeSigma(rows);
     rows.sort(intByDistance);
     return rows;
@@ -13671,6 +13849,9 @@ function intRefresh(){
         txt=all.length+' interaction'+(all.length===1?'':'s')+': '+parts.join(', ');
         if(all.length>shown.length)txt+=' - nearest '+shown.length+' listed';
     }
+    if(intShowTypes.pp&&intCache&&intCache.trunc&&intCache.trunc.pp){
+        txt+=' - pi-contact search hit its work budget, some pairs were not checked';
+    }
     if(sumEl)sumEl.textContent=txt;
     var html='';
     for(i=0;i<shown.length;i++){
@@ -13691,6 +13872,9 @@ function intRefresh(){
 function intStartSession(){
     intActive=true;
     intRows=[];
+    // A fresh session reads the structure in front of it, not a cache left by
+    // an earlier one.
+    intCache=null;
     var show=document.getElementById('int-show');
     if(show)show.checked=intShowLines;
     INT_TYPE_ORDER.forEach(function(t){
@@ -13704,6 +13888,7 @@ function intEndSession(){
     intActive=false;
     intClearLines();
     intRows=[];
+    intCache=null;
 }
 
 (function(){
@@ -14012,16 +14197,23 @@ Cm:[36.6488,0.465154,24.4096,3.08997,17.399,13.4346,4.21665,88.4834,13.2887],
 Bk:[36.7881,0.451018,24.7736,3.04619,17.8919,12.8946,4.23284,86.003,13.2754],
 Cf:[36.9185,0.437533,25.1995,3.00775,18.3317,12.4044,4.24391,83.7881,13.2674]
 };
+// lambda is the value the panel prints (the Kalpha1 line, or the weighted
+// mean of the doublet); k1/k2 are the two lines a Kalpha source really
+// emits. A doublet entry profiles both at their own angles with the tube's
+// 2:1 intensity ratio, so high-angle lines split as the measurement does.
 var XRD_RADIATIONS=[
     {id:'CuKa1',label:'Cu Kα1',lambda:1.54056},
-    {id:'CuKa',label:'Cu Kα',lambda:1.54184},
+    {id:'CuKa',label:'Cu Kα',lambda:1.54184,k1:1.54056,k2:1.54439},
     {id:'MoKa1',label:'Mo Kα1',lambda:0.70930},
-    {id:'MoKa',label:'Mo Kα',lambda:0.71073},
+    {id:'MoKa',label:'Mo Kα',lambda:0.71073,k1:0.70930,k2:0.71359},
     {id:'CoKa1',label:'Co Kα1',lambda:1.78897},
     {id:'FeKa1',label:'Fe Kα1',lambda:1.93604},
     {id:'CrKa1',label:'Cr Kα1',lambda:2.28970},
     {id:'AgKa1',label:'Ag Kα1',lambda:0.55941}
 ];
+// I(Kalpha2)/I(Kalpha1) for a laboratory tube: the Kalpha2 line carries half
+// the photons, so a resolved pair shows the strong and weak components in 2:1.
+var XRD_K2_RATIO=0.5;
 var XRD_TWO_THETA_CHOICES=[60,90,120,150];
 var XRD_2THETA_MIN=2;
 var XRD_MAX_INDEX=40;
@@ -14055,6 +14247,22 @@ function xrdFormFactor(el,s){
     var s2=s*s;
     return ff[0]*Math.exp(-ff[1]*s2)+ff[2]*Math.exp(-ff[3]*s2)+
         ff[4]*Math.exp(-ff[5]*s2)+ff[6]*Math.exp(-ff[7]*s2)+ff[8];
+}
+// The Debye-Waller factor of one site at (h k l), from its Cartesian tensor.
+// The thermal average of exp(i q.u) is exp(-2 pi^2 q U q), with q the
+// scattering vector in 1/Angstrom: q = h a* + k b* + l c*. A tensor that is
+// not positive definite along q would make the reflection brighter, which no
+// vibration can do, so that direction is held at one; a site with no tensor
+// has no stated vibration and keeps a factor of one as well.
+function xrdDwb(u,h,k,l,rec){
+    if(!u)return 1;
+    var qx=h*rec[0].x+k*rec[1].x+l*rec[2].x;
+    var qy=h*rec[0].y+k*rec[1].y+l*rec[2].y;
+    var qz=h*rec[0].z+k*rec[1].z+l*rec[2].z;
+    var e=u[0]*qx*qx+u[1]*qy*qy+u[2]*qz*qz+
+        2*(u[3]*qx*qy+u[4]*qx*qz+u[5]*qy*qz);
+    if(!(e>0))return 1;
+    return Math.exp(-2*Math.PI*Math.PI*e);
 }
 function xrdRadiationById(id){
     for(var i=0;i<XRD_RADIATIONS.length;i++){
@@ -14095,7 +14303,17 @@ function xrdCellSites(){
         var occ=(ba.occupancy==null?1:ba.occupancy);
         if(!(occ>0))continue;
         var f=neighFractional(ba);
-        sites.push({el:el,f:[f[0],f[1],f[2]],occ:occ});
+        // The file's displacement tensor, when it has a usable one: the six
+        // numbers are Cartesian Angstrom squared, the frame the structure
+        // factor wants. A tensor with a non-positive trace cannot describe a
+        // vibration and is left out rather than guessed at.
+        var u=ba.uAniso,uu=null;
+        if(u&&u.length>=6){
+            var okU=true,q;
+            for(q=0;q<6;q++)if(typeof u[q]!=='number'||!isFinite(u[q]))okU=false;
+            if(okU&&u[0]+u[1]+u[2]>0)uu=[u[0],u[1],u[2],u[3],u[4],u[5]];
+        }
+        sites.push({el:el,f:[f[0],f[1],f[2]],occ:occ,u:uu});
     }
     var miss=[];
     for(var k in missing){
@@ -14106,9 +14324,12 @@ function xrdCellSites(){
 }
 // Pure: sites + lattice + wavelength + limit in, pattern out. The index bounds
 // are the dual relation |h| = |g.a| <= |g||a|, so a reflection inside the
-// reciprocal sphere can never fall outside the loops.
-function xrdPattern(sites,lv,lambda,twoMax){
+// reciprocal sphere can never fall outside the loops. A second wavelength
+// (lambda2) profiles the Kalpha2 line of every peak beside its Kalpha1 line,
+// at the tube's 2:1 ratio; without it the pattern is the single line.
+function xrdPattern(sites,lv,lambda,twoMax,lambda2){
     if(!sites||sites.length===0||!(lambda>0)||!(twoMax>XRD_2THETA_MIN))return null;
+    if(!(lambda2>0)||lambda2===lambda)lambda2=0;
     var rec=hklReciprocals(lv);
     if(!rec)return null;
     var form=xrdReciprocalForm(rec);
@@ -14149,6 +14370,7 @@ function xrdPattern(sites,lv,lambda,twoMax){
             var st=sites[j];
             var f=xrdFormFactor(st.el,r.s)*st.occ;
             if(!f)continue;
+            if(st.u)f*=xrdDwb(st.u,r.h,r.k,r.l,rec);
             var ph=2*Math.PI*(r.h*st.f[0]+r.k*st.f[1]+r.l*st.f[2]);
             re+=f*Math.cos(ph);im+=f*Math.sin(ph);
         }
@@ -14181,17 +14403,29 @@ function xrdPattern(sites,lv,lambda,twoMax){
     if(n<2)n=2;
     var prof=new Float64Array(n),kk;
     var k4=4*Math.LN2;
-    for(i=0;i<peaks.length;i++){
-        var p=peaks[i];
-        var fwhm=xrdCagliotiFwhm(p.two);
+    function addLine(two,inten){
+        var fwhm=xrdCagliotiFwhm(two);
         if(!(fwhm>0.005))fwhm=0.005;
         if(fwhm>4)fwhm=4;
         var half=2.5*fwhm;
-        var i0=Math.max(0,Math.ceil((p.two-half-XRD_2THETA_MIN)/XRD_STEP));
-        var i1=Math.min(n-1,Math.floor((p.two+half-XRD_2THETA_MIN)/XRD_STEP));
-        for(kk=i0;kk<=i1;kk++){
-            var dx=(XRD_2THETA_MIN+kk*XRD_STEP-p.two)/fwhm;
-            prof[kk]+=p.I*Math.exp(-k4*dx*dx);
+        var i0=Math.max(0,Math.ceil((two-half-XRD_2THETA_MIN)/XRD_STEP));
+        var i1=Math.min(n-1,Math.floor((two+half-XRD_2THETA_MIN)/XRD_STEP));
+        for(var q=i0;q<=i1;q++){
+            var dx=(XRD_2THETA_MIN+q*XRD_STEP-two)/fwhm;
+            prof[q]+=inten*Math.exp(-k4*dx*dx);
+        }
+    }
+    var w2=lambda2?XRD_K2_RATIO/(1+XRD_K2_RATIO):0;
+    var w1=1-w2;
+    for(i=0;i<peaks.length;i++){
+        var p=peaks[i];
+        addLine(p.two,p.I*w1);
+        if(w2>0){
+            var sin2=lambda2/(2*p.d);
+            if(sin2<1){
+                var two2=2*Math.asin(sin2)*180/Math.PI;
+                if(two2>=XRD_2THETA_MIN&&two2<=twoMax+1e-9)addLine(two2,p.I*w2);
+            }
         }
     }
     var pmax=0;
@@ -14200,7 +14434,7 @@ function xrdPattern(sites,lv,lambda,twoMax){
     for(kk=0;kk<n;kk++)prof[kk]=prof[kk]/pmax*100;
     return {
         atoms:sites.length,peaks:peaks,reflections:list.length,found:found,
-        capped:capped,indexCapped:indexCapped,
+        capped:capped,indexCapped:indexCapped,doublet:w2>0,
         twoMax:twoMax,min:XRD_2THETA_MIN,step:XRD_STEP,values:prof
     };
 }
@@ -14210,7 +14444,10 @@ function xrdCompute(){
     if(!cell)return {ok:false,message:'Not a crystal structure.'};
     if(cell.sites.length===0)return {ok:false,message:'No atom in the cell has a scattering factor.',missing:cell.missing};
     var rad=xrdRadiationById(xrdRadiation);
-    var pat=xrdPattern(cell.sites,CRY.latticeVectors,rad.lambda,xrdTwoThetaMax);
+    // A Kalpha entry carries both lines of the doublet; the primary wavelength
+    // places the peaks (the table lists the Kalpha1 reading) and the secondary
+    // one profiles the weak line beside each of them.
+    var pat=xrdPattern(cell.sites,CRY.latticeVectors,rad.k1||rad.lambda,xrdTwoThetaMax,rad.k2||0);
     if(!pat)return {ok:false,message:'The cell has no volume, so no lattice can be built.',missing:cell.missing};
     return {ok:true,rad:rad,pattern:pat,missing:cell.missing};
 }
@@ -14509,6 +14746,7 @@ function xrdUpdate(){
     var notes=[];
     if(pat.capped)notes.push('Only the '+XRD_MAX_REFLECTIONS+' lowest-angle reflections were kept (the cell is too large for the rest).');
     if(pat.indexCapped)notes.push('Reflections needing an index above '+XRD_MAX_INDEX+' are not enumerated.');
+    if(pat.doublet)notes.push('The curve carries the Kα1/Kα2 doublet at its 2:1 ratio; the peak list is the Kα1 line.');
     if(res.missing.length)notes.push('No scattering factor for '+res.missing.join(', ')+' - those atoms are not in the pattern.');
     if(noteEl)noteEl.textContent=notes.join(' ');
     if(expBtn)expBtn.disabled=false;
@@ -14603,6 +14841,8 @@ function xrdExport(){
     var out=[];
     out.push('# Molecular Viewer - powder X-ray diffraction');
     out.push('# Radiation: '+rad.label+' (lambda = '+rad.lambda.toFixed(5)+' A)');
+    if(rad.k2)out.push('# Doublet: Kα1 = '+rad.k1.toFixed(5)+' A, Kα2 = '+rad.k2.toFixed(5)+
+        ' A, I(Kα2)/I(Kα1) = '+XRD_K2_RATIO.toFixed(2));
     out.push('# Structure: '+(MD.title||'crystal'));
     out.push('# Range: '+pat.min.toFixed(2)+' - '+(pat.min+pat.step*(pat.values.length-1)).toFixed(2)+' deg, step '+pat.step+' deg');
     out.push('# 2theta(deg) intensity');
@@ -14754,59 +14994,91 @@ function cavityAtoms(){
 // the neighbouring cells are walked too, so a site on a face blocks the space
 // on the other side of it. The far field is a finite stand-in: an infinite
 // value would turn the isosurface interpolation into NaN.
-function cavField(atoms,lv,inv,probe,nx,ny,nz){
-    var n=nx*ny*nz;
+//
+// The image walk is not clamped. In a skew cell the nearest image of a site
+// can sit several cells away, and stopping at three would leave voxels free
+// that the crystal actually blocks. A probe whose blocking sphere is wider
+// than the cell's whole reach blocks every voxel through some image, and that
+// case is answered without walking any of them.
+var CAV_SLICE_MS=14;
+function cavNow(){return Date.now()}
+function cavFieldJob(atoms,lv,inv,probe,nx,ny,nz){
+    var n=nx*ny*nz,i;
     var field=new Float32Array(n);
-    for(var q=0;q<n;q++)field[q]=1e6;
+    for(i=0;i<n;i++)field[i]=1e6;
     var rx=Math.sqrt(inv[0][0]*inv[0][0]+inv[0][1]*inv[0][1]+inv[0][2]*inv[0][2]);
     var ry=Math.sqrt(inv[1][0]*inv[1][0]+inv[1][1]*inv[1][1]+inv[1][2]*inv[1][2]);
     var rz=Math.sqrt(inv[2][0]*inv[2][0]+inv[2][1]*inv[2][1]+inv[2][2]*inv[2][2]);
-    for(var a=0;a<atoms.length;a++){
-        var at=atoms[a];
+    var reach=0.5*(cavEdge(lv,0)+cavEdge(lv,1)+cavEdge(lv,2));
+    for(i=0;i<atoms.length;i++){
+        if(atoms[i].r+probe>=reach){
+            for(i=0;i<n;i++)field[i]=-1e6;
+            return {atoms:atoms,lv:lv,probe:probe,nx:nx,ny:ny,nz:nz,
+                field:field,rx:rx,ry:ry,rz:rz,ai:atoms.length};
+        }
+    }
+    return {atoms:atoms,lv:lv,probe:probe,nx:nx,ny:ny,nz:nz,
+        field:field,rx:rx,ry:ry,rz:rz,ai:0};
+}
+// Marks a slice of the atom list; returns true when every atom is done. The
+// time is checked between atoms, so a cell with thousands of sites still lets
+// the page paint progress and answer a Cancel.
+function cavFieldChunk(job,deadline){
+    var atoms=job.atoms,lv=job.lv,probe=job.probe;
+    var nx=job.nx,ny=job.ny,nz=job.nz,field=job.field;
+    var rx=job.rx,ry=job.ry,rz=job.rz;
+    while(job.ai<atoms.length){
+        var at=atoms[job.ai++];
         var R=at.r+probe;
-        if(!(R>0))continue;
-        var ex=R*rx,ey=R*ry,ez=R*rz;
-        var mx=Math.ceil(ex-1e-9),my=Math.ceil(ey-1e-9),mz=Math.ceil(ez-1e-9);
-        if(mx>3)mx=3;if(my>3)my=3;if(mz>3)mz=3;
-        for(var sx=-mx;sx<=mx;sx++){
-            var cx=at.fx+sx;
-            var i0=Math.ceil((cx-ex)*nx-0.5),i1=Math.floor((cx+ex)*nx-0.5);
-            if(i0<0)i0=0;if(i1>nx-1)i1=nx-1;
-            if(i1<i0)continue;
-            for(var sy=-my;sy<=my;sy++){
-                var cy=at.fy+sy;
-                var j0=Math.ceil((cy-ey)*ny-0.5),j1=Math.floor((cy+ey)*ny-0.5);
-                if(j0<0)j0=0;if(j1>ny-1)j1=ny-1;
-                if(j1<j0)continue;
-                for(var sz=-mz;sz<=mz;sz++){
-                    var cz=at.fz+sz;
-                    var k0=Math.ceil((cz-ez)*nz-0.5),k1=Math.floor((cz+ez)*nz-0.5);
-                    if(k0<0)k0=0;if(k1>nz-1)k1=nz-1;
-                    if(k1<k0)continue;
-                    for(var ii=i0;ii<=i1;ii++){
-                        var du=(ii+0.5)/nx-cx;
-                        var ux=du*lv[0][0],uy=du*lv[0][1],uz=du*lv[0][2];
-                        for(var jj=j0;jj<=j1;jj++){
-                            var dv=(jj+0.5)/ny-cy;
-                            var vx=ux+dv*lv[1][0],vy=uy+dv*lv[1][1],vz=uz+dv*lv[1][2];
-                            for(var kk=k0;kk<=k1;kk++){
-                                var dw=(kk+0.5)/nz-cz;
-                                var dx=vx+dw*lv[2][0],dy=vy+dw*lv[2][1],dz=vz+dw*lv[2][2];
-                                var idx=(kk*ny+jj)*nx+ii;
-                                var d2=dx*dx+dy*dy+dz*dz;
-                                var lim=field[idx]+R;
-                                // sqrt(d2) - R beats the stored value only when
-                                // d2 < (stored + R)^2, so the root is taken on
-                                // the few voxels an atom actually improves.
-                                if(lim>0&&d2<lim*lim)field[idx]=Math.sqrt(d2)-R;
+        if(R>0){
+            var ex=R*rx,ey=R*ry,ez=R*rz;
+            var mx=Math.ceil(ex-1e-9),my=Math.ceil(ey-1e-9),mz=Math.ceil(ez-1e-9);
+            for(var sx=-mx;sx<=mx;sx++){
+                var cx=at.fx+sx;
+                var i0=Math.ceil((cx-ex)*nx-0.5),i1=Math.floor((cx+ex)*nx-0.5);
+                if(i0<0)i0=0;if(i1>nx-1)i1=nx-1;
+                if(i1<i0)continue;
+                for(var sy=-my;sy<=my;sy++){
+                    var cy=at.fy+sy;
+                    var j0=Math.ceil((cy-ey)*ny-0.5),j1=Math.floor((cy+ey)*ny-0.5);
+                    if(j0<0)j0=0;if(j1>ny-1)j1=ny-1;
+                    if(j1<j0)continue;
+                    for(var sz=-mz;sz<=mz;sz++){
+                        var cz=at.fz+sz;
+                        var k0=Math.ceil((cz-ez)*nz-0.5),k1=Math.floor((cz+ez)*nz-0.5);
+                        if(k0<0)k0=0;if(k1>nz-1)k1=nz-1;
+                        if(k1<k0)continue;
+                        for(var ii=i0;ii<=i1;ii++){
+                            var du=(ii+0.5)/nx-cx;
+                            var ux=du*lv[0][0],uy=du*lv[0][1],uz=du*lv[0][2];
+                            for(var jj=j0;jj<=j1;jj++){
+                                var dv=(jj+0.5)/ny-cy;
+                                var vx=ux+dv*lv[1][0],vy=uy+dv*lv[1][1],vz=uz+dv*lv[1][2];
+                                for(var kk=k0;kk<=k1;kk++){
+                                    var dw=(kk+0.5)/nz-cz;
+                                    var dx=vx+dw*lv[2][0],dy=vy+dw*lv[2][1],dz=vz+dw*lv[2][2];
+                                    var idx=(kk*ny+jj)*nx+ii;
+                                    var d2=dx*dx+dy*dy+dz*dz;
+                                    var lim=field[idx]+R;
+                                    // sqrt(d2) - R beats the stored value only when
+                                    // d2 < (stored + R)^2, so the root is taken on
+                                    // the few voxels an atom actually improves.
+                                    if(lim>0&&d2<lim*lim)field[idx]=Math.sqrt(d2)-R;
+                                }
                             }
                         }
                     }
                 }
             }
         }
+        if(deadline&&cavNow()>=deadline)return false;
     }
-    return field;
+    return true;
+}
+function cavField(atoms,lv,inv,probe,nx,ny,nz){
+    var job=cavFieldJob(atoms,lv,inv,probe,nx,ny,nz);
+    while(!cavFieldChunk(job,0)){}
+    return job.field;
 }
 
 // Six-connected components of the free voxels, with a lift into the universal
@@ -14888,89 +15160,123 @@ function cavFreeRadius(x,y,z,atoms,lv,nx,ny,nz){
 // halving the step down to one voxel and finished with a hill climb, which
 // makes the reported point a genuine local maximum rather than just the best
 // of a fixed stencil.
-function cavDeepen(comps,allCount,comp,atoms,lv,nx,ny,nz){
-    if(!comps.length)return;
+//
+// The walk is a resumable job: every free-radius sample costs one atom sweep,
+// so on a cell with thousands of atoms the caller needs to stop between
+// samples, paint its progress and answer a Cancel. The synchronous path runs
+// the same states with no deadline, which keeps one implementation.
+var CAV_N26=(function(){
+    var out=[],oz,oy,ox;
+    for(oz=-1;oz<=1;oz++)for(oy=-1;oy<=1;oy++)for(ox=-1;ox<=1;ox++){
+        if(ox||oy||oz)out.push([ox,oy,oz]);
+    }
+    return out;
+})();
+function cavDeepenJob(comps,allCount,comp,atoms,lv,nx,ny,nz){
     var total=allCount+1,i;
     var bestV=new Float64Array(total);
     var bestX=new Int32Array(total),bestY=new Int32Array(total),bestZ=new Int32Array(total);
     for(i=0;i<total;i++)bestV[i]=-1e9;
-    var stride=8;
-    for(var z=0;z<nz;z+=stride){
-        for(var y=0;y<ny;y+=stride){
-            for(var x=0;x<nx;x+=stride){
-                var id=comp[(z*ny+y)*nx+x];
-                if(!id||id>=total)continue;
-                var v=cavFreeRadius(x,y,z,atoms,lv,nx,ny,nz);
-                if(v>bestV[id]){bestV[id]=v;bestX[id]=x;bestY[id]=y;bestZ[id]=z}
+    return {comps:comps,total:total,comp:comp,atoms:atoms,lv:lv,
+        nx:nx,ny:ny,nz:nz,skip:!comps.length,
+        bestV:bestV,bestX:bestX,bestY:bestY,bestZ:bestZ,
+        cz:0,cy:0,cx:0,
+        ci:0,stage:0,
+        bx:0,by:0,bz:0,bv:0,
+        hstep:4,nIdx:0,moved:false,guard:0,
+        lbv:0,lbx:0,lby:0,lbz:0};
+}
+function cavDeepenCoarseChunk(job,deadline){
+    if(job.skip)return true;
+    var comp=job.comp,nx=job.nx,ny=job.ny,nz=job.nz;
+    while(job.cz<nz){
+        var id=comp[(job.cz*ny+job.cy)*nx+job.cx];
+        if(id&&id<job.total){
+            var v=cavFreeRadius(job.cx,job.cy,job.cz,job.atoms,job.lv,nx,ny,nz);
+            if(v>job.bestV[id]){
+                job.bestV[id]=v;
+                job.bestX[id]=job.cx;job.bestY[id]=job.cy;job.bestZ[id]=job.cz;
             }
         }
-    }
-    for(i=0;i<comps.length;i++){
-        var c=comps[i];
-        var bx=bestX[c.id],by=bestY[c.id],bz=bestZ[c.id],bv=bestV[c.id];
-        if(bv<-1e8){
-            // No coarse sample fell inside a pocket this small: start from the
-            // region's own seed and let the refinement walk to its middle.
-            bx=c.seed%nx;by=((c.seed-bx)/nx)%ny;bz=(c.seed-bx-by*nx)/(nx*ny);
-            bv=cavFreeRadius(bx,by,bz,atoms,lv,nx,ny,nz);
+        job.cx+=8;
+        if(job.cx>=nx){
+            job.cx=0;job.cy+=8;
+            if(job.cy>=ny){job.cy=0;job.cz+=8}
         }
-        if(i>=CAV_DEEP_MAX){
-            c.deepest=[(bx+0.5)/nx,(by+0.5)/ny,(bz+0.5)/nz];
-            c.radius=bv;
+        if(deadline&&cavNow()>=deadline)return false;
+    }
+    return true;
+}
+function cavDeepenRefineChunk(job,deadline){
+    if(job.skip)return true;
+    var nx=job.nx,ny=job.ny,nz=job.nz;
+    while(job.ci<job.comps.length){
+        var c=job.comps[job.ci];
+        if(job.stage===0){
+            var bx=job.bestX[c.id],by=job.bestY[c.id],bz=job.bestZ[c.id],bv=job.bestV[c.id];
+            if(bv<-1e8){
+                // No coarse sample fell inside a pocket this small: start from
+                // the region's own seed and let the refinement walk to its
+                // middle.
+                bx=c.seed%nx;by=((c.seed-bx)/nx)%ny;bz=(c.seed-bx-by*nx)/(nx*ny);
+                bv=cavFreeRadius(bx,by,bz,job.atoms,job.lv,nx,ny,nz);
+            }
+            if(job.ci>=CAV_DEEP_MAX){
+                c.deepest=[(bx+0.5)/nx,(by+0.5)/ny,(bz+0.5)/nz];
+                c.radius=bv;
+                job.ci++;
+                continue;
+            }
+            job.bx=bx;job.by=by;job.bz=bz;job.bv=bv;
+            job.hstep=4;job.nIdx=0;job.stage=1;
             continue;
         }
-        for(var step=4;step>=2;step>>=1){
-            var lbv=bv,lbx=bx,lby=by,lbz=bz;
-            for(var oz=-1;oz<=1;oz++){
-                for(var oy=-1;oy<=1;oy++){
-                    for(var ox=-1;ox<=1;ox++){
-                        if(!ox&&!oy&&!oz)continue;
-                        var x2=((bx+ox*step)%nx+nx)%nx;
-                        var y2=((by+oy*step)%ny+ny)%ny;
-                        var z2=((bz+oz*step)%nz+nz)%nz;
-                        var vv=cavFreeRadius(x2,y2,z2,atoms,lv,nx,ny,nz);
-                        if(vv>lbv){lbv=vv;lbx=x2;lby=y2;lbz=z2}
-                    }
-                }
+        if(job.stage===1){
+            // Halving: 26 neighbours at four, then at two voxels, and only
+            // the best of each pass is kept.
+            if(job.nIdx===0){job.lbv=job.bv;job.lbx=job.bx;job.lby=job.by;job.lbz=job.bz}
+            var nb=CAV_N26[job.nIdx++];
+            var x2=((job.bx+nb[0]*job.hstep)%nx+nx)%nx;
+            var y2=((job.by+nb[1]*job.hstep)%ny+ny)%ny;
+            var z2=((job.bz+nb[2]*job.hstep)%nz+nz)%nz;
+            var vv=cavFreeRadius(x2,y2,z2,job.atoms,job.lv,nx,ny,nz);
+            if(vv>job.lbv){job.lbv=vv;job.lbx=x2;job.lby=y2;job.lbz=z2}
+            if(job.nIdx>=CAV_N26.length){
+                job.bx=job.lbx;job.by=job.lby;job.bz=job.lbz;job.bv=job.lbv;
+                job.nIdx=0;
+                if(job.hstep===4)job.hstep=2;
+                else{job.stage=2;job.moved=true;job.guard=0}
             }
-            bx=lbx;by=lby;bz=lbz;bv=lbv;
+            if(deadline&&cavNow()>=deadline)return false;
+            continue;
         }
-        var moved=true,guard=0;
-        while(moved&&guard++<64){
-            moved=false;
-            for(var mz=-1;mz<=1;mz++){
-                for(var my=-1;my<=1;my++){
-                    for(var mx=-1;mx<=1;mx++){
-                        if(!mx&&!my&&!mz)continue;
-                        var x3=((bx+mx)%nx+nx)%nx;
-                        var y3=((by+my)%ny+ny)%ny;
-                        var z3=((bz+mz)%nz+nz)%nz;
-                        var v3=cavFreeRadius(x3,y3,z3,atoms,lv,nx,ny,nz);
-                        // Strictly better only: a tie would let the walk
-                        // shuttle between equal voxels.
-                        if(v3>bv+1e-12){bv=v3;bx=x3;by=y3;bz=z3;moved=true}
-                    }
-                }
+        // Hill climb, one 26-neighbour sweep per pass, at most 64 passes.
+        var nb2=CAV_N26[job.nIdx++];
+        var x3=((job.bx+nb2[0])%nx+nx)%nx;
+        var y3=((job.by+nb2[1])%ny+ny)%ny;
+        var z3=((job.bz+nb2[2])%nz+nz)%nz;
+        var v3=cavFreeRadius(x3,y3,z3,job.atoms,job.lv,nx,ny,nz);
+        // Strictly better only: a tie would let the walk shuttle between
+        // equal voxels.
+        if(v3>job.bv+1e-12){job.bv=v3;job.bx=x3;job.by=y3;job.bz=z3;job.moved=true}
+        if(job.nIdx>=CAV_N26.length){
+            job.nIdx=0;
+            if(job.moved&&job.guard<64){job.guard++;job.moved=false}
+            else{
+                c.deepest=[(job.bx+0.5)/nx,(job.by+0.5)/ny,(job.bz+0.5)/nz];
+                c.radius=job.bv;
+                job.ci++;job.stage=0;
             }
         }
-        c.deepest=[(bx+0.5)/nx,(by+0.5)/ny,(bz+0.5)/nz];
-        c.radius=bv;
+        if(deadline&&cavNow()>=deadline)return false;
     }
+    return true;
 }
-
-function cavityCompute(probe){
-    if(!CRY||!CRY_INV)return {report:{ok:false,reason:'No unit cell.'}};
-    var lv=CRY.latticeVectors;
-    var atoms=cavityAtoms();
-    if(atoms.length===0)return {report:{ok:false,reason:'No atoms in the unit cell.'}};
-    var dims=cavGridDims(lv);
-    var nx=dims[0],ny=dims[1],nz=dims[2];
-    var cellVolume=cavCellVolume(lv);
-    var voxelVolume=cellVolume/(nx*ny*nz);
-    var field=cavField(atoms,lv,CRY_INV,probe,nx,ny,nz);
-    var split=cavComponents(field,nx,ny,nz,voxelVolume);
-    var cavities=[],channels=[],free=0;
-    for(var i=0;i<split.components.length;i++){
+// The regions the report lists, with the refinement order: largest volume
+// first, so the deepest-point budget lands on the rows a reader is looking at.
+function cavGroup(split){
+    var cavities=[],channels=[],free=0,i;
+    for(i=0;i<split.components.length;i++){
         var c=split.components[i];
         if(c.volume<CAV_MIN_VOLUME)continue;
         free+=c.volume;
@@ -14978,18 +15284,88 @@ function cavityCompute(probe){
     }
     function byVolume(a,b){return b.volume-a.volume}
     cavities.sort(byVolume);channels.sort(byVolume);
-    // The refinement budget is spent on the largest regions: the report is
-    // sorted by volume, so those are the rows a reader is looking at.
     var refine=cavities.concat(channels);
     refine.sort(byVolume);
-    cavDeepen(refine,split.components.length,split.comp,atoms,lv,nx,ny,nz);
-    var step=Math.max(cavEdge(lv,0)/nx,cavEdge(lv,1)/ny,cavEdge(lv,2)/nz);
-    var report={ok:true,reason:'',probe:probe,nx:nx,ny:ny,nz:nz,step:step,
-        cellVolume:cellVolume,voxelVolume:voxelVolume,atoms:atoms.length,
-        cavities:cavities,channels:channels,freeVolume:free,
-        freeFraction:cellVolume>0?free/cellVolume:0};
-    return {report:report,field:field,comp:split.comp,
-        components:split.components,surfaceId:0,surfacePos:null};
+    return {cavities:cavities,channels:channels,free:free,refine:refine};
+}
+
+// One analysis, from the atoms to the finished cache. The job runs in four
+// states (field, splitting, coarse depth, refinement) so the panel can drive
+// it a slice at a time; cavityCompute drives the same states without a
+// deadline and is what the report's own tests measure.
+function cavJobStart(probe){
+    if(!CRY||!CRY_INV)return {error:{report:{ok:false,reason:'No unit cell.'}}};
+    var lv=CRY.latticeVectors;
+    var atoms=cavityAtoms();
+    if(atoms.length===0)return {error:{report:{ok:false,reason:'No atoms in the unit cell.'}}};
+    var dims=cavGridDims(lv);
+    var nx=dims[0],ny=dims[1],nz=dims[2];
+    var cellVolume=cavCellVolume(lv);
+    var voxelVolume=cellVolume/(nx*ny*nz);
+    return {probe:probe,atoms:atoms,lv:lv,nx:nx,ny:ny,nz:nz,
+        cellVolume:cellVolume,voxelVolume:voxelVolume,
+        stage:0,field:null,fieldJob:null,split:null,group:null,deepen:null};
+}
+function cavJobStep(job,deadline){
+    if(job.stage===0){
+        job.fieldJob=cavFieldJob(job.atoms,job.lv,CRY_INV,job.probe,job.nx,job.ny,job.nz);
+        job.field=job.fieldJob.field;
+        job.stage=1;
+    }
+    if(job.stage===1){
+        if(!cavFieldChunk(job.fieldJob,deadline))return false;
+        job.split=cavComponents(job.field,job.nx,job.ny,job.nz,job.voxelVolume);
+        job.group=cavGroup(job.split);
+        job.stage=2;
+    }
+    if(job.stage===2){
+        if(!job.deepen)job.deepen=cavDeepenJob(job.group.refine,job.split.components.length,
+            job.split.comp,job.atoms,job.lv,job.nx,job.ny,job.nz);
+        if(!cavDeepenCoarseChunk(job.deepen,deadline))return false;
+        job.stage=3;
+    }
+    if(job.stage===3){
+        if(!cavDeepenRefineChunk(job.deepen,deadline))return false;
+        job.stage=4;
+    }
+    return true;
+}
+function cavJobPercent(job){
+    if(job.stage<=1){
+        var fj=job.fieldJob;
+        return fj&&fj.atoms.length?fj.ai/fj.atoms.length:1;
+    }
+    if(job.stage===2){
+        var dj=job.deepen;
+        return dj&&dj.nz>0?dj.cz/dj.nz:0;
+    }
+    if(job.stage===3&&job.deepen&&job.deepen.comps.length){
+        return job.deepen.ci/job.deepen.comps.length;
+    }
+    return 1;
+}
+function cavJobProgressText(job){
+    if(job.stage<=1)return 'Analysing: marking the atoms ('+Math.round(cavJobPercent(job)*100)+'%)';
+    if(job.stage===2)return 'Analysing: sampling the deepest points ('+Math.round(cavJobPercent(job)*100)+'%)';
+    if(job.stage===3)return 'Analysing: refining the deepest points ('+Math.round(cavJobPercent(job)*100)+'%)';
+    return 'Analysing...';
+}
+function cavAssemble(job){
+    var step=Math.max(cavEdge(job.lv,0)/job.nx,cavEdge(job.lv,1)/job.ny,cavEdge(job.lv,2)/job.nz);
+    var g=job.group;
+    var report={ok:true,reason:'',probe:job.probe,nx:job.nx,ny:job.ny,nz:job.nz,step:step,
+        cellVolume:job.cellVolume,voxelVolume:job.voxelVolume,atoms:job.atoms.length,
+        cavities:g.cavities,channels:g.channels,freeVolume:g.free,
+        freeFraction:job.cellVolume>0?g.free/job.cellVolume:0};
+    return {report:report,field:job.field,comp:job.split.comp,
+        components:job.split.components,surfaceId:0,surfacePos:null};
+}
+
+function cavityCompute(probe){
+    var job=cavJobStart(probe);
+    if(job.error)return job.error;
+    while(!cavJobStep(job,0)){}
+    return cavAssemble(job);
 }
 
 // The isosurface f = 0 of one component, as a plain triangle list in absolute
@@ -15110,7 +15486,9 @@ function cavityRefresh(){
 }
 
 function cavityInvalidate(){
+    if(cavAbortJob())cavSetRunButton('Analyse','Scan the unit cell with this probe');
     cavCache=null;
+    cavJobPrev=null;
     cavSelected=-1;
     cavNote='';
     cavityClearSurface();
@@ -15121,6 +15499,11 @@ function cavityRenderPanel(){
     var sum=document.getElementById('cav-summary');
     var list=document.getElementById('cav-list');
     if(!sum||!list)return;
+    if(cavJob){
+        sum.textContent=cavJobProgressText(cavJob);
+        list.innerHTML='';
+        return;
+    }
     if(!cavCache){
         sum.textContent=CRY?'Not analysed yet.':'No unit cell.';
         list.innerHTML='';
@@ -15159,6 +15542,24 @@ function cavitySelect(id){
     cavityShowSelected();
 }
 
+// The analysis is driven a slice at a time: each pass works for CAV_SLICE_MS
+// and hands the event loop back, so even a cell with thousands of atoms keeps
+// the page alive and the summary line counts up. The Analyse button becomes
+// Cancel while the job runs, and a cell edit drops the job with the report.
+var cavJob=null,cavJobSeq=0,cavJobPrev=null;
+
+function cavSetRunButton(label,title){
+    var run=document.getElementById('cav-run');
+    if(run){run.textContent=label;run.title=title}
+}
+
+function cavAbortJob(){
+    if(!cavJob)return false;
+    cavJob=null;
+    cavJobSeq++;
+    return true;
+}
+
 function cavityAnalyse(){
     if(!CRY)return;
     var input=document.getElementById('cav-probe');
@@ -15166,14 +15567,74 @@ function cavityAnalyse(){
     if(!(probe>=0)||!isFinite(probe))probe=CAV_PROBE_DEFAULT;
     if(probe>20)probe=20;
     if(input)input.value=String(probe);
+    // A probe change while a run is going starts the new run from scratch.
+    if(cavAbortJob())cavSetRunButton('Analyse','Scan the unit cell with this probe');
+    // The old report stays reachable for a cancel, but it is off the panel
+    // while the new run works: its rows would draw surfaces the new numbers
+    // no longer describe.
+    cavJobPrev=cavCache;
+    cavCache=null;
     cavSelected=-1;
     cavNote='';
     cavityClearSurface();
-    cavCache=cavityCompute(probe);
+    var noteEl=document.getElementById('cav-note');
+    if(noteEl)noteEl.textContent='';
+    var job=cavJobStart(probe);
+    if(job.error){
+        cavJobPrev=null;
+        cavCache=job.error;
+        cavityRenderPanel();
+        if(cavOpen){syncPanelChips();layoutPanels();}
+        return;
+    }
+    cavJob=job;
+    var seq=++cavJobSeq;
+    cavSetRunButton('Cancel','Stop the cavity analysis');
+    cavityRenderPanel();
+    setTimeout(function(){cavJobTick(seq)},0);
+}
+
+function cavJobTick(seq){
+    if(!cavJob||seq!==cavJobSeq)return;
+    var job=cavJob;
+    var done;
+    try{
+        done=cavJobStep(job,cavNow()+CAV_SLICE_MS);
+    }catch(e){
+        cavJob=null;
+        cavJobSeq++;
+        cavJobPrev=null;
+        cavSetRunButton('Analyse','Scan the unit cell with this probe');
+        cavCache={report:{ok:false,reason:'The analysis stopped: '+
+            (e&&e.message?e.message:'unexpected error')}};
+        cavityRenderPanel();
+        return;
+    }
+    if(!cavJob||seq!==cavJobSeq)return;
+    if(!done){
+        var sum=document.getElementById('cav-summary');
+        if(sum)sum.textContent=cavJobProgressText(job);
+        setTimeout(function(){cavJobTick(seq)},0);
+        return;
+    }
+    cavJob=null;
+    cavJobPrev=null;
+    cavCache=cavAssemble(job);
+    cavSetRunButton('Analyse','Scan the unit cell with this probe');
     cavityRenderPanel();
     var note=document.getElementById('cav-note');
     if(note)note.textContent='';
     if(cavOpen){syncPanelChips();layoutPanels();}
+}
+
+function cavityCancelAnalysis(){
+    if(!cavAbortJob())return;
+    cavSetRunButton('Analyse','Scan the unit cell with this probe');
+    if(cavJobPrev){cavCache=cavJobPrev;cavJobPrev=null}
+    cavityRenderPanel();
+    var note=document.getElementById('cav-note');
+    if(note)note.textContent=cavCache?'Analysis cancelled; the report above is the previous run.':'Analysis cancelled.';
+    if(cavOpen)layoutPanels();
 }
 
 function cavityOpenPanel(){
@@ -15183,7 +15644,7 @@ function cavityOpenPanel(){
     cavOpen=true;
     panelMinState.cav=false;
     panel.style.display='block';
-    if(!cavCache)cavityAnalyse();
+    if(!cavCache&&!cavJob)cavityAnalyse();
     else cavityRenderPanel();
     syncPanelChips();
     layoutPanels();
@@ -15216,7 +15677,10 @@ function cavityClosePanel(){
     var closeBtn=document.getElementById('cav-close');
     if(closeBtn)closeBtn.addEventListener('click',cavityMinimizePanel);
     var run=document.getElementById('cav-run');
-    if(run)run.addEventListener('click',cavityAnalyse);
+    if(run)run.addEventListener('click',function(){
+        if(cavJob)cavityCancelAnalysis();
+        else cavityAnalyse();
+    });
     var probe=document.getElementById('cav-probe');
     if(probe)probe.addEventListener('change',cavityAnalyse);
     var clear=document.getElementById('cav-clear');
@@ -16034,7 +16498,7 @@ function provBaseName(p){
 }
 function provClone(){
     var edits=[],modes={},i,k;
-    for(i=0;i<provEdits.length;i++)edits.push({k:provEdits[i].k,n:provEdits[i].n});
+    for(i=0;i<provEdits.length;i++)edits.push({k:provEdits[i].k,n:provEdits[i].n,d:provEdits[i].d||null});
     for(k in provModes){if(provModes.hasOwnProperty(k))modes[k]={freq:provModes[k].freq,scale:provModes[k].scale}}
     return {edits:edits,merged:provMerged.slice(),modes:modes};
 }
@@ -16042,7 +16506,7 @@ function provRestore(p){
     var i,k;
     provEdits=[];provMerged=[];provModes={};
     if(!p)return;
-    if(p.edits)for(i=0;i<p.edits.length;i++)provEdits.push({k:p.edits[i].k,n:p.edits[i].n});
+    if(p.edits)for(i=0;i<p.edits.length;i++)provEdits.push({k:p.edits[i].k,n:p.edits[i].n,d:p.edits[i].d||null});
     if(p.merged)provMerged=p.merged.slice();
     if(p.modes)for(k in p.modes){if(p.modes.hasOwnProperty(k))provModes[k]={freq:p.modes[k].freq,scale:p.modes[k].scale}}
 }
@@ -16055,7 +16519,21 @@ function provMark(kind,n){
     for(var i=0;i<provEdits.length;i++){
         if(provEdits[i].k===kind){provEdits[i].n=(provEdits[i].n||0)+(n||1);return}
     }
-    provEdits.push({k:kind,n:n||1});
+    provEdits.push({k:kind,n:n||1,d:null});
+}
+/** A stateful choice rather than a counted edit: the cell in force, the
+ *  disorder alternative on screen, whether its sites count as fully occupied.
+ *  Only the latest choice describes the structure, so it replaces the clause
+ *  instead of adding a second one ("2 x cell edited" would be wrong). */
+function provSet(kind,detail){
+    for(var i=0;i<provEdits.length;i++){
+        if(provEdits[i].k===kind){
+            provEdits[i].n=1;
+            provEdits[i].d=detail||null;
+            return;
+        }
+    }
+    provEdits.push({k:kind,n:1,d:detail||null});
 }
 /** A change that was taken back without an Undo (MM "Restore initial", a
  *  displacement dragged back to zero) is not an edit any more. */
@@ -16159,6 +16637,9 @@ function provEditText(e){
         case 'bondAngle':return 'bond angle adjusted';
         case 'dihedral':return 'dihedral adjusted';
         case 'disorder':return 'disorder removed';
+        case 'disorderGroup':return e.d?('disorder group '+e.d+' shown'):'disorder alternative shown';
+        case 'occNormalize':return 'disorder sites counted at full occupancy';
+        case 'cellEdit':return e.d?('cell edited to '+e.d):'cell edited';
         case 'supercell':return 'supercell rebuilt';
     }
     return '';
