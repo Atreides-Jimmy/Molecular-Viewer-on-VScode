@@ -58,6 +58,18 @@ export interface Atom {
      * different parts of a structure and occupancy alone cannot tell them apart.
      */
     disorderGroup?: string;
+    /**
+     * Anisotropic displacement tensor from `_atom_site_aniso_U_*`, in the
+     * Cartesian frame of the cell (Angstrom squared), as
+     * `[U11, U22, U33, U12, U13, U23]`.
+     *
+     * The parser rotates the tensor with every symmetry operation it places an
+     * image under, so the value on a cell atom describes *that image*: an atom
+     * on a general position of a cubic group has a different orientation from
+     * its symmetry mates, which is exactly what an ORTEP drawing shows. Absent
+     * on every atom whose site the file lists no aniso record for.
+     */
+    uAniso?: number[];
 }
 
 export interface Bond {
@@ -114,6 +126,56 @@ export interface AsymAtom {
     symmetryOps: number[];
     /** `_atom_site_disorder_group` for this site, when the file states one. */
     disorderGroup?: string;
+    /**
+     * The site's anisotropic displacement tensor as the file lists it
+     * (`[U11, U22, U33, U12, U13, U23]`, Cartesian Angstrom squared), before
+     * any symmetry rotation. Every image in `baseAtoms` carries its own rotated
+     * copy; this is the one a save-back can write verbatim.
+     */
+    uAniso?: number[];
+}
+
+/**
+ * What a file's space-group *name* says against what its own symmetry table
+ * says, when the two disagree.
+ *
+ * The file's operations stay authoritative — they are what the coordinates were
+ * written for — so this is a report, not a correction. Both counts are the
+ * expansion each statement produces from the same sites, which is what makes
+ * the disagreement visible as a number (`P 1 21/c 1` gives 4 ops and 24 atoms,
+ * the file's 1 op gives 12).
+ */
+export interface CrystalSymmetryCheck {
+    /** The name the file states, as written. */
+    declared: string;
+    /** The table's Hermann-Mauguin symbol for the setting it matched. */
+    symbol: string;
+    /** The setting the table chose, described (`origin choice 2`). */
+    settingLabel: string;
+    /** The space-group number of that setting. */
+    number: number;
+    /** The operations the file itself lists. */
+    fileOps: string[];
+    /** The operations the declared name stands for. */
+    tableOps: string[];
+    /** Atoms the file's operations expand the listed sites to. */
+    fileAtoms: number;
+    /** Atoms the name's operations would expand the same sites to. */
+    tableAtoms: number;
+}
+
+/**
+ * The cell the declared name stands for, expanded from the same asymmetric
+ * unit, kept so the page can offer a one-time switch when `CrystalSymmetryCheck`
+ * finds the file and its name inconsistent. `baseAtoms`/`asymAtoms` are a
+ * complete alternative expansion, not a transform of the file's.
+ */
+export interface CrystalSymmetryAlternative {
+    ops: string[];
+    symbol: string;
+    settingLabel: string;
+    baseAtoms: Atom[];
+    asymAtoms: AsymAtom[];
 }
 
 export interface CrystalData {
@@ -132,6 +194,11 @@ export interface CrystalData {
      * space-group name. Absent on formats that carry no operations at all.
      */
     symmetrySource?: 'file' | 'builtin';
+    /** Set when the file states operations *and* a name the table knows, and
+     * the two expansions disagree. The file's operations are still used. */
+    symmetryCheck?: CrystalSymmetryCheck;
+    /** The name's expansion, offered by the page as a one-time switch. */
+    symmetryAlternative?: CrystalSymmetryAlternative;
     baseAtoms: Atom[];
     baseBonds: Bond[];
     /**
