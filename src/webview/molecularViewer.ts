@@ -1624,6 +1624,7 @@ input,textarea{-webkit-user-select:text;user-select:text}
 #xrd-panel select{flex:1;min-width:0;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;padding:1px 2px;font-size:11px}
 #xrd-panel select.xr-narrow{flex:0 0 62px}
 #xrd-panel .xr-summary{font-size:11px;color:var(--vscode-descriptionForeground,#999);margin:2px 0;min-height:14px}
+#xrd-panel .xr-summary.xr-running{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #xrd-panel canvas{display:block;width:100%;height:150px;border:1px solid rgba(128,128,128,0.25);border-radius:3px;background:#0d1117;cursor:crosshair}
 #xrd-panel .xr-note{font-size:10px;color:var(--vscode-descriptionForeground,#999);line-height:1.4;margin:3px 0}
 #xrd-panel .xr-list{max-height:132px;overflow-y:auto;border-top:1px solid rgba(128,128,128,0.25);margin-top:3px;font-variant-numeric:tabular-nums}
@@ -9461,6 +9462,10 @@ function crystalDiffRefresh(){
     updateDiffHighlights(diffs);
 }
 function startDiff(msg){
+    // Polyhedra is refused once the comparison is up (setDisplayStyle), so a
+    // structure that was already wearing it is put back into the style both
+    // halves can draw before the right-hand model is built.
+    if(displayStyle==='polyhedra')setDisplayStyle('ball');
     // A powder pattern or a cavity report describes one cell, and the
     // comparison has two: the reading aids go away before the second structure
     // is drawn, so neither can cover its half of the view.
@@ -9863,6 +9868,9 @@ function buildDiffModel(hiAtom,hiBond){
 // hulls of its metal/metalloid centres over its ball-and-stick picture. The
 // comparison's bonds carry no periodic image of their own (that half is built
 // against transformed coordinates), so there is no lattice offset to resolve.
+// The style cannot be chosen while the comparison is up (setDisplayStyle
+// refuses it: a crystal comparison carries no bonds for this side, so the two
+// halves would disagree), but the model keeps the path its unit tests read.
 function buildDiffPolyhedra(){
     disposePolyMesh(diffPolyFacesMesh);
     disposePolyMesh(diffPolyEdgesMesh);
@@ -12337,7 +12345,7 @@ function neighComputeMolecule(){
 }
 
 function neighComputeCrystal(){
-    var out={rows:[],total:0,bonded:0};
+    var out={rows:[],total:0,bonded:0,trunc:null};
     var abi=neighAnchor.bi,abase=CRY&&CRY.baseAtoms?CRY.baseAtoms[abi]:null;
     if(!abase||!neighBaseVisible(abase))return out;
     var as=neighAnchor.shift,lv=CRY.latticeVectors;
@@ -12347,10 +12355,19 @@ function neighComputeCrystal(){
     // any axis, so this box holds every image that could qualify and nothing
     // else. The repeat cap is the same one the rest of the page uses.
     var lim=[1,1,1],k;
+    var capped='',covered=Infinity;
     for(k=0;k<3;k++){
         var q=widths[k]>1e-9?neighRadius/widths[k]:CRYSTAL_MAX_IMAGE_REPEAT;
         lim[k]=Math.min(CRYSTAL_MAX_IMAGE_REPEAT,Math.max(1,Math.ceil(q+1e-9)));
+        if(widths[k]>1e-9){
+            // The cap truncates an axis when the radius reaches further than
+            // the four images the box holds; the radius every axis still
+            // covers is what the search can honestly promise.
+            if(q>CRYSTAL_MAX_IMAGE_REPEAT+1e-9)capped+='abc'.charAt(k);
+            if(lim[k]*widths[k]<covered)covered=lim[k]*widths[k];
+        }
     }
+    if(capped)out.trunc={axes:capped,radius:covered};
     var bondSet=neighCrystalBondSet();
     var disp=neighDisplayMap();
     var r2=neighRadius*neighRadius;
@@ -12499,6 +12516,14 @@ function neighRefresh(){
     if(neighRows.length===0)txt='No contacts within '+neighRadius.toFixed(2)+' A';
     else txt=neighRows.length+' contact'+(neighRows.length===1?'':'s')+' within '+neighRadius.toFixed(2)+' A';
     if(neighSkipBonded&&res.bonded>0)txt+=' ('+res.bonded+' bonded hidden)';
+    if(res.trunc){
+        // The image box is capped, so a radius wider than the cap can miss a
+        // contact that is inside it. The panel says which axes were capped and
+        // the radius every axis still covers, rather than reporting a short
+        // list as complete.
+        txt+=' - image search capped at '+CRYSTAL_MAX_IMAGE_REPEAT+' cells along '+res.trunc.axes+
+             ': contacts beyond '+res.trunc.radius.toFixed(2)+' A may be missing';
+    }
     if(neighRows.length>shown)txt+=' - nearest '+shown+' shown';
     if(sumEl)sumEl.textContent=txt;
     var html='';
@@ -14349,11 +14374,17 @@ function xrdCellSites(){
     return {sites:sites,missing:miss};
 }
 // The pattern is built as a resumable job so a large cell cannot freeze the
-// page: enumeration, structure factors, peak merging and profile broadening
-// each remember where they stopped, and xrdPatternStep runs until the slice's
-// deadline. The sums and the order of the stages are the ones the pattern
-// always had; only the chunking is new. xrdPattern() drives the same job to
-// completion in one call, which is what the engine tests read.
+// page: enumeration, the reflection sort, structure factors, peak merging and
+// profile broadening each remember where they stopped, and xrdPatternStep runs
+// until the slice's deadline. The sums and the order of the stages are the ones
+// the pattern always had; only the chunking is new. xrdPattern() drives the
+// same job to completion in one call, which is what the engine tests read.
+function xrdReflectionOrder(p,q){
+    if(p.two!==q.two)return p.two-q.two;
+    if(p.h!==q.h)return p.h-q.h;
+    if(p.k!==q.k)return p.k-q.k;
+    return p.l-q.l;
+}
 function xrdProfileAdd(job,two,inten){
     var fwhm=xrdCagliotiFwhm(two);
     if(!(fwhm>0.005))fwhm=0.005;
@@ -14390,6 +14421,8 @@ function xrdPatternStart(sites,lv,lambda,twoMax,lambda2){
         indexCapped:indexCapped,limA:limA,limB:limB,limC:limC,
         phase:'enum',h:-limA,k:-limB,list:[],
         found:0,capped:false,i:0,peaks:[],
+        sortWidth:1,sortStart:0,sortDst:null,
+        sortLo:0,sortMid:0,sortEnd:null,sortI:0,sortJ:0,sortK:0,
         peakIndex:0,n:0,prof:null
     };
 }
@@ -14422,16 +14455,57 @@ function xrdPatternStep(job,deadline){
             continue;
         }
         if(job.phase==='sort'){
-            job.list.sort(function(p,q){
-                if(p.two!==q.two)return p.two-q.two;
-                if(p.h!==q.h)return p.h-q.h;
-                if(p.k!==q.k)return p.k-q.k;
-                return p.l-q.l;
-            });
-            job.found=job.list.length;
-            job.capped=job.found>XRD_MAX_REFLECTIONS;
-            if(job.capped)job.list.length=XRD_MAX_REFLECTIONS;
-            job.phase='sf';
+            // A bottom-up merge sort, resumed across slices: the built-in sort
+            // runs in one uninterruptible chunk, which on a large list can
+            // overrun the slice once. The comparator (and the stable <= merge)
+            // is the one the whole pattern was always ordered by, so the final
+            // sequence is unchanged.
+            var sortN=job.list.length;
+            if(sortN<2){
+                job.found=sortN;job.capped=false;
+                job.phase='sf';
+                continue;
+            }
+            if(!job.sortDst||job.sortDst.length!==sortN)job.sortDst=new Array(sortN);
+            if(job.sortWidth>=sortN){
+                // The last pass left the sorted run in job.list; the scratch
+                // buffer has done its work.
+                job.found=sortN;
+                job.capped=sortN>XRD_MAX_REFLECTIONS;
+                if(job.capped)job.list.length=XRD_MAX_REFLECTIONS;
+                job.sortDst=null;
+                job.phase='sf';
+                continue;
+            }
+            var sortSrc=job.list,sortDst=job.sortDst;
+            if(job.sortEnd==null){
+                var sortLo=job.sortStart;
+                var sortMid=Math.min(sortLo+job.sortWidth,sortN);
+                var sortHi=Math.min(sortLo+2*job.sortWidth,sortN);
+                job.sortLo=sortLo;job.sortMid=sortMid;job.sortEnd=sortHi;
+                job.sortI=sortLo;job.sortJ=sortLo;job.sortK=sortMid;
+            }
+            while(job.sortI<job.sortEnd){
+                var take;
+                if(job.sortJ>=job.sortMid)take=sortSrc[job.sortK++];
+                else if(job.sortK>=job.sortEnd)take=sortSrc[job.sortJ++];
+                else take=xrdReflectionOrder(sortSrc[job.sortJ],sortSrc[job.sortK])<=0?
+                    sortSrc[job.sortJ++]:sortSrc[job.sortK++];
+                sortDst[job.sortI++]=take;
+                if((job.sortI&511)===0&&deadline!==Infinity&&Date.now()>=deadline)return false;
+            }
+            job.sortStart=job.sortEnd;
+            job.sortEnd=null;
+            if(job.sortStart>=sortN){
+                job.list=sortDst;
+                job.sortDst=sortSrc;
+                job.sortWidth*=2;
+                job.sortStart=0;
+            }
+            // One merged run is the smallest unit of progress: the deadline is
+            // consulted after it, never before, so an expired budget still
+            // advances the sort by a run rather than looping on the check.
+            if(deadline!==Infinity&&Date.now()>=deadline)return false;
             continue;
         }
         if(job.phase==='sf'){
@@ -14533,7 +14607,18 @@ function xrdPattern(sites,lv,lambda,twoMax,lambda2){
 // How far along the slice job is, for the panel's summary line while it runs.
 function xrdPatternProgress(job){
     if(job.phase==='enum')return 3;
-    if(job.phase==='sort')return 10;
+    if(job.phase==='sort'){
+        // The sort runs pass by pass; the width doubles and the start index
+        // walks the current pass, so the two together say how far it has come.
+        var sn=job.list.length||1;
+        if(sn<2)return 10;
+        var levels=Math.ceil(Math.log(sn)/Math.LN2)||1;
+        var level=Math.log(job.sortWidth||1)/Math.LN2;
+        var fraction=(level+(job.sortStart||0)/sn)/levels;
+        if(!(fraction>0))fraction=0;
+        if(fraction>1)fraction=1;
+        return 3+Math.floor(7*fraction);
+    }
     if(job.phase==='sf'){
         var n=job.list.length||1;
         return 10+Math.floor(job.i/n*70);
@@ -14547,7 +14632,8 @@ function xrdPatternProgress(job){
 }
 function xrdJobProgressText(job){
     var txt='Calculating the powder pattern... '+xrdPatternProgress(job)+'%';
-    if(job.phase==='sf')txt+=' ('+job.i+' of '+job.list.length+' reflections)';
+    if(job.phase==='sort')txt+=' (sorting '+job.list.length+' reflections)';
+    else if(job.phase==='sf')txt+=' ('+job.i+' of '+job.list.length+' reflections)';
     else if(job.phase==='profile')txt+=' ('+job.peakIndex+' of '+job.peaks.length+' lines)';
     return txt;
 }
@@ -14868,6 +14954,7 @@ function xrdRenderError(res){
     var listEl=document.getElementById('xrd-list');
     var expBtn=document.getElementById('xrd-export');
     if(sumEl)sumEl.textContent=res.message||'';
+    if(sumEl)sumEl.classList.remove('xr-running');
     var nm=[];
     if(res.missing&&res.missing.length)nm.push('No scattering factor for '+res.missing.join(', ')+' in the cell.');
     if(noteEl)noteEl.textContent=nm.join(' ');
@@ -14887,6 +14974,7 @@ function xrdRenderResult(res){
         sumEl.textContent=rad.label+' '+rad.lambda.toFixed(4)+' A - '+pat.peaks.length+' peak'+
             (pat.peaks.length===1?'':'s')+' from '+pat.reflections+' reflection'+
             (pat.reflections===1?'':'s')+' ('+pat.min+'-'+pat.twoMax+' deg)';
+        sumEl.classList.remove('xr-running');
     }
     var notes=[];
     if(pat.capped)notes.push('Only the '+XRD_MAX_REFLECTIONS+' lowest-angle reflections were kept (the cell is too large for the rest).');
@@ -14954,6 +15042,7 @@ function xrdCancelCompute(){
     var listEl=document.getElementById('xrd-list');
     var expBtn=document.getElementById('xrd-export');
     if(sumEl)sumEl.textContent='Calculation cancelled.';
+    if(sumEl)sumEl.classList.remove('xr-running');
     if(noteEl)noteEl.textContent='';
     if(listEl)listEl.innerHTML='<div class="xr-empty">Calculation cancelled. Recalculate to start again.</div>';
     if(expBtn)expBtn.disabled=true;
@@ -14980,7 +15069,13 @@ function xrdUpdate(){
     var seq=++xrdJobSeq;
     xrdSetRunButton('Cancel','Stop the powder calculation');
     var sumEl=document.getElementById('xrd-summary');
-    if(sumEl)sumEl.textContent=xrdJobProgressText(job);
+    if(sumEl){
+        sumEl.textContent=xrdJobProgressText(job);
+        // The progress line is one line while the job runs: its text changes
+        // every slice, and a wrap would change the panel's height under a
+        // layout that is only taken when the job ends.
+        sumEl.classList.add('xr-running');
+    }
     var noteEl=document.getElementById('xrd-note');
     if(noteEl)noteEl.textContent='';
     var listEl=document.getElementById('xrd-list');
@@ -17843,6 +17938,15 @@ function setDisplayStyle(style){
     // hasOwnProperty, not a plain lookup: 'constructor' and 'toString' are on
     // every object, and a style is only ever one of the three keys.
     if(!Object.prototype.hasOwnProperty.call(DISPLAY_STYLES,style)||style===displayStyle){syncStyleSelect();return}
+    // Polyhedra draws its hulls from a bond list, and a crystal comparison's
+    // right-hand half carries none (the file side is drawn atom-for-atom), so
+    // the two halves would disagree. The style is refused before any state
+    // changes; the control snaps back to the style the picture is actually in.
+    if(diffMode&&style==='polyhedra'){
+        syncStyleSelect();
+        modeInfoEl.textContent='Polyhedra is not available in Diff mode';
+        return;
+    }
     displayStyle=style;
     syncStyleSelect();
     rebuildScene();
