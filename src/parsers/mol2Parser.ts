@@ -1,5 +1,5 @@
 import { Atom, Bond, MolecularData } from '../types';
-import { ghostFromLabel } from './ghostAtoms';
+import { ghostFromLabel } from '../tools/ghostAtoms';
 
 export function parseMol2(content: string): MolecularData {
     const lines = content.split(/\r?\n/);

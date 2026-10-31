@@ -46,7 +46,11 @@ export function parseCube(content: string): MolecularData {
     const title = lines[0].trim() || lines[1].trim() || 'Cube Structure';
 
     const parseLine3 = lines[2].trim().split(/\s+/).map(Number);
-    const natoms = parseLine3[0];
+    // A negative NATOMS is part of the cube convention, not an error: it means
+    // the coordinates are Angstrom and one extra "orbital records" line follows
+    // the atoms. Reading it as a count would read nothing at all.
+    const declaredNatoms = parseLine3[0];
+    const natoms = Math.abs(declaredNatoms);
     const origin = [parseLine3[1] || 0, parseLine3[2] || 0, parseLine3[3] || 0];
 
     const voxelLines: number[][] = [];
@@ -61,7 +65,7 @@ export function parseCube(content: string): MolecularData {
         voxelLines.some(v => v.some(x => Math.abs(x) > 1e-10));
 
     // Cube convention: NATOMS > 0 means Bohr, NATOMS < 0 means Angstrom
-    let isBohr = natoms > 0;
+    let isBohr = declaredNatoms > 0;
     if (voxelValid) {
         const maxVoxel = Math.max(...voxelLines.flat().map(Math.abs));
         const maxCoordAbs = 50;
@@ -83,6 +87,7 @@ export function parseCube(content: string): MolecularData {
     let atomIndex = 0;
     const atomStartLine = 6;
     let atomLinesRead = 0;
+    let lastAtomLine = atomStartLine - 1;
 
     for (let i = atomStartLine; i < lines.length && atomLinesRead < natoms; i++) {
         const line = lines[i].trim();
@@ -110,6 +115,23 @@ export function parseCube(content: string): MolecularData {
         });
         atomIndex++;
         atomLinesRead++;
+        lastAtomLine = i;
+    }
+
+    const warnings: string[] = [];
+    if (declaredNatoms < 0) {
+        // The line after the atom block names how many data grids follow. Only
+        // its count is used, and only for the warning; the grids are not read.
+        let records = 1;
+        if (atoms.length > 0) {
+            for (let i = lastAtomLine + 1; i < lines.length; i++) {
+                const parts = lines[i].trim().split(/\s+/).map(Number);
+                if (parts.length === 0 || !isValidNumber(parts[0])) continue;
+                records = parts[0];
+                break;
+            }
+        }
+        warnings.push(`${records} orbital record${records === 1 ? '' : 's'} present - geometry only`);
     }
 
     if (!lattice && atoms.length > 0) {
@@ -140,6 +162,7 @@ export function parseCube(content: string): MolecularData {
         title,
         hasExplicitBonds: false
     };
+    if (warnings.length > 0) result.warnings = warnings;
 
     if (lattice) {
         const cellParams = latticeToCellParams(lattice);

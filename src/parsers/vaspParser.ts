@@ -30,21 +30,50 @@ export function parseVasp(content: string): MolecularData {
     const lines = content.split(/\r?\n/);
 
     if (lines.length < 8) {
-        return { atoms: [], bonds: [], title: 'Invalid VASP file', hasExplicitBonds: false };
+        return {
+            atoms: [], bonds: [], title: 'Invalid VASP file', hasExplicitBonds: false,
+            warnings: ['too few lines for a POSCAR: no structure to show']
+        };
     }
 
     const title = lines[0].trim() || 'VASP Structure';
+    const warnings: string[] = [];
 
-    const scale = parseFloat(lines[1].trim()) || 1.0;
+    const rawScale = parseFloat(lines[1].trim());
+    let scale = isFinite(rawScale) && rawScale !== 0 ? rawScale : 1.0;
 
-    const lattice: number[][] = [];
+    const rawLattice: number[][] = [];
     for (let i = 0; i < 3; i++) {
         const parts = lines[2 + i].trim().split(/\s+/).map(Number);
         if (parts.length < 3 || parts.some(isNaN)) {
-            return { atoms: [], bonds: [], title: 'Invalid lattice vectors', hasExplicitBonds: false };
+            return {
+                atoms: [], bonds: [], title: 'Invalid lattice vectors', hasExplicitBonds: false,
+                warnings: ['unreadable lattice vectors: no structure to show']
+            };
         }
-        lattice.push([parts[0] * scale, parts[1] * scale, parts[2] * scale]);
+        rawLattice.push([parts[0], parts[1], parts[2]]);
     }
+
+    // A negative scale is VASP's other spelling of a scale: the target cell
+    // volume in cubic Angstrom, reached by the factor (V/V0)^(1/3). Applying
+    // the number itself would turn a requested 100 A^3 cell into a lattice
+    // mirrored through the origin and scaled by 100. The factor applies to
+    // Cartesian coordinates too, exactly as a positive scale does.
+    if (scale < 0) {
+        const target = -scale;
+        const v0 = Math.abs(
+            rawLattice[0][0] * (rawLattice[1][1] * rawLattice[2][2] - rawLattice[1][2] * rawLattice[2][1]) -
+            rawLattice[0][1] * (rawLattice[1][0] * rawLattice[2][2] - rawLattice[1][2] * rawLattice[2][0]) +
+            rawLattice[0][2] * (rawLattice[1][0] * rawLattice[2][1] - rawLattice[1][1] * rawLattice[2][0])
+        );
+        if (v0 > 1e-8) {
+            scale = Math.cbrt(target / v0);
+        } else {
+            warnings.push('negative scale factor on a zero-volume cell: read as 1.0');
+            scale = 1;
+        }
+    }
+    const lattice = rawLattice.map(v => v.map(c => c * scale));
 
     let lineIdx = 5;
 
@@ -58,6 +87,7 @@ export function parseVasp(content: string): MolecularData {
         line6Tokens.every(t => /^[A-Za-z][a-z]?$/.test(t)) &&
         !(line6Tokens.length === 1 && /^-?\d/.test(line6));
 
+    let symbolCountsMissing = 0;
     if (isElementTypeLine) {
         elementTypes = line6Tokens.map(t => t.charAt(0).toUpperCase() + t.slice(1).toLowerCase());
         lineIdx++;
@@ -67,11 +97,28 @@ export function parseVasp(content: string): MolecularData {
         if (countTokens.length === elementTypes.length && countTokens.every(n => !isNaN(n) && n >= 0)) {
             elementCounts = countTokens;
             lineIdx++;
+        } else {
+            warnings.push('atom counts line missing or unreadable: every site is read as the dummy element X');
+            elementTypes = [];
         }
+    } else {
+        // VASP 4 wrote a counts line without symbol names. The counts still
+        // say how many sites follow, so the layout is recoverable; only the
+        // elements are unknown, and saying so is the point.
+        const countTokens = line6Tokens.map(Number);
+        if (countTokens.length > 0 &&
+            countTokens.every(n => !isNaN(n) && n >= 0 && n % 1 === 0) &&
+            countTokens.some(n => n > 0)) {
+            symbolCountsMissing = countTokens.reduce((s, n) => s + n, 0);
+            lineIdx++;
+        }
+        warnings.push('no element symbol line in the file: every site is read as the dummy element X');
     }
 
     let coordLine = lines[lineIdx].trim();
+    let selective = false;
     if (/^s/i.test(coordLine)) {
+        selective = true;
         lineIdx++;
         coordLine = lines[lineIdx].trim();
     }
@@ -81,7 +128,9 @@ export function parseVasp(content: string): MolecularData {
     lineIdx++;
 
     if (elementTypes.length === 0 || elementCounts.length === 0) {
-        const totalAtoms = lines.length - lineIdx;
+        const totalAtoms = symbolCountsMissing > 0
+            ? symbolCountsMissing
+            : lines.length - lineIdx;
         elementTypes = ['X'];
         elementCounts = [totalAtoms];
     }
@@ -122,12 +171,25 @@ export function parseVasp(content: string): MolecularData {
             cz = fz;
         }
 
+        // Selective dynamics keeps its three flags on the atom so a save can
+        // write the column back; a file without the line leaves them unset.
+        let constraint: string | undefined;
+        if (selective && parts.length >= 6) {
+            const f1 = parts[3].charAt(0).toUpperCase();
+            const f2 = parts[4].charAt(0).toUpperCase();
+            const f3 = parts[5].charAt(0).toUpperCase();
+            if ((f1 === 'T' || f1 === 'F') && (f2 === 'T' || f2 === 'F') && (f3 === 'T' || f3 === 'F')) {
+                constraint = f1 + ' ' + f2 + ' ' + f3;
+            }
+        }
+
         atoms.push({
             element: elementTypes[elementTypeIdx],
             x: cx, y: cy, z: cz,
             index: atomIndex,
             occupancy: 1,
-            baseIdx: atomIndex
+            baseIdx: atomIndex,
+            constraint
         });
         atomIndex++;
         elementRemaining--;
@@ -143,11 +205,13 @@ export function parseVasp(content: string): MolecularData {
         baseBonds: []
     };
 
-    return {
+    const data: MolecularData = {
         atoms,
         bonds: [],
         title,
         hasExplicitBonds: false,
         crystal
     };
+    if (warnings.length > 0) data.warnings = warnings;
+    return data;
 }
