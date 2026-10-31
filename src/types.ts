@@ -25,6 +25,51 @@ export interface Atom {
     cellI?: number;
     cellJ?: number;
     cellK?: number;
+    /**
+     * The atom-site label the file gave the asymmetric-unit site this atom was
+     * expanded from (`C12`, `O1W`). Only the CIF parser writes it — the other
+     * formats have no labels — and it travels on the atom, so the passes that
+     * rebuild `baseAtoms` (delete, disorder removal) keep site and label
+     * together instead of relying on a parallel array staying aligned.
+     */
+    siteLabel?: string;
+    /**
+     * The asymmetric-unit site this cell atom is an image of (`asymIdx`, an
+     * index into `CrystalData.asymAtoms`) and the operation that placed it
+     * (`symOp`, an index into `CrystalData.symmetryOps`). The pair is what
+     * answers "where did this atom come from" for a tooltip or a site table, and
+     * both parsers write it while expanding, so it is exact rather than
+     * reconstructed by re-running the expansion. Absent on a structure that
+     * never had an asymmetric unit to begin with.
+     */
+    asymIdx?: number;
+    symOp?: number;
+    /**
+     * POSCAR "Selective dynamics" flags for this atom, one letter per axis
+     * (`T T F`). Kept verbatim so a read-save-read round trip states exactly
+     * what the file stated; the viewer itself has no use for the constraint.
+     */
+    constraint?: string;
+    /**
+     * The file's disorder group (`_atom_site_disorder_group`), when it states
+     * one. Empty/undefined means "not part of any group". The page uses it to
+     * show one component of a disordered site at a time; it is never inferred
+     * from occupancy, because two groups can each be fully occupied in
+     * different parts of a structure and occupancy alone cannot tell them apart.
+     */
+    disorderGroup?: string;
+    /**
+     * Anisotropic displacement tensor from `_atom_site_aniso_U_*`, in the
+     * Cartesian frame of the cell (Angstrom squared), as
+     * `[U11, U22, U33, U12, U13, U23]`.
+     *
+     * The parser rotates the tensor with every symmetry operation it places an
+     * image under, so the value on a cell atom describes *that image*: an atom
+     * on a general position of a cubic group has a different orientation from
+     * its symmetry mates, which is exactly what an ORTEP drawing shows. Absent
+     * on every atom whose site the file lists no aniso record for.
+     */
+    uAniso?: number[];
 }
 
 export interface Bond {
@@ -33,6 +78,104 @@ export interface Bond {
     order: number;
     crossCell?: boolean;
     shift?: [number, number, number];
+    /**
+     * `_geom_bond_valence` as the file states it, when it states one. A bond
+     * valence is not a bond order — it is the share of an atom's valence this
+     * bond carries, so a single bond is 1 and a delocalised one can be 1.5 —
+     * and it is kept verbatim so a read-save-read round trip says what the
+     * file said instead of a number the viewer guessed.
+     */
+    valence?: number;
+}
+
+/**
+ * One atom site exactly as the file lists it — the asymmetric unit — together
+ * with the symmetry operations that actually placed an image of it.
+ *
+ * `baseAtoms` is the *expanded* cell: every site multiplied by every operation
+ * and deduplicated. That is what the viewer draws, but it cannot answer "what
+ * does the file itself contain", which is the question a save-back to CIF has
+ * to answer (writing the expanded cell under the full operation list would
+ * expand it again on the next read). Keeping the original sites alongside makes
+ * that answerable without re-reading the file.
+ *
+ * Nothing but the parser writes this. Every other pass may read it; a pass that
+ * edits coordinates must keep editing `baseAtoms`, because the asymmetric unit
+ * is a record of the file, not of the session.
+ */
+export interface AsymAtom {
+    element: string;
+    /** Site label as written (`C12`, `O1W`); empty when the file has none. */
+    label: string;
+    /** Cartesian position of the site (the identity image), in Angstrom. */
+    x: number;
+    y: number;
+    z: number;
+    /** Fractional position as listed, wrapped into [0, 1). */
+    frac: [number, number, number];
+    /** Position in `asymAtoms` — the index an `asymBonds` entry refers to. */
+    index: number;
+    occupancy?: number;
+    /**
+     * Indices into `CrystalData.symmetryOps` whose image of this site survived
+     * deduplication, in increasing order. A site on a special position lists
+     * fewer operations than the file declares; a site whose images all landed
+     * on atoms already placed (a duplicate site) lists none. Identity is index 0
+     * only when the file happens to list it first.
+     */
+    symmetryOps: number[];
+    /** `_atom_site_disorder_group` for this site, when the file states one. */
+    disorderGroup?: string;
+    /**
+     * The site's anisotropic displacement tensor as the file lists it
+     * (`[U11, U22, U33, U12, U13, U23]`, Cartesian Angstrom squared), before
+     * any symmetry rotation. Every image in `baseAtoms` carries its own rotated
+     * copy; this is the one a save-back can write verbatim.
+     */
+    uAniso?: number[];
+}
+
+/**
+ * What a file's space-group *name* says against what its own symmetry table
+ * says, when the two disagree.
+ *
+ * The file's operations stay authoritative — they are what the coordinates were
+ * written for — so this is a report, not a correction. Both counts are the
+ * expansion each statement produces from the same sites, which is what makes
+ * the disagreement visible as a number (`P 1 21/c 1` gives 4 ops and 24 atoms,
+ * the file's 1 op gives 12).
+ */
+export interface CrystalSymmetryCheck {
+    /** The name the file states, as written. */
+    declared: string;
+    /** The table's Hermann-Mauguin symbol for the setting it matched. */
+    symbol: string;
+    /** The setting the table chose, described (`origin choice 2`). */
+    settingLabel: string;
+    /** The space-group number of that setting. */
+    number: number;
+    /** The operations the file itself lists. */
+    fileOps: string[];
+    /** The operations the declared name stands for. */
+    tableOps: string[];
+    /** Atoms the file's operations expand the listed sites to. */
+    fileAtoms: number;
+    /** Atoms the name's operations would expand the same sites to. */
+    tableAtoms: number;
+}
+
+/**
+ * The cell the declared name stands for, expanded from the same asymmetric
+ * unit, kept so the page can offer a one-time switch when `CrystalSymmetryCheck`
+ * finds the file and its name inconsistent. `baseAtoms`/`asymAtoms` are a
+ * complete alternative expansion, not a transform of the file's.
+ */
+export interface CrystalSymmetryAlternative {
+    ops: string[];
+    symbol: string;
+    settingLabel: string;
+    baseAtoms: Atom[];
+    asymAtoms: AsymAtom[];
 }
 
 export interface CrystalData {
@@ -45,8 +188,59 @@ export interface CrystalData {
     latticeVectors: number[][];
     spaceGroup?: string;
     symmetryOps: string[];
+    /**
+     * Where the operations came from: the file's own symmetry table, or the
+     * built-in space-group table consulted because the file stated only a
+     * space-group name. Absent on formats that carry no operations at all.
+     */
+    symmetrySource?: 'file' | 'builtin';
+    /** Set when the file states operations *and* a name the table knows, and
+     * the two expansions disagree. The file's operations are still used. */
+    symmetryCheck?: CrystalSymmetryCheck;
+    /** The name's expansion, offered by the page as a one-time switch. */
+    symmetryAlternative?: CrystalSymmetryAlternative;
     baseAtoms: Atom[];
     baseBonds: Bond[];
+    /**
+     * The asymmetric unit the file lists (see `AsymAtom`). Optional because
+     * only the formats that state symmetry fill it: a POSCAR or a VESTA file is
+     * already one cell with no operations, and a cube file has no cell at all.
+     */
+    asymAtoms?: AsymAtom[];
+    /**
+     * Bonds among `asymAtoms`, by their `index`. Present only when a format
+     * states bonds for the asymmetric unit itself; a CIF's `_geom_bond` loop is
+     * expanded into the base cell instead (see `fileBonds`), so this stays
+     * undefined rather than being invented.
+     */
+    asymBonds?: Bond[];
+    /**
+     * The bonds the file itself states (`_geom_bond`), already expanded into
+     * `baseAtoms` indices with the periodic image each bond points at. Only the
+     * CIF reader fills it, because only CIF carries a bond table among the
+     * formats read here.
+     *
+     * This is evidence, not the session's bond list: `baseBonds` stays the
+     * geometry-perceived list, and the page merges this table over it once, on
+     * the first rebuild. The table states which of the detected bonds the file
+     * agrees with and with what order; a bond the table lists that perception
+     * did not find is reported, not drawn, because a single bad row must not
+     * replace the picture the structure's geometry supports.
+     *
+     * An entry's `order` is 0 when the table lists the bond but states no order
+     * (`_geom_bond_order` absent or missing for that row): the file has said
+     * nothing about the order, and the perceived one stands.
+     */
+    fileBonds?: Bond[];
+    /**
+     * How many whole molecules (finite connected components) the unit cell
+     * contains — the crystallographic Z for a molecular crystal. Written only
+     * by the page's `rebuildCrystal` as a session observation on its own copy;
+     * it is never part of the payload and the host never reads it. A cell whose
+     * only component is an infinite network (a framework, diamond) stays
+     * without a meaningful Z, which the page shows by omitting the line.
+     */
+    moleculeCount?: number;
 }
 
 export interface GjfMeta {
@@ -154,6 +348,17 @@ export interface MolecularData {
     charge?: number;
     multiplicity?: number;
     atomGroups?: AtomGroup[];
+    /**
+     * Things the parser had to work around, in the file's own terms ("no
+     * symmetry operations in the file: read as P1"). The viewer shows them as
+     * one line in the structure panel; they are never a substitute for the
+     * structure itself, only an explanation of what it is.
+     *
+     * A parser reports a problem here instead of throwing or silently
+     * substituting a default: a CIF whose cell is missing comes back as an
+     * empty structure with a warning, not as a structure with a 1 A cube.
+     */
+    warnings?: string[];
     /** Present when the structure was loaded through a VMD visualization script. */
     vmd?: VmdScene;
     crystal?: CrystalData;
