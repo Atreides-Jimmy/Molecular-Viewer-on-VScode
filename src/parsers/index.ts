@@ -9,21 +9,39 @@ import { parseOrcaOut, isOrcaOutput, OrcaFrame, OrcaLogResult } from './orcaOutP
 import { parsePdb } from './pdbParser';
 import { parseMopac } from './mopacParser';
 import { parseCif } from './cifParser';
-import { parseVasp } from './vaspParser';
+import { parseVasp, parseXdatcar, parseOutcar, parseVasprunXml, isXdatcar, isOutcar, isVasprunXml } from './vaspParser';
 import { parseCube } from './cubeParser';
 import { parseVesta } from './vestaParser';
 import { parseXtbLog, isXtbLog, XtbLogResult } from './xtbParser';
 import { parseTcl, TclParseResult, resolveVmdScene, VmdResolvedScene, hasScalarChannel, resolveSelection, vdwRadius, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg } from './vmdVisualization';
+import { parseAbacusStru, parseAbacusLog, parseAbacusMdDump, isAbacusLog, isAbacusStru, isAbacusMdDump } from './abacusParser';
+import { parseAbinitInput, parseAbinitOutput, isAbinitOutput, isAbinitInput } from './abinitParser';
+import { parseCp2kInput, parseCp2kOutput, isCp2kInput, isCp2kOutput, Cp2kParseOptions } from './cp2kParser';
+import { parseQeInput, parseQeOutput, isQeInput, isQeOutput } from './qeParser';
+import { parseLammpsData, parseLammpsDump, isLammpsData, isLammpsDump, LammpsParseOptions, LammpsHints, parseLammpsInputHints, lammpsTypeElements } from './lammpsParser';
+import { parseGro, isGro } from './gromacsParser';
+import { parseExtXyz, isExtXyz } from './extXyzParser';
+import { parseDeepmdDataset, isDeepmdDatasetFile, DeepmdParseOptions, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox } from './deepmdParser';
+import { parsePyscfOutput, parseMolden, isPyscfOutput, isMolden } from './pyscfParser';
 
 export { parseGaussianLog, LogFrame, GaussianLogResult };
 export { RouteSection, RouteKeyword };
 export { parseOrcaOut, isOrcaOutput, OrcaFrame, OrcaLogResult };
 export { parseXyzTrajectory, XyzFrame, XyzTrajectory };
 export { parseCif };
-export { parseVasp };
+export { parseVasp, parseXdatcar, parseOutcar, parseVasprunXml, isXdatcar, isOutcar, isVasprunXml };
 export { parseCube };
 export { parseVesta };
 export { parseXtbLog, isXtbLog, XtbLogResult };
+export { parseAbacusStru, parseAbacusLog, parseAbacusMdDump, isAbacusLog, isAbacusStru, isAbacusMdDump };
+export { parseAbinitInput, parseAbinitOutput, isAbinitOutput, isAbinitInput };
+export { parseCp2kInput, parseCp2kOutput, isCp2kInput, isCp2kOutput, Cp2kParseOptions };
+export { parseQeInput, parseQeOutput, isQeInput, isQeOutput };
+export { parseLammpsData, parseLammpsDump, isLammpsData, isLammpsDump, LammpsParseOptions, LammpsHints, parseLammpsInputHints, lammpsTypeElements };
+export { parseGro, isGro };
+export { parseExtXyz, isExtXyz };
+export { parseDeepmdDataset, isDeepmdDatasetFile, DeepmdParseOptions, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox };
+export { parsePyscfOutput, parseMolden, isPyscfOutput, isMolden };
 // Visualization files: the VMD scripts and the bare scalar-carrying coordinate
 // files they describe (see src/parsers/vmdVisualization.ts).
 export { parseTcl, TclParseResult };
@@ -50,8 +68,59 @@ export interface LogFileResult {
     source?: 'gaussian' | 'xtb' | 'orca';
 }
 
-export function parseFile(content: string, fileName: string): MolecularData {
-    const ext = fileName.toLowerCase().split('.').pop() || '';
+export interface ParseFileOptions {
+    /** Companion coordinate file referenced by a CP2K `COORD_FILE_NAME`. */
+    externalCoordinateFile?: { content: string; fileName: string };
+    /** Type/element hints and units read from a LAMMPS input or data file. */
+    lammps?: LammpsParseOptions;
+    /** Type map, types and box read from the rest of a DeepMD dataset. */
+    deepmd?: DeepmdParseOptions;
+    /** Raw bytes when the primary file is binary (`.npy`). */
+    binary?: Uint8Array;
+}
+
+/**
+ * Whether a `.log`/`.out` file is structured output of a program this reader
+ * understands, rather than a Gaussian/ORCA/xTB trajectory log. The host uses
+ * this to choose between the frame pipeline and `parseFile`.
+ */
+export function isStructuredProgramOutput(content: string): boolean {
+    return isQeOutput(content) || isCp2kOutput(content) || isPyscfOutput(content) ||
+        isAbinitOutput(content) || isVasprunXml(content) || isOutcar(content) ||
+        isLammpsDump(content) || isAbacusMdDump(content) || isAbacusLog(content) ||
+        isXdatcar(content);
+}
+
+/** Recognise structured program output before falling back to a Gaussian/ORCA log. */
+function structuredOutput(content: string, options?: ParseFileOptions): MolecularData | null {
+    if (isQeOutput(content)) return parseQeOutput(content);
+    if (isCp2kOutput(content)) return parseCp2kOutput(content);
+    if (isPyscfOutput(content)) return parsePyscfOutput(content);
+    if (isAbinitOutput(content)) return parseAbinitOutput(content);
+    if (isVasprunXml(content)) return parseVasprunXml(content);
+    if (isOutcar(content)) return parseOutcar(content);
+    if (isLammpsDump(content)) return parseLammpsDump(content, options && options.lammps);
+    if (isAbacusMdDump(content)) return parseAbacusMdDump(content);
+    if (isAbacusLog(content)) return parseAbacusLog(content);
+    if (isXdatcar(content)) return parseXdatcar(content);
+    return null;
+}
+
+export function parseFile(content: string, fileName: string, options?: ParseFileOptions): MolecularData {
+    const baseName = fileName.split(/[\\/]/).pop() || fileName;
+    const ext = baseName.toLowerCase().split('.').pop() || '';
+
+    // DeepMD datasets and LAMMPS data files are named by convention, not by a
+    // unique extension (`coord.raw`, `data.si`), so the name is consulted
+    // before the switch.
+    if (/^coord\.(raw|npy)$/i.test(baseName)) {
+        const deepmd: DeepmdParseOptions = { ...(options && options.deepmd ? options.deepmd : {}) };
+        if (options && options.binary && !deepmd.binary) deepmd.binary = options.binary;
+        return parseDeepmdDataset(content, baseName, deepmd);
+    }
+    if (/^data\b/i.test(baseName) && isLammpsData(content)) {
+        return parseLammpsData(content, options && options.lammps);
+    }
 
     switch (ext) {
         case 'gjf':
@@ -61,22 +130,33 @@ export function parseFile(content: string, fileName: string): MolecularData {
         case 'com':
             return parseGjf(content);
         case 'xyz':
-            return parseXyz(content);
+            // A GPUMD/ASE file carries its cell on the comment line; the plain
+            // XYZ reader would throw that cell away.
+            return isExtXyz(content) ? parseExtXyz(content) : parseXyz(content);
+        case 'extxyz':
+            return parseExtXyz(content);
         case 'mol2':
             return parseMol2(content);
         case 'log':
-        case 'out':
-            return parseLogAsSingleFrame(content);
+        case 'out': {
+            const structured = structuredOutput(content, options);
+            return structured || parseLogAsSingleFrame(content);
+        }
         case 'coord':
             return parseCoord(content);
-        case 'inp': {
-            // `.inp` is ORCA's input extension, but Gaussian users name their
-            // inputs that way too. ORCA's own syntax is unambiguous (`* xyz` /
-            // `* xyzfile` / `%coords`); anything else that starts with a route
-            // card is read as a Gaussian input instead of coming back empty.
+        case 'inp':
+        case 'in': {
+            // `.inp` is ORCA's input extension, but Gaussian and CP2K users
+            // name their inputs that way too. The CP2K section syntax is
+            // unambiguous; ORCA's is `* xyz`/`* xyzfile`/`%coords`, and
+            // anything else that starts with a route card is Gaussian.
+            if (isCp2kInput(content)) return parseCp2kInput(content, options);
+            if (isQeInput(content)) return parseQeInput(content);
+            if (isAbinitInput(content)) return parseAbinitInput(content);
             const orca = parseOrcainp(content);
             if (orca.atoms.length > 0) return orca;
             if (/^\s*#/m.test(content)) return parseGjf(content);
+            if (ext === 'in') return tryAutoParse(content, fileName, options);
             return orca;
         }
         case 'pdb':
@@ -96,8 +176,48 @@ export function parseFile(content: string, fileName: string): MolecularData {
             return parseCube(content);
         case 'vesta':
             return parseVesta(content);
+        case 'abi':
+            return parseAbinitInput(content);
+        case 'abo':
+            return parseAbinitOutput(content);
+        case 'stru':
+            return parseAbacusStru(content);
+        case 'md_dump':
+            return parseAbacusMdDump(content);
+        case 'gro':
+            return parseGro(content);
+        case 'molden':
+            return parseMolden(content);
+        case 'pwi':
+            return parseQeInput(content);
+        case 'pwo':
+            return parseQeOutput(content);
+        case 'lammpstrj':
+            return parseLammpsDump(content, options && options.lammps);
+        case 'data':
+            // `system.data` is the usual LAMMPS data name; any other `.data`
+            // file is not a structure this viewer knows.
+            if (isLammpsData(content)) return parseLammpsData(content, options && options.lammps);
+            return tryAutoParse(content, fileName, options);
+        case 'lmp':
+        case 'lammps':
+            if (isLammpsData(content)) return parseLammpsData(content, options && options.lammps);
+            if (isLammpsDump(content)) return parseLammpsDump(content, options && options.lammps);
+            return tryAutoParse(content, fileName, options);
+        case 'xdatcar':
+            return parseXdatcar(content);
+        case 'outcar':
+            return parseOutcar(content);
+        case 'xml':
+            if (isVasprunXml(content)) return parseVasprunXml(content);
+            return tryAutoParse(content, fileName, options);
+        case 'npy':
+        case 'raw':
+            // Only a coordinate file is a structure; any other array is not
+            // something this viewer can draw.
+            return tryAutoParse(content, fileName, options);
         default:
-            return tryAutoParse(content, fileName);
+            return tryAutoParse(content, fileName, options);
     }
 }
 
@@ -162,7 +282,7 @@ function parseLogAsSingleFrame(content: string): MolecularData {
     return { atoms: [], bonds: [], title: 'Empty', hasExplicitBonds: false };
 }
 
-export function tryAutoParse(content: string, fileName: string = ''): MolecularData {
+export function tryAutoParse(content: string, fileName: string = '', options?: ParseFileOptions): MolecularData {
     const lines = content.split(/\r?\n/).filter(l => l.trim() !== '');
 
     if (content.includes('$coord')) {
@@ -173,7 +293,23 @@ export function tryAutoParse(content: string, fileName: string = ''): MolecularD
         return parseOrcainp(content);
     }
 
-    if (content.match(/^(ATOM|HETATM)/m)) {
+    // The extended XYZ comment line is the only thing that distinguishes a
+    // GPUMD/ASE trajectory from a plain XYZ; it must be tested before the
+    // first-line-is-a-count fallback below.
+    if (isExtXyz(content)) {
+        return parseExtXyz(content);
+    }
+
+    const structured = structuredOutput(content, options);
+    if (structured) return structured;
+
+    if (isMolden(content)) {
+        return parseMolden(content);
+    }
+
+    // PDB's record name is followed by the fixed-width serial; matching a bare
+    // `ATOM` prefix would claim ABACUS's `ATOMIC_SPECIES` as a PDB file.
+    if (content.match(/^(ATOM  |HETATM)/m)) {
         return parsePdb(content);
     }
 
@@ -195,6 +331,26 @@ export function tryAutoParse(content: string, fileName: string = ''): MolecularD
 
     if (fileName.match(/\.vesta$/i) || content.includes('#VESTA_FORMAT_VERSION')) {
         return parseVesta(content);
+    }
+
+    if (isAbacusStru(content)) {
+        return parseAbacusStru(content);
+    }
+
+    if (isLammpsData(content)) {
+        return parseLammpsData(content, options && options.lammps);
+    }
+
+    if (isCp2kInput(content)) {
+        return parseCp2kInput(content, options);
+    }
+
+    if (isQeInput(content)) {
+        return parseQeInput(content);
+    }
+
+    if (isAbinitInput(content)) {
+        return parseAbinitInput(content);
     }
 
     if (isOrcaOutput(content)) {

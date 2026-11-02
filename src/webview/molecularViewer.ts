@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { parseFile, parseLogFile, parseXyzTrajectory, LogFrame, OrcaFrame, RouteSection, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg } from '../parsers/index';
+import { parseFile, parseLogFile, parseXyzTrajectory, LogFrame, OrcaFrame, RouteSection, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg, ParseFileOptions, DeepmdParseOptions, LammpsParseOptions, LammpsHints, isStructuredProgramOutput, isExtXyz, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox, parseLammpsInputHints, lammpsTypeElements } from '../parsers/index';
 import { ensureBonds } from '../tools/bondDetector';
 import { BOND_PERCEPTION_SOURCE } from '../tools/bondPerception';
 import { BVS_SOURCE } from '../tools/bvs';
@@ -176,14 +176,174 @@ interface LoadedStructure {
 
 const EMPTY_STRUCTURE: MolecularData = { atoms: [], bonds: [], title: 'Empty', hasExplicitBonds: false };
 
+/**
+ * The companion files a structure names, read from beside it.
+ *
+ * A DeepMD dataset is a directory (`type.raw`, `type_map.raw`, `box.raw`, a
+ * `nopbc` marker), a LAMMPS dump takes its types and units from the input
+ * script that wrote it, and a CP2K input can keep its coordinates in a separate
+ * file. The parsers themselves never touch the file system — they receive what
+ * the host read — so this is the one place that decides what "beside it" means
+ * and how far up it looks.
+ */
+async function buildParseOptions(
+    uri: vscode.Uri,
+    fileName: string,
+    bytes: Uint8Array,
+    text: string
+): Promise<ParseFileOptions | undefined> {
+    const dir = vscode.Uri.file(path.dirname(uri.fsPath));
+    const parent = vscode.Uri.file(path.dirname(dir.fsPath));
+    const lowerName = fileName.toLowerCase();
+    const coordArray = /^coord\.(raw|npy)$/i.test(fileName);
+    const lammpsFamily = /\.(lammpstrj|dump|lmp|lammps|data)$/i.test(lowerName) ||
+        /^dump\b/i.test(fileName) || /^data\b/i.test(fileName);
+    const cp2kInput = /\.(inp|in)$/i.test(lowerName) &&
+        /^\s*&(GLOBAL|FORCE_EVAL|SUBSYS|COORD|CELL)\b/im.test(text);
+    if (!coordArray && !lammpsFamily && !cp2kInput && !lowerName.endsWith('.npy')) return undefined;
+
+    const indexes = new Map<string, Map<string, string>>();
+    const indexOf = async (folder: vscode.Uri): Promise<Map<string, string>> => {
+        const key = folder.toString();
+        let index = indexes.get(key);
+        if (!index) {
+            index = new Map<string, string>();
+            try {
+                for (const [name, type] of await vscode.workspace.fs.readDirectory(folder)) {
+                    if (type === vscode.FileType.File) index.set(name.toLowerCase(), name);
+                }
+            } catch {
+                // An unreadable folder simply has no companions.
+            }
+            indexes.set(key, index);
+        }
+        return index;
+    };
+    const readCompanion = async (folder: vscode.Uri, wanted: string): Promise<{ name: string; bytes: Uint8Array } | undefined> => {
+        const actual = (await indexOf(folder)).get(wanted.toLowerCase());
+        if (!actual) return undefined;
+        try {
+            return { name: actual, bytes: await vscode.workspace.fs.readFile(vscode.Uri.joinPath(folder, actual)) };
+        } catch {
+            return undefined;
+        }
+    };
+
+    const options: ParseFileOptions = {};
+    if (lowerName.endsWith('.npy')) options.binary = bytes;
+
+    if (coordArray) {
+        const deepmd: DeepmdParseOptions = {};
+        if (lowerName.endsWith('.npy')) deepmd.binary = bytes;
+        // `box` accompanies the arrays (a raw dataset has it in the same folder,
+        // an npy one keeps it in `set.NNN`), while the type table describes the
+        // whole dataset and sits at its root, one level up for `set.NNN`.
+        const roots = [dir];
+        if (/^set\.\d+$/i.test(path.basename(dir.fsPath))) roots.push(parent);
+        const boxFile = await readCompanion(dir, 'box.raw') || await readCompanion(dir, 'box.npy');
+        if (boxFile) {
+            const np = boxFile.name.toLowerCase().endsWith('.npy');
+            const box = deepmdFirstBox(np ? '' : new TextDecoder().decode(boxFile.bytes), np ? boxFile.bytes : undefined);
+            if (box) deepmd.box = box;
+        }
+        for (const root of roots) {
+            if (!deepmd.types) {
+                const types = await readCompanion(root, 'type.raw');
+                if (types) deepmd.types = parseDeepmdTypes(new TextDecoder().decode(types.bytes));
+            }
+            if (!deepmd.typeMap) {
+                const map = await readCompanion(root, 'type_map.raw');
+                if (map) deepmd.typeMap = parseDeepmdTypeMap(new TextDecoder().decode(map.bytes));
+            }
+            if (!deepmd.nopbc && await readCompanion(root, 'nopbc')) deepmd.nopbc = true;
+        }
+        options.deepmd = deepmd;
+    }
+
+    if (lammpsFamily) {
+        const hints: LammpsHints = { typeElements: {}, typeMasses: {} };
+        let units: string | undefined;
+        let readData: string | undefined;
+        let atomStyle: string | undefined;
+        const index = await indexOf(dir);
+        const scriptTexts: string[] = [];
+        for (const name of index.values()) {
+            if (!/^in\./i.test(name) && !/\.in$/i.test(name)) continue;
+            const file = await readCompanion(dir, name);
+            if (file) scriptTexts.push(new TextDecoder().decode(file.bytes));
+        }
+        // A folder often holds one input per job. With several, only the scripts
+        // that name this file describe it: an unrelated job's units and masses
+        // would rescale or relabel this geometry.
+        const escapedName = fileName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const namesFile = new RegExp('(^|[^A-Za-z0-9_.-])' + escapedName + '($|[^A-Za-z0-9_.-])', 'i');
+        let scripts = scriptTexts.filter(text => namesFile.test(text));
+        if (scripts.length === 0 && scriptTexts.length === 1) scripts = scriptTexts;
+        for (const scriptText of scripts) {
+            const parsed = parseLammpsInputHints(scriptText);
+            if (!units && parsed.units) units = parsed.units;
+            if (!readData && parsed.readData) readData = parsed.readData;
+            if (!atomStyle && parsed.atomStyle) atomStyle = parsed.atomStyle;
+            for (const key of Object.keys(parsed.typeElements)) {
+                const type = Number(key);
+                if (!hints.typeElements[type]) hints.typeElements[type] = parsed.typeElements[type];
+            }
+        }
+        // The masses in the data file name its types too, and following
+        // `read_data` reaches the file the script itself used. Without that
+        // pointer, several sibling data files describe several jobs: merging
+        // all their masses would relabel this dump with another job's types.
+        const dataNames: string[] = [];
+        if (readData) {
+            dataNames.push(readData.split(/[\\/]/).pop() || readData);
+        } else {
+            const candidates: string[] = [];
+            for (const name of index.values()) if (/^data\b/i.test(name)) candidates.push(name);
+            if (candidates.length === 1) dataNames.push(candidates[0]);
+        }
+        for (const name of dataNames) {
+            const file = await readCompanion(dir, name);
+            if (!file) continue;
+            const masses = lammpsTypeElements(new TextDecoder().decode(file.bytes));
+            for (const key of Object.keys(masses)) {
+                const type = Number(key);
+                if (!hints.typeElements[type]) hints.typeElements[type] = masses[type];
+            }
+        }
+        if (units || atomStyle || Object.keys(hints.typeElements).length > 0) {
+            const lammps: LammpsParseOptions = {};
+            if (units) lammps.units = units;
+            if (atomStyle) lammps.atomStyle = atomStyle;
+            if (Object.keys(hints.typeElements).length > 0) lammps.typeElements = hints.typeElements;
+            options.lammps = lammps;
+        }
+    }
+
+    if (cp2kInput) {
+        const coord = /^\s*COORD_FILE_NAME\s+(\S+)/im.exec(text);
+        if (coord) {
+            const wanted = coord[1].replace(/^['"]|['"]$/g, '');
+            const base = wanted.split(/[\\/]/).pop() || wanted;
+            const file = await readCompanion(dir, base);
+            if (file) options.externalCoordinateFile = { content: new TextDecoder().decode(file.bytes), fileName: base };
+        }
+    }
+
+    return Object.keys(options).length > 0 ? options : undefined;
+}
+
 /** Load and parse one structure file (any supported format). */
 async function loadStructureFile(uri: vscode.Uri): Promise<LoadedStructure> {
     const content = await vscode.workspace.fs.readFile(uri);
     const text = new TextDecoder().decode(content);
     const fileName = uri.path.split('/').pop() || 'unknown.xyz';
     const ext = fileName.toLowerCase().split('.').pop() || '';
+    const options = await buildParseOptions(uri, fileName, content, text);
 
-    if (ext === 'log' || ext === 'out') {
+    // A `.log`/`.out` is a Gaussian/ORCA/xTB trajectory only when a program
+    // this reader knows has not written it: QE, CP2K, PySCF, ABINIT, VASP
+    // (xml/OUTCAR), LAMMPS and ABACUS all use the same extensions.
+    if ((ext === 'log' || ext === 'out') && !isStructuredProgramOutput(text)) {
         const logResult = parseLogFile(text, fileName);
         if (logResult.frames.length === 0) {
             return { data: { atoms: [], bonds: [], title: 'No structures found', hasExplicitBonds: false },
@@ -204,7 +364,7 @@ async function loadStructureFile(uri: vscode.Uri): Promise<LoadedStructure> {
         };
     }
 
-    const parsed = parseFile(text, fileName);
+    const parsed = parseFile(text, fileName, options);
     let data: MolecularData;
     if (parsed.crystal) {
         parsed.bonds = [];
@@ -443,6 +603,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         const fileName = uri.path.split('/').pop() || 'unknown.xyz';
 
         const ext = fileName.toLowerCase().split('.').pop() || '';
+        const parseOptions = await buildParseOptions(uri, fileName, content, textContent);
         let data: MolecularData;
         let frames: (LogFrame | OrcaFrame)[] = [];
         let atomGroups: AtomGroup[] | undefined;
@@ -475,7 +636,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                 atomGroups = tclResult.groups.length > 0 ? tclResult.groups : undefined;
                 data.atomGroups = atomGroups;
             }
-        } else if (ext === 'log' || ext === 'out') {
+        } else if ((ext === 'log' || ext === 'out') && !isStructuredProgramOutput(textContent)) {
             const logResult = parseLogFile(textContent, fileName);
             frames = logResult.frames;
             optSteps = logResult.optSteps;
@@ -495,12 +656,14 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             } else {
                 data = { atoms: [], bonds: [], title: 'No structures found', hasExplicitBonds: false };
             }
-        } else if (ext === 'xyz') {
+        } else if (ext === 'xyz' && !isExtXyz(textContent)) {
             // A multi-frame XYZ is a trajectory — ORCA writes one for every
             // optimization as `<job>_trj.xyz`, with each frame's energy in its
             // comment line — so it gets the same frame navigation (and, when the
             // comment states an energy per frame, the same convergence chart) a
             // log does. A single-frame file takes the ordinary structure path.
+            // GPUMD/ASE extended XYZ keeps its cell on the comment line, which
+            // the trajectory reader cannot carry, so it takes the structure path.
             const traj = parseXyzTrajectory(textContent);
             if (traj.frames.length > 1) {
                 frames = traj.frames.map((f, k) => ({
@@ -527,10 +690,10 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                     hasExplicitBonds: false
                 });
             } else {
-                data = ensureBonds(parseFile(textContent, fileName));
+                data = ensureBonds(parseFile(textContent, fileName, parseOptions));
             }
         } else {
-            data = parseFile(textContent, fileName);
+            data = parseFile(textContent, fileName, parseOptions);
             if (data.crystal) {
                 data.bonds = [];
                 data.crystal.baseBonds = [];
@@ -839,6 +1002,13 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                 'MDL Mol': ['mol'],
                                 'PDB': ['pdb'],
                                 'MOPAC': ['mop'],
+                                'ABACUS STRU': ['STRU'],
+                                'ABINIT Input': ['abi'],
+                                'CP2K Input': ['inp'],
+                                'Quantum ESPRESSO Input': ['in', 'pwi'],
+                                'LAMMPS Data': ['lmp', 'data'],
+                                'GROMACS': ['gro'],
+                                'Extended XYZ': ['xyz'],
                                 // The powder XRD panel exports a two-column
                                 // 2theta/intensity text file.
                                 'XY Data': ['xy', 'dat'],
@@ -859,7 +1029,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             canSelectMany: false,
                             openLabel: 'Select File to Compare',
                             filters: {
-                                'Molecular Files': ['gjf', 'xyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta'],
+                                'Molecular Files': ['gjf', 'xyz', 'extxyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta', 'abi', 'abo', 'stru', 'gro', 'molden', 'pwi', 'pwo', 'lammpstrj', 'dump', 'lmp', 'lammps', 'data', 'md_dump', 'xdatcar', 'outcar', 'xml'],
                                 'All Files': ['*']
                             }
                         });
@@ -872,6 +1042,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         const diffText = new TextDecoder().decode(diffContent);
                         const diffFileName = diffUri.path.split('/').pop() || 'unknown.xyz';
                         const diffExt = diffFileName.toLowerCase().split('.').pop() || '';
+                        const diffOptions = await buildParseOptions(diffUri, diffFileName, diffContent, diffText);
 
                         let diffData: MolecularData;
                         let diffFrames: (LogFrame | OrcaFrame)[] = [];
@@ -916,7 +1087,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             } else {
                                 diffData = { atoms: [], bonds: [], title: 'No source', hasExplicitBonds: false };
                             }
-                        } else if (diffExt === 'log' || diffExt === 'out') {
+                        } else if ((diffExt === 'log' || diffExt === 'out') && !isStructuredProgramOutput(diffText)) {
                             const logResult = parseLogFile(diffText, diffFileName);
                             diffFrames = logResult.frames;
                             if (diffFrames.length > 0) {
@@ -929,7 +1100,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                 diffData = { atoms: [], bonds: [], title: 'No structures', hasExplicitBonds: false };
                             }
                         } else {
-                            diffData = parseFile(diffText, diffFileName);
+                            diffData = parseFile(diffText, diffFileName, diffOptions);
                             if (diffData.crystal) {
                                 const c = diffData.crystal;
                                 diffCrystalPayload = {
@@ -1101,7 +1272,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             canSelectMany: false,
                             openLabel: 'Select Structure to Import',
                             filters: {
-                                'Molecular Files': ['gjf', 'xyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta'],
+                                'Molecular Files': ['gjf', 'xyz', 'extxyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta', 'abi', 'abo', 'stru', 'gro', 'molden', 'pwi', 'pwo', 'lammpstrj', 'dump', 'lmp', 'lammps', 'data', 'md_dump', 'xdatcar', 'outcar', 'xml'],
                                 'All Files': ['*']
                             }
                         });
@@ -1114,6 +1285,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         const impText = new TextDecoder().decode(impContent);
                         const impFileName = impUri.path.split('/').pop() || 'unknown.xyz';
                         const impExt = impFileName.toLowerCase().split('.').pop() || '';
+                        const impOptions = await buildParseOptions(impUri, impFileName, impContent, impText);
 
                         if (impExt === 'tcl') {
                             vscode.window.showErrorMessage('Import: TCL scripts are not supported (use Diff for TCL).');
@@ -1122,7 +1294,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         }
 
                         let impData: MolecularData | undefined;
-                        if (impExt === 'log' || impExt === 'out') {
+                        if ((impExt === 'log' || impExt === 'out') && !isStructuredProgramOutput(impText)) {
                             const logResult = parseLogFile(impText, impFileName);
                             if (logResult.frames.length === 0) {
                                 vscode.window.showErrorMessage('Import: no structure found in ' + impFileName);
@@ -1152,7 +1324,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                 hasExplicitBonds: sf.hasExplicitBonds, charge: sf.charge, multiplicity: sf.multiplicity
                             });
                         } else {
-                            impData = parseFile(impText, impFileName);
+                            impData = parseFile(impText, impFileName, impOptions);
                             // Crystal files (CIF/VASP/VESTA/Cube): import the
                             // unit-cell content as a molecule; periodicity is
                             // dropped (the current structure stays molecular).
@@ -1921,7 +2093,8 @@ try{
 var MD=${jsonData};
 var BP=${bondPerceptionSource};
 var BVS=${bvsSource};
-var AN={H:1,He:2,Li:3,Be:4,B:5,C:6,N:7,O:8,F:9,Ne:10,Na:11,Mg:12,Al:13,Si:14,P:15,S:16,Cl:17,Ar:18,K:19,Ca:20,Sc:21,Ti:22,V:23,Cr:24,Mn:25,Fe:26,Co:27,Ni:28,Cu:29,Zn:30,Ga:31,Ge:32,As:33,Se:34,Br:35,Kr:36,Rb:37,Sr:38,Y:39,Zr:40,Nb:41,Mo:42,Tc:43,Ru:44,Rh:45,Pd:46,Ag:47,Cd:48,In:49,Sn:50,Sb:51,Te:52,I:53,Xe:54,Cs:55,Ba:56,La:57,Ce:58,Pr:59,Nd:60,Pm:61,Sm:62,Eu:63,Gd:64,Tb:65,Dy:66,Ho:67,Er:68,Tm:69,Yb:70,Lu:71,Hf:72,Ta:73,W:74,Re:75,Os:76,Ir:77,Pt:78,Au:79,Hg:80,Tl:81,Pb:82,Bi:83,Po:84,At:85,Rn:86};
+var AN={H:1,He:2,Li:3,Be:4,B:5,C:6,N:7,O:8,F:9,Ne:10,Na:11,Mg:12,Al:13,Si:14,P:15,S:16,Cl:17,Ar:18,K:19,Ca:20,Sc:21,Ti:22,V:23,Cr:24,Mn:25,Fe:26,Co:27,Ni:28,Cu:29,Zn:30,Ga:31,Ge:32,As:33,Se:34,Br:35,Kr:36,Rb:37,Sr:38,Y:39,Zr:40,Nb:41,Mo:42,Tc:43,Ru:44,Rh:45,Pd:46,Ag:47,Cd:48,In:49,Sn:50,Sb:51,Te:52,I:53,Xe:54,Cs:55,Ba:56,La:57,Ce:58,Pr:59,Nd:60,Pm:61,Sm:62,Eu:63,Gd:64,Tb:65,Dy:66,Ho:67,Er:68,Tm:69,Yb:70,Lu:71,Hf:72,Ta:73,W:74,Re:75,Os:76,Ir:77,Pt:78,Au:79,Hg:80,Tl:81,Pb:82,Bi:83,Po:84,At:85,Rn:86,
+    Fr:87,Ra:88,Ac:89,Th:90,Pa:91,U:92,Np:93,Pu:94,Am:95,Cm:96,Bk:97,Cf:98,Es:99,Fm:100,Md:101,No:102,Lr:103,Rf:104,Db:105,Sg:106,Bh:107,Hs:108,Mt:109,Ds:110,Rg:111,Cn:112,Nh:113,Fl:114,Mc:115,Lv:116,Ts:117,Og:118};
 // Standard atomic weights (IUPAC 2021, abridged), the one table the density
 // line of the structure panel needs: a cell's occupancy-weighted mass over its
 // volume. It sits beside the atomic numbers it mirrors, above every reader; an
@@ -1935,7 +2108,10 @@ var MASS={H:1.008,He:4.0026,Li:6.94,Be:9.0122,B:10.81,C:12.011,N:14.007,O:15.999
     Sb:121.76,Te:127.60,I:126.90,Xe:131.29,Cs:132.91,Ba:137.33,La:138.91,Ce:140.12,Pr:140.91,Nd:144.24,
     Pm:145,Sm:150.36,Eu:151.96,Gd:157.25,Tb:158.93,Dy:162.50,Ho:164.93,Er:167.26,Tm:168.93,Yb:173.05,
     Lu:174.97,Hf:178.49,Ta:180.95,W:183.84,Re:186.21,Os:190.23,Ir:192.22,Pt:195.08,Au:196.97,Hg:200.59,
-    Tl:204.38,Pb:207.2,Bi:208.98,Po:209,At:210,Rn:222};
+    Tl:204.38,Pb:207.2,Bi:208.98,Po:209,At:210,Rn:222,
+    Fr:223,Ra:226,Ac:227,Th:232.04,Pa:231.04,U:238.03,Np:237,Pu:244,Am:243,Cm:247,Bk:247,Cf:251,
+    Es:252,Fm:257,Md:258,No:259,Lr:262,Rf:267,Db:268,Sg:269,Bh:270,Hs:269,Mt:278,Ds:281,Rg:282,
+    Cn:285,Nh:286,Fl:289,Mc:290,Lv:293,Ts:294,Og:294};
 // ===== Ghost atoms =====
 // A ghost is a position without a nucleus, electrons or bonds: the marker a
 // counterpoise calculation puts where the other fragment's atoms are. It keeps
@@ -17448,7 +17624,8 @@ function doSave(){
         ?'<div class="current-val"><b>'+nGhosts+' ghost atom'+(nGhosts===1?'':'s')+'</b>: '+
             'written as <code>C-Bq</code> in the Gaussian input and <code>C:</code> in the ORCA input '+
             '(element kept), and as a dummy point - <code>X</code> / <code>Du</code> / <code>q</code> / '+
-            '<code>*</code> / <code>XX</code> - in the formats that have no ghost atom.</div>'
+            '<code>*</code> / <code>XX</code> / <code>znucl 0</code> - in the formats that have no ghost atom '+
+            '(STRU, ABINIT, QE, LAMMPS, CP2K, GRO and extended XYZ write it as <code>X</code>).</div>'
         :'';
     // A crystal's two families of files do different jobs, and the dialog says
     // so before it writes either: the crystal formats describe the unit cell
@@ -17456,11 +17633,14 @@ function doSave(){
     // formats cut what is on screen out as a molecule — the file a QM job
     // starts from, and the only way to get one cage out of a framework.
     var crystalNote=CRY
-        ?'<div class="current-val">Crystal formats (CIF / POSCAR / VESTA / cube) write the <b>unit cell</b> - '+
-            'every symmetry operation expanded into one cell, declared P1. '+
+        ?'<div class="current-val">Periodic formats (CIF / POSCAR / VESTA / cube / STRU / ABINIT / QE / '+
+            'LAMMPS / CP2K / GRO / extended XYZ) write the <b>unit cell</b> - every symmetry operation '+
+            'expanded into one cell, declared P1 where the format states symmetry. '+
             'The cluster formats (XYZ / GJF - displayed cluster) write <b>what is on screen</b>, '+
             'cut to the bounds below, as a molecule.</div>'
-        :'';
+        :'<div class="current-val">CP2K and GROMACS always declare a box: a molecule is written inside a '+
+            'bounding box (CP2K marks it <code>PERIODIC NONE</code>), and extended XYZ marks it '+
+            '<code>pbc="F F F"</code>.</div>';
     showModal('<h3>Save File</h3>'+vdNote+ghostNote+crystalNote+
         '<label>Format:</label><select id="m-fmt">'+
         // The molecular formats keep their old order (plain XYZ is still the
@@ -17474,6 +17654,13 @@ function doSave(){
         (CRY?'<option value="vasp">VASP POSCAR (.vasp)</option>':'')+
         (CRY?'<option value="cube">Gaussian Cube (.cube)</option>':'')+
         (CRY?'<option value="vesta">VESTA (.vesta)</option>':'')+
+        (CRY?'<option value="stru">ABACUS STRU (STRU)</option>':'')+
+        (CRY?'<option value="abi">ABINIT Input (.abi)</option>':'')+
+        (CRY?'<option value="qe">Quantum ESPRESSO Input (.pwi)</option>':'')+
+        (CRY?'<option value="lmp">LAMMPS Data (.lmp)</option>':'')+
+        '<option value="cp2k">CP2K Input (.inp)</option>'+
+        '<option value="gro">GROMACS (.gro)</option>'+
+        '<option value="extxyz">Extended XYZ (.xyz)</option>'+
         '<option value="coord">Turbomole Coord (.coord)</option>'+
         '<option value="inp">ORCA Input (.inp)</option>'+
         '<option value="mol2">MOL2 (.mol2)</option>'+
@@ -17504,11 +17691,19 @@ function doSave(){
     document.getElementById('m-ok').addEventListener('click',function(){
         var fmt=document.getElementById('m-fmt').value;
         var content,ext;
+        var suggestName='molecule_modified';
         try{
         switch(fmt){
             case 'gjf':content=gjf;ext='.gjf';break;
             case 'cif':content=cifContent;ext='.cif';break;
             case 'vasp':content=vaspContent;ext='.vasp';break;
+            case 'stru':content=buildStruContent();ext='';suggestName='STRU';break;
+            case 'abi':content=buildAbinitContent();ext='.abi';break;
+            case 'qe':content=buildQeContent();ext='.pwi';break;
+            case 'lmp':content=buildLammpsDataContent();ext='.lmp';break;
+            case 'cp2k':content=buildCp2kContent();ext='.inp';break;
+            case 'gro':content=buildGroContent();ext='.gro';break;
+            case 'extxyz':content=buildExtendedXyzContent();ext='.xyz';break;
             // The grid is the one thing about the cube the dialog lets a user
             // size, so it is read here rather than at open time. A grid whose
             // value block would be unreasonably large is refused before a file
@@ -17539,7 +17734,7 @@ function doSave(){
             alert('Failed to generate save content: '+(err&&err.message?err.message:String(err)));
             return;
         }
-        vscodeApi.postMessage({command:'saveFile',content:content,suggestedName:'molecule_modified'+ext,filePath:MD.filePath||''});
+        vscodeApi.postMessage({command:'saveFile',content:content,suggestedName:suggestName+ext,filePath:MD.filePath||''});
         hideModal();
     });
     document.getElementById('m-cancel').addEventListener('click',function(){hideModal()});
@@ -17610,6 +17805,71 @@ function crystalFracWrapped(x,y,z){
         f[i]=w;
     }
     return f;
+}
+/** The element a format without a ghost concept can name; a ghost is X. */
+function crystalSaveElement(atom){return isGhostAtom(atom)?'X':atom.element}
+/** Standard atomic weight for a saved species table; a dummy point has none. */
+function saveMassOf(element){if(element==='X')return 0;return MASS[element]!==undefined?MASS[element]:0}
+/** A cell's sites grouped by the element a saved species table names. */
+function crystalSaveGroups(atoms){
+    var order=[],groups={};
+    atoms.forEach(function(atom){
+        var el=crystalSaveElement(atom);
+        if(!groups[el]){groups[el]=[];order.push(el)}
+        groups[el].push(atom);
+    });
+    return {order:order,groups:groups};
+}
+/** A base site's Cartesian position, wrapped into its own cell. */
+function crystalSiteCart(atom){
+    var f=crystalFracWrapped(atom.x,atom.y,atom.z);
+    var lv=CRY.latticeVectors;
+    return [f[0]*lv[0][0]+f[1]*lv[1][0]+f[2]*lv[2][0],
+            f[0]*lv[0][1]+f[1]*lv[1][1]+f[2]*lv[2][1],
+            f[0]*lv[0][2]+f[1]*lv[1][2]+f[2]*lv[2][2]];
+}
+/**
+ * The cell in the lower-triangular form a LAMMPS triclinic box carries.
+ *
+ * A restricted triclinic box has a along x and b in the xy plane, while a
+ * cell read from CIF or POSCAR may be oriented any way; writing its rows
+ * directly would make LAMMPS read a sheared, wrong cell. The vectors are
+ * re-expressed on an orthonormal basis built from a, which preserves every
+ * length and angle (a left-handed c is reflected, an isometry a box has no
+ * way to state), and the atom positions are mapped with the same basis, so the
+ * file describes the same solid in another orientation.
+ */
+function lammpsBoxOf(lv,cart){
+    var dot=function(u,v){return u[0]*v[0]+u[1]*v[1]+u[2]*v[2]};
+    var cross=function(u,v){return [u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]]};
+    var len=function(v){return Math.sqrt(dot(v,v))};
+    var A=lv[0],B=lv[1],C=lv[2];
+    var lx=len(A);
+    var e1=lx>0?[A[0]/lx,A[1]/lx,A[2]/lx]:[1,0,0];
+    var xy=dot(B,e1);
+    var bp=[B[0]-xy*e1[0],B[1]-xy*e1[1],B[2]-xy*e1[2]];
+    var ly=len(bp);
+    var e2=ly>0?[bp[0]/ly,bp[1]/ly,bp[2]/ly]:[0,1,0];
+    var e3=cross(e1,e2);
+    var xz=dot(C,e1),yz=dot(C,e2),lz=dot(C,e3);
+    var flip=lz<0;
+    if(flip)lz=-lz;
+    var toBox=function(p){
+        var z=dot(p,e3);
+        return [dot(p,e1),dot(p,e2),flip?-z:z];
+    };
+    var points=cart.map(toBox);
+    // The box is declared around the points instead of over-riding a coordinate
+    // that is already fractional-exact: a wrapped site can miss [0, lx] by a
+    // rounding step at a face, and a reader that subtracts the origin (LAMMPS
+    // does) must find the same atom either way.
+    var min=[0,0,0];
+    points.forEach(function(p){for(var i=0;i<3;i++)if(p[i]<min[i])min[i]=p[i]});
+    return {
+        lx:lx,ly:ly,lz:lz,xy:xy,xz:xz,yz:yz,
+        xlo:min[0],ylo:min[1],zlo:min[2],
+        points:points
+    };
 }
 /**
  * The displayed region as a molecule: atoms plus the bonds among them.
@@ -17740,6 +18000,317 @@ function buildCubeContent(nGrid){
         if((vi+1)%6===0||vi===nVals-1)out+='\\n';else out+='  ';
     }
     return out;
+}
+
+// ===== Saves for the other computational-chemistry formats =====
+//
+// These writers answer the same two questions the crystal exports do: a
+// periodic format gets the *unit cell* (symmetry expanded, sites wrapped), and
+// a format that also holds a molecule gets the displayed geometry when there
+// is no cell. Every one is written so the reader in src/parsers reads it back
+// with the same units; that round trip is the only check a save has.
+
+/** A number in a fixed-width column, wider only when the value overflows. */
+function saveCol(value,digits,width){
+    var s=value.toFixed(digits);
+    while(s.length<width)s=' '+s;
+    return s;
+}
+/**
+ * Standard GTH-PBE valence counts, Z = 1..118 — the N in GTH-PBE-qN.
+ *
+ * ABINIT/CP2K have no element table of their own to consult, so the save names
+ * the potential a run would most likely use. The block pattern is the GTH one:
+ * a 3s3p (4s4p, 5s5p) semicore through the d block, the f shell in valence for
+ * the lanthanides, and the main-group count (group - 10) after it. Z > 86 has
+ * no GTH potential at all; those entries only keep the saved KIND well formed.
+ */
+var GTH_VALENCE=(
+    '1 2 3 4 3 4 5 6 7 8 9 2 3 4 5 6 7 8 '+
+    '9 10 11 12 13 14 15 16 17 18 11 12 '+
+    '13 4 5 6 7 8 '+
+    '9 10 11 12 13 14 15 16 17 18 11 12 '+
+    '13 4 5 6 7 8 '+
+    '9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 '+
+    '12 13 14 15 16 17 18 11 12 '+
+    '13 4 5 6 7 8 '+
+    '9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 '+
+    '12 13 14 15 16 17 18 11 12 '+
+    '13 4 5 6 7 8').split(' ');
+function gthValenceOf(element){
+    var z=AN[element]||0;
+    return z>=1&&z<=GTH_VALENCE.length?GTH_VALENCE[z-1]:'0';
+}
+/**
+ * ABACUS STRU of the unit cell.
+ *
+ * The vectors are written in Angstrom and LATTICE_CONSTANT is the Angstrom ->
+ * Bohr factor (1.8897 Bohr per Angstrom), because the constant is what ABACUS
+ * scales the vector block by. Writing Angstrom numbers under the default 1.0
+ * would shrink the cell by that factor on the next read. Positions are Direct,
+ * the one mode that cannot drift when the vector block is rescaled.
+ */
+function buildStruContent(){
+    var base=crystalVisibleBaseAtoms();
+    var g=crystalSaveGroups(base);
+    var out='# '+provTitle(MD.title||'Modified structure',false)+'\\n\\n';
+    out+='ATOMIC_SPECIES\\n';
+    g.order.forEach(function(el){
+        out+=el+' '+saveMassOf(el).toFixed(4)+' '+el+'.upf\\n';
+    });
+    out+='\\nLATTICE_CONSTANT\\n1.8897259886\\n\\nLATTICE_VECTORS\\n';
+    var lv=CRY.latticeVectors;
+    for(var i=0;i<3;i++)out+='  '+lv[i][0].toFixed(10)+'  '+lv[i][1].toFixed(10)+'  '+lv[i][2].toFixed(10)+'\\n';
+    out+='\\nATOMIC_POSITIONS\\nDirect\\n';
+    g.order.forEach(function(el){
+        var atoms=g.groups[el];
+        out+='\\n'+el+'\\n0.0\\n'+atoms.length+'\\n';
+        atoms.forEach(function(a){
+            var f=crystalFracWrapped(a.x,a.y,a.z);
+            var line='  '+f[0].toFixed(10)+'  '+f[1].toFixed(10)+'  '+f[2].toFixed(10);
+            // STRU's three trailing flags are 1 = free, 0 = fixed; a site
+            // without flags keeps ABACUS's own default (free).
+            if(a.constraint&&/^[TF] [TF] [TF]$/.test(a.constraint)){
+                line+='  m '+a.constraint.split(' ').map(function(c){return c==='T'?'1':'0'}).join(' ');
+            }
+            out+=line+'\\n';
+        });
+    });
+    return out;
+}
+/**
+ * ABINIT geometry: acell = 1 Angstrom, rprim = the cell in Angstrom, xred.
+ *
+ * Splitting the cell into acell and a dimensionless rprim is ABINIT's own
+ * layout; with acell 1 the rprim rows are the vectors the viewer drew. The
+ * input may be read back as a cell, and a run only has to add its pseudos and
+ * cutoff. A ghost has no znucl, so it is written as 0 and the reader keeps it
+ * the dummy element X.
+ */
+function buildAbinitContent(){
+    var base=crystalVisibleBaseAtoms();
+    var g=crystalSaveGroups(base);
+    var out='# '+provTitle(MD.title||'Modified structure',false)+'\\n\\n';
+    out+='acell 1.0 1.0 1.0 Angstrom\\n';
+    out+='rprim\\n';
+    var lv=CRY.latticeVectors;
+    for(var i=0;i<3;i++)out+='  '+lv[i][0].toFixed(10)+'  '+lv[i][1].toFixed(10)+'  '+lv[i][2].toFixed(10)+'\\n';
+    out+='\\nnatom '+base.length+'\\nntypat '+g.order.length+'\\n';
+    out+='znucl';
+    g.order.forEach(function(el){out+=' '+(AN[el]||0)});
+    out+='\\n\\n';
+    var typeOf={};
+    g.order.forEach(function(el,ti){typeOf[el]=ti+1});
+    out+='typat';
+    base.forEach(function(a){out+=' '+typeOf[crystalSaveElement(a)]});
+    out+='\\n\\nxred\\n';
+    base.forEach(function(a){
+        var f=crystalFracWrapped(a.x,a.y,a.z);
+        out+='  '+f[0].toFixed(10)+'  '+f[1].toFixed(10)+'  '+f[2].toFixed(10)+'\\n';
+    });
+    return out;
+}
+/**
+ * Quantum ESPRESSO pw.x input: ibrav 0, CELL_PARAMETERS in Angstrom, crystal
+ * positions. The cell is stated as vectors rather than as a Bravais index, so
+ * every cell the viewer can draw round-trips without a lattice-matching step.
+ */
+function buildQeContent(){
+    var base=crystalVisibleBaseAtoms();
+    var g=crystalSaveGroups(base);
+    var out='! '+provTitle(MD.title||'Modified structure',false)+'\\n';
+    out+='&CONTROL\\n  calculation = \\'scf\\'\\n  prefix = \\'modified\\'\\n/\\n';
+    out+='&SYSTEM\\n  ibrav = 0\\n  nat = '+base.length+'\\n  ntyp = '+g.order.length+'\\n  ecutwfc = 60.0\\n/\\n';
+    out+='&ELECTRONS\\n  conv_thr = 1.0d-8\\n/\\n\\n';
+    out+='ATOMIC_SPECIES\\n';
+    g.order.forEach(function(el){
+        out+=el+' '+saveMassOf(el).toFixed(4)+' '+el+'.UPF\\n';
+    });
+    out+='\\nCELL_PARAMETERS angstrom\\n';
+    var lv=CRY.latticeVectors;
+    for(var i=0;i<3;i++)out+='  '+lv[i][0].toFixed(10)+'  '+lv[i][1].toFixed(10)+'  '+lv[i][2].toFixed(10)+'\\n';
+    out+='\\nATOMIC_POSITIONS crystal\\n';
+    base.forEach(function(a){
+        var f=crystalFracWrapped(a.x,a.y,a.z);
+        out+=crystalSaveElement(a)+'  '+f[0].toFixed(10)+'  '+f[1].toFixed(10)+'  '+f[2].toFixed(10)+'\\n';
+    });
+    out+='\\nK_POINTS gamma\\n';
+    return out;
+}
+/**
+ * LAMMPS data file of the unit cell.
+ *
+ * The cell is re-expressed in LAMMPS's restricted triclinic form (a along x, b
+ * in the xy plane) and the atoms are mapped with the same basis, so the box
+ * bounds and the coordinates describe the solid that was drawn. Masses are
+ * written per type with the element in a comment as well as in the mass, which
+ * is how the reader names a type even when a rounded weight is ambiguous.
+ */
+function buildLammpsDataContent(){
+    var base=crystalVisibleBaseAtoms();
+    var g=crystalSaveGroups(base);
+    var box=lammpsBoxOf(CRY.latticeVectors,base.map(function(a){return crystalSiteCart(a)}));
+    var out=provTitle(MD.title||'Modified structure',false)+'\\n\\n';
+    out+=base.length+' atoms\\n'+g.order.length+' atom types\\n\\n';
+    out+=box.xlo.toFixed(10)+' '+(box.xlo+box.lx).toFixed(10)+' xlo xhi\\n';
+    out+=box.ylo.toFixed(10)+' '+(box.ylo+box.ly).toFixed(10)+' ylo yhi\\n';
+    out+=box.zlo.toFixed(10)+' '+(box.zlo+box.lz).toFixed(10)+' zlo zhi\\n';
+    out+=box.xy.toFixed(10)+' '+box.xz.toFixed(10)+' '+box.yz.toFixed(10)+' xy xz yz\\n\\n';
+    out+='Masses\\n\\n';
+    g.order.forEach(function(el,i){
+        out+=(i+1)+' '+saveMassOf(el).toFixed(4)+' # '+el+'\\n';
+    });
+    var typeOf={};
+    g.order.forEach(function(el,ti){typeOf[el]=ti+1});
+    out+='\\nAtoms # atomic\\n\\n';
+    base.forEach(function(a,i){
+        var p=box.points[i];
+        out+=(i+1)+' '+typeOf[crystalSaveElement(a)]+' '+
+            p[0].toFixed(10)+' '+p[1].toFixed(10)+' '+p[2].toFixed(10)+'\\n';
+    });
+    return out;
+}
+/**
+ * GROMACS .gro.
+ *
+ * Coordinates and the box are in nanometres and the nine box numbers are in
+ * GROMACS's order (v1x v2y v3z v1y v1z v2x v2z v3x v3y), not row-major, which
+ * is the same trap the reader avoids. A molecule has no cell of its own, but a
+ * .gro always declares one, so it is written inside a bounding box with a one
+ * Angstrom margin rather than a zero box a GRO tool would reject.
+ */
+function buildGroContent(){
+    var out=provTitle(MD.title||'Modified structure',true)+'\\n';
+    var lines=[];
+    var bx,by,bz,bxy,bxz,byz;
+    if(CRY){
+        var base=crystalVisibleBaseAtoms();
+        var box=lammpsBoxOf(CRY.latticeVectors,base.map(function(a){return crystalSiteCart(a)}));
+        // A .gro has no box origin: shift the whole solid so its lowest point
+        // sits at zero and the coordinates are inside the box they declare.
+        var dx=-box.xlo,dy=-box.ylo,dz=-box.zlo;
+        base.forEach(function(a,i){
+            var p=box.points[i];
+            lines.push(groAtomLine(i+1,crystalSaveElement(a),(p[0]+dx)/10,(p[1]+dy)/10,(p[2]+dz)/10));
+        });
+        bx=box.lx/10;by=box.ly/10;bz=box.lz/10;
+        bxy=box.xy/10;bxz=box.xz/10;byz=box.yz/10;
+    }else{
+        var min=[Infinity,Infinity,Infinity],max=[-Infinity,-Infinity,-Infinity];
+        MD.atoms.forEach(function(a){
+            min[0]=Math.min(min[0],a.x);min[1]=Math.min(min[1],a.y);min[2]=Math.min(min[2],a.z);
+            max[0]=Math.max(max[0],a.x);max[1]=Math.max(max[1],a.y);max[2]=Math.max(max[2],a.z);
+        });
+        // One Angstrom of vacuum on each side keeps every atom strictly inside
+        // the box a periodic tool will wrap it into.
+        var m=1.0;
+        bx=(max[0]-min[0]+2*m)/10;by=(max[1]-min[1]+2*m)/10;bz=(max[2]-min[2]+2*m)/10;
+        bxy=0;bxz=0;byz=0;
+        MD.atoms.forEach(function(a,i){
+            lines.push(groAtomLine(i+1,isGhostAtom(a)?'X':a.element,
+                (a.x-min[0]+m)/10,(a.y-min[1]+m)/10,(a.z-min[2]+m)/10));
+        });
+    }
+    out+=lines.length+'\\n';
+    lines.forEach(function(l){out+=l});
+    out+=bx.toFixed(5)+' '+by.toFixed(5)+' '+bz.toFixed(5)+' 0.00000 0.00000 '+
+        bxy.toFixed(5)+' 0.00000 '+bxz.toFixed(5)+' '+byz.toFixed(5)+'\\n';
+    return out;
+}
+/** One fixed-width GRO atom row: resid, resname, atom name, serial, x, y, z. */
+function groAtomLine(serial,element,x,y,z){
+    var sn=String(serial);while(sn.length<5)sn=' '+sn;
+    var res='MOL';while(res.length<5)res+=' ';
+    var name=element;while(name.length<5)name+=' ';
+    return sn+res+name+sn+saveCol(x,3,8)+saveCol(y,3,8)+saveCol(z,3,8)+'\\n';
+}
+/**
+ * CP2K Quickstep input.
+ *
+ * A periodic structure gets its cell as A/B/C vectors and PERIODIC XYZ; a
+ * molecule gets a bounding box with PERIODIC NONE, which is CP2K's way to say
+ * "a box around a molecule" and exactly what the reader drops the cell for.
+ * Basis and potential are named per KIND so the file is a runnable skeleton;
+ * the q of a GTH-PBE potential follows the element's standard valence, and a
+ * ghost KIND has a basis but no potential (CP2K's own ghost convention).
+ */
+function buildCp2kContent(){
+    var base=CRY?crystalVisibleBaseAtoms():MD.atoms;
+    var g=crystalSaveGroups(base);
+    var out='# '+provTitle(MD.title||'Modified structure',false)+'\\n';
+    out+='&GLOBAL\\n  PROJECT modified\\n  RUN_TYPE ENERGY\\n&END GLOBAL\\n\\n';
+    out+='&FORCE_EVAL\\n  METHOD Quickstep\\n';
+    out+='  &DFT\\n    BASIS_SET_FILE_NAME BASIS_MOLOPT\\n    POTENTIAL_FILE_NAME GTH_POTENTIALS\\n  &END DFT\\n';
+    out+='  &SUBSYS\\n    &CELL\\n';
+    if(CRY){
+        var lv=CRY.latticeVectors;
+        out+='      A '+lv[0][0].toFixed(10)+' '+lv[0][1].toFixed(10)+' '+lv[0][2].toFixed(10)+'\\n';
+        out+='      B '+lv[1][0].toFixed(10)+' '+lv[1][1].toFixed(10)+' '+lv[1][2].toFixed(10)+'\\n';
+        out+='      C '+lv[2][0].toFixed(10)+' '+lv[2][1].toFixed(10)+' '+lv[2][2].toFixed(10)+'\\n';
+        out+='      PERIODIC XYZ\\n';
+    }else{
+        var min=[Infinity,Infinity,Infinity],max=[-Infinity,-Infinity,-Infinity];
+        MD.atoms.forEach(function(a){
+            min[0]=Math.min(min[0],a.x);min[1]=Math.min(min[1],a.y);min[2]=Math.min(min[2],a.z);
+            max[0]=Math.max(max[0],a.x);max[1]=Math.max(max[1],a.y);max[2]=Math.max(max[2],a.z);
+        });
+        var m=1.0;
+        out+='      A '+(max[0]-min[0]+2*m).toFixed(10)+' 0.0 0.0\\n';
+        out+='      B 0.0 '+(max[1]-min[1]+2*m).toFixed(10)+' 0.0\\n';
+        out+='      C 0.0 0.0 '+(max[2]-min[2]+2*m).toFixed(10)+'\\n';
+        out+='      PERIODIC NONE\\n';
+    }
+    out+='    &END CELL\\n    &COORD\\n';
+    if(CRY){
+        base.forEach(function(a){
+            var p=crystalSiteCart(a);
+            out+='      '+crystalSaveElement(a)+' '+p[0].toFixed(10)+' '+p[1].toFixed(10)+' '+p[2].toFixed(10)+'\\n';
+        });
+    }else{
+        // &CELL has its origin at (0,0,0): without this shift a molecule that
+        // is not already near the origin would sit outside its own box.
+        MD.atoms.forEach(function(a){
+            out+='      '+(isGhostAtom(a)?'X':a.element)+' '+
+                (a.x-min[0]+m).toFixed(10)+' '+(a.y-min[1]+m).toFixed(10)+' '+(a.z-min[2]+m).toFixed(10)+'\\n';
+        });
+    }
+    out+='    &END COORD\\n';
+    g.order.forEach(function(el){
+        out+='    &KIND '+el+'\\n      BASIS_SET DZVP-MOLOPT-SR-GTH\\n';
+        if(el==='X')out+='      # a ghost KIND: basis functions and no potential\\n';
+        else out+='      POTENTIAL GTH-PBE-q'+gthValenceOf(el)+'\\n';
+        out+='    &END KIND\\n';
+    });
+    out+='  &END SUBSYS\\n&END FORCE_EVAL\\n';
+    return out;
+}
+/**
+ * Extended XYZ (GPUMD / ASE / OVITO): the cell on the comment line.
+ *
+ * A periodic structure states Lattice and pbc="T T T"; a molecule states
+ * pbc="F F F" and no Lattice, which the reader takes as a molecule rather than
+ * wrapping it in a box it does not have.
+ */
+function buildExtendedXyzContent(){
+    var title=provTitle(MD.title||'Modified structure',false);
+    if(CRY){
+        var base=crystalVisibleBaseAtoms();
+        var lv=CRY.latticeVectors;
+        var vals=[];
+        for(var i=0;i<3;i++)vals.push(lv[i][0].toFixed(10),lv[i][1].toFixed(10),lv[i][2].toFixed(10));
+        var out=base.length+'\\n'+title+' Lattice="'+vals.join(' ')+
+            '" Properties=species:S:1:pos:R:3 pbc="T T T"\\n';
+        base.forEach(function(a){
+            var p=crystalSiteCart(a);
+            out+=crystalSaveElement(a)+' '+p[0].toFixed(8)+' '+p[1].toFixed(8)+' '+p[2].toFixed(8)+'\\n';
+        });
+        return out;
+    }
+    var mol=MD.atoms.length+'\\n'+title+' Properties=species:S:1:pos:R:3 pbc="F F F"\\n';
+    MD.atoms.forEach(function(a){
+        mol+=(isGhostAtom(a)?'X':a.element)+' '+a.x.toFixed(8)+' '+a.y.toFixed(8)+' '+a.z.toFixed(8)+'\\n';
+    });
+    return mol;
 }
 
 function parseSelectInput(input){
