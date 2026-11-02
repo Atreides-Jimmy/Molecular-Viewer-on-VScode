@@ -49,6 +49,59 @@ function isNumeric(token: string | undefined): boolean {
     return token !== undefined && token !== '' && isFinite(parseFloat(token));
 }
 
+/** A LAMMPS line with its `#` comment removed; a `#` inside quotes is text. */
+function stripLammpsComment(line: string): string {
+    let quote = '';
+    for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (quote) {
+            if (ch === quote) quote = '';
+        } else if (ch === '"' || ch === "'") {
+            quote = ch;
+        } else if (ch === '#') {
+            return line.slice(0, i);
+        }
+    }
+    return line;
+}
+
+/** Words of a LAMMPS command, with quoted arguments kept as one word. */
+function lammpsWords(line: string): string[] {
+    const words: string[] = [];
+    const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(line)) !== null) {
+        words.push(m[1] !== undefined ? m[1] : m[2] !== undefined ? m[2] : m[3]);
+    }
+    return words;
+}
+
+/** `${name}` / `$name` substitution from the script's own `variable` commands. */
+function expandLammpsVariables(token: string, variables: { [name: string]: string }): string {
+    let value = token;
+    for (let pass = 0; pass < 10; pass++) {
+        const next = value
+            .replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::[^}]*)?\}/g, (whole, name) =>
+                Object.prototype.hasOwnProperty.call(variables, name) ? variables[name] : whole)
+            .replace(/\$([A-Za-z_][A-Za-z0-9_]*)/g, (whole, name) =>
+                Object.prototype.hasOwnProperty.call(variables, name) ? variables[name] : whole);
+        if (next === value) break;
+        value = next;
+    }
+    return value;
+}
+
+function defineLammpsVariable(words: string[], variables: { [name: string]: string }): boolean {
+    if (words.length < 3 || words[0].toLowerCase() !== 'variable') return false;
+    const style = words[2].toLowerCase();
+    if (style !== 'string' && style !== 'index') return false;
+    // An `index` variable holds the first value; a `string` keeps the rest.
+    const value = style === 'index' ? (words[3] || '') : words.slice(3).join(' ');
+    const expanded = expandLammpsVariables(value, variables);
+    if (expanded !== '') variables[words[1]] = expanded;
+    return true;
+}
+
 const SECTION_START = /^(Masses|Atoms|Velocities|Bonds|Angles|Dihedrals|Impropers|Pair Coeffs|PairIJ Coeffs|Bond Coeffs|Angle Coeffs|Dihedral Coeffs|Improper Coeffs|BondBond Coeffs|BondAngle Coeffs|MiddleBondTorsion Coeffs|EndBondTorsion Coeffs|AngleTorsion Coeffs|AngleAngleTorsion Coeffs|BondBond13 Coeffs|AngleAngle Coeffs|Ellipsoids|Lines|Triangles|Bodies|Molecules)\b/i;
 
 interface DataBox {
@@ -543,20 +596,26 @@ export interface LammpsHints {
  *
  * `dump_modify ... element Si Mg` is the one place a dump's types are named
  * explicitly; `mass 1 28.0855` names them by mass; `units metal` decides
- * whether the numbers in the dump are Angstrom, nanometres or metres.
+ * whether the numbers in the dump are Angstrom, nanometres or metres. Variables
+ * defined in the script are expanded in the same words the command has, so
+ * `variable data string si.data` followed by `read_data ${data}` names the file
+ * the run actually read.
  */
-export function parseLammpsInputHints(content: string): LammpsHints {
+export function parseLammpsInputHints(content: string, inherited?: { [name: string]: string }): LammpsHints {
     const hints: LammpsHints = { typeMasses: {}, typeElements: {} };
-    const lines = content.split(/\r?\n/);
-    for (const raw of lines) {
-        const line = raw.replace(/#.*$/, '').trim();
-        if (line === '') continue;
-        const unit = /^units\s+(\S+)/i.exec(line);
-        if (unit) { hints.units = unit[1].toLowerCase(); continue; }
-        const mass = /^mass\s+(\d+)\s+([-+0-9.eE]+)/i.exec(line);
-        if (mass) {
-            const type = parseInt(mass[1], 10);
-            const value = parseFloat(mass[2]);
+    const variables: { [name: string]: string } = { ...(inherited || {}) };
+    for (const raw of content.split(/\r?\n/)) {
+        const words = lammpsWords(stripLammpsComment(raw));
+        if (words.length === 0) continue;
+        if (defineLammpsVariable(words, variables)) continue;
+        const command = words[0].toLowerCase();
+        if (command === 'units' && words.length >= 2) {
+            hints.units = expandLammpsVariables(words[1], variables).toLowerCase();
+            continue;
+        }
+        if (command === 'mass' && words.length >= 3) {
+            const type = parseInt(expandLammpsVariables(words[1], variables), 10);
+            const value = parseFloat(expandLammpsVariables(words[2], variables));
             if (isFinite(type) && isFinite(value)) {
                 hints.typeMasses[type] = value;
                 const element = elementFromMass(value);
@@ -564,24 +623,148 @@ export function parseLammpsInputHints(content: string): LammpsHints {
             }
             continue;
         }
-        const style = /^atom_style\s+(\S+)/i.exec(line);
-        if (style) { hints.atomStyle = style[1].toLowerCase(); continue; }
-        const readData = /^read_data\s+(\S+)/i.exec(line);
-        if (readData) { hints.readData = readData[1]; continue; }
-        const elements = /^dump_modify\b[^\n]*?\belement\s+(.+)$/i.exec(line);
-        if (elements) {
-            const list = elements[1].trim().split(/\s+/);
-            for (let i = 0; i < list.length; i++) {
-                const element = normalizeElementSymbol(list[i]);
-                // The element list is positional and ends at the next
-                // dump_modify keyword; a trailing `format %0.8f` would
-                // otherwise name a further type fluorine.
+        if (command === 'atom_style' && words.length >= 2) {
+            hints.atomStyle = expandLammpsVariables(words[1], variables).toLowerCase();
+            continue;
+        }
+        if (command === 'read_data' && words.length >= 2) {
+            hints.readData = expandLammpsVariables(words[1], variables);
+            continue;
+        }
+        if (command === 'dump_modify') {
+            let at = -1;
+            for (let i = 1; i < words.length; i++) {
+                if (words[i].toLowerCase() === 'element') { at = i; break; }
+            }
+            if (at < 0) continue;
+            // The element list is positional and ends at the next dump_modify
+            // keyword; a trailing `format %0.8f` would otherwise name a further
+            // type fluorine.
+            for (let i = at + 1; i < words.length; i++) {
+                const element = normalizeElementSymbol(words[i]);
                 if (!element) break;
-                hints.typeElements[i + 1] = element;
+                hints.typeElements[i - at] = element;
             }
         }
     }
     return hints;
+}
+
+export interface LammpsInputScan {
+    /** Variables defined (or inherited) when the file finished. */
+    variables: { [name: string]: string };
+    /** `read_data` targets in command order, variables expanded. */
+    readData: string[];
+    /** `include` targets in command order, variables expanded. */
+    includes: string[];
+    /** The last `read_restart` target, variables expanded. */
+    readRestart?: string;
+}
+
+/**
+ * What a LAMMPS input script says about files outside it.
+ *
+ * The reader never touches the file system: the host follows the returned
+ * names, reads those files, and hands the structure back through
+ * `externalStructureFile`. Only the two variable styles whose value is a
+ * literal (`string` and `index`) are expanded; an arithmetic `equal` or an
+ * immediate `$(...)` expression is left as written and reported as an
+ * unresolved reference instead of being guessed.
+ */
+export function scanLammpsInput(content: string, inherited?: { [name: string]: string }): LammpsInputScan {
+    const variables: { [name: string]: string } = { ...(inherited || {}) };
+    const readData: string[] = [];
+    const includes: string[] = [];
+    let readRestart: string | undefined;
+    for (const raw of content.split(/\r?\n/)) {
+        const words = lammpsWords(stripLammpsComment(raw));
+        if (words.length === 0) continue;
+        if (defineLammpsVariable(words, variables)) continue;
+        const command = words[0].toLowerCase();
+        if (command === 'read_data' && words.length >= 2) {
+            readData.push(expandLammpsVariables(words[1], variables));
+        } else if (command === 'include' && words.length >= 2) {
+            includes.push(expandLammpsVariables(words[1], variables));
+        } else if (command === 'read_restart' && words.length >= 2) {
+            readRestart = expandLammpsVariables(words[1], variables);
+        }
+    }
+    return { variables, readData, includes, readRestart };
+}
+
+const LAMMPS_INPUT_COMMANDS = new Set([
+    'units', 'dimension', 'boundary', 'newton', 'processors', 'atom_style', 'atom_modify',
+    'read_data', 'read_restart', 'read_dump', 'create_box', 'create_atoms', 'lattice',
+    'region', 'group', 'mass', 'velocity', 'set', 'pair_style', 'pair_coeff', 'bond_style',
+    'bond_coeff', 'angle_style', 'dihedral_style', 'improper_style', 'kspace_style',
+    'special_bonds', 'neighbor', 'neigh_modify', 'comm_modify', 'timestep', 'fix', 'unfix',
+    'compute', 'variable', 'include', 'dump', 'undump', 'dump_modify', 'thermo',
+    'thermo_style', 'thermo_modify', 'min_style', 'minimize', 'run', 'reset_timestep',
+    'shell', 'jump', 'label', 'next', 'if', 'echo', 'log', 'restart', 'write_data'
+]);
+
+/**
+ * Whether a file is a LAMMPS input script rather than a structure.
+ *
+ * A data file starts with `N atoms` / `Atoms`, a dump with `ITEM:`, and neither
+ * uses LAMMPS commands at line starts. Two known commands (or one structural
+ * command such as `read_data`) distinguish a script; matching only one weak
+ * word would claim ordinary text files.
+ */
+export function isLammpsInput(content: string): boolean {
+    // A LAMMPS log echoes the input commands it ran, so command-looking lines
+    // are not evidence that this file is the input itself.
+    if (/^LAMMPS\s*\(/im.test(content)) return false;
+    let commands = 0;
+    let structural = false;
+    for (const raw of content.split(/\r?\n/)) {
+        const line = stripLammpsComment(raw).trim();
+        if (line === '') continue;
+        const command = line.split(/\s+/)[0].toLowerCase();
+        if (!LAMMPS_INPUT_COMMANDS.has(command)) continue;
+        commands++;
+        if (/^(read_data|read_restart|create_box|create_atoms)$/.test(command)) structural = true;
+        if (commands >= 2) return true;
+    }
+    return structural;
+}
+
+/**
+ * A LAMMPS input as a structure: the data file its `read_data` names.
+ *
+ * The host is the only part that can resolve the path (relative, included,
+ * variable-expanded), so it hands the referenced file in. When it could not,
+ * the warning names what the script asked for instead of drawing a fragment of
+ * the script itself.
+ */
+export function parseLammpsInputStructure(
+    content: string,
+    external: { content: string; fileName: string } | undefined,
+    options?: LammpsParseOptions
+): MolecularData {
+    const title = oneLineTitle((content.split(/\r?\n/)[0] || '').replace(/^#\s*/, ''), 'LAMMPS input');
+    if (external) {
+        const hints = parseLammpsInputHints(content);
+        const lammps: LammpsParseOptions = { ...(options || {}) };
+        if (!lammps.units && hints.units) lammps.units = hints.units;
+        if (!lammps.atomStyle && hints.atomStyle) lammps.atomStyle = hints.atomStyle;
+        const typeElements = { ...hints.typeElements, ...(lammps.typeElements || {}) };
+        if (Object.keys(typeElements).length > 0) lammps.typeElements = typeElements;
+        return parseLammpsData(external.content, lammps);
+    }
+
+    const scan = scanLammpsInput(content);
+    let warning: string;
+    if (scan.readData.length > 0) {
+        warning = 'the LAMMPS input reads its structure from "' + scan.readData[0] +
+            '", but that file could not be read';
+    } else if (scan.readRestart) {
+        warning = 'the LAMMPS input continues from the restart file "' + scan.readRestart +
+            '": a restart file holds no readable atom list';
+    } else {
+        warning = 'the LAMMPS input builds its structure at run time (no read_data): no structure file to show';
+    }
+    return { atoms: [], bonds: [], title, hasExplicitBonds: false, warnings: [warning] };
 }
 
 export function isLammpsData(content: string): boolean {

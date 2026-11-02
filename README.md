@@ -27,6 +27,7 @@ A VS Code / Trae extension that brings a GaussView-style 3D molecular viewer and
 - **Orientation axes** — A gizmo at bottom-left shows Cartesian X/Y/Z axes for molecules and lattice a/b/c axes for crystals, following every rotation. **Reset View** restores the initial orientation.
 - **Remote-SSH** — Parsing and saving run on the remote host while the 3D view runs locally, so the extension works unchanged on a remote Linux server.
 - **VMD TCL scripts** — Opening a VMD script reproduces its representations, colours, selections and surfaces, including multiple molecules and optional egg metadata. See [VMD TCL scripts](#vmd-tcl-scripts).
+- **Main input files** — Opening a computational-chemistry input shows the structure it names instead of the script text. **LAMMPS** follows `read_data` and `include` (wildcards included) and applies `units`, `atom_style`, `mass` and `dump_modify element`; **ORCA** reads `* xyzfile <charge> <mult> <file>`; **ABINIT** reads `xyzfile` and `include`; **ABACUS** `INPUT` opens the `STRU` named by `stru_file` (default `STRU`); **CP2K** reads `COORD_FILE_NAME` (XYZ/PDB/CP2K) and expands `@INCLUDE`, `@SET`/`$VAR` and `@IF`/`@IFDEF` branches first. Quoted and relative/absolute paths are resolved, and a bare `data` file opens on its own. A reference that cannot be read is reported as a warning and no atoms are drawn (a CP2K inline `&COORD` is kept when its `COORD_FILE_NAME` is missing); Save As starts in the referenced file's folder.
 - **Performance with large structures** — The scene redraws only on interaction or change, and GPU resources are released on rebuild. Detail adapts to structure size, and spheres and bonds are drawn with instancing, so structures with thousands of atoms stay responsive. Move Atoms rebuilds only the bonds touching the selection, and long logs are parsed in a single pass.
 
 #### Molecular Editing
@@ -107,7 +108,7 @@ A script also works as the comparison side of **Structure Diff**, using the scri
 | XYZ | `.xyz` | Standard XYZ; multi-frame trajectories (including ORCA `_trj.xyz`) with frame navigation and convergence when every frame has an energy; a truncated final frame is dropped |
 | MOL2 | `.mol2` | ATOM and BOND sections, aromatic `ar` bonds |
 | Gaussian log | `.log` | Optimisation trajectories, SCF energies, convergence, harmonic frequencies; xtb trajectories are detected automatically |
-| ORCA input | `.inp` | `* xyz … *` and `%coords` blocks, xyz/xyzfile data, Bohr/Å units |
+| ORCA input | `.inp` | `* xyz … *` and `* xyzfile` (opens the external XYZ it names), `%coords` blocks, Bohr/Å units |
 | ORCA output | `.out` | Cartesian coordinates in Å or a.u., cycles and final geometry, charge/multiplicity, convergence tolerances, frequencies/IR, route line; format detected by content |
 | Turbomole | `.coord` | `$coord` (Bohr → Å), `$chrg`, `$spin`/`$mult` |
 | PDB | `.pdb` `.ent` | ATOM/HETATM, element, occupancy, B-factor scalar, CONECT, duplicate serials |
@@ -117,11 +118,11 @@ A script also works as the comparison side of **Structure Diff**, using the scri
 | VASP POSCAR | `.vasp` `POSCAR` `CONTCAR` | Scale (negative = target volume), lattice, element counts, selective dynamics, Direct/Cartesian |
 | Gaussian Cube | `.cube` | Voxel vectors and atoms, Bohr/Å auto-detection, robust lattice fallback |
 | VESTA | `.vesta` | CELLP, STRUC, GROUP and SYMOP; symmetry expansion and occupancy, with the same logic as CIF |
-| ABACUS | `.stru` `STRU` `STRU_MD_*` `.md_dump` | ATOMIC_SPECIES/MASS, LATTICE_CONSTANT (Bohr default), Direct/Cartesian positions, constraint flags; SCF log and MD dump |
-| ABINIT | `.abi` `.abo` | `acell`/`rprim` (Bohr default or `angstrom`), `znucl`/`typat` with `N*value` repeats, `xred`/`xcart`/`xangst`; converged output geometry |
-| CP2K | `.inp` `.out` | `&CELL` (ABC + angles or A/B/C vectors), `&COORD` Cartesian/scaled, `&KIND`, `COORD_FILE_NAME`; output geometries |
+| ABACUS | `.stru` `STRU` `STRU_MD_*` `.md_dump` `INPUT` | ATOMIC_SPECIES/MASS, LATTICE_CONSTANT (Bohr default), Direct/Cartesian positions, constraint flags; `INPUT` opens the `stru_file` it names (default `STRU`); SCF log and MD dump |
+| ABINIT | `.abi` `.abo` | `acell`/`rprim` (Bohr default or `angstrom`), `znucl`/`typat` with `N*value` repeats, `xred`/`xcart`/`xangst`, `xyzfile` (external XYZ) and `include` files; converged output geometry |
+| CP2K | `.inp` `.out` | `&CELL` (ABC + angles or A/B/C vectors), `&COORD` Cartesian/scaled, `&KIND`, `COORD_FILE_NAME` (XYZ/PDB/CP2K, last one wins), `@INCLUDE`/`@SET`/`@IF`/`@IFDEF`; output geometries |
 | Quantum ESPRESSO | `.in` `.pwi` `.pwo` | `ibrav` + `celldm` or `CELL_PARAMETERS`, `ATOMIC_POSITIONS` crystal/alat/bohr/angstrom; final output cell and geometry |
-| LAMMPS | `.lmp` `.lammps` `.data` `.lammpstrj` `.dump` | Data box and tilt, `Masses`/`mass`/`dump_modify element` type names, atomic/charge/full/molecular styles, dump frames; type hints from an input script |
+| LAMMPS | `.lmp` `.lammps` `.data` `.lammpstrj` `.dump` `data` | Data box and tilt, `Masses`/`mass`/`dump_modify element` type names, atomic/charge/full/molecular styles, dump frames; an input script (`read_data`, `include`, `variable`) opens the structure it names, and the bare `data` file opens by itself |
 | GROMACS | `.gro` | nm → Å, nine-value triclinic box in GROMACS order, velocities ignored; a zero box is a molecule |
 | Extended XYZ / GPUMD | `.xyz` `.extxyz` | `Lattice=`, `Properties=` and `pbc=` on the comment line, property layout resolved by name, frame count reported |
 | DeepMD / DP-GEN | `coord.raw` `coord.npy` | `type.raw`/`type_map.raw` types, `box.raw`/`box.npy` cell, empty `nopbc`; first frame shown |
@@ -284,6 +285,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 - **方向坐标轴** — 左下角显示分子的笛卡尔 X/Y/Z 轴或晶体的晶格 a/b/c 轴，并跟随视图旋转；**Reset View** 恢复初始朝向。
 - **远程 SSH** — 解析与保存运行在远程主机，3D 视图在本地渲染，因此在远程 Linux 服务器上编辑文件也能直接使用。
 - **VMD TCL 脚本** — 打开 VMD 脚本会复现它的表示、颜色、选择与曲面，并支持多分子与可选的 egg 元数据。详见 [VMD TCL 脚本](#vmd-tcl-脚本)。
+- **主输入文件** — 打开计算化学的主输入文件时显示它指向的结构，而不是脚本文字。**LAMMPS** 会跟随 `read_data` 与 `include`（含通配符），并用 `units`、`atom_style`、`mass` 与 `dump_modify element` 描述结构；**ORCA** 读取 `* xyzfile <charge> <mult> <file>`；**ABINIT** 读取 `xyzfile` 与 `include`；**ABACUS** 的 `INPUT` 打开 `stru_file` 指定的 `STRU`（缺省为 `STRU`）；**CP2K** 读取 `COORD_FILE_NAME`（XYZ/PDB/CP2K），并先展开 `@INCLUDE`、`@SET`/`$VAR` 与 `@IF`/`@IFDEF` 分支。引号路径与相对/绝对路径都会解析，裸 `data` 文件也可单独打开。引用文件读不到时给出警告且不画原子（CP2K 的 `COORD_FILE_NAME` 缺失时保留内联 `&COORD`）；另存为默认落在被引用文件所在目录。
 - **大结构性能** — 场景只在交互或变化时重绘，空闲时不占用 GPU；重建时释放显存。细节层次随结构规模调整，球与键采用实例化绘制，数千原子的结构仍可流畅操作。Move Atoms 只重建受影响的键，长日志单趟解析。
 
 #### 分子编辑
@@ -364,7 +366,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 | XYZ | `.xyz` | 标准 XYZ；多帧轨迹（含 ORCA `_trj.xyz`）支持帧导航，每帧都带能量时显示收敛信息；被截断的末帧会被丢弃 |
 | MOL2 | `.mol2` | ATOM 与 BOND 段、芳香 `ar` 键 |
 | Gaussian 日志 | `.log` | 优化轨迹、SCF 能量、收敛、谐振频率；xtb 轨迹会自动识别 |
-| ORCA 输入 | `.inp` | `* xyz … *` 与 `%coords` 块、xyz/xyzfile 数据、Bohr/Å 单位 |
+| ORCA 输入 | `.inp` | `* xyz … *` 与 `* xyzfile`（打开其指向的外部 XYZ）、`%coords` 块、Bohr/Å 单位 |
 | ORCA 输出 | `.out` | Å 或 a.u. 的笛卡尔坐标、每个循环与最终几何、电荷/多重度、收敛容差、频率/IR、route 行；按内容识别格式 |
 | Turbomole | `.coord` | `$coord`（Bohr → Å）、`$chrg`、`$spin`/`$mult` |
 | PDB | `.pdb` `.ent` | ATOM/HETATM、元素、占据率、B 因子标量、CONECT、重复序号 |
@@ -374,11 +376,11 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 | VASP POSCAR | `.vasp` `POSCAR` `CONTCAR` | 缩放因子（负值表示目标体积）、晶格、元素数量、选择性动力学、Direct/Cartesian |
 | Gaussian Cube | `.cube` | 体素矢量与原子、Bohr/Å 自动识别、晶格损坏时的稳健回退 |
 | VESTA | `.vesta` | CELLP、STRUC、GROUP 与 SYMOP；对称展开与占据率，逻辑与 CIF 一致 |
-| ABACUS | `.stru` `STRU` `STRU_MD_*` `.md_dump` | ATOMIC_SPECIES/MASS、LATTICE_CONSTANT（默认 Bohr）、Direct/Cartesian 坐标、约束标记；SCF 日志与 MD dump |
-| ABINIT | `.abi` `.abo` | `acell`/`rprim`（默认 Bohr 或 `angstrom`）、`znucl`/`typat`（支持 `N*value` 重复）、`xred`/`xcart`/`xangst`；收敛后的输出几何 |
-| CP2K | `.inp` `.out` | `&CELL`（ABC + 角度或 A/B/C 矢量）、`&COORD` 笛卡尔/缩放坐标、`&KIND`、`COORD_FILE_NAME`；输出几何 |
+| ABACUS | `.stru` `STRU` `STRU_MD_*` `.md_dump` `INPUT` | ATOMIC_SPECIES/MASS、LATTICE_CONSTANT（默认 Bohr）、Direct/Cartesian 坐标、约束标记；`INPUT` 打开其 `stru_file`（缺省 `STRU`）；SCF 日志与 MD dump |
+| ABINIT | `.abi` `.abo` | `acell`/`rprim`（默认 Bohr 或 `angstrom`）、`znucl`/`typat`（支持 `N*value` 重复）、`xred`/`xcart`/`xangst`、`xyzfile`（外部 XYZ）与 `include`；收敛后的输出几何 |
+| CP2K | `.inp` `.out` | `&CELL`（ABC + 角度或 A/B/C 矢量）、`&COORD` 笛卡尔/缩放坐标、`&KIND`、`COORD_FILE_NAME`（XYZ/PDB/CP2K，取最后一个）、`@INCLUDE`/`@SET`/`@IF`/`@IFDEF`；输出几何 |
 | Quantum ESPRESSO | `.in` `.pwi` `.pwo` | `ibrav` + `celldm` 或 `CELL_PARAMETERS`、`ATOMIC_POSITIONS` 的 crystal/alat/bohr/angstrom；输出中的最终晶胞与几何 |
-| LAMMPS | `.lmp` `.lammps` `.data` `.lammpstrj` `.dump` | 数据文件盒与倾斜、`Masses`/`mass`/`dump_modify element` 类型名、atomic/charge/full/molecular 样式、dump 帧；可从输入脚本读取类型提示 |
+| LAMMPS | `.lmp` `.lammps` `.data` `.lammpstrj` `.dump` `data` | 数据文件盒与倾斜、`Masses`/`mass`/`dump_modify element` 类型名、atomic/charge/full/molecular 样式、dump 帧；输入脚本（`read_data`、`include`、`variable`）会打开它指向的结构，裸 `data` 文件也可单独打开 |
 | GROMACS | `.gro` | nm → Å、按 GROMACS 顺序排列的九值三斜盒、忽略速度列；零盒按分子处理 |
 | Extended XYZ / GPUMD | `.xyz` `.extxyz` | 注释行的 `Lattice=`、`Properties=` 与 `pbc=`，按列名解析属性布局，并报告帧数 |
 | DeepMD / DP-GEN | `coord.raw` `coord.npy` | `type.raw`/`type_map.raw` 类型、`box.raw`/`box.npy` 晶胞、空 `nopbc`；显示第一帧 |

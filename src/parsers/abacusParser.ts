@@ -327,6 +327,77 @@ export function parseAbacusStru(content: string): MolecularData {
     return data;
 }
 
+export interface AbacusExternalStructure {
+    content: string;
+    fileName: string;
+}
+
+export interface AbacusInputScan {
+    /** Every `stru_file` value, in the order the INPUT states them. */
+    files: string[];
+    /** The file ABACUS ends up reading: the last definition wins. */
+    struFile?: string;
+}
+
+/** The structure paths an ABACUS INPUT names; paths are relative to its run folder. */
+export function scanAbacusInput(content: string): AbacusInputScan {
+    const files: string[] = [];
+    for (const raw of content.split(/\r?\n/)) {
+        const line = stripComment(raw);
+        const match = /^stru_file\b\s*(?:=\s*)?(.*)$/i.exec(line);
+        if (!match) continue;
+        const value = match[1].trim().replace(/^['"]|['"]$/g, '').trim();
+        if (value !== '') files.push(value);
+    }
+    return { files, struFile: files.length > 0 ? files[files.length - 1] : undefined };
+}
+
+/**
+ * Whether a text is an ABACUS `INPUT` parameter file. The `INPUT_PARAMETERS`
+ * header and `stru_file`/`basis_type`/`ks_solver`/`latname` keys are ABACUS's
+ * own; `ecutwfc` and `pseudo_dir` alone are shared with Quantum ESPRESSO and
+ * must not be enough to claim the file.
+ */
+export function isAbacusInput(content: string): boolean {
+    // A Fortran namelist is CP2K/QE territory, not ABACUS's key-value layout.
+    if (/^\s*&[A-Za-z]/m.test(content)) return false;
+    const keys = new Set<string>();
+    let header = false;
+    for (const raw of content.split(/\r?\n/)) {
+        const line = stripComment(raw);
+        if (line === '') continue;
+        if (line.toUpperCase() === 'INPUT_PARAMETERS') { header = true; continue; }
+        const match = /^([A-Za-z_][A-Za-z0-9_]*)\b/.exec(line);
+        if (match) keys.add(match[1].toLowerCase());
+    }
+    return header || keys.has('stru_file') || keys.has('basis_type') ||
+        keys.has('ks_solver') || keys.has('latname');
+}
+
+/**
+ * An ABACUS `INPUT` holds no coordinates: it names the `STRU` (or another
+ * structure file) that does. Without that file there is nothing to draw, so
+ * the warning says exactly which name was sought.
+ */
+export function parseAbacusInput(content: string, external?: AbacusExternalStructure): MolecularData {
+    const scan = scanAbacusInput(content);
+    const wanted = scan.struFile || 'STRU';
+    if (external) {
+        const data = parseAbacusStru(external.content);
+        if (data.atoms.length === 0) {
+            const warnings = data.warnings ? data.warnings.slice() : [];
+            warnings.push('the ABACUS structure file "' + external.fileName + '" has no atoms');
+            data.warnings = warnings;
+        }
+        return data;
+    }
+    return {
+        atoms: [], bonds: [], title: 'ABACUS input', hasExplicitBonds: false,
+        warnings: ['the ABACUS INPUT reads its structure from "' + wanted +
+            '", but that file could not be read']
+    };
+}
+
 interface LogAtomType {
     element: string;
     count: number;

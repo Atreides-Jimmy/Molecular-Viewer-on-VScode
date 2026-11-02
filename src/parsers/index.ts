@@ -4,7 +4,7 @@ import { parseXyz, parseXyzTrajectory, XyzFrame, XyzTrajectory } from './xyzPars
 import { parseMol2 } from './mol2Parser';
 import { parseGaussianLog, LogFrame, GaussianLogResult, RouteSection, RouteKeyword } from './logParser';
 import { parseCoord } from './coordParser';
-import { parseOrcainp } from './orcaInpParser';
+import { parseOrcainp, scanOrcaXyzfile, OrcaExternalStructure, OrcaXyzReference } from './orcaInpParser';
 import { parseOrcaOut, isOrcaOutput, OrcaFrame, OrcaLogResult } from './orcaOutParser';
 import { parsePdb } from './pdbParser';
 import { parseMopac } from './mopacParser';
@@ -14,11 +14,11 @@ import { parseCube } from './cubeParser';
 import { parseVesta } from './vestaParser';
 import { parseXtbLog, isXtbLog, XtbLogResult } from './xtbParser';
 import { parseTcl, TclParseResult, resolveVmdScene, VmdResolvedScene, hasScalarChannel, resolveSelection, vdwRadius, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg } from './vmdVisualization';
-import { parseAbacusStru, parseAbacusLog, parseAbacusMdDump, isAbacusLog, isAbacusStru, isAbacusMdDump } from './abacusParser';
-import { parseAbinitInput, parseAbinitOutput, isAbinitOutput, isAbinitInput } from './abinitParser';
+import { parseAbacusStru, parseAbacusLog, parseAbacusMdDump, parseAbacusInput, scanAbacusInput, isAbacusLog, isAbacusStru, isAbacusMdDump, isAbacusInput, AbacusExternalStructure, AbacusInputScan } from './abacusParser';
+import { parseAbinitInput, parseAbinitOutput, scanAbinitXyzfile, isAbinitOutput, isAbinitInput, AbinitExternalStructure, AbinitXyzfileScan } from './abinitParser';
 import { parseCp2kInput, parseCp2kOutput, isCp2kInput, isCp2kOutput, Cp2kParseOptions } from './cp2kParser';
 import { parseQeInput, parseQeOutput, isQeInput, isQeOutput } from './qeParser';
-import { parseLammpsData, parseLammpsDump, isLammpsData, isLammpsDump, LammpsParseOptions, LammpsHints, parseLammpsInputHints, lammpsTypeElements } from './lammpsParser';
+import { parseLammpsData, parseLammpsDump, isLammpsData, isLammpsDump, isLammpsInput, parseLammpsInputStructure, scanLammpsInput, LammpsParseOptions, LammpsHints, LammpsInputScan, parseLammpsInputHints, lammpsTypeElements } from './lammpsParser';
 import { parseGro, isGro } from './gromacsParser';
 import { parseExtXyz, isExtXyz } from './extXyzParser';
 import { parseDeepmdDataset, isDeepmdDatasetFile, DeepmdParseOptions, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox } from './deepmdParser';
@@ -27,17 +27,18 @@ import { parsePyscfOutput, parseMolden, isPyscfOutput, isMolden } from './pyscfP
 export { parseGaussianLog, LogFrame, GaussianLogResult };
 export { RouteSection, RouteKeyword };
 export { parseOrcaOut, isOrcaOutput, OrcaFrame, OrcaLogResult };
+export { scanOrcaXyzfile, OrcaExternalStructure, OrcaXyzReference };
 export { parseXyzTrajectory, XyzFrame, XyzTrajectory };
 export { parseCif };
 export { parseVasp, parseXdatcar, parseOutcar, parseVasprunXml, isXdatcar, isOutcar, isVasprunXml };
 export { parseCube };
 export { parseVesta };
 export { parseXtbLog, isXtbLog, XtbLogResult };
-export { parseAbacusStru, parseAbacusLog, parseAbacusMdDump, isAbacusLog, isAbacusStru, isAbacusMdDump };
-export { parseAbinitInput, parseAbinitOutput, isAbinitOutput, isAbinitInput };
+export { parseAbacusStru, parseAbacusLog, parseAbacusMdDump, parseAbacusInput, scanAbacusInput, isAbacusLog, isAbacusStru, isAbacusMdDump, isAbacusInput, AbacusExternalStructure, AbacusInputScan };
+export { parseAbinitInput, parseAbinitOutput, scanAbinitXyzfile, isAbinitOutput, isAbinitInput, AbinitExternalStructure, AbinitXyzfileScan };
 export { parseCp2kInput, parseCp2kOutput, isCp2kInput, isCp2kOutput, Cp2kParseOptions };
 export { parseQeInput, parseQeOutput, isQeInput, isQeOutput };
-export { parseLammpsData, parseLammpsDump, isLammpsData, isLammpsDump, LammpsParseOptions, LammpsHints, parseLammpsInputHints, lammpsTypeElements };
+export { parseLammpsData, parseLammpsDump, isLammpsData, isLammpsDump, isLammpsInput, parseLammpsInputStructure, scanLammpsInput, LammpsParseOptions, LammpsHints, LammpsInputScan, parseLammpsInputHints, lammpsTypeElements };
 export { parseGro, isGro };
 export { parseExtXyz, isExtXyz };
 export { parseDeepmdDataset, isDeepmdDatasetFile, DeepmdParseOptions, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox };
@@ -71,6 +72,13 @@ export interface LogFileResult {
 export interface ParseFileOptions {
     /** Companion coordinate file referenced by a CP2K `COORD_FILE_NAME`. */
     externalCoordinateFile?: { content: string; fileName: string };
+    /**
+     * Structure file a main input names (LAMMPS `read_data`, ORCA/ABINIT
+     * `xyzfile`, ABACUS `stru_file`). The host resolves the path and reads the
+     * bytes; `fsPath` is returned here so the viewer can save and trace the
+     * structure beside its real file.
+     */
+    externalStructureFile?: { content: string; fileName: string; fsPath?: string };
     /** Type/element hints and units read from a LAMMPS input or data file. */
     lammps?: LammpsParseOptions;
     /** Type map, types and box read from the rest of a DeepMD dataset. */
@@ -121,6 +129,12 @@ export function parseFile(content: string, fileName: string, options?: ParseFile
     if (/^data\b/i.test(baseName) && isLammpsData(content)) {
         return parseLammpsData(content, options && options.lammps);
     }
+    // ABACUS names its parameter file exactly `INPUT`; that name and the
+    // `stru_file` key together leave no other format this could be.
+    if (/^INPUT$/i.test(baseName) &&
+        (isAbacusInput(content) || (options && options.externalStructureFile))) {
+        return parseAbacusInput(content, options && options.externalStructureFile);
+    }
 
     switch (ext) {
         case 'gjf':
@@ -152,8 +166,16 @@ export function parseFile(content: string, fileName: string, options?: ParseFile
             // anything else that starts with a route card is Gaussian.
             if (isCp2kInput(content)) return parseCp2kInput(content, options);
             if (isQeInput(content)) return parseQeInput(content);
-            if (isAbinitInput(content)) return parseAbinitInput(content);
-            const orca = parseOrcainp(content);
+            if (isAbacusInput(content)) {
+                return parseAbacusInput(content, options && options.externalStructureFile);
+            }
+            if (isAbinitInput(content)) {
+                return parseAbinitInput(content, options && options.externalStructureFile);
+            }
+            if (isLammpsInput(content)) {
+                return parseLammpsInputStructure(content, options && options.externalStructureFile, options && options.lammps);
+            }
+            const orca = parseOrcainp(content, options && options.externalStructureFile);
             if (orca.atoms.length > 0) return orca;
             if (/^\s*#/m.test(content)) return parseGjf(content);
             if (ext === 'in') return tryAutoParse(content, fileName, options);
@@ -177,7 +199,7 @@ export function parseFile(content: string, fileName: string, options?: ParseFile
         case 'vesta':
             return parseVesta(content);
         case 'abi':
-            return parseAbinitInput(content);
+            return parseAbinitInput(content, options && options.externalStructureFile);
         case 'abo':
             return parseAbinitOutput(content);
         case 'stru':
@@ -203,7 +225,12 @@ export function parseFile(content: string, fileName: string, options?: ParseFile
         case 'lammps':
             if (isLammpsData(content)) return parseLammpsData(content, options && options.lammps);
             if (isLammpsDump(content)) return parseLammpsDump(content, options && options.lammps);
-            return tryAutoParse(content, fileName, options);
+            // A log echoes its input commands; it is not the input file, and
+            // there is no LAMMPS log reader to fall through to.
+            if (/^LAMMPS\s*\(/im.test(content)) return tryAutoParse(content, fileName, options);
+            // The extension names a LAMMPS script; even a one-line `include`
+            // main file must not fall through to the coordinate guessers.
+            return parseLammpsInputStructure(content, options && options.externalStructureFile, options && options.lammps);
         case 'xdatcar':
             return parseXdatcar(content);
         case 'outcar':
@@ -290,7 +317,7 @@ export function tryAutoParse(content: string, fileName: string = '', options?: P
     }
 
     if (content.match(/\*\s*xyz/i) || content.match(/\*\s*xyzfile/i)) {
-        return parseOrcainp(content);
+        return parseOrcainp(content, options && options.externalStructureFile);
     }
 
     // The extended XYZ comment line is the only thing that distinguishes a
@@ -302,6 +329,10 @@ export function tryAutoParse(content: string, fileName: string = '', options?: P
 
     const structured = structuredOutput(content, options);
     if (structured) return structured;
+
+    if (isLammpsInput(content)) {
+        return parseLammpsInputStructure(content, options && options.externalStructureFile, options && options.lammps);
+    }
 
     if (isMolden(content)) {
         return parseMolden(content);
@@ -341,6 +372,10 @@ export function tryAutoParse(content: string, fileName: string = '', options?: P
         return parseLammpsData(content, options && options.lammps);
     }
 
+    if (isAbacusInput(content)) {
+        return parseAbacusInput(content, options && options.externalStructureFile);
+    }
+
     if (isCp2kInput(content)) {
         return parseCp2kInput(content, options);
     }
@@ -350,7 +385,7 @@ export function tryAutoParse(content: string, fileName: string = '', options?: P
     }
 
     if (isAbinitInput(content)) {
-        return parseAbinitInput(content);
+        return parseAbinitInput(content, options && options.externalStructureFile);
     }
 
     if (isOrcaOutput(content)) {

@@ -2,6 +2,7 @@ import { MolecularData } from '../types';
 import { elementFromAtomName, normalizeElementSymbol } from '../tools/periodicTable';
 import { cellToLatticeVectors, fracToCart } from '../tools/crystalGeometry';
 import { parseXyz } from './xyzParser';
+import { parsePdb } from './pdbParser';
 import {
     BOHR_TO_ANGSTROM,
     buildMolecularStructure,
@@ -52,7 +53,10 @@ function parseCp2kSections(content: string): Cp2kSection[] {
         let line = rawLine;
         const hash = line.indexOf('#');
         if (hash >= 0) line = line.slice(0, hash);
-        // A trailing comment after a value is not part of the value.
+        // CP2K writes comments with `!` as well; a trailing comment after a
+        // value is not part of the value.
+        const bang = line.indexOf('!');
+        if (bang >= 0) line = line.slice(0, bang);
         line = line.trim();
         if (line === '') continue;
         if (/^&END\b/i.test(line)) {
@@ -225,6 +229,51 @@ function coordSites(section: Cp2kSection): Site[] {
     return sites;
 }
 
+/** The coordinate-file format the input states, else the file's extension. */
+function cp2kCoordFormat(sections: Cp2kSection[], fileName: string): string {
+    const topology = lastSection(sections, 'TOPOLOGY');
+    const tokens = topology ? sectionKey(topology, 'COORD_FILE_FORMAT') : undefined;
+    const declared = tokens ? tokens.join(' ').trim().toLowerCase() : '';
+    // CP2K's default is OFF, which makes it detect the format from the name.
+    if (declared !== '' && declared !== 'off') return declared;
+    return fileName.toLowerCase().split('.').pop() || '';
+}
+
+/** Read a CP2K companion coordinate file in the formats an input can name. */
+function cp2kCoordinateSites(content: string, format: string): Site[] {
+    const kind = format.toLowerCase().replace(/^\./, '');
+    if (kind === 'xyz') {
+        const xyz = parseXyz(content);
+        return xyz.atoms.map(atom => {
+            const site: Site = { element: atom.element, cart: [atom.x, atom.y, atom.z] };
+            if (atom.ghost) site.ghost = true;
+            return site;
+        });
+    }
+    if (kind === 'pdb' || kind === 'ent') {
+        const pdb = parsePdb(content);
+        return pdb.atoms.map(atom => ({ element: atom.element, cart: [atom.x, atom.y, atom.z] }));
+    }
+    if (kind === 'cp2k' || kind === 'crd' || kind === 'coord') {
+        const sites: Site[] = [];
+        for (const raw of content.split(/\r?\n/)) {
+            const line = raw.replace(/#.*$/, '').trim();
+            if (line === '') continue;
+            const parts = line.split(/\s+/);
+            // A leading atom count (the CP2K/CRD layout) is not a site row.
+            if (parts.length < 4 || !/^[A-Za-z]/.test(parts[0])) continue;
+            const x = parseFloat(parts[1]);
+            const y = parseFloat(parts[2]);
+            const z = parseFloat(parts[3]);
+            if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
+            const element = normalizeElementSymbol(parts[0]) || elementFromAtomName(parts[0]) || 'X';
+            sites.push({ element, cart: [x, y, z], label: parts[0] });
+        }
+        return sites;
+    }
+    return [];
+}
+
 export function parseCp2kInput(content: string, options?: Cp2kParseOptions): MolecularData {
     const warnings: string[] = [];
     const sections = flattenSections(parseCp2kSections(content));
@@ -236,25 +285,36 @@ export function parseCp2kInput(content: string, options?: Cp2kParseOptions): Mol
 
     const coord = lastSection(sections, 'COORD');
     let sites = coord ? coordSites(coord) : [];
-    if (sites.length === 0) {
-        const topology = lastSection(sections, 'TOPOLOGY');
-        const coordName = topology && topology.keys['COORD_FILE_NAME'] ? topology.keys['COORD_FILE_NAME'].join(' ') : '';
-        if (options && options.externalCoordinateFile) {
-            const ext = options.externalCoordinateFile.fileName.toLowerCase().split('.').pop() || '';
-            if (ext === 'xyz') {
-                const xyz = parseXyz(options.externalCoordinateFile.content);
-                sites = xyz.atoms.map(a => ({ element: a.element, cart: [a.x, a.y, a.z], ghost: a.ghost }));
-                if (sites.length === 0) {
-                    warnings.push('COORD_FILE_NAME ' + coordName + ': the coordinate file has no atoms');
-                }
+    const topology = lastSection(sections, 'TOPOLOGY');
+    const coordName = topology && topology.keys['COORD_FILE_NAME']
+        ? topology.keys['COORD_FILE_NAME'].join(' ').trim().replace(/^['"]|['"]$/g, '').trim()
+        : '';
+    const external = options && options.externalCoordinateFile ? options.externalCoordinateFile : undefined;
+    if (coordName !== '' || external) {
+        if (external) {
+            const format = cp2kCoordFormat(sections, external.fileName);
+            const externalSites = cp2kCoordinateSites(external.content, format);
+            if (externalSites.length > 0) {
+                // A stated COORD_FILE_NAME is where CP2K reads the geometry;
+                // an inline &COORD block is then not what the run uses.
+                sites = externalSites;
+            } else if (['xyz', 'pdb', 'ent', 'cp2k', 'crd', 'coord'].indexOf(format) < 0) {
+                warnings.push('COORD_FILE_NAME ' + (coordName || external.fileName) +
+                    ': the coordinate format "' + (format || 'unknown') + '" is not read');
             } else {
-                warnings.push('COORD_FILE_NAME ' + coordName + ': only an XYZ coordinate file is read');
+                warnings.push('COORD_FILE_NAME ' + (coordName || external.fileName) +
+                    ': the coordinate file has no readable atoms');
             }
+        } else if (coordName !== '' && sites.length === 0) {
+            warnings.push('the CP2K input reads its structure from "' + coordName +
+                '", but that file could not be read');
         } else if (coordName !== '') {
-            warnings.push('COORD_FILE_NAME ' + coordName + ' is not next to the input: no atoms to show');
-        } else {
-            warnings.push('the CP2K input has no &COORD block: no atoms to show');
+            warnings.push('the CP2K input reads its structure from "' + coordName +
+                '", but that file could not be read: showing the inline &COORD block');
         }
+    }
+    if (sites.length === 0 && coordName === '' && !external) {
+        warnings.push('the CP2K input has no &COORD block: no atoms to show');
     }
 
     const lattice = cellLattice(sections);

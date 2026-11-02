@@ -1,6 +1,7 @@
 import { MolecularData } from '../types';
 import { elementFromZ, normalizeElementSymbol } from '../tools/periodicTable';
-import { BOHR_TO_ANGSTROM, buildPeriodicStructure, isUsableLattice, Site } from './periodicUtils';
+import { BOHR_TO_ANGSTROM, buildMolecularStructure, buildPeriodicStructure, isUsableLattice, Site } from './periodicUtils';
+import { parseXyzTrajectory } from './xyzParser';
 
 /**
  * ABINIT reader, for both the input (`.abi`) and the output (`.abo`).
@@ -174,11 +175,21 @@ interface AbinitGeometry {
     natom: number;
 }
 
-function geometryFromInput(input: TokenizedInput): AbinitGeometry | null {
-    const warnings: string[] = [];
+/** The dataset whose geometry the input describes (ABINIT's last one wins). */
+function abinitDataset(input: TokenizedInput): number {
     const ndtsetRaw = numberList(input.values['ndtset']);
-    const dataset = ndtsetRaw.length > 0 && ndtsetRaw[0] > 1 ? Math.floor(ndtsetRaw[0]) : 1;
+    return ndtsetRaw.length > 0 && ndtsetRaw[0] > 1 ? Math.floor(ndtsetRaw[0]) : 1;
+}
 
+interface AbinitCell {
+    lattice: number[][];
+    warnings: string[];
+    /** Whether the file states a cell rather than relying on ABINIT's 1-Bohr default. */
+    stated: boolean;
+}
+
+function cellFromInput(input: TokenizedInput, dataset: number): AbinitCell {
+    const warnings: string[] = [];
     const acellTokens = datasetKey(input, 'acell', dataset);
     const acellValues = numberList(acellTokens);
     if (acellValues.length === 0) {
@@ -203,6 +214,14 @@ function geometryFromInput(input: TokenizedInput): AbinitGeometry | null {
         warnings.push('rprim needs nine numbers: the identity is used instead');
     }
     const lattice = rprim.map((row, i) => row.map(v => v * acell[i]));
+    return { lattice, warnings, stated: acellValues.length > 0 || rprimValues.length > 0 };
+}
+
+function geometryFromInput(input: TokenizedInput): AbinitGeometry | null {
+    const dataset = abinitDataset(input);
+    const cell = cellFromInput(input, dataset);
+    const warnings = cell.warnings;
+    const lattice = cell.lattice;
 
     const natomRaw = numberList(datasetKey(input, 'natom', dataset));
     let natom = natomRaw.length > 0 ? Math.floor(natomRaw[0]) : 0;
@@ -255,10 +274,83 @@ function geometryFromInput(input: TokenizedInput): AbinitGeometry | null {
     return { lattice, sites, warnings, natom };
 }
 
-export function parseAbinitInput(content: string): MolecularData {
+export interface AbinitExternalStructure {
+    content: string;
+    fileName: string;
+}
+
+export interface AbinitXyzfileScan {
+    /** The first `xyzfile` the input states: the geometry the run starts from. */
+    xyzfile?: string;
+    /** Every distinct `xyzfile` name, in file order. */
+    files: string[];
+}
+
+/** The XYZ structure files an ABINIT input names; ABINIT resolves them from its run folder. */
+export function scanAbinitXyzfile(content: string): AbinitXyzfileScan {
     const input = tokenizeAbinit(content);
-    const geometry = geometryFromInput(input);
+    const entries: { name: string; order: number }[] = [];
+    for (const key of Object.keys(input.values)) {
+        if (!/^xyzfile\d*$/.test(key)) continue;
+        const tokens = input.values[key];
+        const raw = tokens.length > 0 ? tokens[0] : '';
+        const name = raw.replace(/^['"]|['"]$/g, '').trim();
+        if (name === '') continue;
+        entries.push({ name, order: input.order[key] !== undefined ? input.order[key] : 0 });
+    }
+    entries.sort((a, b) => a.order - b.order);
+    const files: string[] = [];
+    for (const entry of entries) {
+        if (files.indexOf(entry.name) < 0) files.push(entry.name);
+    }
+    return { files, xyzfile: files.length > 0 ? files[0] : undefined };
+}
+
+export function parseAbinitInput(content: string, external?: AbinitExternalStructure): MolecularData {
+    const input = tokenizeAbinit(content);
     const title = input.comments.length > 0 ? input.comments[0] : 'ABINIT input';
+    const xyz = scanAbinitXyzfile(content);
+
+    if (xyz.xyzfile) {
+        if (!external) {
+            return {
+                atoms: [], bonds: [], title, hasExplicitBonds: false,
+                warnings: ['the ABINIT input reads its structure from "' + xyz.xyzfile +
+                    '", but that file could not be read']
+            };
+        }
+        const trajectory = parseXyzTrajectory(external.content);
+        const frame = trajectory.frames.length > 0 ? trajectory.frames[0] : undefined;
+        if (!frame || frame.atoms.length === 0) {
+            return {
+                atoms: [], bonds: [], title, hasExplicitBonds: false,
+                warnings: ['xyzfile "' + external.fileName + '": the coordinate file has no atoms']
+            };
+        }
+        const sites: Site[] = frame.atoms.map(atom => {
+            const site: Site = { element: atom.element, cart: [atom.x, atom.y, atom.z] };
+            if (atom.ghost) site.ghost = true;
+            return site;
+        });
+        const displayTitle = input.comments.length === 0 && frame.title !== '' ? frame.title : title;
+        const cell = cellFromInput(input, abinitDataset(input));
+        if (!cell.stated) {
+            // ABINIT's 1-Bohr default cell would squeeze a molecular xyzfile
+            // into a half-Angstrom cube; the molecule is better shown free.
+            return buildMolecularStructure(sites, displayTitle, [
+                'the ABINIT input states no cell: the xyzfile structure is shown without a cell'
+            ]);
+        }
+        if (!isUsableLattice(cell.lattice)) {
+            return {
+                atoms: [], bonds: [], title: displayTitle, hasExplicitBonds: false,
+                warnings: cell.warnings.concat('the ABINIT input cell is degenerate: no structure to show')
+            };
+        }
+        return buildPeriodicStructure(cell.lattice, sites, displayTitle, cell.warnings);
+    }
+
+    const geometry = geometryFromInput(input);
     if (!geometry || geometry.sites.length === 0) {
         return {
             atoms: [], bonds: [], title, hasExplicitBonds: false,
@@ -441,6 +533,6 @@ export function isAbinitOutput(content: string): boolean {
 }
 
 export function isAbinitInput(content: string): boolean {
-    return /^\s*(acell|rprim|xred|xcart|xangst|natom|typat|znucl)\b/m.test(content) ||
+    return /^\s*(acell|rprim|xred|xcart|xangst|natom|typat|znucl|xyzfile\d*|ecut|ndtset|pseudos|kptopt|ngkpt)\b/m.test(content) ||
         /^\s*(natom|ntypat)\s+\d+/m.test(content);
 }

@@ -64,14 +64,14 @@
       "explorer/context": [
         {
           "command": "molecularViewer.openViewer",
-          "when": "resourceExtname == .gjf || resourceExtname == .xyz || resourceExtname == .com || resourceExtname == .gjf03 || resourceExtname == .gjf09 || resourceExtname == .gjf16 || resourceExtname == .mol2 || resourceExtname == .log || resourceExtname == .out || resourceExtname == .coord || resourceExtname == .inp || resourceExtname == .pdb || resourceExtname == .ent || resourceExtname == .mop || resourceExtname == .mopac || resourceExtname == .dat || resourceExtname == .tcl || resourceExtname == .cif || resourceExtname == .vasp || resourceExtname == .cube || resourceExtname == .vesta || resourceExtname == .abi || resourceExtname == .abo || resourceExtname == .stru || resourceExtname == .gro || resourceExtname == .molden || resourceExtname == .pwi || resourceExtname == .pwo || resourceExtname == .lammpstrj || resourceExtname == .lmp || resourceExtname == .lammps || resourceExtname == .in || resourceExtname == .extxyz || resourceExtname == .data || resourceExtname == .dump || resourceExtname == .md_dump || resourceExtname == .xdatcar || resourceExtname == .outcar || resourceFilename =~ /^(POSCAR|CONTCAR|poscar|contcar|STRU|STRU_MD_\\d+|MD_dump|XDATCAR|OUTCAR|vasprun\\.xml|coord\\.raw|coord\\.npy|data\\.[A-Za-z0-9_-]+|dump\\.[A-Za-z0-9_-]+)$/i",
+          "when": "resourceExtname == .gjf || resourceExtname == .xyz || resourceExtname == .com || resourceExtname == .gjf03 || resourceExtname == .gjf09 || resourceExtname == .gjf16 || resourceExtname == .mol2 || resourceExtname == .log || resourceExtname == .out || resourceExtname == .coord || resourceExtname == .inp || resourceExtname == .pdb || resourceExtname == .ent || resourceExtname == .mop || resourceExtname == .mopac || resourceExtname == .dat || resourceExtname == .tcl || resourceExtname == .cif || resourceExtname == .vasp || resourceExtname == .cube || resourceExtname == .vesta || resourceExtname == .abi || resourceExtname == .abo || resourceExtname == .stru || resourceExtname == .gro || resourceExtname == .molden || resourceExtname == .pwi || resourceExtname == .pwo || resourceExtname == .lammpstrj || resourceExtname == .lmp || resourceExtname == .lammps || resourceExtname == .in || resourceExtname == .extxyz || resourceExtname == .data || resourceExtname == .dump || resourceExtname == .md_dump || resourceExtname == .xdatcar || resourceExtname == .outcar || resourceFilename =~ /^(POSCAR|CONTCAR|poscar|contcar|STRU|STRU_MD_\\d+|MD_dump|XDATCAR|OUTCAR|vasprun\\.xml|coord\\.raw|coord\\.npy|INPUT|data|data\\.[A-Za-z0-9_-]+|dump\\.[A-Za-z0-9_-]+)$/i",
           "group": "navigation"
         }
       ],
       "editor/title/context": [
         {
           "command": "molecularViewer.openViewer",
-          "when": "resourceExtname == .gjf || resourceExtname == .xyz || resourceExtname == .com || resourceExtname == .gjf03 || resourceExtname == .gjf09 || resourceExtname == .gjf16 || resourceExtname == .mol2 || resourceExtname == .log || resourceExtname == .out || resourceExtname == .coord || resourceExtname == .inp || resourceExtname == .pdb || resourceExtname == .ent || resourceExtname == .mop || resourceExtname == .mopac || resourceExtname == .dat || resourceExtname == .tcl || resourceExtname == .cif || resourceExtname == .vasp || resourceExtname == .cube || resourceExtname == .vesta || resourceExtname == .abi || resourceExtname == .abo || resourceExtname == .stru || resourceExtname == .gro || resourceExtname == .molden || resourceExtname == .pwi || resourceExtname == .pwo || resourceExtname == .lammpstrj || resourceExtname == .lmp || resourceExtname == .lammps || resourceExtname == .in || resourceExtname == .extxyz || resourceExtname == .data || resourceExtname == .dump || resourceExtname == .md_dump || resourceExtname == .xdatcar || resourceExtname == .outcar || resourceFilename =~ /^(POSCAR|CONTCAR|poscar|contcar|STRU|STRU_MD_\\d+|MD_dump|XDATCAR|OUTCAR|vasprun\\.xml|coord\\.raw|coord\\.npy|data\\.[A-Za-z0-9_-]+|dump\\.[A-Za-z0-9_-]+)$/i",
+          "when": "resourceExtname == .gjf || resourceExtname == .xyz || resourceExtname == .com || resourceExtname == .gjf03 || resourceExtname == .gjf09 || resourceExtname == .gjf16 || resourceExtname == .mol2 || resourceExtname == .log || resourceExtname == .out || resourceExtname == .coord || resourceExtname == .inp || resourceExtname == .pdb || resourceExtname == .ent || resourceExtname == .mop || resourceExtname == .mopac || resourceExtname == .dat || resourceExtname == .tcl || resourceExtname == .cif || resourceExtname == .vasp || resourceExtname == .cube || resourceExtname == .vesta || resourceExtname == .abi || resourceExtname == .abo || resourceExtname == .stru || resourceExtname == .gro || resourceExtname == .molden || resourceExtname == .pwi || resourceExtname == .pwo || resourceExtname == .lammpstrj || resourceExtname == .lmp || resourceExtname == .lammps || resourceExtname == .in || resourceExtname == .extxyz || resourceExtname == .data || resourceExtname == .dump || resourceExtname == .md_dump || resourceExtname == .xdatcar || resourceExtname == .outcar || resourceFilename =~ /^(POSCAR|CONTCAR|poscar|contcar|STRU|STRU_MD_\\d+|MD_dump|XDATCAR|OUTCAR|vasprun\\.xml|coord\\.raw|coord\\.npy|INPUT|data|data\\.[A-Za-z0-9_-]+|dump\\.[A-Za-z0-9_-]+)$/i",
           "group": "navigation"
         }
       ]
@@ -227,6 +227,12 @@
           },
           {
             "filenamePattern": "data.*"
+          },
+          {
+            "filenamePattern": "data"
+          },
+          {
+            "filenamePattern": "INPUT"
           }
         ]
       }
