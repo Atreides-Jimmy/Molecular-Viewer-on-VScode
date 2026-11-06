@@ -7021,6 +7021,70 @@ function rebuildMovedBondMeshes(oldBonds,selSet){
     placeBondPieces();
 }
 
+// ===== Periodic bonds in a trajectory frame =====
+//
+// A trajectory document is a molecule list with a box, not a crystal: it has
+// no CRY, and its atoms are wrapped into each frame's cell. Two bonded atoms
+// can therefore sit on opposite faces of the box, with the raw difference
+// spanning the whole cell. The bond has to be drawn to the nearest periodic
+// image of its far atom — the short split stub a crystal draws across a face —
+// rather than through the box.
+var TRAJ_INV=null,TRAJ_INV_FOR=null;
+function trajectoryInverse(){
+    if(!TRAJ_CELL){TRAJ_INV=null;TRAJ_INV_FOR=null;return null}
+    if(TRAJ_INV_FOR!==TRAJ_CELL){
+        TRAJ_INV_FOR=TRAJ_CELL;
+        TRAJ_INV=crystalInverseOf(TRAJ_CELL);
+    }
+    return TRAJ_INV;
+}
+// The far endpoint of a bond in the nearest image of atom2 around atom1.
+// The 27 repeats around the rounded displacement are enumerated instead of
+// trusting rounding, because a skewed box can put the nearest image in an
+// adjacent repeat (the same reason the crystal bond search enumerates).
+function trajectoryBondEnd(a1,a2,out){
+    var lv=TRAJ_CELL,inv=trajectoryInverse();
+    if(!lv||!inv)return false;
+    var dx=a2.x-a1.x,dy=a2.y-a1.y,dz=a2.z-a1.z;
+    var fx=inv[0][0]*dx+inv[0][1]*dy+inv[0][2]*dz;
+    var fy=inv[1][0]*dx+inv[1][1]*dy+inv[1][2]*dz;
+    var fz=inv[2][0]*dx+inv[2][1]*dy+inv[2][2]*dz;
+    var bx=Math.round(fx),by=Math.round(fy),bz=Math.round(fz);
+    var bestD2=Infinity,bestX=dx,bestY=dy,bestZ=dz;
+    for(var sx=bx+1;sx>=bx-1;sx--){
+        var gx=fx-sx;
+        for(var sy=by+1;sy>=by-1;sy--){
+            var gy=fy-sy;
+            for(var sz=bz+1;sz>=bz-1;sz--){
+                var gz=fz-sz;
+                var ax=gx*lv[0][0]+gy*lv[1][0]+gz*lv[2][0];
+                var ay=gx*lv[0][1]+gy*lv[1][1]+gz*lv[2][1];
+                var az=gx*lv[0][2]+gy*lv[1][2]+gz*lv[2][2];
+                var d2=ax*ax+ay*ay+az*az;
+                if(d2<bestD2-1e-12){bestD2=d2;bestX=ax;bestY=ay;bestZ=az}
+            }
+        }
+    }
+    out[0]=a1.x+bestX;out[1]=a1.y+bestY;out[2]=a1.z+bestZ;
+    return true;
+}
+// The endpoint a bond is actually drawn to: a crystal adds the shift its bond
+// states, a trajectory takes the nearest image in the frame's own box, and
+// every other structure draws the atom where it stands.
+var _bondFarPoint=[0,0,0];
+function bondDrawnEnd(b,a1,a2,out){
+    if(b.shift&&CRY){
+        var lv=CRY.latticeVectors;
+        out[0]=a2.x+b.shift[0]*lv[0][0]+b.shift[1]*lv[1][0]+b.shift[2]*lv[2][0];
+        out[1]=a2.y+b.shift[0]*lv[0][1]+b.shift[1]*lv[1][1]+b.shift[2]*lv[2][1];
+        out[2]=a2.z+b.shift[0]*lv[0][2]+b.shift[1]*lv[1][2]+b.shift[2]*lv[2][2];
+        return true;
+    }
+    if(!CRY&&TRAJ_CELL&&trajectoryBondEnd(a1,a2,out))return true;
+    out[0]=a2.x;out[1]=a2.y;out[2]=a2.z;
+    return true;
+}
+
 // Place one piece from the current atom coordinates. The piece's position,
 // orientation and size all follow the two atoms it spans, so this is the single
 // source of bond geometry: building the scene, dragging an atom, streaming an
@@ -7031,13 +7095,8 @@ function placePiece(pool,slot){
     if(!b||p.bondIdx<0||p.bondIdx>=MD.bonds.length){poolHide(pool,slot);return}
     var a1=MD.atoms[b.atom1],a2=MD.atoms[b.atom2];
     if(!a1||!a2){poolHide(pool,slot);return}
-    var a2x=a2.x,a2y=a2.y,a2z=a2.z;
-    if(b.shift&&CRY){
-        var lv=CRY.latticeVectors;
-        a2x+=b.shift[0]*lv[0][0]+b.shift[1]*lv[1][0]+b.shift[2]*lv[2][0];
-        a2y+=b.shift[0]*lv[0][1]+b.shift[1]*lv[1][1]+b.shift[2]*lv[2][1];
-        a2z+=b.shift[0]*lv[0][2]+b.shift[1]*lv[1][2]+b.shift[2]*lv[2][2];
-    }
+    bondDrawnEnd(b,a1,a2,_bondFarPoint);
+    var a2x=_bondFarPoint[0],a2y=_bondFarPoint[1],a2z=_bondFarPoint[2];
     var sx=a1.x-CX,sy=a1.y-CY,sz=a1.z-CZ;
     var ex=a2x-CX,ey=a2y-CY,ez=a2z-CZ;
     var dx=ex-sx,dy=ey-sy,dz=ez-sz;
@@ -7172,19 +7231,12 @@ var aromPlan={sign:null,nx:null,ny:null,nz:null};
 function isAromaticOrder(o){return o>=1.25&&o<1.75}
 // The far endpoint of a bond as it is drawn, with the periodic shift applied
 // exactly as placePiece() applies it, so a crystal's wrapped bond is planned
-// along the line it is actually drawn on.
+// along the line it is actually drawn on. A trajectory frame has no CRY, so its
+// endpoint comes from the nearest image in the frame's own box.
 function bondEnd(b,out){
-    var a2=MD.atoms[b.atom2];
-    if(!a2)return false;
-    var ex=a2.x,ey=a2.y,ez=a2.z;
-    if(b.shift&&CRY){
-        var lv=CRY.latticeVectors;
-        ex+=b.shift[0]*lv[0][0]+b.shift[1]*lv[1][0]+b.shift[2]*lv[2][0];
-        ey+=b.shift[0]*lv[0][1]+b.shift[1]*lv[1][1]+b.shift[2]*lv[2][1];
-        ez+=b.shift[0]*lv[0][2]+b.shift[1]*lv[1][2]+b.shift[2]*lv[2][2];
-    }
-    out[0]=ex;out[1]=ey;out[2]=ez;
-    return true;
+    var a1=MD.atoms[b.atom1],a2=MD.atoms[b.atom2];
+    if(!a1||!a2)return false;
+    return bondDrawnEnd(b,a1,a2,out);
 }
 // Unit direction of one bond.
 var _bondScratch=[0,0,0];
