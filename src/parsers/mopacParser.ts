@@ -113,26 +113,39 @@ export function parseMopac(content: string): MolecularData {
         }
 
         if (i === 0) {
+            // The first line is the keyword line (`PM7 CHARGE=1 MS=2`), not
+            // the title; the title is the line after it. Reading the keywords
+            // as the title lost the input's charge and multiplicity.
+            const cmMatch = line.match(/\bCHARGE\s*=\s*(-?\d+)/i);
+            if (cmMatch) charge = parseInt(cmMatch[1], 10);
+            const msMatch = line.match(/\b(?:MULT|MS|MULTIPlicity)\s*=\s*(\d+)/i);
+            if (msMatch) multiplicity = parseInt(msMatch[1], 10);
+            continue;
+        }
+
+        if (i === 1) {
             title = line || 'MOPAC Calculation';
             continue;
         }
 
-        if (i === 1) continue;
-
+        // `foundChargeMult` only stops the charge scan; it must not stop the
+        // coordinate-block detection, or a charge on the keyword line (read
+        // above) would leave every geometry row unparsed.
         if (!foundChargeMult) {
-            const cmMatch = line.match(/CHARGE\s*=\s*(-?\d+)/i);
+            const cmMatch = line.match(/\bCHARGE\s*=\s*(-?\d+)/i);
             if (cmMatch) charge = parseInt(cmMatch[1], 10);
 
-            const msMatch = line.match(/(?:MULT|MS|MULTIPlicity)\s*=\s*(\d+)/i);
+            const msMatch = line.match(/\b(?:MULT|MS|MULTIPlicity)\s*=\s*(\d+)/i);
             if (msMatch) multiplicity = parseInt(msMatch[1], 10);
 
             if (cmMatch || msMatch) {
                 foundChargeMult = true;
             }
+        }
 
-            if (line.match(/^\s*[A-Za-z]{1,2}\s+/) || line.match(/^\s*\d+\s+/)) {
-                inCoords = true;
-            }
+        if (!inCoords &&
+            (line.match(/^\s*[A-Za-z]{1,2}\s+/) || line.match(/^\s*\d+\s+/))) {
+            inCoords = true;
         }
 
         if (inCoords) {
@@ -194,7 +207,14 @@ export function parseMopac(content: string): MolecularData {
         for (const fa of fallbackAtoms) atoms.push(fa);
     }
 
-    return { atoms, bonds, title, hasExplicitBonds, charge, multiplicity };
+    const data: MolecularData = { atoms, bonds, title, hasExplicitBonds, charge, multiplicity };
+    if (atoms.length === 0 && coordLines.length > 0) {
+        // MOPAC also accepts Z-matrix (internal-coordinate) input, whose rows
+        // have distances and angles rather than x/y/z triples. Saying so is
+        // better than an unexplained empty canvas.
+        data.warnings = ['the MOPAC input states internal coordinates: only a Cartesian geometry can be shown'];
+    }
+    return data;
 }
 
 /**

@@ -133,11 +133,16 @@ interface DataBox {
     tilt: [number, number, number];
 }
 
+function lammpsDataLine(line: string): string {
+    return stripLammpsComment(line).trim();
+}
+
 function readDataBox(lines: string[]): DataBox {
     const bound: { [key: string]: number } = {};
     let tilt: [number, number, number] = [0, 0, 0];
-    for (const line of lines) {
-        const m = /^\s*([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+(xlo|ylo|zlo)\s+(xhi|yhi|zhi)\b/i.exec(line);
+    for (const raw of lines) {
+        const line = lammpsDataLine(raw);
+        const m = /^([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+(xlo|ylo|zlo)\s+(xhi|yhi|zhi)\b/i.exec(line);
         if (m) {
             const lo = m[3].toLowerCase();
             const hi = m[4].toLowerCase();
@@ -145,7 +150,7 @@ function readDataBox(lines: string[]): DataBox {
             bound[hi] = parseFloat(m[2]);
             continue;
         }
-        const t = /^\s*([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+xy\s+xz\s+yz\b/i.exec(line);
+        const t = /^([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+xy\s+xz\s+yz\b/i.exec(line);
         if (t) tilt = [parseFloat(t[1]), parseFloat(t[2]), parseFloat(t[3])];
     }
     const xlo = bound['xlo'] !== undefined ? bound['xlo'] : 0;
@@ -276,8 +281,9 @@ function atomStyleOf(header: string, rows: string[][], hint?: string, atomTypes?
 }
 
 function declaredAtomTypes(lines: string[]): number | undefined {
-    for (const line of lines) {
-        const m = /^\s*(\d+)\s+atom\s+types\s*$/i.exec(line);
+    for (const raw of lines) {
+        const line = lammpsDataLine(raw);
+        const m = /^(\d+)\s+atom\s+types$/i.exec(line);
         if (m) return parseInt(m[1], 10);
     }
     return undefined;
@@ -294,15 +300,10 @@ function readDataAtoms(lines: string[], start: number, styleHint?: string, atomT
     const rawRows: string[][] = [];
     let i = start + 1;
     for (; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (line === '') {
-            let k = i + 1;
-            while (k < lines.length && lines[k].trim() === '') k++;
-            if (k >= lines.length || SECTION_START.test(lines[k].trim())) { i = k; break; }
-            continue;
-        }
-        // A comment row is not an atom and must not seed the style guess.
-        if (line.startsWith('#')) continue;
+        // A trailing comment is not a column: keeping it would inflate the
+        // row's width and let the style guess read x from the wrong field.
+        const line = lammpsDataLine(lines[i]);
+        if (line === '') continue;
         if (SECTION_START.test(line)) break;
         const parts = line.split(/\s+/);
         if (parts.length < 5) continue;
@@ -416,9 +417,28 @@ function readDumpBox(lines: string[], start: number, factor: number): { box: Dum
     }
     let xlo = 0, xhi = 0, ylo = 0, yhi = 0, zlo = 0, zhi = 0;
     let tilt: [number, number, number] = [0, 0, 0];
+    let lattice: number[][] | null = null;
+    const general = /\babc\s+origin\b/i.test(lines[start] || '');
     if (values.length >= 3) {
-        if (values[0].length >= 3) {
-            // Triclinic dump: xlo_bound xhi_bound xy / ... / ...
+        if (general || (values[0].length >= 4 && values[1].length >= 4 && values[2].length >= 4)) {
+            // General triclinic (`dump_modify triclinic/general`): each line is
+            // one edge vector followed by that axis's origin component,
+            //   ax ay az originx / bx by bz originy / cx cy cz originz
+            // and the vectors are already in Cartesian form, not lower
+            // triangular, so they are taken as the lattice exactly as written.
+            const a = values[0].slice(0, 3).map(v => v * factor);
+            const b = values[1].slice(0, 3).map(v => v * factor);
+            const c = values[2].slice(0, 3).map(v => v * factor);
+            lattice = isUsableLattice([a, b, c]) ? [a, b, c] : null;
+            xlo = (values[0][3] || 0) * factor;
+            ylo = (values[1][3] || 0) * factor;
+            zlo = (values[2][3] || 0) * factor;
+            xhi = xlo + Math.hypot(a[0], a[1], a[2]);
+            yhi = ylo + Math.hypot(b[0], b[1], b[2]);
+            zhi = zlo + Math.hypot(c[0], c[1], c[2]);
+            tilt = [b[0], c[0], c[1]];
+        } else if (values[0].length >= 3) {
+            // Restricted triclinic: xlo_bound xhi_bound xy / ... / ...
             const xy = values[0][2] * factor;
             const xz = values[1][2] * factor;
             const yz = values[2][2] * factor;
@@ -446,12 +466,14 @@ function readDumpBox(lines: string[], start: number, factor: number): { box: Dum
             zhi = values[2][1] * factor;
         }
     }
-    const lx = xhi - xlo;
-    const ly = yhi - ylo;
-    const lz = zhi - zlo;
-    const lattice = lx > 0 && ly > 0 && lz > 0
-        ? [[lx, 0, 0], [tilt[0], ly, 0], [tilt[1], tilt[2], lz]]
-        : null;
+    if (!lattice) {
+        const lx = xhi - xlo;
+        const ly = yhi - ylo;
+        const lz = zhi - zlo;
+        lattice = lx > 0 && ly > 0 && lz > 0
+            ? [[lx, 0, 0], [tilt[0], ly, 0], [tilt[1], tilt[2], lz]]
+            : null;
+    }
     return { box: { lattice, xlo, xhi, ylo, yhi, zlo, zhi, tilt }, next: i };
 }
 
@@ -903,7 +925,10 @@ export function isLammpsInput(content: string): boolean {
         // `lattice constant (Bohr) = 10.26` is printed by ABACUS/QE, not a
         // command; an input line rarely carries `=` in its first words.
         if (/^\S+(?:\s+\S+){0,3}\s*=\s*\S/.test(line)) continue;
-        const command = line.split(/\s+/)[0].toLowerCase();
+        // LAMMPS commands are lowercase and case-sensitive. Accepting any case
+        // made Gaussian's "Compute ..." / "Fix ..." section lines look like a
+        // script, and this test runs before the output readers.
+        const command = line.split(/\s+/)[0];
         if (!LAMMPS_STRONG_COMMANDS.has(command)) continue;
         if (/^(read_data|read_restart|create_box|create_atoms)$/.test(command)) return true;
         if (++strong >= 2) return true;
@@ -950,10 +975,20 @@ export function parseLammpsInputStructure(
 }
 
 export function isLammpsData(content: string): boolean {
-    return /^\s*\d+\s+atoms\s*$/im.test(content) &&
-        /^\s*\d+\s+atom types\s*$/im.test(content) &&
-        /^\s*Atoms\b/im.test(content) &&
-        /^\s*[-+0-9.eE]+\s+[-+0-9.eE]+\s+xlo\s+xhi\s*$/im.test(content);
+    let atoms = false;
+    let types = false;
+    let section = false;
+    let box = false;
+    for (const raw of content.split(/\r?\n/)) {
+        const line = lammpsDataLine(raw);
+        if (line === '') continue;
+        if (!atoms && /^\d+\s+atoms$/i.test(line)) atoms = true;
+        else if (!types && /^\d+\s+atom types$/i.test(line)) types = true;
+        else if (!section && /^Atoms\b/i.test(line)) section = true;
+        else if (!box && /^[-+0-9.eE]+\s+[-+0-9.eE]+\s+xlo\s+xhi/i.test(line)) box = true;
+        if (atoms && types && section && box) return true;
+    }
+    return false;
 }
 
 export function isLammpsDump(content: string): boolean {

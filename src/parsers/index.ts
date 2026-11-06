@@ -195,8 +195,10 @@ export function parseFile(content: string, fileName: string, options?: ParseFile
         case 'com':
             return parseGjf(content);
         case 'xyz':
+        case 'trj':
             // A GPUMD/ASE file carries its cell on the comment line; the plain
-            // XYZ reader would throw that cell away.
+            // XYZ reader would throw that cell away. xTB writes its trajectory
+            // as `xtb.trj`, which is the same back-to-back XYZ layout.
             return isExtXyz(content) ? parseExtXyz(content) : parseXyz(content);
         case 'extxyz':
             return parseExtXyz(content);

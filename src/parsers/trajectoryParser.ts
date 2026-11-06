@@ -100,6 +100,13 @@ function scaleCell(lattice: number[][], scale: number): number[][] {
     return lattice.map(row => row.map(v => v * scale));
 }
 
+function allFinite(values: Float64Array): boolean {
+    for (let i = 0; i < values.length; i++) {
+        if (!isFinite(values[i])) return false;
+    }
+    return true;
+}
+
 /* ------------------------------------------------------------------------- *
  * XTC
  *
@@ -171,12 +178,17 @@ function decodeBits(buf: Int32Array, cbuf: Uint8Array, numOfBits: number, buf2: 
     let bits = numOfBits;
 
     while (bits >= 8) {
+        // A corrupt byte count must fail the frame, not read `undefined`
+        // (which bitwise arithmetic turns into zero) and yield coordinates
+        // from a stream that ended early.
+        if (cnt >= cbuf.length) throw new RecordError('compressed coordinate block is truncated');
         lastBB1 = (lastBB1 << 8) | cbuf[cnt++];
         num |= (lastBB1 >> lastBB0) << (bits - 8);
         bits -= 8;
     }
     if (bits > 0) {
         if (lastBB0 < bits) {
+            if (cnt >= cbuf.length) throw new RecordError('compressed coordinate block is truncated');
             lastBB0 += 8;
             lastBB1 = (lastBB1 << 8) | cbuf[cnt++];
         }
@@ -727,8 +739,11 @@ function scanDcd(dv: DataView, reader: DcdReader, header: DcdHeader): { infos: D
             offset = zAt + expected + reader.markerSize;
             if (header.has4dims) offset = skipDcdRecord(dv, reader, offset);
 
+            // ISTART/NSAVC place the frame on the run's step axis; DELTA is the time
+            // per step, so the frame's time is that step times DELTA. Using the
+            // frame index alone put every DCD frame at its own index in time.
             const step = header.istart + infos.length * header.nsavc;
-            const time = infos.length * header.delta;
+            const time = step * header.delta;
             infos.push({ offset: xMarker, step, time, cell, xAt, yAt, zAt, axisCount });
         } catch {
             truncated = offset < dv.byteLength;
@@ -836,11 +851,22 @@ function readXtc(bytes: Uint8Array, dv: DataView, scale: number, options: Trajec
 
     for (const index of chosen) {
         const info = scan.infos[index];
+        if (info.natoms !== result.natoms) {
+            result.warnings.push('XTC frame ' + (index + 1) + ' has a different atom count: skipped');
+            continue;
+        }
         try {
             const raw = decodeXtcFrame(bytes, dv, info);
             const positions = new Float64Array(raw.length);
             for (let i = 0; i < raw.length; i++) positions[i] = raw[i] * scale;
-            const frame: TrajectoryFrame = { positions, step: info.step, time: info.time };
+            if (!allFinite(positions)) {
+                result.warnings.push('XTC frame ' + (index + 1) + ' holds a non-finite coordinate: skipped');
+                continue;
+            }
+            const frame: TrajectoryFrame = {
+                positions, step: info.step,
+                time: isFinite(info.time) ? info.time : undefined
+            };
             const cell = usableCell(matrixFromNine(info.box));
             if (cell) frame.cell = scaleCell(cell, scale);
             result.frames.push(frame);
@@ -866,11 +892,22 @@ function readTrr(dv: DataView, scale: number, options: TrajectoryReadOptions, re
 
     for (const index of chosen) {
         const info = scan.infos[index];
+        if (info.natoms !== result.natoms) {
+            result.warnings.push('TRR frame ' + (index + 1) + ' has a different atom count: skipped');
+            continue;
+        }
         try {
             const raw = decodeTrrFrame(dv, info);
             const positions = new Float64Array(raw.length);
             for (let i = 0; i < raw.length; i++) positions[i] = raw[i] * scale;
-            const frame: TrajectoryFrame = { positions, step: info.step, time: info.time };
+            if (!allFinite(positions)) {
+                result.warnings.push('TRR frame ' + (index + 1) + ' holds a non-finite coordinate: skipped');
+                continue;
+            }
+            const frame: TrajectoryFrame = {
+                positions, step: info.step,
+                time: isFinite(info.time) ? info.time : undefined
+            };
             const cell = usableCell(matrixFromNine(info.box));
             if (cell) frame.cell = scaleCell(cell, scale);
             result.frames.push(frame);
@@ -881,7 +918,21 @@ function readTrr(dv: DataView, scale: number, options: TrajectoryReadOptions, re
 }
 
 function readDcd(bytes: Uint8Array, dv: DataView, reader: DcdReader, scale: number, options: TrajectoryReadOptions, result: BinaryTrajectory): void {
-    const header = readDcdHeader(bytes, dv, reader);
+    let header: DcdHeader;
+    try {
+        header = readDcdHeader(bytes, dv, reader);
+    } catch (err) {
+        // A damaged header is a statement about this file, not a reason to
+        // fail the document: the warning path still opens the panel.
+        const msg = err instanceof Error ? err.message : String(err);
+        result.warnings.push('the DCD header could not be read (' + msg + '): no trajectory frames');
+        return;
+    }
+    if (header.natoms <= 0 || header.natoms > MAX_SINGLE_FRAME_ATOMS) {
+        result.warnings.push('the DCD header states ' + header.natoms +
+            ' atoms: the file is too large or corrupt to show');
+        return;
+    }
     result.natoms = header.natoms;
     const scan = scanDcd(dv, reader, header);
     result.truncated = scan.truncated;
@@ -912,7 +963,14 @@ function readDcd(bytes: Uint8Array, dv: DataView, reader: DcdReader, scale: numb
             const raw = decodeDcdFrame(dv, reader, header, info, firstRaw);
             const positions = new Float64Array(raw.length);
             for (let i = 0; i < raw.length; i++) positions[i] = raw[i] * scale;
-            const frame: TrajectoryFrame = { positions, step: info.step, time: info.time };
+            if (!allFinite(positions)) {
+                result.warnings.push('DCD frame ' + (index + 1) + ' holds a non-finite coordinate: skipped');
+                continue;
+            }
+            const frame: TrajectoryFrame = {
+                positions, step: info.step,
+                time: isFinite(info.time) ? info.time : undefined
+            };
             if (info.cell) frame.cell = scaleCell(info.cell, scale);
             result.frames.push(frame);
         } catch {

@@ -65,8 +65,23 @@ export function parseVasp(content: string): MolecularData {
     const title = lines[0].trim() || 'VASP Structure';
     const warnings: string[] = [];
 
-    const rawScale = parseFloat(lines[1].trim());
-    let scale = isFinite(rawScale) && rawScale !== 0 ? rawScale : 1.0;
+    // VASP accepts one scale for the whole cell or three per-axis factors.
+    // Reading the first number of a three-factor line scaled all three axes by
+    // it, so a cell stretched differently along x and z came out cubic.
+    const scaleTokens = lines[1].trim().split(/\s+/).map(Number);
+    const perAxis = scaleTokens.length >= 3 &&
+        scaleTokens.slice(0, 3).every(v => isFinite(v) && v > 0);
+    let scaleX: number, scaleY: number, scaleZ: number;
+    let scale = 1.0;
+    if (perAxis) {
+        scaleX = scaleTokens[0];
+        scaleY = scaleTokens[1];
+        scaleZ = scaleTokens[2];
+    } else {
+        const rawScale = parseFloat(lines[1].trim());
+        scale = isFinite(rawScale) && rawScale !== 0 ? rawScale : 1.0;
+        scaleX = scaleY = scaleZ = scale;
+    }
 
     const rawLattice: number[][] = [];
     for (let i = 0; i < 3; i++) {
@@ -85,7 +100,7 @@ export function parseVasp(content: string): MolecularData {
     // the number itself would turn a requested 100 A^3 cell into a lattice
     // mirrored through the origin and scaled by 100. The factor applies to
     // Cartesian coordinates too, exactly as a positive scale does.
-    if (scale < 0) {
+    if (!perAxis && scale < 0) {
         const target = -scale;
         const v0 = Math.abs(
             rawLattice[0][0] * (rawLattice[1][1] * rawLattice[2][2] - rawLattice[1][2] * rawLattice[2][1]) -
@@ -98,8 +113,9 @@ export function parseVasp(content: string): MolecularData {
             warnings.push('negative scale factor on a zero-volume cell: read as 1.0');
             scale = 1;
         }
+        scaleX = scaleY = scaleZ = scale;
     }
-    const lattice = rawLattice.map(v => v.map(c => c * scale));
+    const lattice = rawLattice.map((v, i) => v.map(c => c * (i === 0 ? scaleX : i === 1 ? scaleY : scaleZ)));
     if (!isUsableLattice(lattice)) {
         // The scale block above may already have reported a zero-volume target;
         // replacing that list with the degenerate-cell line would lose the
@@ -208,9 +224,9 @@ export function parseVasp(content: string): MolecularData {
 
         let cx: number, cy: number, cz: number;
         if (isCartesian) {
-            cx = x * scale;
-            cy = y * scale;
-            cz = z * scale;
+            cx = x * scaleX;
+            cy = y * scaleY;
+            cz = z * scaleZ;
         } else {
             const wrapped = [x, y, z];
             const [fx, fy, fz] = fracToCart(wrapped, lattice);
@@ -469,7 +485,10 @@ export function parseOutcar(content: string): MolecularData {
 }
 
 function xmlVarrays(block: string, name: string): number[][] {
-    const varray = new RegExp('<varray\\s+name="' + name + '">([\\s\\S]*?)</varray>', 'i').exec(block);
+    // vasprun.xml is written by hand-formatted code that puts a space before
+    // the closing angle bracket (`<varray name="basis" >`); requiring the
+    // quote to be followed by `>` directly lost every basis and position.
+    const varray = new RegExp('<varray\\s+name\\s*=\\s*"' + name + '"\\s*>([\\s\\S]*?)</varray\\s*>', 'i').exec(block);
     if (!varray) return [];
     const rows: number[][] = [];
     const re = /<v>([\s\S]*?)<\/v>/gi;
@@ -492,7 +511,7 @@ export function parseVasprunXml(content: string): MolecularData {
     }
 
     const elements: string[] = [];
-    const atomArray = /<array\s+name="atoms">([\s\S]*?)<\/array>/i.exec(content);
+    const atomArray = /<array\s+name\s*=\s*"atoms"\s*>([\s\S]*?)<\/array\s*>/i.exec(content);
     if (atomArray) {
         const re = /<rc>([\s\S]*?)<\/rc>/gi;
         let m: RegExpExecArray | null;

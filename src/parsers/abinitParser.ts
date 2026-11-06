@@ -35,7 +35,8 @@ interface TokenizedInput {
 const POSITION_KEYWORDS = ['xangst', 'xcart', 'xred'];
 
 function isKeywordToken(token: string): boolean {
-    return /^[A-Za-z][A-Za-z0-9_]*$/.test(token) && !/^(bohr|angstrom|ang|nm|hartree|ev|ry|rydberg)$/i.test(token);
+    return /^[A-Za-z][A-Za-z0-9_]*$/.test(token) &&
+        !/^(bohr|angstrom|ang|nm|pm|cm|mm|au|hartree|ev|ry|rydberg)$/i.test(token);
 }
 
 /**
@@ -147,13 +148,40 @@ function znuclElements(tokens: string[] | undefined): string[] {
     return out;
 }
 
-function unitOf(tokens: string[] | undefined): 'bohr' | 'angstrom' {
-    if (!tokens) return 'bohr';
-    for (const t of tokens) {
-        const s = t.toLowerCase();
-        if (s.indexOf('angstrom') >= 0 || s === 'ang') return 'angstrom';
+/** Angstrom per ABINIT length unit; a trailing unit token overrides the default. */
+const LENGTH_UNIT_FACTOR: { [unit: string]: number } = {
+    bohr: BOHR_TO_ANGSTROM,
+    bohrs: BOHR_TO_ANGSTROM,
+    'a.u.': BOHR_TO_ANGSTROM,
+    au: BOHR_TO_ANGSTROM,
+    angstrom: 1,
+    angstroms: 1,
+    ang: 1,
+    a: 1,
+    nm: 10,
+    pm: 0.01,
+    mm: 1e7,
+    cm: 1e8,
+    m: 1e10
+};
+
+function lengthUnitFactor(tokens: string[] | undefined, fallback: number): number {
+    if (!tokens) return fallback;
+    let factor = fallback;
+    for (const raw of tokens) {
+        const unit = raw.toLowerCase();
+        if (LENGTH_UNIT_FACTOR[unit] !== undefined) factor = LENGTH_UNIT_FACTOR[unit];
     }
-    return 'bohr';
+    return factor;
+}
+
+function hasUnlistedType(typat: number[], count: number, znucl: string[]): boolean {
+    if (znucl.length === 0) return false;
+    for (let i = 0; i < count; i++) {
+        const type = typat[i] !== undefined ? typat[i] : 1;
+        if (type < 1 || type > znucl.length) return true;
+    }
+    return false;
 }
 
 function datasetKey(input: TokenizedInput, key: string, dataset: number): string[] | undefined {
@@ -173,6 +201,8 @@ interface AbinitGeometry {
     sites: Site[];
     warnings: string[];
     natom: number;
+    /** Cartesian sites with no stated cell: show the molecule, not a 1-Bohr cube. */
+    molecular: boolean;
 }
 
 /** The dataset whose geometry the input describes (ABINIT's last one wins). */
@@ -195,8 +225,9 @@ function cellFromInput(input: TokenizedInput, dataset: number): AbinitCell {
     if (acellValues.length === 0) {
         warnings.push('no acell in the ABINIT input: the cell is read in Bohr with acell = 1');
     }
-    const unit = unitOf(acellTokens);
-    const factor = unit === 'angstrom' ? 1 : BOHR_TO_ANGSTROM;
+    // acell carries a LENGTH dimension: its default is Bohr, but an explicit
+    // Angstrom/nm/cm token is legal and must scale the cell.
+    const factor = lengthUnitFactor(acellTokens, BOHR_TO_ANGSTROM);
     let acell = [1, 1, 1];
     if (acellValues.length === 1) acell = [acellValues[0], acellValues[0], acellValues[0]];
     else if (acellValues.length >= 3) acell = [acellValues[0], acellValues[1], acellValues[2]];
@@ -243,7 +274,7 @@ function geometryFromInput(input: TokenizedInput): AbinitGeometry | null {
     }
     if (chosen === '') {
         warnings.push('the ABINIT input states no xred, xcart or xangst: no sites to show');
-        return { lattice, sites: [], warnings, natom };
+        return { lattice, sites: [], warnings, natom, molecular: false };
     }
 
     if (natom <= 0) {
@@ -257,6 +288,11 @@ function geometryFromInput(input: TokenizedInput): AbinitGeometry | null {
     }
 
     const positions = numberList(datasetKey(input, chosen, dataset));
+    // xcart defaults to Bohr and xangst to Angstrom, but both carry ABINIT's
+    // LENGTH dimension, so `xcart ... Angstrom` and `xangst ... nm` are legal.
+    const cartFactor = chosen === 'xcart'
+        ? lengthUnitFactor(datasetKey(input, chosen, dataset), BOHR_TO_ANGSTROM)
+        : lengthUnitFactor(datasetKey(input, chosen, dataset), 1);
     const sites: Site[] = [];
     const count = natom > 0 ? Math.min(natom, Math.floor(positions.length / 3)) : Math.floor(positions.length / 3);
     for (let i = 0; i < count; i++) {
@@ -266,12 +302,18 @@ function geometryFromInput(input: TokenizedInput): AbinitGeometry | null {
         const y = positions[3 * i + 1];
         const z = positions[3 * i + 2];
         if (chosen === 'xred') sites.push({ element, frac: [x, y, z] });
-        else if (chosen === 'xcart') sites.push({ element, cart: [x * BOHR_TO_ANGSTROM, y * BOHR_TO_ANGSTROM, z * BOHR_TO_ANGSTROM] });
-        else sites.push({ element, cart: [x, y, z] });
+        else sites.push({ element, cart: [x * cartFactor, y * cartFactor, z * cartFactor] });
     }
     if (znucl.length === 0) warnings.push('no znucl in the ABINIT input: every site is read as the dummy element X');
+    else if (hasUnlistedType(typat, count, znucl)) {
+        warnings.push('typat names a type znucl does not list: those sites are read as the dummy element X');
+    }
     if (sites.length === 0) warnings.push('no readable sites in the ABINIT input');
-    return { lattice, sites, warnings, natom };
+    // A Cartesian geometry needs no cell; drawing ABINIT's 1-Bohr default box
+    // around it would be a 0.53 A cube that no run intended.
+    const molecular = !cell.stated && chosen !== 'xred';
+    if (molecular) warnings.push('the ABINIT input states no cell: the structure is shown without a cell');
+    return { lattice, sites, warnings, natom, molecular };
 }
 
 export interface AbinitExternalStructure {
@@ -357,6 +399,9 @@ export function parseAbinitInput(content: string, external?: AbinitExternalStruc
             warnings: geometry ? geometry.warnings : ['unreadable ABINIT input: no structure to show']
         };
     }
+    if (geometry.molecular) {
+        return buildMolecularStructure(geometry.sites, title, geometry.warnings);
+    }
     if (!isUsableLattice(geometry.lattice)) {
         return {
             atoms: [], bonds: [], title, hasExplicitBonds: false,
@@ -398,8 +443,7 @@ function parseOutvarBlock(content: string): OutvarGeometry {
     const input = tokenizeAbinit(block);
 
     const acellValues = numberList(input.values['acell']);
-    const acellUnit = unitOf(input.values['acell']);
-    const factor = acellUnit === 'angstrom' ? 1 : BOHR_TO_ANGSTROM;
+    const factor = lengthUnitFactor(input.values['acell'], BOHR_TO_ANGSTROM);
     let acell = [1, 1, 1];
     if (acellValues.length === 1) acell = [acellValues[0], acellValues[0], acellValues[0]];
     else if (acellValues.length >= 3) acell = [acellValues[0], acellValues[1], acellValues[2]];
@@ -429,9 +473,13 @@ function parseOutvarBlock(content: string): OutvarGeometry {
     const xred = numberList(input.values['xred']);
     const xcart = numberList(input.values['xcart']);
     const xangst = numberList(input.values['xangst']);
-    const positions = xangst.length >= 3 ? { list: xangst, kind: 'angstrom' }
-        : xcart.length >= 3 ? { list: xcart, kind: 'bohr' }
-            : xred.length >= 3 ? { list: xred, kind: 'frac' } : null;
+    // The echoed xcart/xangst carry a LENGTH dimension, so a stated unit token
+    // scales them; only xred is dimensionless.
+    const xcartFactor = lengthUnitFactor(input.values['xcart'], BOHR_TO_ANGSTROM);
+    const xangstFactor = lengthUnitFactor(input.values['xangst'], 1);
+    const positions = xangst.length >= 3 ? { list: xangst, factor: xangstFactor }
+        : xcart.length >= 3 ? { list: xcart, factor: xcartFactor }
+            : xred.length >= 3 ? { list: xred, factor: undefined } : null;
     if (positions) {
         const n = natom > 0 ? Math.min(natom, Math.floor(positions.list.length / 3)) : Math.floor(positions.list.length / 3);
         if (natom <= 0) natom = n;
@@ -441,9 +489,8 @@ function parseOutvarBlock(content: string): OutvarGeometry {
             const x = positions.list[3 * i];
             const y = positions.list[3 * i + 1];
             const z = positions.list[3 * i + 2];
-            if (positions.kind === 'frac') sites.push({ element, frac: [x, y, z] });
-            else if (positions.kind === 'bohr') sites.push({ element, cart: [x * BOHR_TO_ANGSTROM, y * BOHR_TO_ANGSTROM, z * BOHR_TO_ANGSTROM] });
-            else sites.push({ element, cart: [x, y, z] });
+            if (positions.factor === undefined) sites.push({ element, frac: [x, y, z] });
+            else sites.push({ element, cart: [x * positions.factor, y * positions.factor, z * positions.factor] });
         }
     }
 
@@ -504,6 +551,9 @@ function parseOutvarBlock(content: string): OutvarGeometry {
     if (!lattice) warnings.push('the ABINIT output states no cell: no structure to show');
     if (sites.length === 0) warnings.push('the ABINIT output states no coordinates: no structure to show');
     if (znucl.length === 0 && sites.length > 0) warnings.push('the ABINIT output names no elements: every site is read as the dummy element X');
+    else if (hasUnlistedType(typat, sites.length, znucl)) {
+        warnings.push('typat names a type znucl does not list: those sites are read as the dummy element X');
+    }
     return { lattice, natom, typat, znucl, sites, warnings };
 }
 

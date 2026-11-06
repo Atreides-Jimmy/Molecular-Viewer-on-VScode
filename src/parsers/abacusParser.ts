@@ -1,5 +1,6 @@
 import { MolecularData } from '../types';
 import { elementFromAtomName, normalizeElementSymbol } from '../tools/periodicTable';
+import { cellToLatticeVectors } from '../tools/crystalGeometry';
 import { BOHR_TO_ANGSTROM, buildPeriodicStructure, isUsableLattice, oneLineTitle, Site } from './periodicUtils';
 
 /**
@@ -23,7 +24,7 @@ import { BOHR_TO_ANGSTROM, buildPeriodicStructure, isUsableLattice, oneLineTitle
  * of Angstroms across and nothing downstream could tell it was wrong.
  */
 
-const STRU_SECTIONS = /^(ATOMIC_SPECIES|NUMERICAL_ORBITAL|NUMERICAL_DESCRIPTOR|LATTICE_CONSTANT|LATTICE_VECTORS|ATOMIC_POSITIONS|K_POINTS|PAW|ORBITAL|DFT_ORBITAL|EXTERNAL_ORBITAL|EXTERNAL_CHARGE|INIT_CHARGE|ATOMIC_MAGMOM|ATOMIC_VELOCITY|ATOMIC_FORCE|CONSTRAINT|MD_INPUT)\b/;
+const STRU_SECTIONS = /^(ATOMIC_SPECIES|NUMERICAL_ORBITAL|NUMERICAL_DESCRIPTOR|LATTICE_CONSTANT|LATTICE_VECTORS|LATTICE_PARAMETERS|ATOMIC_POSITIONS|K_POINTS|PAW|ORBITAL|DFT_ORBITAL|EXTERNAL_ORBITAL|EXTERNAL_CHARGE|INIT_CHARGE|ATOMIC_MAGMOM|ATOMIC_VELOCITY|ATOMIC_FORCE|CONSTRAINT|MD_INPUT)\b/;
 
 /** A value line whose leading token is a number and whose unit words are known. */
 function parseLengthUnit(tokens: string[], defaultUnit: 'bohr' | 'angstrom'): { value: number; unit: 'bohr' | 'angstrom' } | null {
@@ -81,11 +82,16 @@ function parsePositionMode(line: string): StruPositionMode | null {
     // `Cartesian_angstrom_center_xy`, so the spelling is matched by prefix
     // rather than by equality: an unknown suffix would otherwise turn every
     // Cartesian coordinate into a fractional one.
-    const t = line.trim().toLowerCase().replace(/[\s_-]/g, '');
+    const raw = line.trim().toLowerCase();
+    const t = raw.replace(/[\s_-]/g, '');
     if (t === 'direct' || t === 'fractional') return { kind: 'direct', unit: 'angstrom', center: '' };
     if (t !== 'angstrom' && t !== 'bohr' && !t.startsWith('cartesian')) return null;
-    const unit = t.indexOf('bohr') >= 0 ? 'bohr'
-        : t === 'angstrom' || t.indexOf('angstrom') >= 0 || t.indexOf('cartesianang') === 0 ? 'angstrom'
+    // `Cartesian_au` states atomic units, which the separator-stripped form
+    // (`cartesianau`) no longer identifies; read the unit from the words as
+    // written before folding them.
+    const atomicUnits = /(?:^|[\s_-])au(?:$|[\s_-])/.test(raw) || t.indexOf('bohr') >= 0;
+    const unit = atomicUnits ? 'bohr'
+        : t === 'angstrom' || t.indexOf('angstrom') >= 0 ? 'angstrom'
         : 'lattice';
     const centered = /center([xyz]+)$/.exec(t);
     return { kind: 'cartesian', unit, center: centered ? centered[1] : '' };
@@ -120,6 +126,46 @@ export function parseAbacusStru(content: string): MolecularData {
                 }
             }
             i++;
+            continue;
+        }
+
+        if (head === 'LATTICE_PARAMETERS') {
+            // Only the triclinic form is self-describing: five numbers are
+            // b/a, c/a and the three angle cosines, with a = LATTICE_CONSTANT.
+            // The other Bravais lattices need the INPUT's `latname` (for
+            // example hexagonal's single c/a ratio), which a STRU does not
+            // carry, so they are reported instead of guessed.
+            i++;
+            const values = readNumbers(lines, i, 6);
+            let used = 0;
+            if (values.length === 5) {
+                const [ba, ca, cosAB, cosAC, cosBC] = values;
+                const a = latticeConstant;
+                const b = ba * a;
+                const c = ca * a;
+                const deg = 180 / Math.PI;
+                const clamp = (v: number) => Math.max(-1, Math.min(1, v));
+                if (a > 0 && b > 0 && c > 0) {
+                    lattice = cellToLatticeVectors(
+                        a, b, c,
+                        Math.acos(clamp(cosBC)) * deg,
+                        Math.acos(clamp(cosAC)) * deg,
+                        Math.acos(clamp(cosAB)) * deg
+                    );
+                }
+                used = 5;
+            } else {
+                warnings.push('LATTICE_PARAMETERS needs the run\'s latname to build the cell ' +
+                    '(only the five-parameter triclinic form is self-describing): no unit cell to show');
+            }
+            // Skip exactly the value lines that were read.
+            let need = used;
+            while (i < lines.length && need > 0) {
+                const tokens = stripComment(lines[i]).split(/\s+/).filter(t => t !== '');
+                if (tokens.length === 0) { i++; continue; }
+                need -= tokens.length;
+                i++;
+            }
             continue;
         }
 
@@ -677,7 +723,7 @@ export function isAbacusLog(content: string): boolean {
 
 export function isAbacusStru(content: string): boolean {
     return /^ATOMIC_SPECIES\s*$/m.test(content) &&
-        /^LATTICE_VECTORS\s*$/m.test(content) &&
+        /^LATTICE_(?:VECTORS|PARAMETERS)\s*$/m.test(content) &&
         /^ATOMIC_POSITIONS\b/m.test(content);
 }
 

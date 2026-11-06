@@ -53,7 +53,12 @@ interface VestaAtom {
     frac: [number, number, number];
 }
 
-const SECTION_KEYWORDS = /^(GROUP|SYMOP|TRANM|LTRANSL|LORIENT|LMATRIX|CELLP|STRUC|THERI|ATOMM|BONDM|POLYM|SURFM|FORMM|SECCL|TEXCL|LIGHT|MAPM|VECTM|SBOND|SANG|BDSPL|BDTYP|CMBOND|ORBIT|NETCHG|AATOMM|SATOMM)\b/;
+// Every section header VESTA writes. An unrecognised header does not end the
+// STRUC table, so the section's own rows are read as sites (SITET and SHAPE
+// rows carry a label and enough numbers to look like one). The list includes
+// the sections of the current format that carry no structure data as well, so
+// this reader stops at all of them rather than just the ones it consumes.
+const SECTION_KEYWORDS = /^(GROUP|SYMOP|TRANM|LTRANSL|LORIENT|LMATRIX|CELLP|CELLT|STRUC|THERI|THERT|ATOMM|ATOMP|ATOMT|BONDM|BONDP|POLYM|POLYP|SURFM|FORMM|FORMP|SECCL|SECTP|TEXCL|TEX3P|LIGHT\d*|MAPM|VECTM|VECTR|VECTT|SBOND|SANG|BDSPL|BDTYP|CMBOND|ORBIT|NETCHG|AATOMM|SATOMM|BOUND|SITET|SHAPE|HKLPM|HKLPP|ISURF|LBLAT|LBLSP|DLATM|DLBND|DLPLY|PLN2D|SPLAN|STYLE|CONTR|SCENE|BKGRC|UCOLP|GRID|OBJECT)\b/;
 
 /** Every site merged away by an inexact match is worth one line, but no more. */
 const MAX_MERGE_WARNINGS = 6;

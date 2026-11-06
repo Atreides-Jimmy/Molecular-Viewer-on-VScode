@@ -160,12 +160,25 @@ function readPyscfGeometry(content: string): PyscfGeometry {
     const warnings: string[] = [];
     const lattice = readLattice(lines);
 
+    // The run states its atom count once, in the opening [INPUT] block. A
+    // geometry block with fewer rows than that is a table cut short (the job
+    // was killed, the log was truncated); letting it replace the last complete
+    // geometry would show a fragment as the finished structure.
+    let expected = 0;
+    for (const line of lines) {
+        const m = /^\s*\[INPUT\]\s*num\.\s*atoms\s*=\s*(\d+)/i.exec(line);
+        if (m) { expected = parseInt(m[1], 10); break; }
+    }
+
     // The last `New geometry` is the one the optimizer finished with.
     let sites: Site[] = [];
+    let partial = false;
     for (let i = 0; i < lines.length; i++) {
         if (lines[i].trim() !== 'New geometry') continue;
         const rows = readNewGeometryBlock(lines, i);
-        if (rows.length > 0) sites = rows;
+        if (rows.length === 0) continue;
+        if (expected > 0 && rows.length < expected) { partial = true; continue; }
+        sites = rows;
     }
     if (sites.length === 0) {
         // A single-point run: the starting table is the geometry.
@@ -173,7 +186,12 @@ function readPyscfGeometry(content: string): PyscfGeometry {
             if (line.indexOf('[INPUT]') < 0) continue;
             const site = geometryRow(line);
             if (site) sites.push(site);
+            if (expected > 0 && sites.length >= expected) break;
         }
+    }
+    if (partial) {
+        warnings.push('the last New geometry table is shorter than the stated atom count: ' +
+            'the previous complete geometry is shown');
     }
     return { lattice, sites, warnings };
 }
