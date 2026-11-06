@@ -1,4 +1,5 @@
 import { Atom, AsymAtom, CrystalData, MolecularData } from '../types';
+import { normalizeElementSymbol } from '../tools/periodicTable';
 import {
     applySymOp,
     cellToLatticeVectors,
@@ -57,6 +58,25 @@ const SECTION_KEYWORDS = /^(GROUP|SYMOP|TRANM|LTRANSL|LORIENT|LMATRIX|CELLP|STRU
 /** Every site merged away by an inexact match is worth one line, but no more. */
 const MAX_MERGE_WARNINGS = 6;
 
+/**
+ * The element a `STRUC` row's name column stands for.
+ *
+ * The column is meant to hold a bare symbol, but files also carry an oxidation
+ * state (`Fe3+`, `O2-`), an isotope spelling (`D`, `T`) or one of VESTA's
+ * dummy names (`X`, `Bq`, `Du`). Left alone, `Fe3+` is no element the tables
+ * know and the site would be dropped; the dummy names are positions, not
+ * atoms, and the viewer already draws the dummy element `X` as a ghost.
+ */
+function vestaElement(raw: string): string | undefined {
+    const text = String(raw || '').trim();
+    if (text === '') return undefined;
+    const symbol = normalizeElementSymbol(text);
+    if (symbol) return symbol;
+    if (/^[DT]$/i.test(text)) return text.toUpperCase();
+    if (/^(x|bq|du|dummy|\*)$/i.test(text)) return 'X';
+    return undefined;
+}
+
 export function parseVesta(content: string): MolecularData {
     const lines = content.split(/\r?\n/);
     const warnings: string[] = [];
@@ -114,46 +134,50 @@ export function parseVesta(content: string): MolecularData {
 
         if (line === 'STRUC') {
             i++;
+            let skippedRows = 0;
             while (i < lines.length) {
                 const strucLine = lines[i].trim();
-                if (strucLine === '' || SECTION_KEYWORDS.test(strucLine)) {
-                    break;
+                // A blank line is whitespace, not a terminator: VESTA writes
+                // one between the table and the next section, and a file that
+                // leaves one between two sites must not lose everything below
+                // it. The section ends at the next keyword, not at an empty
+                // line.
+                if (strucLine === '') {
+                    i++;
+                    continue;
                 }
+                if (SECTION_KEYWORDS.test(strucLine)) break;
                 const parts = strucLine.split(/\s+/);
-                if (parts.length >= 7) {
-                    const element = parts[1];
-                    const label = parts[2];
-                    const occupancy = parseFloat(parts[3]);
-                    const fx = parseFloat(parts[4]);
-                    const fy = parseFloat(parts[5]);
-                    const fz = parseFloat(parts[6]);
-
-                    if (/^[A-Za-z][A-Za-z]?$/.test(element) && isFinite(fx) && isFinite(fy) && isFinite(fz)) {
-                        vestaAtoms.push({
-                            element,
-                            label,
-                            occupancy: isFinite(occupancy) ? occupancy : 1,
-                            frac: [fx, fy, fz]
-                        });
-                        i++;
-                        // VESTA writes a second, detail line per atom (its
-                        // displacement parameters). Skip it, but only when the
-                        // next line really is a detail line — a file with the
-                        // detail line omitted must not lose its next atom.
-                        if (i < lines.length) {
-                            const nextLine = lines[i].trim();
-                            if (nextLine === '' || SECTION_KEYWORDS.test(nextLine)) continue;
-                            const nextParts = nextLine.split(/\s+/);
-                            const nextElem = nextParts.length >= 2 ? nextParts[1] : '';
-                            const nextFx = nextParts.length >= 5 ? parseFloat(nextParts[4]) : NaN;
-                            if (!(nextParts.length >= 7 && /^[A-Za-z][A-Za-z]?$/.test(nextElem) && isFinite(nextFx))) {
-                                i++;
-                            }
-                        }
-                        continue;
-                    }
+                // Each site may be followed by a detail line of displacement
+                // parameters. It is numeric throughout, and treating it as a
+                // damaged site row would put one warning per atom in the panel.
+                if (parts.every(p => p !== '' && isFinite(Number(p)))) {
+                    i++;
+                    continue;
                 }
-                break;
+                const element = parts.length >= 7 ? vestaElement(parts[1]) : undefined;
+                const fx = parts.length >= 7 ? parseFloat(parts[4]) : NaN;
+                const fy = parts.length >= 7 ? parseFloat(parts[5]) : NaN;
+                const fz = parts.length >= 7 ? parseFloat(parts[6]) : NaN;
+                if (element !== undefined && isFinite(fx) && isFinite(fy) && isFinite(fz)) {
+                    const occupancy = parseFloat(parts[3]);
+                    vestaAtoms.push({
+                        element,
+                        label: parts[2],
+                        occupancy: isFinite(occupancy) ? occupancy : 1,
+                        frac: [fx, fy, fz]
+                    });
+                } else {
+                    // One damaged row is skipped, not treated as the end of the
+                    // table: a single unreadable line must not hide every site
+                    // below it. The count is reported once, after the section.
+                    skippedRows++;
+                }
+                i++;
+            }
+            if (skippedRows > 0) {
+                warnings.push(skippedRows + ' STRUC row' + (skippedRows === 1 ? '' : 's') +
+                    ' skipped: not a site with an element and three coordinates');
             }
             continue;
         }
@@ -162,10 +186,22 @@ export function parseVesta(content: string): MolecularData {
             symopSectionSeen = true;
             i++;
             while (i < lines.length) {
-                const parts = lines[i].trim().split(/\s+/).map(Number);
-                if (parts.length >= 3 && parts[0] === -1 && parts[1] === -1 && parts[2] === -1) break;
-                // t (3), R (9) and VESTA's trailing operation-kind column.
-                if (parts.length >= 13 && parts.every(v => isFinite(v) && !isNaN(v))) {
+                const symopLine = lines[i].trim();
+                if (symopLine === '') {
+                    i++;
+                    continue;
+                }
+                const parts = symopLine.split(/\s+/).map(Number);
+                if (parts.length >= 3 && parts[0] === -1 && parts[1] === -1 && parts[2] === -1) {
+                    i++;
+                    break;
+                }
+                // A row holds t (3), R (9) and VESTA's operation-kind column;
+                // the trailing column is optional in files written by other
+                // tools. The first non-numeric line is the next section, and
+                // walking into it would read its numeric rows as operations.
+                if (parts.some(v => !isFinite(v) || isNaN(v))) break;
+                if (parts.length >= 12) {
                     vestaSymOps.push({
                         t: [parts[0], parts[1], parts[2]],
                         R: [
@@ -177,7 +213,6 @@ export function parseVesta(content: string): MolecularData {
                 }
                 i++;
             }
-            i++;
             continue;
         }
 

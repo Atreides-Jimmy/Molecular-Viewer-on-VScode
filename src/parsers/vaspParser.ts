@@ -101,9 +101,12 @@ export function parseVasp(content: string): MolecularData {
     }
     const lattice = rawLattice.map(v => v.map(c => c * scale));
     if (!isUsableLattice(lattice)) {
+        // The scale block above may already have reported a zero-volume target;
+        // replacing that list with the degenerate-cell line would lose the
+        // reason the file could not be read.
         return {
             atoms: [], bonds: [], title: 'Invalid lattice vectors', hasExplicitBonds: false,
-            warnings: ['the POSCAR lattice is degenerate: no structure to show']
+            warnings: warnings.concat(['the POSCAR lattice is degenerate: no structure to show'])
         };
     }
 
@@ -121,6 +124,10 @@ export function parseVasp(content: string): MolecularData {
         !(line6Tokens.length === 1 && /^-?\d/.test(line6));
 
     let symbolCountsMissing = 0;
+    // The site total the file states, when it states one. Zero means the
+    // counts line was unreadable, and the fallback below reads every remaining
+    // row; there is then no declared total to compare the parsed sites with.
+    let declaredTotal = 0;
     if (isElementTypeLine) {
         elementTypes = line6Tokens.map(t => normalizeElementSymbol(t) || 'X');
         lineIdx++;
@@ -129,6 +136,7 @@ export function parseVasp(content: string): MolecularData {
         const countTokens = countLine.split(/\s+/).filter(t => t !== '').map(Number);
         if (countTokens.length === elementTypes.length && countTokens.every(n => !isNaN(n) && n >= 0)) {
             elementCounts = countTokens;
+            declaredTotal = countTokens.reduce((s, n) => s + n, 0);
             lineIdx++;
         } else {
             warnings.push('atom counts line missing or unreadable: every site is read as the dummy element X');
@@ -143,6 +151,7 @@ export function parseVasp(content: string): MolecularData {
             countTokens.every(n => !isNaN(n) && n >= 0 && n % 1 === 0) &&
             countTokens.some(n => n > 0)) {
             symbolCountsMissing = countTokens.reduce((s, n) => s + n, 0);
+            declaredTotal = symbolCountsMissing;
             lineIdx++;
         }
         warnings.push('no element symbol line in the file: every site is read as the dummy element X');
@@ -185,12 +194,17 @@ export function parseVasp(content: string): MolecularData {
 
         if (isNaN(x) || isNaN(y) || isNaN(z)) continue;
 
-        if (elementRemaining <= 0) {
+        // A type with zero sites is legal in a POSCAR, and the row that is
+        // being read belongs to the next type that has one. Advancing only on
+        // the next iteration would drop that row (a `1 0 1` cell lost the
+        // second element's atom), so the zero-count types are stepped over
+        // before the coordinates are assigned.
+        while (elementRemaining <= 0) {
             elementTypeIdx++;
             if (elementTypeIdx >= elementTypes.length) break;
             elementRemaining = elementCounts[elementTypeIdx] || 0;
-            if (elementRemaining <= 0) continue;
         }
+        if (elementTypeIdx >= elementTypes.length) break;
 
         let cx: number, cy: number, cz: number;
         if (isCartesian) {
@@ -237,6 +251,14 @@ export function parseVasp(content: string): MolecularData {
         });
         atomIndex++;
         elementRemaining--;
+    }
+
+    // A truncated coordinate table is a fact about the file, not a reason to
+    // show the part that happened to fit without comment: the counts line is
+    // the file's own statement of how many sites it holds.
+    if (declaredTotal > atoms.length) {
+        warnings.push('the POSCAR declares ' + declaredTotal + ' sites but only ' + atoms.length +
+            ' coordinate row' + (atoms.length === 1 ? ' was' : 's were') + ' readable');
     }
 
     const cellParams = latticeToCellParams(lattice);

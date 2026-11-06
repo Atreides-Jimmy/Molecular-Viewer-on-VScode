@@ -182,3 +182,14 @@ export function isGro(content: string): boolean {
     // (`1 SOL OW 1 ...`); both are the same residue/atom/serial/x-y-z row.
     return /^\s*\d+\S*(?:\s+\S+)?\s+\S+\s+\d+\s+[-+0-9.]+\s+[-+0-9.]+\s+[-+0-9.]+/.test(lines[2]);
 }
+
+/**
+ * A GROMACS run log. It shares `.log` with Gaussian/ORCA/xTB and with ABACUS,
+ * but contains no coordinates: recognising it here keeps the log readers from
+ * claiming it and lets the viewer say which file to open instead.
+ */
+export function isGromacsLog(content: string): boolean {
+    return /^:-\)\s*GROMACS\s+-/m.test(content) ||
+        /^GROMACS version:/im.test(content) ||
+        /^\s*GROMACS\s*-\s*gmx\b/im.test(content);
+}

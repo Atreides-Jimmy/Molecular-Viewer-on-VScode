@@ -148,6 +148,12 @@
             "filenamePattern": "*.{POSCAR,CONTCAR,poscar,contcar}"
           },
           {
+            "filenamePattern": "{POSCAR,CONTCAR,poscar,contcar}"
+          },
+          {
+            "filenamePattern": "*#*.gro*#*"
+          },
+          {
             "filenamePattern": "*.cube"
           },
           {

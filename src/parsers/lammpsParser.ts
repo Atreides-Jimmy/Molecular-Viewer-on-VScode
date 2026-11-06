@@ -692,41 +692,54 @@ export function scanLammpsInput(content: string, inherited?: { [name: string]: s
     return { variables, readData, includes, readRestart };
 }
 
-const LAMMPS_INPUT_COMMANDS = new Set([
-    'units', 'dimension', 'boundary', 'newton', 'processors', 'atom_style', 'atom_modify',
-    'read_data', 'read_restart', 'read_dump', 'create_box', 'create_atoms', 'lattice',
-    'region', 'group', 'mass', 'velocity', 'set', 'pair_style', 'pair_coeff', 'bond_style',
-    'bond_coeff', 'angle_style', 'dihedral_style', 'improper_style', 'kspace_style',
-    'special_bonds', 'neighbor', 'neigh_modify', 'comm_modify', 'timestep', 'fix', 'unfix',
-    'compute', 'variable', 'include', 'dump', 'undump', 'dump_modify', 'thermo',
-    'thermo_style', 'thermo_modify', 'min_style', 'minimize', 'run', 'reset_timestep',
-    'shell', 'jump', 'label', 'next', 'if', 'echo', 'log', 'restart', 'write_data'
+// Commands that only a LAMMPS input uses at the start of a line. The words
+// deliberately left out (`lattice`, `region`, `group`, `velocity`, `run`,
+// `set`, `thermo`, `neighbor`, ...) also open output lines of ABACUS, QE,
+// PySCF, GROMACS and GPUMD, so they cannot be evidence on their own.
+const LAMMPS_STRONG_COMMANDS = new Set([
+    'units', 'atom_style', 'atom_modify', 'read_data', 'read_restart', 'read_dump',
+    'create_box', 'create_atoms', 'pair_style', 'pair_coeff', 'pair_modify',
+    'bond_style', 'bond_coeff', 'angle_style', 'angle_coeff', 'dihedral_style',
+    'dihedral_coeff', 'improper_style', 'improper_coeff', 'kspace_style',
+    'kspace_modify', 'special_bonds', 'neigh_modify', 'comm_modify', 'timestep',
+    'fix', 'unfix', 'compute', 'dump', 'undump', 'dump_modify', 'thermo_style',
+    'thermo_modify', 'min_style', 'min_modify', 'minimize', 'reset_timestep',
+    'write_data', 'write_restart', 'write_dump', 'delete_atoms', 'displace_atoms',
+    'change_box', 'replicate', 'delete_bonds', 'create_bonds'
 ]);
 
 /**
  * Whether a file is a LAMMPS input script rather than a structure.
  *
  * A data file starts with `N atoms` / `Atoms`, a dump with `ITEM:`, and neither
- * uses LAMMPS commands at line starts. Two known commands (or one structural
- * command such as `read_data`) distinguish a script; matching only one weak
- * word would claim ordinary text files.
+ * uses LAMMPS commands at line starts. One structural command (`read_data`,
+ * `create_box`, ...) or two strong commands distinguish a script; one weak word
+ * or an echoed `key = value` line does not, because ABACUS, QE, PySCF and
+ * GROMACS outputs open lines with the same words.
  */
+export function isLammpsLog(content: string): boolean {
+    // Every LAMMPS log opens with the version banner; the same words in an
+    // input script are a comment, so the test is anchored at the line start.
+    return /^LAMMPS\s*\(/im.test(content);
+}
+
 export function isLammpsInput(content: string): boolean {
     // A LAMMPS log echoes the input commands it ran, so command-looking lines
     // are not evidence that this file is the input itself.
-    if (/^LAMMPS\s*\(/im.test(content)) return false;
-    let commands = 0;
-    let structural = false;
+    if (isLammpsLog(content)) return false;
+    let strong = 0;
     for (const raw of content.split(/\r?\n/)) {
         const line = stripLammpsComment(raw).trim();
         if (line === '') continue;
+        // `lattice constant (Bohr) = 10.26` is printed by ABACUS/QE, not a
+        // command; an input line rarely carries `=` in its first words.
+        if (/^\S+(?:\s+\S+){0,3}\s*=\s*\S/.test(line)) continue;
         const command = line.split(/\s+/)[0].toLowerCase();
-        if (!LAMMPS_INPUT_COMMANDS.has(command)) continue;
-        commands++;
-        if (/^(read_data|read_restart|create_box|create_atoms)$/.test(command)) structural = true;
-        if (commands >= 2) return true;
+        if (!LAMMPS_STRONG_COMMANDS.has(command)) continue;
+        if (/^(read_data|read_restart|create_box|create_atoms)$/.test(command)) return true;
+        if (++strong >= 2) return true;
     }
-    return structural;
+    return false;
 }
 
 /**

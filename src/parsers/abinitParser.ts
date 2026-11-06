@@ -533,6 +533,9 @@ export function isAbinitOutput(content: string): boolean {
 }
 
 export function isAbinitInput(content: string): boolean {
+    // An output echoes its input variables (`natom`, `ecut`, ...) in the
+    // `-outvars` block, so the output banner has to win before the key scan.
+    if (isAbinitOutput(content)) return false;
     return /^\s*(acell|rprim|xred|xcart|xangst|natom|typat|znucl|xyzfile\d*|ecut|ndtset|pseudos|kptopt|ngkpt)\b/m.test(content) ||
         /^\s*(natom|ntypat)\s+\d+/m.test(content);
 }

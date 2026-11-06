@@ -7,21 +7,21 @@ import { parseCoord } from './coordParser';
 import { parseOrcainp, scanOrcaXyzfile, OrcaExternalStructure, OrcaXyzReference } from './orcaInpParser';
 import { parseOrcaOut, isOrcaOutput, OrcaFrame, OrcaLogResult } from './orcaOutParser';
 import { parsePdb } from './pdbParser';
-import { parseMopac } from './mopacParser';
+import { parseMopac, parseMopacOutput, isMopacOutput } from './mopacParser';
 import { parseCif } from './cifParser';
 import { parseVasp, parseXdatcar, parseOutcar, parseVasprunXml, isXdatcar, isOutcar, isVasprunXml } from './vaspParser';
 import { parseCube } from './cubeParser';
 import { parseVesta } from './vestaParser';
-import { parseXtbLog, isXtbLog, XtbLogResult } from './xtbParser';
+import { parseXtbLog, parseXtbOutput, isXtbLog, isXtbOutput, XtbLogResult } from './xtbParser';
 import { parseTcl, TclParseResult, resolveVmdScene, VmdResolvedScene, hasScalarChannel, resolveSelection, vdwRadius, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg } from './vmdVisualization';
 import { parseAbacusStru, parseAbacusLog, parseAbacusMdDump, parseAbacusInput, scanAbacusInput, isAbacusLog, isAbacusStru, isAbacusMdDump, isAbacusInput, AbacusExternalStructure, AbacusInputScan } from './abacusParser';
 import { parseAbinitInput, parseAbinitOutput, scanAbinitXyzfile, isAbinitOutput, isAbinitInput, AbinitExternalStructure, AbinitXyzfileScan } from './abinitParser';
 import { parseCp2kInput, parseCp2kOutput, isCp2kInput, isCp2kOutput, Cp2kParseOptions } from './cp2kParser';
 import { parseQeInput, parseQeOutput, isQeInput, isQeOutput } from './qeParser';
-import { parseLammpsData, parseLammpsDump, isLammpsData, isLammpsDump, isLammpsInput, parseLammpsInputStructure, scanLammpsInput, LammpsParseOptions, LammpsHints, LammpsInputScan, parseLammpsInputHints, lammpsTypeElements } from './lammpsParser';
-import { parseGro, isGro } from './gromacsParser';
-import { parseExtXyz, isExtXyz } from './extXyzParser';
-import { parseDeepmdDataset, isDeepmdDatasetFile, DeepmdParseOptions, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox } from './deepmdParser';
+import { parseLammpsData, parseLammpsDump, isLammpsData, isLammpsDump, isLammpsInput, isLammpsLog, parseLammpsInputStructure, scanLammpsInput, LammpsParseOptions, LammpsHints, LammpsInputScan, parseLammpsInputHints, lammpsTypeElements } from './lammpsParser';
+import { parseGro, isGro, isGromacsLog } from './gromacsParser';
+import { parseExtXyz, isExtXyz, isGpumdInput } from './extXyzParser';
+import { parseDeepmdDataset, isDeepmdDatasetFile, isDpgenModelDevi, DeepmdParseOptions, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox } from './deepmdParser';
 import { parsePyscfOutput, parseMolden, isPyscfOutput, isMolden } from './pyscfParser';
 
 export { parseGaussianLog, LogFrame, GaussianLogResult };
@@ -33,15 +33,16 @@ export { parseCif };
 export { parseVasp, parseXdatcar, parseOutcar, parseVasprunXml, isXdatcar, isOutcar, isVasprunXml };
 export { parseCube };
 export { parseVesta };
-export { parseXtbLog, isXtbLog, XtbLogResult };
+export { parseXtbLog, parseXtbOutput, isXtbLog, isXtbOutput, XtbLogResult };
+export { parseMopac, parseMopacOutput, isMopacOutput };
 export { parseAbacusStru, parseAbacusLog, parseAbacusMdDump, parseAbacusInput, scanAbacusInput, isAbacusLog, isAbacusStru, isAbacusMdDump, isAbacusInput, AbacusExternalStructure, AbacusInputScan };
 export { parseAbinitInput, parseAbinitOutput, scanAbinitXyzfile, isAbinitOutput, isAbinitInput, AbinitExternalStructure, AbinitXyzfileScan };
 export { parseCp2kInput, parseCp2kOutput, isCp2kInput, isCp2kOutput, Cp2kParseOptions };
 export { parseQeInput, parseQeOutput, isQeInput, isQeOutput };
-export { parseLammpsData, parseLammpsDump, isLammpsData, isLammpsDump, isLammpsInput, parseLammpsInputStructure, scanLammpsInput, LammpsParseOptions, LammpsHints, LammpsInputScan, parseLammpsInputHints, lammpsTypeElements };
-export { parseGro, isGro };
-export { parseExtXyz, isExtXyz };
-export { parseDeepmdDataset, isDeepmdDatasetFile, DeepmdParseOptions, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox };
+export { parseLammpsData, parseLammpsDump, isLammpsData, isLammpsDump, isLammpsInput, isLammpsLog, parseLammpsInputStructure, scanLammpsInput, LammpsParseOptions, LammpsHints, LammpsInputScan, parseLammpsInputHints, lammpsTypeElements };
+export { parseGro, isGro, isGromacsLog };
+export { parseExtXyz, isExtXyz, isGpumdInput };
+export { parseDeepmdDataset, isDeepmdDatasetFile, isDpgenModelDevi, DeepmdParseOptions, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox };
 export { parsePyscfOutput, parseMolden, isPyscfOutput, isMolden };
 // Visualization files: the VMD scripts and the bare scalar-carrying coordinate
 // files they describe (see src/parsers/vmdVisualization.ts).
@@ -96,7 +97,14 @@ export function isStructuredProgramOutput(content: string): boolean {
     return isQeOutput(content) || isCp2kOutput(content) || isPyscfOutput(content) ||
         isAbinitOutput(content) || isVasprunXml(content) || isOutcar(content) ||
         isLammpsDump(content) || isAbacusMdDump(content) || isAbacusLog(content) ||
-        isXdatcar(content);
+        isXdatcar(content) || isMopacOutput(content) || isXtbOutput(content) ||
+        isGromacsLog(content) || isLammpsLog(content) ||
+        isDpgenModelDevi(content) || isGpumdInput(content);
+}
+
+/** A recognised program output that carries no coordinates. */
+function noStructureOutput(title: string, warning: string): MolecularData {
+    return { atoms: [], bonds: [], title, hasExplicitBonds: false, warnings: [warning] };
 }
 
 /** Recognise structured program output before falling back to a Gaussian/ORCA log. */
@@ -111,7 +119,48 @@ function structuredOutput(content: string, options?: ParseFileOptions): Molecula
     if (isAbacusMdDump(content)) return parseAbacusMdDump(content);
     if (isAbacusLog(content)) return parseAbacusLog(content);
     if (isXdatcar(content)) return parseXdatcar(content);
+    // MOPAC and xTB print their final geometry in output that shares `.out`
+    // and `.log` with Gaussian, ORCA and the trajectory formats.
+    if (isMopacOutput(content)) return parseMopacOutput(content);
+    if (isXtbOutput(content)) return parseXtbOutput(content);
+    // Outputs that share `.log`/`.out` with the structure-bearing programs.
+    // Naming them here keeps the Gaussian/ORCA/xTB readers from claiming them
+    // and replaces an empty canvas with the file that does hold the geometry.
+    if (isGromacsLog(content)) {
+        return noStructureOutput('GROMACS log',
+            'a GROMACS log records energies, temperatures and performance, not coordinates: ' +
+            'open the .gro file mdrun wrote (the -deffnm output, e.g. water.gro)');
+    }
+    if (isLammpsLog(content)) {
+        return noStructureOutput('LAMMPS log',
+            'a LAMMPS log records the run and its thermo output, not coordinates: ' +
+            'open the data file or a dump file');
+    }
+    if (isDpgenModelDevi(content)) {
+        return noStructureOutput('DP-GEN model deviation',
+            'model_devi.out is a model-deviation table, not a structure: ' +
+            'open the corresponding POSCAR/XYZ frames or the LAMMPS dump');
+    }
+    if (isGpumdInput(content)) {
+        return noStructureOutput('GPUMD input',
+            'a GPUMD run.in selects the potential and the files to dump, not a structure: ' +
+            'open model.xyz or the dump.xyz it writes');
+    }
     return null;
+}
+
+/**
+ * A Gaussian/ORCA/xTB log opened under an input extension (`.in`/`.inp`).
+ *
+ * The host sends `.log`/`.out` files to the frame pipeline, so a renamed log
+ * normally never reaches `parseFile`. When one does, show its first structure
+ * with the program's own title instead of letting the ORCA input reader claim
+ * the file and return nothing.
+ */
+function singleFrameLogOutput(content: string): MolecularData | null {
+    const isLog = isOrcaOutput(content) || isXtbLog(content) ||
+        content.includes('Standard orientation:') || content.includes('Input orientation:');
+    return isLog ? parseLogAsSingleFrame(content) : null;
 }
 
 export function parseFile(content: string, fileName: string, options?: ParseFileOptions): MolecularData {
@@ -160,6 +209,15 @@ export function parseFile(content: string, fileName: string, options?: ParseFile
             return parseCoord(content);
         case 'inp':
         case 'in': {
+            // Programs echo their input into their output. A CP2K output is
+            // full of `&SECTION` lines and a QE/ABINIT/PySCF output can look
+            // like a namelist, so what wrote the file has to win before the
+            // input syntax it repeats does. MOPAC and xTB outputs share these
+            // extensions too when a job renamed them.
+            const structured = structuredOutput(content, options);
+            if (structured) return structured;
+            const logOutput = singleFrameLogOutput(content);
+            if (logOutput) return logOutput;
             // `.inp` is ORCA's input extension, but Gaussian and CP2K users
             // name their inputs that way too. The CP2K section syntax is
             // unambiguous; ORCA's is `* xyz`/`* xyzfile`/`%coords`, and
@@ -177,17 +235,32 @@ export function parseFile(content: string, fileName: string, options?: ParseFile
             }
             const orca = parseOrcainp(content, options && options.externalStructureFile);
             if (orca.atoms.length > 0) return orca;
-            if (/^\s*#/m.test(content)) return parseGjf(content);
-            if (ext === 'in') return tryAutoParse(content, fileName, options);
-            return orca;
+            // `.in` is not Gaussian's extension, and the scripts that do use
+            // it start with comments (`#` in GPUMD's run.in), so the content
+            // sniffers get the file before the route-card fallback. A renamed
+            // `.inp` gets the same treatment: QE, PySCF and ABINIT inputs and
+            // outputs are not ORCA inputs merely because ORCA uses the suffix.
+            const guessed = tryAutoParse(content, fileName, options);
+            if (guessed.atoms.length === 0 && (!guessed.warnings || guessed.warnings.length === 0)) {
+                guessed.warnings = ['no structure was found in this input file: ' +
+                    'check that it contains coordinates or names the file that does'];
+            }
+            return guessed;
         }
         case 'pdb':
         case 'ent':
             return parsePdb(content);
         case 'mop':
         case 'mopac':
-        case 'dat':
+            return isMopacOutput(content) ? parseMopacOutput(content) : parseMopac(content);
+        case 'dat': {
+            // `.dat` is MOPAC's input name, but LAMMPS data files use it too
+            // and MOPAC output can be renamed to it.
+            if (isLammpsData(content)) return parseLammpsData(content, options && options.lammps);
+            if (isLammpsDump(content)) return parseLammpsDump(content, options && options.lammps);
+            if (isMopacOutput(content)) return parseMopacOutput(content);
             return parseMopac(content);
+        }
         case 'cif':
             return parseCif(content);
         case 'vasp':
@@ -306,7 +379,11 @@ function parseLogAsSingleFrame(content: string): MolecularData {
             multiplicity: f.multiplicity
         };
     }
-    return { atoms: [], bonds: [], title: 'Empty', hasExplicitBonds: false };
+    return {
+        atoms: [], bonds: [], title: 'Empty', hasExplicitBonds: false,
+        warnings: ['no Gaussian, ORCA or xTB structure frame was found in this file: ' +
+            'open the output file that holds the geometry']
+    };
 }
 
 export function tryAutoParse(content: string, fileName: string = '', options?: ParseFileOptions): MolecularData {
@@ -338,14 +415,24 @@ export function tryAutoParse(content: string, fileName: string = '', options?: P
         return parseMolden(content);
     }
 
+    // GROMACS names its structures `.gro`, but a backup (`#water.gro.1#`) and
+    // a renamed file keep the format, not the extension. The fixed-width
+    // residue/atom/serial/xyz layout is distinctive enough to recognise.
+    if (isGro(content)) {
+        return parseGro(content);
+    }
+
     // PDB's record name is followed by the fixed-width serial; matching a bare
     // `ATOM` prefix would claim ABACUS's `ATOMIC_SPECIES` as a PDB file.
     if (content.match(/^(ATOM  |HETATM)/m)) {
         return parsePdb(content);
     }
 
-    if (content.match(/CARTESIAN COORDINATES/i) && content.match(/MOPAC/i)) {
-        return parseMopac(content);
+    // An older MOPAC output may not state a version banner; the program name
+    // plus the Cartesian table still identifies it, and the output reader
+    // understands the serial number in front of each element.
+    if (/^\s*CARTESIAN COORDINATES\b/im.test(content) && /\bMOPAC\b/i.test(content)) {
+        return parseMopacOutput(content);
     }
 
     if (content.match(/^data_/m) && content.includes('_cell_length_a')) {

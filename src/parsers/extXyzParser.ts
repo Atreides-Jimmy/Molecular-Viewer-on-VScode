@@ -113,6 +113,31 @@ function countFrames(lines: string[]): number {
     return frames;
 }
 
+/**
+ * A GPUMD `run.in` control script. GPUMD is configured through this file,
+ * which names the potential and the files to dump but holds no coordinates;
+ * recognising it lets the viewer point at the `model.xyz` or `dump.xyz` it
+ * writes instead of showing an unexplained empty canvas.
+ */
+export function isGpumdInput(content: string): boolean {
+    // CP2K inputs use the same words (`POTENTIAL`, `ENSEMBLE`) inside their
+    // sections; the section marker identifies them first.
+    if (/^\s*&[A-Za-z]/m.test(content)) return false;
+    let keywords = 0;
+    for (const raw of content.split(/\r?\n/)) {
+        const line = raw.replace(/#.*$/, '').trim();
+        if (line === '' || /^\S+(?:\s+\S+){0,3}\s*=/.test(line)) continue;
+        // GPUMD's commands are lower-case; keeping the case keeps CP2K's
+        // upper-case keywords from matching here. `velocity` and `run` are
+        // shared with LAMMPS, so they never count.
+        const command = line.split(/\s+/)[0];
+        if (/^(potential|ensemble|time_step|dump_thermo|dump_xyz|dump_exyz|dump_restart|dump_combined)$/.test(command)) {
+            if (++keywords >= 2) return true;
+        }
+    }
+    return false;
+}
+
 export function parseExtXyz(content: string): MolecularData {
     const lines = content.split(/\r?\n/);
     const warnings: string[] = [];

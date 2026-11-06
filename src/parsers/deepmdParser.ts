@@ -255,6 +255,15 @@ export function isDeepmdDatasetFile(fileName: string): boolean {
     return /^coord\.(raw|npy)$/i.test(fileName);
 }
 
+/**
+ * DP-GEN's `model_devi.out`: the deviation table `dpgen run` writes during
+ * model deviation. It shares `.out` with the electronic-structure programs but
+ * holds no coordinates, so the viewer identifies it and points at the frames.
+ */
+export function isDpgenModelDevi(content: string): boolean {
+    return /^\s*#?\s*step\s+max_devi_v\s+min_devi_v\s+avg_devi_v\s+max_devi_f\s+min_devi_f\s+avg_devi_f\b/mi.test(content);
+}
+
 function boxLattice(values: number[] | undefined): number[][] | null {
     if (!values || values.length < 9) return null;
     const lattice = [

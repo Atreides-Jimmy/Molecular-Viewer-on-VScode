@@ -1,4 +1,5 @@
-import { Atom, OptStep, NormalMode } from '../types';
+import { Atom, MolecularData, OptStep, NormalMode } from '../types';
+import { normalizeElementSymbol } from '../tools/periodicTable';
 import { LogFrame } from './logParser';
 import { resolveElement } from './xyzParser';
 
@@ -130,4 +131,95 @@ export function parseXtbLog(content: string): XtbLogResult {
         optSteps: optSteps.length > 0 ? optSteps : undefined,
         normalModes: undefined,
     };
+}
+
+function xtbOutputAtom(line: string): Atom | undefined {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 4) return undefined;
+    const element = normalizeElementSymbol(parts[0]);
+    if (!element) return undefined;
+    const x = parseFloat(parts[1]);
+    const y = parseFloat(parts[2]);
+    const z = parseFloat(parts[3]);
+    if (!isFinite(x) || !isFinite(y) || !isFinite(z)) return undefined;
+    return { element, x, y, z, index: 0 };
+}
+
+/**
+ * Whether the text is xTB's standard output (the run log) rather than the
+ * multi-frame trajectory xTB writes separately.
+ *
+ * The run log ends with a `final structure:` block in XYZ layout; the xTB
+ * banner in the header tells it apart from a CREST or a Gaussian output that
+ * happens to contain a similarly labelled section.
+ */
+export function isXtbOutput(content: string): boolean {
+    // A trajectory starts with the atom count, never with the banner.
+    if (isXtbLog(content)) return false;
+    if (!/^\s*\*?\s*final structure:\s*$/im.test(content)) return false;
+    const head = content.slice(0, 120000);
+    return /\bxtb\b/i.test(head) && /\bversion\b/i.test(head);
+}
+
+/**
+ * Read the final geometry from an xTB run log.
+ *
+ * The block layout is
+ *
+ *   ===============
+ *    final structure:
+ *   ===============
+ *   6
+ *   xtb: 6.7.1 (edcfbbe)
+ *   O  0.0000  0.0000  0.1173
+ *   ...
+ *
+ * The line after the atom count is xTB's comment, not a coordinate row; some
+ * builds add another version line or leave the comment empty, so rows are
+ * recognised by their shape instead of by counting lines.
+ */
+export function parseXtbOutput(content: string): MolecularData {
+    const lines = content.split(/\r?\n/);
+    let atoms: Atom[] = [];
+    for (let i = 0; i < lines.length; i++) {
+        if (!/^\s*\*?\s*final structure:\s*$/i.test(lines[i])) continue;
+        // Find the atom count after the heading and its ruler.
+        let countAt = i + 1;
+        while (countAt < lines.length && !/^\s*\d+\s*$/.test(lines[countAt])) {
+            if (countAt - i > 8) { countAt = lines.length; break; }
+            countAt++;
+        }
+        if (countAt >= lines.length) continue;
+        const count = parseInt(lines[countAt].trim(), 10);
+        if (!(count > 0) || count > 1000000) { i = countAt; continue; }
+
+        const block: Atom[] = [];
+        let skipped = 0;
+        let k = countAt + 1;
+        while (k < lines.length && block.length < count) {
+            const line = lines[k].trim();
+            k++;
+            if (line === '' || /^[=*-]+$/.test(line)) continue;
+            const atom = xtbOutputAtom(line);
+            if (!atom) {
+                // The comment and version lines live between the count and the
+                // first row; the table itself ends at the first non-row.
+                if (block.length === 0 && ++skipped <= 5) continue;
+                break;
+            }
+            atom.index = block.length;
+            block.push(atom);
+        }
+        if (block.length === count) atoms = block;
+        i = k - 1;
+    }
+
+    if (atoms.length === 0) {
+        return {
+            atoms: [], bonds: [], title: 'xtb output', hasExplicitBonds: false,
+            warnings: ['the xtb output has no readable final structure: ' +
+                'open the trajectory (xtbopt.log or xtb.trj) for the individual frames']
+        };
+    }
+    return { atoms, bonds: [], title: 'xtb output', hasExplicitBonds: false };
 }

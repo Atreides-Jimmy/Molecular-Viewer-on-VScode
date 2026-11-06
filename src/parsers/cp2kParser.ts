@@ -461,6 +461,10 @@ export function isCp2kOutput(content: string): boolean {
 }
 
 export function isCp2kInput(content: string): boolean {
+    // A CP2K output echoes the input's `&SECTION` blocks, so without this
+    // guard an output renamed `.inp` would be read as the input that produced
+    // it and the echoed `GLOBAL| ...` lines would become the "geometry".
+    if (isCp2kOutput(content)) return false;
     return /^\s*&(GLOBAL|FORCE_EVAL|SUBSYS|COORD|CELL)\b/m.test(content) &&
         /^\s*&END\b/m.test(content);
 }

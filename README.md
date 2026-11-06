@@ -112,7 +112,8 @@ A script also works as the comparison side of **Structure Diff**, using the scri
 | ORCA output | `.out` | Cartesian coordinates in Å or a.u., cycles and final geometry, charge/multiplicity, convergence tolerances, frequencies/IR, route line; format detected by content |
 | Turbomole | `.coord` | `$coord` (Bohr → Å), `$chrg`, `$spin`/`$mult` |
 | PDB | `.pdb` `.ent` | ATOM/HETATM, element, occupancy, B-factor scalar, CONECT, duplicate serials |
-| MOPAC | `.mop` `.mopac` `.dat` | Internal coordinates, Å/Bohr auto-detection, CHARGE and MS, Cartesian fallback |
+| MOPAC | `.mop` `.mopac` `.dat` `.out` `.log` | Input: internal coordinates, Å/Bohr auto-detection, CHARGE and MS, Cartesian fallback. Output: the final `CARTESIAN COORDINATES` table, including serial-numbered rows; detected by content |
+| xtb | `.log` `.out` `.xyz` | Optimisation trajectory (`xtbopt.log`/`xtb.trj`) with frame navigation and gradient norms; a run log's `final structure:` block is read as the final geometry |
 | VMD TCL | `.tcl` | Display recipe with molecules, representations, colours, selections, surfaces and egg metadata |
 | CIF | `.cif` | Cell, space group and symmetry operations, fractional/Cartesian sites, occupancy, asymmetric unit, `_geom_bond`; CIF 1.1, 1.2 and 2 tags |
 | VASP POSCAR | `.vasp` `POSCAR` `CONTCAR` | Scale (negative = target volume), lattice, element counts, selective dynamics, Direct/Cartesian |
@@ -129,6 +130,8 @@ A script also works as the comparison side of **Structure Diff**, using the scri
 | PySCF | `.out` `.log` | `[INPUT]` and `New geometry` blocks, periodic cell vectors in Bohr, final geometry |
 | Molden | `.molden` | `[Atoms]` table with its AU/Å unit header |
 | VASP XDATCAR / OUTCAR / vasprun.xml | `.xdatcar` `.outcar` `vasprun.xml` | MD configurations (first shown), final geometry, cell and energies |
+
+Output files are dispatched by content, not by the suffix alone: Quantum ESPRESSO, CP2K, ABINIT, PySCF, ABACUS, MOPAC and xtb outputs saved as `.out`/`.log`, VASP `OUTCAR`/`vasprun.xml`/`XDATCAR`, LAMMPS dumps and ABACUS `MD_dump` all open directly even when renamed. The same holds for an output renamed to an input suffix (`.in`, `.inp`): a CP2K output is not read as its own echoed input, and a LAMMPS data file named `.dat` is not read as a MOPAC input. A recognised output that carries no coordinates (a GROMACS or LAMMPS log, DP-GEN `model_devi.out`, a GPUMD `run.in`) states that on the canvas and names the file that holds the geometry, rather than leaving an unexplained empty view.
 
 ### Installation
 
@@ -370,7 +373,8 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 | ORCA 输出 | `.out` | Å 或 a.u. 的笛卡尔坐标、每个循环与最终几何、电荷/多重度、收敛容差、频率/IR、route 行；按内容识别格式 |
 | Turbomole | `.coord` | `$coord`（Bohr → Å）、`$chrg`、`$spin`/`$mult` |
 | PDB | `.pdb` `.ent` | ATOM/HETATM、元素、占据率、B 因子标量、CONECT、重复序号 |
-| MOPAC | `.mop` `.mopac` `.dat` | 内坐标、Å/Bohr 自动识别、CHARGE 与 MS、笛卡尔坐标回退 |
+| MOPAC | `.mop` `.mopac` `.dat` `.out` `.log` | 输入：内坐标、Å/Bohr 自动识别、CHARGE 与 MS、笛卡尔坐标回退。输出：最后的 `CARTESIAN COORDINATES` 表（含序号列），按内容识别 |
+| xtb | `.log` `.out` `.xyz` | 优化轨迹（`xtbopt.log`/`xtb.trj`）支持帧导航与梯度范数；运行日志中的 `final structure:` 块作为最终几何读取 |
 | VMD TCL | `.tcl` | 显示配方：分子、表示、颜色、选择、曲面与 egg 元数据 |
 | CIF | `.cif` | 晶胞、空间群与对称操作、分数/笛卡尔位点、占据率、不对称单元、`_geom_bond`；支持 CIF 1.1、1.2 与 2 标签 |
 | VASP POSCAR | `.vasp` `POSCAR` `CONTCAR` | 缩放因子（负值表示目标体积）、晶格、元素数量、选择性动力学、Direct/Cartesian |
@@ -387,6 +391,8 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 | PySCF | `.out` `.log` | `[INPUT]` 与 `New geometry` 块、Bohr 单位的周期晶格矢量、最终几何 |
 | Molden | `.molden` | `[Atoms]` 表及其 AU/Å 单位头 |
 | VASP XDATCAR / OUTCAR / vasprun.xml | `.xdatcar` `.outcar` `vasprun.xml` | MD 构型（显示第一帧）、最终几何、晶胞与能量 |
+
+输出文件按内容而不是仅按后缀分派：Quantum ESPRESSO、CP2K、ABINIT、PySCF、ABACUS、MOPAC 与 xtb 保存为 `.out`/`.log` 的输出、VASP 的 `OUTCAR`/`vasprun.xml`/`XDATCAR`、LAMMPS dump 与 ABACUS `MD_dump` 即使改名也能直接打开。改名为输入后缀（`.in`、`.inp`）的输出同样如此：CP2K 输出不会被当成它自己回显的输入，命名为 `.dat` 的 LAMMPS 数据文件也不会被当成 MOPAC 输入。若识别出的输出不含坐标（GROMACS/LAMMPS 日志、DP-GEN 的 `model_devi.out`、GPUMD 的 `run.in`），画布会明确说明，并指出真正保存结构的文件，而不是留下一个没有解释的空视图。
 
 ### 安装
 

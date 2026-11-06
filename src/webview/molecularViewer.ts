@@ -668,7 +668,11 @@ async function buildParseOptions(
     // input even when it holds only one command (a lone `include`).
     const lammpsInput = !lammpsLog && (isLammpsInput(text) ||
         (/\.(lmp|lammps)$/i.test(lowerName) && !isLammpsData(text) && !isLammpsDump(text)));
-    const lammpsFamily = lammpsInput || /\.(lammpstrj|dump|lmp|lammps|data)$/i.test(lowerName) ||
+    // `.dat` is MOPAC's input name but also a common LAMMPS data name, and a
+    // renamed data/dump file keeps its content. Reading the sibling scripts is
+    // what supplies the units and type labels in those cases.
+    const lammpsFamily = lammpsInput || isLammpsData(text) || isLammpsDump(text) ||
+        /\.(lammpstrj|dump|lmp|lammps|data)$/i.test(lowerName) ||
         /^dump\b/i.test(fileName) || /^data\b/i.test(fileName);
     const cp2kInput = !lammpsInput && /\.(inp|in)$/i.test(lowerName) &&
         (isCp2kInput(text) || /^\s*&(GLOBAL|FORCE_EVAL|SUBSYS|COORD|CELL)\b/im.test(text) ||
@@ -968,7 +972,9 @@ async function loadStructureFile(uri: vscode.Uri): Promise<LoadedStructure> {
     if ((ext === 'log' || ext === 'out') && !isStructuredProgramOutput(text)) {
         const logResult = parseLogFile(text, fileName);
         if (logResult.frames.length === 0) {
-            return { data: { atoms: [], bonds: [], title: 'No structures found', hasExplicitBonds: false },
+            return { data: { atoms: [], bonds: [], title: 'No structures found', hasExplicitBonds: false,
+                             warnings: ['no Gaussian, ORCA or xTB structure frame was found in this log: ' +
+                                        'open the output file that holds the geometry'] },
                      frames: [], error: 'no structure found' };
         }
         const f = logResult.frames[0];
@@ -1280,7 +1286,9 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                     multiplicity: frames[0].multiplicity
                 });
             } else {
-                data = { atoms: [], bonds: [], title: 'No structures found', hasExplicitBonds: false };
+                data = { atoms: [], bonds: [], title: 'No structures found', hasExplicitBonds: false,
+                         warnings: ['no Gaussian, ORCA or xTB structure frame was found in this log: ' +
+                                    'open the output file that holds the geometry'] };
             }
         } else if (ext === 'xyz' && !isExtXyz(textContent)) {
             // A multi-frame XYZ is a trajectory — ORCA writes one for every
@@ -1335,7 +1343,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         }
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            data = { atoms: [], bonds: [], title: 'Parse error: ' + msg, hasExplicitBonds: false };
+            data = { atoms: [], bonds: [], title: 'Parse error: ' + msg, hasExplicitBonds: false,
+                     warnings: ['the file could not be parsed: ' + msg] };
             frames = [];
             optSteps = undefined;
             normalModes = undefined;
@@ -1689,6 +1698,10 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             symmetryOps: string[];
                             symmetrySource?: 'file' | 'builtin';
                             baseAtoms: { element: string; x: number; y: number; z: number; occupancy?: number }[];
+                            // The compared file's own bond table, by base-site
+                            // index: the right half merges it over perception
+                            // exactly as the left half merges the open file's.
+                            fileBonds?: { atom1: number; atom2: number; order: number; shift?: number[]; valence?: number }[];
                         } | null = null;
 
                         if (diffExt === 'tcl') {
@@ -1742,6 +1755,10 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                     baseAtoms: c.baseAtoms.map(a => ({
                                         element: a.element, x: a.x, y: a.y, z: a.z,
                                         occupancy: a.occupancy
+                                    })),
+                                    fileBonds: (c.fileBonds || []).map(b => ({
+                                        atom1: b.atom1, atom2: b.atom2, order: b.order,
+                                        shift: b.shift, valence: b.valence
                                     }))
                                 };
                                 diffData.bonds = [];
@@ -2529,6 +2546,7 @@ canvas{display:block}
 #modal .bvs-meh{color:#e8a33d}
 #loading{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--vscode-editor-foreground,#ccc);font-size:14px}
 #error-msg{display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#f66;padding:20px;font-size:13px;text-align:center;max-width:80%;z-index:50}
+#empty-msg{display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#e8a33d;padding:20px;font-size:13px;text-align:center;max-width:80%;z-index:49;line-height:1.5;white-space:pre-wrap}
 .hidden{display:none!important}
 #frame-nav{display:none;align-items:center;gap:2px;flex-shrink:0}
 #frame-nav.show{display:flex}
@@ -2717,6 +2735,7 @@ canvas{display:block}
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
 <div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><div class="pn-head"><h4>Supercell Bounds</h4><button class="pn-close" id="crystal-close" type="button" title="Minimize the crystal panel">&times;</button></div><div class="bnd-row bnd-axis"><label for="bnd-a-min">a</label><input type="number" id="bnd-a-min" value="0" step="0.1" title="lower bound along a" aria-label="lower bound along a"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-a-max" value="1" step="0.1" title="upper bound along a" aria-label="upper bound along a"></div><div class="bnd-row bnd-axis"><label for="bnd-b-min">b</label><input type="number" id="bnd-b-min" value="0" step="0.1" title="lower bound along b" aria-label="lower bound along b"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-b-max" value="1" step="0.1" title="upper bound along b" aria-label="upper bound along b"></div><div class="bnd-row bnd-axis"><label for="bnd-c-min">c</label><input type="number" id="bnd-c-min" value="0" step="0.1" title="lower bound along c" aria-label="lower bound along c"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-c-max" value="1" step="0.1" title="upper bound along c" aria-label="upper bound along c"></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-p2" title="Eight unit cells, 0..2 along every axis">2×2×2</button><button class="bnd-mini" id="bnd-p3" title="Twenty-seven unit cells, 0..3 along every axis">3×3×3</button><button class="bnd-mini" id="bnd-p4" title="Sixty-four unit cells, 0..4 along every axis">4×4×4</button></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-reset" title="Back to the single unit cell, 0..1 along every axis">Reset</button><button class="bnd-mini" id="bnd-origin" title="Keep the spans, move the low corner onto the lattice origin">Align Origin</button></div><div class="bnd-cell" id="bnd-cell-line"></div><div class="bnd-sym" id="bnd-sym-note" style="display:none"></div><div class="bnd-row"><label>Disorder</label><select id="bnd-disorder" title="Show the ordered part plus one disorder group; All shows every alternative the cell lists"><option value="">All</option></select></div><label class="bnd-occ off" id="bnd-occ-label" for="bnd-occ-normalize" title="When one disorder group is selected, count its sites at occupancy 1 in the formula, density and saved files, so the cell describes the ordered variant on screen. All keeps every occupancy the file states."><input type="checkbox" id="bnd-occ-normalize" checked disabled>Selected group fully occupied</label><div class="hk-title">Lattice Planes (h k l)</div><div class="bnd-row hk-row"><label>(h k l)</label><input type="number" id="hk-h" value="0" step="1" title="h"><input type="number" id="hk-k" value="0" step="1" title="k"><input type="number" id="hk-l" value="1" step="1" title="l"></div><div class="hk-val" id="hk-d1"></div><div class="bnd-row hk-row"><label>2nd</label><input type="number" id="hk2-h" value="1" step="1" title="h of the second plane"><input type="number" id="hk2-k" value="0" step="1" title="k of the second plane"><input type="number" id="hk2-l" value="0" step="1" title="l of the second plane"></div><div class="hk-val" id="hk-d2"></div><button id="hk-show" class="bnd-btn" title="Draw the (hkl) plane through the centre of the box">Show Plane</button><button id="xrd-open" class="bnd-btn" title="Calculate the powder X-ray diffraction pattern of the unit cell">Powder XRD Pattern...</button><button id="bvs-open" class="bnd-btn" title="Bond-valence sums per site: how well the coordination around each cation and anion matches its formal valence (read-only)">Bond Valence (BVS)...</button><button id="cav-open" class="bnd-btn" title="Probe the unit cell for closed cavities and open channels and report their volume (read-only)">Cavities...</button><button id="bnd-edit-cell" class="bnd-btn" title="Change the cell parameters; every site keeps its fractional coordinates">Edit Cell...</button><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="pn-head"><span class="vp-title">Auto Rotate</span><button class="pn-close" id="view-close" type="button" title="Minimize the View controls">&times;</button></div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div><div class="vp-title vp-sub">Display</div><select id="style-select" title="How the structure is drawn: ball and stick (the default), van der Waals spheres, sticks without the atom spheres, or coordination polyhedra for a crystal"><option value="ball">Ball &amp; Stick</option><option value="spacefill">Space-filling</option><option value="stick">Stick</option>${(function(){try{return JSON.parse(jsonData).crystal?'<option value="polyhedra">Polyhedra</option>':'';}catch(e){return '';}}())}</select><label class="vp-check off" id="ortep-line" title="Draw atoms that carry anisotropic displacement parameters as 50% probability ellipsoids"><input type="checkbox" id="ortep-chk" disabled> Thermal ellipsoids (50%)</label></div><div id="bake-panel"><div class="pn-head"><span class="vp-title">Edit Coordinates</span><button class="pn-close" id="bake-close" type="button" title="Minimize the Edit Coordinates card">&times;</button></div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="pn-head"><span class="sp-title">Select Atoms</span><button class="pn-close" id="select-close" type="button" title="Minimize the selection panel">&times;</button></div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="neigh-panel"><div class="pn-head"><span class="ng-title">Neighbours</span><button class="pn-close" id="neigh-close" type="button" title="Minimize the neighbour list">&times;</button></div><div class="ng-line"><label for="ng-radius">Radius (A)</label><input type="number" id="ng-radius" value="3.5" min="0.1" max="12" step="0.1"><label class="ng-chk" for="ng-skip"><input type="checkbox" id="ng-skip" checked>skip bonded</label></div><div class="ng-line"><label>Anchor</label><span class="ng-anchor" id="ng-anchor">click an atom</span></div><div class="ng-summary" id="ng-summary"></div><div class="ng-list" id="ng-list"></div><div class="ng-btns"><button id="ng-select">Select listed</button></div><div class="ng-hint" id="ng-hint">Click a row to select that atom. Crystal images outside the drawn cell are listed with their cell offset.</div></div><div id="int-panel"><div class="pn-head"><span class="ng-title">Non-covalent Interactions</span><button class="pn-close" id="int-close" type="button" title="Minimize the interaction list">&times;</button></div><div class="ng-line ng-types"><label class="ng-chk" for="int-hb"><input type="checkbox" id="int-hb" checked>H-bond</label><label class="ng-chk" for="int-xb"><input type="checkbox" id="int-xb" checked>halogen</label><label class="ng-chk" for="int-cb"><input type="checkbox" id="int-cb" checked>chalcogen</label><label class="ng-chk" for="int-pn"><input type="checkbox" id="int-pn" checked>pnictogen</label><label class="ng-chk" for="int-pp"><input type="checkbox" id="int-pp" checked>&pi;-&pi;</label><label class="ng-chk" for="int-chpi"><input type="checkbox" id="int-chpi" checked>CH-&pi;</label></div><div class="ng-line"><label class="ng-chk" for="int-show"><input type="checkbox" id="int-show" checked>draw dashed lines</label></div><div class="ng-summary" id="int-summary"></div><div class="ng-list" id="int-list"></div><div class="ng-hint" id="int-hint">H-bond: d(H&middot;&middot;&middot;A) &lt; 2.5 &Aring; and D-H&middot;&middot;&middot;A &gt; 120&deg;. Halogen, chalcogen and pnictogen bonds: d(X&middot;&middot;&middot;A) &lt; vdW sum &minus; 0.1 &Aring; and D-X&middot;&middot;&middot;A &gt; 130&deg;; acceptors N, O, S, F, Cl, Br, I. &pi;-&pi;: aromatic 5&ndash;7 rings with a plane angle &le; 30&deg;, centroid distance &le; 4.5 &Aring; and a 2.8&ndash;3.8 &Aring; face gap (parallel/offset), or a &ge; 60&deg; T-shape with one ring edge 3.0&ndash;5.5 &Aring; over the other face. CH-&pi;: H&middot;&middot;&middot;centroid &lt; 3.0 &Aring;, C-H&middot;&middot;&middot;centroid &gt; 120&deg; and the H at least 1.0 &Aring; above the ring face.</div></div><div id="xrd-panel"><div class="xr-title"><span>Powder XRD</span><button class="xr-close" id="xrd-close" title="Close (Esc)">&times;</button></div><div class="xr-line"><label for="xrd-rad">Radiation</label><select id="xrd-rad" title="The X-ray wavelength the pattern is calculated for"></select><label for="xrd-2max">2&theta; max</label><select id="xrd-2max" class="xr-narrow" title="The highest diffraction angle in the pattern"></select></div><div class="xr-summary" id="xrd-summary"></div><canvas id="xrd-canvas" width="440" height="150"></canvas><div class="xr-note" id="xrd-peak-info"></div><div class="xr-note" id="xrd-exp-info"></div><div class="xr-note" id="xrd-note"></div><div class="xr-list" id="xrd-list"></div><div class="xr-btns"><button id="xrd-refresh" class="xr-secondary" title="Recalculate after the structure changed">Recalculate</button><button id="xrd-export" title="Save the drawn curve as a two-column text file">Export .xy</button></div><div class="xr-btns"><button id="xrd-import" class="xr-secondary" title="Overlay a measured two-column 2theta/intensity pattern">Import experimental .xy...</button><button id="xrd-clear-exp" class="xr-secondary" disabled title="Remove the experimental curve">Clear exp.</button></div><input type="file" id="xrd-file" accept=".xy,.txt,.csv,text/plain" style="display:none"><div class="xr-hint">Pattern of the unit cell on screen (the supercell bounds do not change it) with Cromer-Mann form factors, Lorenz-polarisation and a Caglioti Gaussian profile. Click a calculated peak to read its position against the experimental curve.</div></div><div id="cav-panel"><div class="cv-title"><span>Voids and Cavities</span><button class="cv-close" id="cav-close" title="Close (Esc)">&times;</button></div><div class="cv-line"><label for="cav-probe">Probe radius</label><input type="number" id="cav-probe" value="1.2" min="0" max="20" step="0.1" title="Radius of the spherical probe rolled through the cell"><span style="font-size:10px;opacity:.7">&Aring;</span><button id="cav-run" title="Scan the unit cell with this probe">Analyse</button><button id="cav-clear" class="cv-secondary" title="Remove the drawn surface">Clear</button></div><div class="cv-summary" id="cav-summary">Not analysed yet.</div><div class="cv-note" id="cav-note"></div><div class="cv-list" id="cav-list"></div><div class="cv-hint">A point is free when a probe of this radius fits there without touching an atom (van der Waals radii, periodic images included). The free space is split into components: one whose walk winds through a cell face is an open channel, otherwise it is a closed cavity. Click a row to draw that void as a translucent surface. Volumes are per unit cell, so a supercell shows the same numbers; pockets under 0.5 &Aring;&sup3; are ignored. r_free is the largest sphere that fits at the void's deepest point.</div></div><div id="rotate-panel"><div class="pn-head"><span class="rp-title">Rotate Group Around Axis</span><button class="pn-close" id="rotate-close" type="button" title="Minimize the rotate panel">&times;</button></div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div><div id="crystal-reopen" class="pn-chip" title="Open the crystal panel">Crystal</div><div id="egg-reopen" class="pn-chip" title="Open the egg list">Eggs</div><div id="view-reopen" class="pn-chip" title="Open the View controls">View</div><div id="bake-reopen" class="pn-chip" title="Open the Edit Coordinates card">Coordinates</div><div id="select-reopen" class="pn-chip" title="Open the Select Atoms panel">Select Atoms</div><div id="neigh-reopen" class="pn-chip" title="Open the Neighbours panel">Neighbours</div><div id="int-reopen" class="pn-chip" title="Open the Non-covalent Interactions panel">Interactions</div><div id="rotate-reopen" class="pn-chip" title="Open the Rotate Group panel">Rotate Group</div><div id="xrd-reopen" class="pn-chip" title="Open the powder XRD panel">Powder XRD</div><div id="cav-reopen" class="pn-chip" title="Open the cavity and void analysis">Cavities</div></div>
 <div id="error-msg"></div>
+<div id="empty-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="box-select-rect"></div>
 <div id="modal-overlay"><div id="modal"></div></div>
@@ -3290,6 +3309,7 @@ updateMolInfo();
 var container=document.getElementById('container');
 var loadingEl=document.getElementById('loading');
 var errorEl=document.getElementById('error-msg');
+var emptyEl=document.getElementById('empty-msg');
 var tooltipEl=document.getElementById('atom-tooltip');
 var boxRectEl=document.getElementById('box-select-rect');
 var modeInfoEl=document.getElementById('mode-info');
@@ -3298,7 +3318,28 @@ var modalOverlay=document.getElementById('modal-overlay');
 var modalEl=document.getElementById('modal');
 var vscodeApi=acquireVsCodeApi();
 
-function showError(msg){if(loadingEl)loadingEl.style.display='none';errorEl.style.display='block';errorEl.textContent=msg}
+function showError(msg){
+    if(loadingEl)loadingEl.style.display='none';
+    if(emptyEl)emptyEl.style.display='none';
+    errorEl.style.display='block';errorEl.textContent=msg;
+}
+
+/**
+ * Say on the canvas why there is nothing to draw. A log without a geometry
+ * frame, a program output that only records energies, or a structure whose
+ * every atom failed to parse must not look like a viewer that broke: the
+ * parser's own first warning names the file to open instead. The notice is
+ * cleared by rebuildScene as soon as atoms exist (an import, an edit or an
+ * undo), so it can never outlive the empty structure it describes.
+ */
+function updateEmptyNotice(){
+    if(!emptyEl)return;
+    if(MD.atoms&&MD.atoms.length>0){emptyEl.style.display='none';emptyEl.textContent='';return}
+    if(errorEl&&errorEl.style.display==='block')return;
+    var warn=(MD.warnings&&MD.warnings.length)?MD.warnings[0]:'';
+    emptyEl.textContent='No structure to draw'+(warn?': '+warn:'.');
+    emptyEl.style.display='block';
+}
 
 if(typeof THREE==='undefined'){showError('Three.js library failed to load. Please reinstall the extension.');return}
 
@@ -3367,8 +3408,10 @@ vmdSurfaceGroup=new THREE.Group();
 moleculeGroup.add(vmdSurfaceGroup);
 
 var CX=0,CY=0,CZ=0;
-MD.atoms.forEach(function(a){CX+=a.x;CY+=a.y;CZ+=a.z});
-CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length;
+if(MD.atoms.length>0){
+    MD.atoms.forEach(function(a){CX+=a.x;CY+=a.y;CZ+=a.z});
+    CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length;
+}
 
 var CR={H:0.31,He:0.28,Li:1.28,Be:0.96,B:0.84,C:0.76,N:0.71,O:0.66,F:0.57,Na:1.66,Mg:1.41,Al:1.21,Si:1.11,P:1.07,S:1.05,Cl:1.02,K:2.03,Ca:1.76,Fe:1.32,Cu:1.32,Zn:1.22,Br:1.20,I:1.39};
 function getR(el){return(CR[el]||1.50)*0.5}
@@ -4179,12 +4222,12 @@ function detectCrystalBaseBonds(){
 // and reported, not drawn: one bad row must not put a bond through a molecule
 // that the geometry says is not there, and the panel line is where the file's
 // disagreement is visible.
-function mergeCrystalFileBonds(){
-    if(!CRY)return;
-    var file=CRY.fileBonds||[];
-    CRY.bondSource=null;
-    if(!file.length)return;
-    var bonds=CRY.baseBonds||[];
+// Merge a file's own bond table over a detected list. Kept separate from the
+// CRY-bound wrapper because the comparison's right-hand cell is a plain object
+// with its own base sites and must be merged by the same rule, not by a second
+// implementation that could disagree with the left half.
+function mergeFileBondsInto(bonds,file){
+    if(!file||!file.length)return{bonds:bonds,source:null};
     var i,f;
     if(bonds.length===0){
         var only=[];
@@ -4194,9 +4237,7 @@ function mergeCrystalFileBonds(){
             only.push({atom1:fbOnly.atom1,atom2:fbOnly.atom2,order:fbOnly.order||1,
                 shift:fbOnly.shift||ZERO_SHIFT,valence:fbOnly.valence});
         }
-        CRY.baseBonds=only;
-        CRY.bondSource={file:file.length,detected:0,matched:only.length,fileOnly:0};
-        return;
+        return{bonds:only,source:{file:file.length,detected:0,matched:only.length,fileOnly:0}};
     }
     // One entry per undirected pair and shift, in the (atom1 < atom2) direction
     // the cell stores, so a table row written from either end finds the edge.
@@ -4226,7 +4267,13 @@ function mergeCrystalFileBonds(){
         if(fb.order>0)hit.order=fb.order;
         if(fb.valence>0)hit.valence=fb.valence;
     }
-    CRY.bondSource={file:file.length,detected:bonds.length,matched:matched,fileOnly:file.length-matched};
+    return{bonds:bonds,source:{file:file.length,detected:bonds.length,matched:matched,fileOnly:file.length-matched}};
+}
+function mergeCrystalFileBonds(){
+    if(!CRY)return;
+    var merged=mergeFileBondsInto(CRY.baseBonds||[],CRY.fileBonds||[]);
+    CRY.baseBonds=merged.bonds;
+    CRY.bondSource=merged.source;
 }
 
 // The connected components of a base bond list, each walked once with an
@@ -4957,6 +5004,23 @@ function restoreCrystalBaseFromUndoTop(){
     CRY.baseBonds=snap.baseBonds;
 }
 
+// A bond list keyed by base-atom index, carried through a deletion: a bond
+// whose end was removed goes with it, and the rest are renumbered. Order,
+// image shift and the file's valence survive; dropping the shift would turn a
+// bond across a cell face into a bond through the cell.
+function remapCrystalBonds(bonds,oldToNew){
+    if(!bonds)return bonds;
+    var out=[];
+    for(var i=0;i<bonds.length;i++){
+        var b=bonds[i];
+        if(!b||oldToNew[b.atom1]==null||oldToNew[b.atom2]==null)continue;
+        var nb={atom1:oldToNew[b.atom1],atom2:oldToNew[b.atom2],order:b.order,shift:b.shift};
+        if(b.valence!=null)nb.valence=b.valence;
+        out.push(nb);
+    }
+    return out;
+}
+
 function removeDisorder(){
     if(!CRY)return;
     pushUndo();
@@ -4978,11 +5042,8 @@ function removeDisorder(){
             uAniso:ba.uAniso
         });
     });
-    CRY.baseBonds=CRY.baseBonds.filter(function(b){
-        return oldToNew[b.atom1]!=null&&oldToNew[b.atom2]!=null;
-    }).map(function(b){
-        return{atom1:oldToNew[b.atom1],atom2:oldToNew[b.atom2],order:b.order,shift:b.shift};
-    });
+    CRY.baseBonds=remapCrystalBonds(CRY.baseBonds,oldToNew);
+    CRY.fileBonds=remapCrystalBonds(CRY.fileBonds,oldToNew);
     CRY.baseAtoms=newBaseAtoms;
     if(CRY.baseAtoms.length<baseCountBefore)provMark('disorder',1);
     rebuildCrystal();
@@ -6117,6 +6178,11 @@ function rebuildScene(keepCenter){
     // aniso table) leaves it disabled rather than offering a view that would
     // draw the same spheres as before.
     syncOrtepControl();
+    // A file that carries no coordinates (a GROMACS/LAMMPS log, DP-GEN's
+    // model_devi.out, a failed run) must say so on the canvas instead of
+    // leaving an unexplained empty view; the notice clears itself as soon as
+    // an edit or import puts atoms back.
+    updateEmptyNotice();
 }
 function updateScenePositions(keepCenter){
     if(!keepCenter){
@@ -8760,6 +8826,17 @@ function pushUndo(symmetryState){
         // the cell it restores.
         snap.baseAtoms=JSON.parse(JSON.stringify(CRY.baseAtoms));
         snap.baseBonds=JSON.parse(JSON.stringify(CRY.baseBonds));
+        // The file's own bond table (_geom_bond) is indexed like baseAtoms, so
+        // an edit that removes or renumbers sites changes it too. The snapshot
+        // carries it for the same reason it carries baseBonds: an undo that
+        // restored the sites but not the table keyed to them would leave the
+        // file's statement pointing at the wrong atoms.
+        snap.fileBonds=CRY.fileBonds?JSON.parse(JSON.stringify(CRY.fileBonds)):undefined;
+        snap.bondSource=CRY.bondSource?{
+            file:CRY.bondSource.file,detected:CRY.bondSource.detected,
+            matched:CRY.bondSource.matched,fileOnly:CRY.bondSource.fileOnly
+        }:null;
+        snap.bondsDetected=!!CRY.bondsDetected;
         snap.boundary={aMin:boundary.aMin,aMax:boundary.aMax,bMin:boundary.bMin,bMax:boundary.bMax,cMin:boundary.cMin,cMax:boundary.cMax};
         // The cell is part of the state an edit can change (Edit Cell), and a
         // snapshot that restored the atoms but not the box would put them back
@@ -8806,6 +8883,10 @@ function doUndo(){
         // is rebuilt from them — this is the step that keeps a large supercell's
         // undo as cheap as a unit cell's.
         CRY.baseAtoms=snap.baseAtoms;CRY.baseBonds=snap.baseBonds;
+        // The table and the counts that describe how much of it the geometry
+        // confirmed travel with the sites they name.
+        CRY.fileBonds=snap.fileBonds;
+        CRY.bondSource=snap.bondSource||null;
         if(snap.boundary){
             boundary.aMin=snap.boundary.aMin;boundary.aMax=snap.boundary.aMax;
             boundary.bMin=snap.boundary.bMin;boundary.bMax=snap.boundary.bMax;
@@ -8835,6 +8916,11 @@ function doUndo(){
             CRY.bondsDetected=snap.symmetry.bondsDetected;
             CRY.symmetryCheck=snap.symmetry.check;
             CRY.symmetryAlternative=snap.symmetry.alternative;
+        }else{
+            // An ordinary edit does not change how the bonds were perceived;
+            // restoring the flag with the cell keeps a later rebuild from
+            // re-running a merge the restored geometry already carries.
+            CRY.bondsDetected=!!snap.bondsDetected;
         }
         syncCellPanel();
         rebuildCrystal();
@@ -10225,6 +10311,9 @@ function startCrystalDiff(msg){
     if(!CRY.bondsDetected)detectCrystalBaseBonds();
     var leftBonds=CRY.baseBonds;
     var rightBonds=detectCrystalBaseBondsFor(right,rightInv);
+    // The compared file may carry a bond table too (_geom_bond); the left half
+    // merges its table, so the right half must read its own by the same rule.
+    rightBonds=mergeFileBondsInto(rightBonds,right.fileBonds||[]).bonds;
     diffRightCrystal=right;diffRightInv=rightInv;diffRightBonds=rightBonds;
     diffDetBonds1=leftBonds;diffDetBonds2=rightBonds;
     var res=crystalStructureDiff(CRY,CRY_INV,leftBonds,right,rightInv,rightBonds,diffThresholdPct);
@@ -17540,6 +17629,16 @@ function showDeleteAtomModal(){
             CRY.baseBonds=CRY.baseBonds.filter(function(b){return b.atom1!==baseIdx&&b.atom2!==baseIdx}).map(function(b){
                 return{atom1:b.atom1>baseIdx?b.atom1-1:b.atom1,atom2:b.atom2>baseIdx?b.atom2-1:b.atom2,order:b.order,shift:b.shift};
             });
+            // The file's bond table names the same sites and must move with
+            // them; a remap that skipped it would leave every row one short
+            // after the deleted site.
+            CRY.fileBonds=CRY.fileBonds?CRY.fileBonds.filter(function(b){
+                return b.atom1!==baseIdx&&b.atom2!==baseIdx;
+            }).map(function(b){
+                var nb={atom1:b.atom1>baseIdx?b.atom1-1:b.atom1,atom2:b.atom2>baseIdx?b.atom2-1:b.atom2,order:b.order,shift:b.shift};
+                if(b.valence!=null)nb.valence=b.valence;
+                return nb;
+            }):CRY.fileBonds;
             rebuildCrystal();rebuildScene();hideModal();resetSelection();
         }else{
             MD.atoms.splice(idx,1);
@@ -17591,11 +17690,8 @@ function batchDeleteSelected(){
                 siteLabel:ba.siteLabel,asymIdx:ba.asymIdx,symOp:ba.symOp,
                 constraint:ba.constraint,disorderGroup:ba.disorderGroup,uAniso:ba.uAniso});
         });
-        CRY.baseBonds=CRY.baseBonds.filter(function(b){
-            return !baseToDelete[b.atom1]&&!baseToDelete[b.atom2];
-        }).map(function(b){
-            return{atom1:oldToNew[b.atom1],atom2:oldToNew[b.atom2],order:b.order,shift:b.shift};
-        });
+        CRY.baseBonds=remapCrystalBonds(CRY.baseBonds,oldToNew);
+        CRY.fileBonds=remapCrystalBonds(CRY.fileBonds,oldToNew);
         CRY.baseAtoms=newBaseAtoms;
         rebuildCrystal();rebuildScene();hideModal();resetSelection();
     }else{
