@@ -1,13 +1,13 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { parseFile, parseLogFile, parseXyzTrajectory, LogFrame, OrcaFrame, RouteSection, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg, ParseFileOptions, DeepmdParseOptions, LammpsParseOptions, LammpsHints, isStructuredProgramOutput, isExtXyz, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox, parseLammpsInputHints, lammpsTypeElements, isLammpsInput, isLammpsData, isLammpsDump, scanLammpsInput, scanOrcaXyzfile, scanAbinitXyzfile, scanAbacusInput, isAbacusInput, isAbinitInput, isCp2kInput } from '../parsers/index';
+import { parseFile, parseLogFile, parseXyzTrajectory, LogFrame, OrcaFrame, RouteSection, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg, ParseFileOptions, DeepmdParseOptions, LammpsParseOptions, LammpsHints, isStructuredProgramOutput, isExtXyz, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox, parseLammpsInputHints, lammpsTypeElements, isLammpsInput, isLammpsData, isLammpsDump, scanLammpsInput, scanOrcaXyzfile, scanAbinitXyzfile, scanAbacusInput, isAbacusInput, isAbinitInput, isCp2kInput, detectBinaryTrajectory, readBinaryTrajectory, lammpsLengthFactor, parseLammpsDumpTrajectory, BinaryTrajectory, TrajectoryFormat, LammpsDumpTrajectory } from '../parsers/index';
 import { ensureBonds } from '../tools/bondDetector';
 import { BOND_PERCEPTION_SOURCE } from '../tools/bondPerception';
 import { BVS_SOURCE } from '../tools/bvs';
 import { addHydrogens } from '../tools/addHydrogens';
 import { beginOptimization, describeForceField, MmHistoryPoint, MmOptimizeResult, MmSession } from '../tools/mmOptimizer';
 import { smilesTo3dSafe, validateSmiles } from '../tools/smilesTo3d';
-import { MolecularData, Atom, AsymAtom, AtomGroup, OptStep, NormalMode, OptThresholds, VmdScene, VmdMolecule } from '../types';
+import { MolecularData, Atom, Bond, AsymAtom, AtomGroup, OptStep, NormalMode, OptThresholds, VmdScene, VmdMolecule, TrajectoryInfo } from '../types';
 
 const ATOM_COLORS: { [key: string]: string } = {
     H: '#FFFFFF', He: '#D9FFFF', Li: '#CC80FF', Be: '#C2FF00', B: '#FFB5B5',
@@ -172,6 +172,30 @@ interface LoadedStructure {
     optThresholds?: OptThresholds;
     logSource?: string;
     error?: string;
+}
+
+/**
+ * One frame of a binary trajectory, compact enough to inline in the page.
+ *
+ * The frames of a log or an XYZ carry a whole atom object list because they can
+ * change composition. A trajectory cannot: every frame has the atoms of the
+ * topology, so only the coordinates travel and the page pairs them with the
+ * element template it already has. That keeps a 500-frame run from being
+ * serialised as half a million element names.
+ */
+interface TrajectoryFramePayload {
+    stepLabel: string;
+    /** `[x0, y0, z0, x1, …]`, Angstrom. */
+    xyz: number[];
+    cell?: number[][];
+    time?: number;
+    step?: number;
+}
+
+/** A trajectory and the template structure its frames are drawn with. */
+interface TrajectoryDocument {
+    data: MolecularData;
+    trajectoryFrames: TrajectoryFramePayload[];
 }
 
 const EMPTY_STRUCTURE: MolecularData = { atoms: [], bonds: [], title: 'Empty', hasExplicitBonds: false };
@@ -644,6 +668,476 @@ function applySetupWarnings(data: MolecularData, setup: ParseSetup | undefined):
 }
 
 /**
+ * The companion files of a trajectory.
+ *
+ * A binary trajectory states no elements, no bonds and — except for XTC/TRR's
+ * nanometres — no unit, so everything it is drawn with comes from beside it:
+ * the topology GROMACS wrote under the same name, or the LAMMPS script that
+ * ran the dump and the data file it read. The scripts are filtered by whether
+ * they name this trajectory, because a folder can hold several jobs whose
+ * `units` and masses would otherwise rescale or relabel this one.
+ */
+interface TrajectoryCompanions {
+    units?: string;
+    typeElements: { [type: number]: string };
+    readData: { name: string; fromDir: vscode.Uri }[];
+    /** Scripts that name this trajectory (0 when none does). */
+    scripts: number;
+    warnings: string[];
+}
+
+interface TrajectoryTopologyChoice {
+    data: MolecularData;
+    name: string;
+    path: string;
+}
+
+interface TrajectoryTopologyLookup {
+    topology?: TrajectoryTopologyChoice;
+    warnings: string[];
+}
+
+async function readDirectoryNames(dir: vscode.Uri): Promise<Map<string, string>> {
+    const index = new Map<string, string>();
+    try {
+        for (const [name, type] of await vscode.workspace.fs.readDirectory(dir)) {
+            if ((type & vscode.FileType.File) !== 0) index.set(name.toLowerCase(), name);
+        }
+    } catch {
+        // An unreadable folder simply has no companions.
+    }
+    return index;
+}
+
+async function collectTrajectoryCompanions(uri: vscode.Uri, fileName: string): Promise<TrajectoryCompanions> {
+    const result: TrajectoryCompanions = { typeElements: {}, readData: [], scripts: 0, warnings: [] };
+    const dir = vscode.Uri.file(path.dirname(uri.fsPath));
+    const index = await readDirectoryNames(dir);
+    const scriptFiles: { uri: vscode.Uri; text: string }[] = [];
+    for (const name of index.values()) {
+        if (!/^in\./i.test(name) && !/\.in$/i.test(name) && !/\.lmp$/i.test(name) && !/\.lammps$/i.test(name)) continue;
+        try {
+            const scriptUri = vscode.Uri.joinPath(dir, name);
+            scriptFiles.push({
+                uri: scriptUri,
+                text: new TextDecoder().decode(await vscode.workspace.fs.readFile(scriptUri))
+            });
+        } catch {
+            // An unreadable script contributes no hints.
+        }
+    }
+    const escapedName = fileName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const namesFile = new RegExp('(^|[^A-Za-z0-9_.-])' + escapedName + '($|[^A-Za-z0-9_.-])', 'i');
+    let scripts = scriptFiles.filter(script => namesFile.test(script.text));
+    // One script in the folder is that folder's job even when it builds the
+    // dump name from a variable the name filter cannot see.
+    if (scripts.length === 0 && scriptFiles.length === 1) scripts = scriptFiles;
+    result.scripts = scripts.length;
+
+    let units: string | undefined;
+    for (const script of scripts) {
+        const chain = await scanLammpsChain(script.uri, script.text, dir);
+        result.warnings.push(...chain.warnings);
+        result.readData.push(...chain.readData);
+        for (const item of chain.texts) {
+            const hints = parseLammpsInputHints(item.content, item.variables);
+            if (!units && hints.units) units = hints.units;
+            for (const key of Object.keys(hints.typeElements)) {
+                const type = Number(key);
+                if (!result.typeElements[type]) result.typeElements[type] = hints.typeElements[type];
+            }
+        }
+    }
+    if (units) result.units = units;
+    return result;
+}
+
+/**
+ * Choose the structure a trajectory's atom order belongs to.
+ *
+ * The same-basename files come first because that is the name GROMACS itself
+ * uses (`water.xtc` beside `water.gro`), then the `read_data` file the LAMMPS
+ * script names, and only when neither exists a coordinate file with the same
+ * atom count. Every candidate is parsed through the ordinary readers, so a
+ * `.data`, `.gro` or `.pdb` topology means exactly what opening it means.
+ */
+async function chooseTrajectoryTopology(
+    uri: vscode.Uri,
+    fileName: string,
+    natoms: number,
+    companions: TrajectoryCompanions,
+    coordinateTopology: boolean
+): Promise<TrajectoryTopologyLookup> {
+    const lookup: TrajectoryTopologyLookup = { warnings: [] };
+    if (natoms <= 0) return lookup;
+    const dir = vscode.Uri.file(path.dirname(uri.fsPath));
+    const index = await readDirectoryNames(dir);
+    const stem = fileName.replace(/\.(xtc|trr|dcd|lammpstrj|dump|crd|trj)$/i, '');
+    const lammpsBase: LammpsParseOptions = {};
+    if (companions.units) lammpsBase.units = companions.units;
+    if (Object.keys(companions.typeElements).length > 0) lammpsBase.typeElements = companions.typeElements;
+
+    const parseTopology = async (name: string): Promise<MolecularData | undefined> => {
+        const actual = index.get(name.toLowerCase());
+        if (!actual) return undefined;
+        try {
+            const text = new TextDecoder().decode(
+                await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dir, actual))
+            );
+            const isData = /\.data$/i.test(actual) || /^data\b/i.test(actual);
+            const options: ParseFileOptions = {};
+            const lammps: LammpsParseOptions = { ...lammpsBase };
+            // Binary dumps (`dump dcd`, `dump xtc`) and this reader's text
+            // dumps order atoms by ID; a data file whose Atoms section is not
+            // sorted must be put in that order before its elements are paired.
+            if (isData) lammps.orderById = true;
+            if (Object.keys(lammps).length > 0) options.lammps = lammps;
+            const parsed = parseFile(text, actual, options);
+            if (parsed.atoms.length !== natoms) {
+                lookup.warnings.push('the topology "' + actual + '" holds ' + parsed.atoms.length +
+                    ' atoms, not ' + natoms + ': not paired');
+                return undefined;
+            }
+            return parsed;
+        } catch {
+            return undefined;
+        }
+    };
+    const accept = (data: MolecularData, name: string): TrajectoryTopologyLookup => {
+        const actual = index.get(name.toLowerCase()) || name;
+        lookup.topology = {
+            data,
+            name: actual,
+            path: vscode.Uri.joinPath(dir, actual).fsPath
+        };
+        return lookup;
+    };
+
+    if (coordinateTopology) {
+        for (const ext of ['.gro', '.pdb', '.ent', '.xyz', '.extxyz', '.data']) {
+            const data = await parseTopology(stem + ext);
+            if (data) return accept(data, stem + ext);
+        }
+    } else {
+        // A LAMMPS dump's rows follow atom IDs. Only a data file states the
+        // same order, so a coordinate topology is not paired with it.
+        const data = await parseTopology(stem + '.data');
+        if (data) return accept(data, stem + '.data');
+    }
+
+    for (const target of companions.readData) {
+        const file = await readReferencedFile(dir, target.fromDir, target.name);
+        if (!file) continue;
+        try {
+            const options: ParseFileOptions = {
+                lammps: { ...lammpsBase, orderById: true }
+            };
+            const data = parseFile(file.content, file.fileName, options);
+            if (data.atoms.length === natoms) return accept(data, file.fileName);
+            lookup.warnings.push('the read_data file "' + file.fileName + '" holds ' + data.atoms.length +
+                ' atoms, not ' + natoms + ': not paired');
+        } catch {
+            // A data file this viewer cannot read is not a topology candidate.
+        }
+    }
+
+    if (!coordinateTopology || natoms <= 0) return lookup;
+    // Last resort: exactly one coordinate file in the folder with the same
+    // atom count. With several there is no way to tell which order the
+    // trajectory used, so none is picked rather than guessing.
+    const candidates: string[] = [];
+    for (const name of index.values()) {
+        if (name.toLowerCase() === fileName.toLowerCase()) continue;
+        if (!/\.(gro|pdb|ent|xyz|extxyz)$/i.test(name) && !/\.data$/i.test(name) && !/^data\b/i.test(name)) continue;
+        candidates.push(name);
+        if (candidates.length > 40) break;
+    }
+    let match: { data: MolecularData; name: string } | undefined;
+    let matchedCount = 0;
+    for (const name of candidates) {
+        const actual = index.get(name.toLowerCase());
+        if (!actual) continue;
+        try {
+            const text = new TextDecoder().decode(
+                await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dir, actual))
+            );
+            const isData = /\.data$/i.test(actual) || /^data\b/i.test(actual);
+            const options: ParseFileOptions = {};
+            if (isData) options.lammps = { ...lammpsBase, orderById: true };
+            const parsed = parseFile(text, actual, options);
+            if (parsed.atoms.length !== natoms) continue;
+            matchedCount++;
+            if (!match) match = { data: parsed, name: actual };
+            if (matchedCount > 1) break;
+        } catch {
+            // Not a readable structure.
+        }
+    }
+    if (matchedCount === 1 && match) {
+        lookup.warnings.push('no same-name topology: paired with "' + match.name +
+            '" (same atom count); if that file orders its atoms differently, the elements will not match');
+        return accept(match.data, match.name);
+    }
+    if (matchedCount > 1) {
+        lookup.warnings.push('several files in the folder hold ' + natoms +
+            ' atoms: no topology was paired, so its elements and bonds are not known');
+    }
+    return lookup;
+}
+
+function formatTrajectoryNumber(value: number): string {
+    if (!isFinite(value)) return String(value);
+    const rounded = Math.round(value);
+    if (Math.abs(value - rounded) < 1e-6) return String(rounded);
+    return value.toPrecision(6).replace(/\.?0+$/, '');
+}
+
+function trajectoryStepLabel(
+    format: TrajectoryFormat | 'dump',
+    frame: { step?: number; time?: number; timestep?: string },
+    index: number
+): string {
+    let label: string;
+    if (format === 'dump') {
+        label = frame.timestep ? 'Timestep ' + frame.timestep : 'Frame ' + (index + 1);
+    } else {
+        label = frame.step !== undefined ? 'Step ' + frame.step : 'Frame ' + (index + 1);
+    }
+    if (frame.time !== undefined && isFinite(frame.time)) {
+        // DCD's time column is in the program's own unit — AKMA for
+        // CHARMM/NAMD, ps for LAMMPS — so only XTC/TRR's ps is labelled.
+        label += ' · t = ' + formatTrajectoryNumber(frame.time) +
+            (format === 'xtc' || format === 'trr' ? ' ps' : '');
+    }
+    return label;
+}
+
+function trajectoryTitle(format: TrajectoryFormat | 'dump'): string {
+    if (format === 'xtc') return 'XTC trajectory';
+    if (format === 'trr') return 'TRR trajectory';
+    if (format === 'dcd') return 'DCD trajectory';
+    return 'LAMMPS dump trajectory';
+}
+
+/**
+ * A trajectory template: the atom list every frame is drawn with.
+ *
+ * The elements come from the topology when there is one. Without it a binary
+ * trajectory has no element information at all; its atoms are shown as `Xx`,
+ * the conventional unknown species, rather than `X`, which this viewer treats
+ * as a ghost atom and would hide.
+ */
+function trajectoryTemplate(
+    natoms: number,
+    elements: string[] | undefined,
+    topology: TrajectoryTopologyChoice | undefined
+): { atoms: Atom[]; bonds: Bond[]; hasExplicitBonds: boolean; warnings: string[] } {
+    const warnings: string[] = [];
+    const atoms: Atom[] = [];
+    for (let i = 0; i < natoms; i++) {
+        const element = elements && elements[i] ? elements[i] : 'Xx';
+        const source = topology ? topology.data.atoms[i] : undefined;
+        atoms.push({
+            element,
+            x: 0, y: 0, z: 0,
+            index: i,
+            occupancy: source ? source.occupancy : undefined,
+            siteLabel: source ? source.siteLabel : undefined
+        });
+    }
+    if (!topology) {
+        return { atoms, bonds: [], hasExplicitBonds: false, warnings };
+    }
+    const bonded = ensureBonds({
+        atoms: topology.data.atoms,
+        bonds: topology.data.bonds,
+        title: topology.data.title,
+        hasExplicitBonds: topology.data.hasExplicitBonds
+    });
+    return {
+        atoms,
+        bonds: bonded.bonds,
+        hasExplicitBonds: bonded.hasExplicitBonds,
+        warnings
+    };
+}
+
+function finishTrajectoryDocument(
+    title: string,
+    template: { atoms: Atom[]; bonds: Bond[]; hasExplicitBonds: boolean },
+    trajectoryFrames: TrajectoryFramePayload[],
+    metadata: TrajectoryInfo,
+    warnings: string[]
+): TrajectoryDocument {
+    if (trajectoryFrames.length > 0) {
+        const first = trajectoryFrames[0];
+        for (let i = 0; i < template.atoms.length; i++) {
+            template.atoms[i].x = first.xyz[i * 3];
+            template.atoms[i].y = first.xyz[i * 3 + 1];
+            template.atoms[i].z = first.xyz[i * 3 + 2];
+        }
+    }
+    const data: MolecularData = {
+        atoms: template.atoms,
+        bonds: template.bonds,
+        title,
+        hasExplicitBonds: template.hasExplicitBonds,
+        trajectory: metadata,
+        warnings: Array.from(new Set(warnings))
+    };
+    if (data.warnings && data.warnings.length === 0) delete data.warnings;
+    return { data, trajectoryFrames };
+}
+
+function emptyTrajectoryDocument(title: string, warnings: string[]): TrajectoryDocument {
+    return {
+        data: {
+            atoms: [], bonds: [], title, hasExplicitBonds: false,
+            warnings: Array.from(new Set(warnings))
+        },
+        trajectoryFrames: []
+    };
+}
+
+async function loadBinaryTrajectoryDocument(
+    uri: vscode.Uri,
+    fileName: string,
+    bytes: Uint8Array,
+    format: TrajectoryFormat
+): Promise<TrajectoryDocument> {
+    const title = trajectoryTitle(format);
+    const companions = await collectTrajectoryCompanions(uri, fileName);
+    const warnings = companions.warnings.slice();
+    if (companions.units && companions.units.toLowerCase() === 'lj') {
+        warnings.push('the LAMMPS run uses units lj: DCD coordinates are in reduced units and are shown unscaled');
+    }
+    const lengthScale = format === 'dcd'
+        ? (companions.units ? lammpsLengthFactor(companions.units) : 1)
+        : 10;
+    const trajectory = readBinaryTrajectory(bytes, { lengthScale });
+    warnings.push(...trajectory.warnings);
+    if (trajectory.sampled) {
+        warnings.push(trajectory.frameCount + ' frames in the file: showing ' +
+            trajectory.frames.length + ' sampled evenly');
+    }
+    if (trajectory.frames.length === 0) {
+        warnings.push('the trajectory holds no frame this reader could decode');
+        return emptyTrajectoryDocument(title, warnings);
+    }
+    let topology: TrajectoryTopologyChoice | undefined;
+    if (trajectory.natoms > 0) {
+        const lookup = await chooseTrajectoryTopology(uri, fileName, trajectory.natoms, companions, true);
+        warnings.push(...lookup.warnings);
+        topology = lookup.topology;
+    }
+    if (!topology) {
+        warnings.push('no topology was found for this trajectory: its elements are unknown (shown as Xx) ' +
+            'and no bonds are drawn; open or keep the matching .gro/.pdb/.xyz or LAMMPS data file beside it');
+    }
+    const template = trajectoryTemplate(
+        trajectory.natoms,
+        topology ? topology.data.atoms.map(a => a.element) : undefined,
+        topology
+    );
+    warnings.push(...template.warnings);
+    const frames: TrajectoryFramePayload[] = [];
+    for (let k = 0; k < trajectory.frames.length; k++) {
+        const frame = trajectory.frames[k];
+        if (frame.positions.length !== trajectory.natoms * 3) continue;
+        frames.push({
+            stepLabel: trajectoryStepLabel(format, frame, k),
+            xyz: Array.from(frame.positions),
+            cell: frame.cell,
+            time: frame.time,
+            step: frame.step
+        });
+    }
+    return finishTrajectoryDocument(
+        topology ? title + ' — ' + topology.name : title,
+        template,
+        frames,
+        {
+            format,
+            source: fileName,
+            topology: topology ? topology.name : undefined,
+            framesInFile: trajectory.frameCount,
+            sampled: trajectory.sampled,
+            truncated: trajectory.truncated
+        },
+        warnings
+    );
+}
+
+async function loadDumpTrajectoryDocument(
+    uri: vscode.Uri,
+    fileName: string,
+    trajectory: LammpsDumpTrajectory,
+    options: LammpsParseOptions | undefined
+): Promise<TrajectoryDocument> {
+    const title = trajectoryTitle('dump');
+    const companions = await collectTrajectoryCompanions(uri, fileName);
+    const warnings = companions.warnings.slice();
+    if (companions.units && companions.units.toLowerCase() === 'lj') {
+        warnings.push('the LAMMPS run uses units lj: dump coordinates are in reduced units and are shown unscaled');
+    }
+    warnings.push(...trajectory.warnings);
+    if (trajectory.frames.length === 0) {
+        return emptyTrajectoryDocument(title, warnings);
+    }
+    if (trajectory.sampled) {
+        warnings.push(trajectory.frameCount + ' frames in the file: showing ' +
+            trajectory.frames.length + ' sampled evenly');
+    }
+    const lookup = await chooseTrajectoryTopology(uri, fileName, trajectory.natoms, companions, false);
+    warnings.push(...lookup.warnings);
+    const topology = lookup.topology;
+    const first = trajectory.frames[0];
+    const dumpElements = first.sites.map(s => s.element).filter(e => !/^T\d+$/.test(e));
+    const elements = topology
+        ? topology.data.atoms.map(a => a.element)
+        : (dumpElements.length === first.sites.length ? dumpElements : undefined);
+    const template = trajectoryTemplate(trajectory.natoms, elements, topology);
+    if (!topology && !elements) {
+        warnings.push('the dump names its atoms by LAMMPS type and no data file or element list was found: ' +
+            'the types are shown as labels and no bonds are drawn');
+    } else if (!topology) {
+        warnings.push('no topology was found for this dump: its element column names the atoms but no bonds are drawn; ' +
+            'keep the matching .data file beside it to draw bonds');
+    }
+    const frames: TrajectoryFramePayload[] = [];
+    for (let k = 0; k < trajectory.frames.length; k++) {
+        const frame = trajectory.frames[k];
+        const xyz: number[] = [];
+        for (const site of frame.sites) {
+            const cart = site.cart || [0, 0, 0];
+            xyz.push(cart[0], cart[1], cart[2]);
+        }
+        if (xyz.length !== trajectory.natoms * 3) continue;
+        frames.push({
+            stepLabel: trajectoryStepLabel('dump', { step: frame.step, timestep: frame.timestep }, k),
+            xyz,
+            cell: frame.lattice,
+            step: frame.step
+        });
+    }
+    return finishTrajectoryDocument(
+        topology ? title + ' — ' + topology.name : title,
+        template,
+        frames,
+        {
+            format: 'lammps-dump',
+            source: fileName,
+            topology: topology ? topology.name : undefined,
+            framesInFile: trajectory.frameCount,
+            sampled: trajectory.sampled,
+            truncated: trajectory.truncated
+        },
+        warnings
+    );
+}
+
+
+/**
  * The companion files a structure names, read from beside it.
  *
  * A DeepMD dataset is a directory (`type.raw`, `type_map.raw`, `box.raw`, a
@@ -960,8 +1454,13 @@ async function buildParseOptions(
 /** Load and parse one structure file (any supported format). */
 async function loadStructureFile(uri: vscode.Uri): Promise<LoadedStructure> {
     const content = await vscode.workspace.fs.readFile(uri);
-    const text = new TextDecoder().decode(content);
     const fileName = uri.path.split('/').pop() || 'unknown.xyz';
+    const binaryFormat = detectBinaryTrajectory(content);
+    if (binaryFormat) {
+        const loaded = await loadBinaryTrajectoryDocument(uri, fileName, content, binaryFormat);
+        return { data: loaded.data, frames: [] };
+    }
+    const text = new TextDecoder().decode(content);
     const ext = fileName.toLowerCase().split('.').pop() || '';
     const setup = await buildParseOptions(uri, fileName, content, text);
     const options = setup && setup.options;
@@ -1233,11 +1732,17 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         const fileName = uri.path.split('/').pop() || 'unknown.xyz';
 
         const ext = fileName.toLowerCase().split('.').pop() || '';
-        const setup = await buildParseOptions(uri, fileName, content, textContent);
+        // A binary trajectory is detected by its magic before anything decodes
+        // it as text; the companion scripts and topology beside it are read by
+        // the trajectory loader itself.
+        const binaryFormat = detectBinaryTrajectory(content);
+        const setup = binaryFormat ? undefined : await buildParseOptions(uri, fileName, content, textContent);
         const parseOptions = setup && setup.options;
         const parseText = setup && setup.text !== undefined ? setup.text : textContent;
         let data: MolecularData;
         let frames: (LogFrame | OrcaFrame)[] = [];
+        let trajectoryFrames: TrajectoryFramePayload[] | undefined;
+        let trajectoryDocument = false;
         let atomGroups: AtomGroup[] | undefined;
         let optSteps: OptStep[] | undefined;
         let normalModes: NormalMode[] | undefined;
@@ -1248,7 +1753,12 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         let autoBeta = false;
 
         try {
-        if (ext === 'tcl') {
+        if (binaryFormat) {
+            const loaded = await loadBinaryTrajectoryDocument(uri, fileName, content, binaryFormat);
+            data = loaded.data;
+            trajectoryFrames = loaded.trajectoryFrames;
+            trajectoryDocument = true;
+        } else if (ext === 'tcl') {
             // A script is a display recipe: every `mol new` it performs becomes
             // one selectable molecule in the viewer, and the first one that
             // loads is also the document's structure so Save As, Diff and the
@@ -1289,6 +1799,27 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                 data = { atoms: [], bonds: [], title: 'No structures found', hasExplicitBonds: false,
                          warnings: ['no Gaussian, ORCA or xTB structure frame was found in this log: ' +
                                     'open the output file that holds the geometry'] };
+            }
+        } else if (isLammpsDump(textContent)) {
+            // A dump with more than one frame is a trajectory, not a crystal:
+            // its frames can change cell and the molecules cross the box, so it
+            // is drawn outside the symmetry machinery. A single-frame dump keeps
+            // the periodic-structure path it has always had.
+            const dumpOptions = parseOptions && parseOptions.lammps ? parseOptions.lammps : undefined;
+            const dumpTrajectory = parseLammpsDumpTrajectory(textContent, dumpOptions);
+            if (dumpTrajectory.frames.length > 1) {
+                const loaded = await loadDumpTrajectoryDocument(uri, fileName, dumpTrajectory, dumpOptions);
+                data = loaded.data;
+                trajectoryFrames = loaded.trajectoryFrames;
+                trajectoryDocument = true;
+            } else {
+                data = parseFile(parseText, fileName, parseOptions);
+                if (data.crystal) {
+                    data.bonds = [];
+                    data.crystal.baseBonds = [];
+                } else {
+                    data = ensureBonds(data);
+                }
             }
         } else if (ext === 'xyz' && !isExtXyz(textContent)) {
             // A multi-frame XYZ is a trajectory — ORCA writes one for every
@@ -1352,11 +1883,15 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         }
 
         applySetupWarnings(data, setup);
-        if (ext !== 'tcl') {
+        if (trajectoryDocument) {
+            // A trajectory is its own file: a read_data an accompanying script
+            // names is a topology, and Save As must write beside the trajectory.
+            data.filePath = uri.fsPath;
+        } else if (ext !== 'tcl') {
             data.filePath = setup && setup.reference ? setup.reference.uri.fsPath : uri.fsPath;
         }
 
-        return new MolecularDocument(uri, data, frames, optSteps, normalModes, logSource, routes, vmdPayload, autoBeta, optThresholds);
+        return new MolecularDocument(uri, data, frames, optSteps, normalModes, logSource, routes, vmdPayload, autoBeta, optThresholds, trajectoryFrames);
     }
 
     /**
@@ -1447,7 +1982,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             enableScripts: true,
         };
 
-        webviewPanel.webview.html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes, document.vmdPayload, document.autoBeta, document.optThresholds);
+        webviewPanel.webview.html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes, document.vmdPayload, document.autoBeta, document.optThresholds, document.trajectoryFrames);
 
         // The panel's Molecular Mechanics run (at most one at a time). The pump
         // steps it in chunks and yields between them, so the panel keeps
@@ -1675,10 +2210,13 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         }
                         const diffUri = result[0];
                         const diffContent = await vscode.workspace.fs.readFile(diffUri);
-                        const diffText = new TextDecoder().decode(diffContent);
+                        // A binary trajectory is compared by a frame the user
+                        // picks: decoding it as text would only yield mojibake.
+                        const diffBinary = detectBinaryTrajectory(diffContent);
+                        const diffText = diffBinary ? '' : new TextDecoder().decode(diffContent);
                         const diffFileName = diffUri.path.split('/').pop() || 'unknown.xyz';
                         const diffExt = diffFileName.toLowerCase().split('.').pop() || '';
-                        const diffSetup = await buildParseOptions(diffUri, diffFileName, diffContent, diffText);
+                        const diffSetup = diffBinary ? undefined : await buildParseOptions(diffUri, diffFileName, diffContent, diffText);
                         const diffOptions = diffSetup && diffSetup.options;
                         const diffParseText = diffSetup && diffSetup.text !== undefined ? diffSetup.text : diffText;
 
@@ -1704,7 +2242,39 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             fileBonds?: { atom1: number; atom2: number; order: number; shift?: number[]; valence?: number }[];
                         } | null = null;
 
-                        if (diffExt === 'tcl') {
+                        if (diffBinary) {
+                            const loaded = await loadBinaryTrajectoryDocument(diffUri, diffFileName, diffContent, diffBinary);
+                            if (loaded.trajectoryFrames.length === 0 || loaded.data.atoms.length === 0) {
+                                vscode.window.showErrorMessage('Diff: no structure found in ' + diffFileName);
+                                webviewPanel.webview.postMessage({ command: 'diffResult', cancelled: true });
+                                break;
+                            }
+                            let frameIdx = 0;
+                            if (loaded.trajectoryFrames.length > 1) {
+                                const picked = await vscode.window.showQuickPick(
+                                    loaded.trajectoryFrames.map((f, i) => ({
+                                        label: `Frame ${i + 1}: ${f.stepLabel || ''}`,
+                                        index: i
+                                    })),
+                                    { placeHolder: `Select frame to compare (${loaded.trajectoryFrames.length} frames found)`, canPickMany: false }
+                                );
+                                if (!picked) {
+                                    webviewPanel.webview.postMessage({ command: 'diffResult', cancelled: true });
+                                    break;
+                                }
+                                frameIdx = picked.index;
+                            }
+                            const xyz = loaded.trajectoryFrames[frameIdx].xyz;
+                            diffData = {
+                                atoms: loaded.data.atoms.map((a, i) => ({
+                                    ...a, x: xyz[i * 3], y: xyz[i * 3 + 1], z: xyz[i * 3 + 2]
+                                })),
+                                bonds: loaded.data.bonds,
+                                title: diffFileName + ' — ' + loaded.trajectoryFrames[frameIdx].stepLabel,
+                                hasExplicitBonds: loaded.data.hasExplicitBonds,
+                                warnings: loaded.data.warnings
+                            };
+                        } else if (diffExt === 'tcl') {
                             const tclResult = parseTcl(diffText);
                             const loaded = await this.loadTclScene(tclResult.scene, diffUri);
                             diffData = loaded.data;
@@ -1932,10 +2502,11 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         }
                         const impUri = result[0];
                         const impContent = await vscode.workspace.fs.readFile(impUri);
-                        const impText = new TextDecoder().decode(impContent);
+                        const impBinary = detectBinaryTrajectory(impContent);
+                        const impText = impBinary ? '' : new TextDecoder().decode(impContent);
                         const impFileName = impUri.path.split('/').pop() || 'unknown.xyz';
                         const impExt = impFileName.toLowerCase().split('.').pop() || '';
-                        const impSetup = await buildParseOptions(impUri, impFileName, impContent, impText);
+                        const impSetup = impBinary ? undefined : await buildParseOptions(impUri, impFileName, impContent, impText);
                         const impOptions = impSetup && impSetup.options;
                         const impParseText = impSetup && impSetup.text !== undefined ? impSetup.text : impText;
 
@@ -1946,7 +2517,39 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         }
 
                         let impData: MolecularData | undefined;
-                        if ((impExt === 'log' || impExt === 'out') && !isStructuredProgramOutput(impText)) {
+                        if (impBinary) {
+                            const loaded = await loadBinaryTrajectoryDocument(impUri, impFileName, impContent, impBinary);
+                            if (loaded.trajectoryFrames.length === 0 || loaded.data.atoms.length === 0) {
+                                vscode.window.showErrorMessage('Import: no structure found in ' + impFileName);
+                                webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                                break;
+                            }
+                            let frameIdx = 0;
+                            if (loaded.trajectoryFrames.length > 1) {
+                                const picked = await vscode.window.showQuickPick(
+                                    loaded.trajectoryFrames.map((f, i) => ({
+                                        label: `Frame ${i + 1}: ${f.stepLabel || ''}`,
+                                        index: i
+                                    })),
+                                    { placeHolder: `Select frame to import (${loaded.trajectoryFrames.length} frames found)`, canPickMany: false }
+                                );
+                                if (!picked) {
+                                    webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                                    break;
+                                }
+                                frameIdx = picked.index;
+                            }
+                            const xyz = loaded.trajectoryFrames[frameIdx].xyz;
+                            impData = {
+                                atoms: loaded.data.atoms.map((a, i) => ({
+                                    ...a, x: xyz[i * 3], y: xyz[i * 3 + 1], z: xyz[i * 3 + 2]
+                                })),
+                                bonds: loaded.data.bonds,
+                                title: impFileName + ' — ' + loaded.trajectoryFrames[frameIdx].stepLabel,
+                                hasExplicitBonds: loaded.data.hasExplicitBonds,
+                                warnings: loaded.data.warnings
+                            };
+                        } else if ((impExt === 'log' || impExt === 'out') && !isStructuredProgramOutput(impText)) {
                             const logResult = parseLogFile(impText, impFileName);
                             if (logResult.frames.length === 0) {
                                 vscode.window.showErrorMessage('Import: no structure found in ' + impFileName);
@@ -2152,7 +2755,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         });
     }
 
-    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[], logSource?: string, routes?: RouteSection[], vmdPayload?: VmdPayload, autoBeta: boolean = false, optThresholds?: OptThresholds): Promise<string> {
+    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[], logSource?: string, routes?: RouteSection[], vmdPayload?: VmdPayload, autoBeta: boolean = false, optThresholds?: OptThresholds, trajectoryFrames?: TrajectoryFramePayload[]): Promise<string> {
         const nonce = getNonce();
 
         const threeJsBytes = await vscode.workspace.fs.readFile(
@@ -2265,7 +2868,31 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             maxDisplacement: optThresholds.maxDisplacement, rmsDisplacement: optThresholds.rmsDisplacement
         } : null;
 
-        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, optThresholds: optThresholdsData, routes: routesData, vmd: vmdData, autoBeta: !!(autoBeta && !vmdData), hasExplicitBonds: !!data.hasExplicitBonds, warnings: data.warnings || [], mmParams: describeForceField() });
+        // A trajectory frame carries no atom objects: the elements, colours and
+        // bonds are the same in every frame, so only the flat positions and the
+        // frame's own cell travel. The page pairs them with the template it
+        // already has, which keeps a 500-frame trajectory a few numbers per
+        // frame instead of a duplicate structure in every frame.
+        const trajectoryFramesData = trajectoryFrames && trajectoryFrames.length > 0
+            ? trajectoryFrames.map(f => ({
+                stepLabel: f.stepLabel,
+                xyz: f.xyz,
+                cell: f.cell,
+                time: f.time,
+                step: f.step
+            }))
+            : null;
+
+        const trajectoryData = data.trajectory ? {
+            format: data.trajectory.format,
+            source: data.trajectory.source,
+            topology: data.trajectory.topology,
+            framesInFile: data.trajectory.framesInFile,
+            sampled: data.trajectory.sampled,
+            truncated: data.trajectory.truncated
+        } : null;
+
+        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, optThresholds: optThresholdsData, routes: routesData, vmd: vmdData, autoBeta: !!(autoBeta && !vmdData), hasExplicitBonds: !!data.hasExplicitBonds, warnings: data.warnings || [], mmParams: describeForceField(), trajectory: trajectoryData, trajectoryFrames: trajectoryFramesData });
 
         // The bond perception module, as source. Both sides run this text —
         // the host calls the compiled function directly, the webview evaluates
@@ -2843,6 +3470,32 @@ function bondPieceRadius(b){
     return (b&&typeof b.vmdR==='number')?b.vmdR:BOND_R;
 }
 var CRY=MD.crystal||null;
+// ===== Trajectory frames =====
+// A molecular-dynamics trajectory (GROMACS XTC/TRR, CHARMM/NAMD/LAMMPS DCD,
+// a LAMMPS text dump) arrives as a position table plus this structure as the
+// template: elements, colours and bonds are the same in every frame, so
+// MD.frames carries only each frame's label, cell and flat xyz, and switchFrame
+// writes the positions into fresh atom records. A frame's cell is drawn by the
+// same box builder a crystal uses (TRAJ_CELL) but stays outside the
+// symmetry/supercell machinery: a box that changes between steps is not a
+// crystal to be expanded.
+var TRAJ_FRAMES=MD.trajectoryFrames||null;
+var TRAJ_CELL=null;
+if(TRAJ_FRAMES&&TRAJ_FRAMES.length){
+    // The template is a copy: the first frame on screen is an ordinary atom
+    // list the editing tools may change, and those changes must not follow
+    // the atoms into the next frame (which is built from the template).
+    MD.trajectoryTemplate=MD.atoms.map(function(a){
+        var copy={};for(var k in a)copy[k]=a[k];return copy;
+    });
+    MD.trajectoryBonds=(MD.bonds||[]).map(function(b){
+        var copy={};for(var k in b)copy[k]=b[k];return copy;
+    });
+    MD.frames=TRAJ_FRAMES.map(function(f){
+        return {stepLabel:f.stepLabel,cell:f.cell||null,time:f.time,step:f.step};
+    });
+    TRAJ_CELL=TRAJ_FRAMES[0].cell||null;
+}
 // ===== VMD visualization script =====
 // Present when the document is a .tcl script: every molecule the script
 // creates, with the drawing properties its representations resolve to. The
@@ -5087,8 +5740,8 @@ function buildCellWireframe(){
         if(sp.material){if(sp.material.map)sp.material.map.dispose();sp.material.dispose()}
     });
     cellEdgeLabels=[];
-    if(!CRY)return;
-    var lv=CRY.latticeVectors;
+    var lv=CRY?CRY.latticeVectors:TRAJ_CELL;
+    if(!lv)return;
     var aMin=boundary.aMin,aMax=boundary.aMax;
     var bMin=boundary.bMin,bMax=boundary.bMax;
     var cMin=boundary.cMin,cMax=boundary.cMax;
@@ -5180,8 +5833,9 @@ function updateAxesIndicator(){
     var el=document.getElementById('axes-indicator');
     if(!el)return;
     var vectors;
-    if(CRY){
-        var lv=CRY.latticeVectors;
+    var cellLv=CRY?CRY.latticeVectors:TRAJ_CELL;
+    if(cellLv){
+        var lv=cellLv;
         vectors=[
             {dir:new THREE.Vector3(lv[0][0],lv[0][1],lv[0][2]).normalize(),color:'#FF4444',label:'a'},
             {dir:new THREE.Vector3(lv[1][0],lv[1][1],lv[1][2]).normalize(),color:'#44FF44',label:'b'},
@@ -6145,7 +6799,7 @@ function rebuildScene(keepCenter){
     sphereLayerBuild(mainSphereLayer,atomMeshes,moleculeGroup,segs,false);
     rebuildBondPieces();
     buildPolyhedra();
-    if(CRY)buildCellWireframe();
+    if(CRY||TRAJ_CELL)buildCellWireframe();
     highlightSelected();
     needsRender=true;
     if(diffMode)refreshDiff();
@@ -6194,7 +6848,7 @@ function updateScenePositions(keepCenter){
     sphereLayerSyncPositions(mainSphereLayer);
     rebuildBondPieces();
     buildPolyhedra();
-    if(CRY)buildCellWireframe();
+    if(CRY||TRAJ_CELL)buildCellWireframe();
     hklRefresh();
     highlightSelected();
     hideVmdSurfaces();
@@ -7547,6 +8201,18 @@ updateAxesIndicator();
 function computeInitialCamDist(){
     var maxD=0;
     MD.atoms.forEach(function(a){var dx=a.x-CX,dy=a.y-CY,dz=a.z-CZ,dd=Math.sqrt(dx*dx+dy*dy+dz*dz);if(dd>maxD)maxD=dd});
+    // A trajectory frame's box can extend past every atom; frame the corners
+    // too, so the first view shows the cell the atoms move in.
+    var lv=CRY?CRY.latticeVectors:TRAJ_CELL;
+    if(lv){
+        for(var ai=0;ai<=1;ai++)for(var bj=0;bj<=1;bj++)for(var ck=0;ck<=1;ck++){
+            var dx=ai*lv[0][0]+bj*lv[1][0]+ck*lv[2][0]-CX;
+            var dy=ai*lv[0][1]+bj*lv[1][1]+ck*lv[2][1]-CY;
+            var dz=ai*lv[0][2]+bj*lv[1][2]+ck*lv[2][2]-CZ;
+            var dd=Math.sqrt(dx*dx+dy*dy+dz*dz);
+            if(dd>maxD)maxD=dd;
+        }
+    }
     return maxD*2.5+5;
 }
 var initCam=computeInitialCamDist();
@@ -11097,10 +11763,35 @@ function switchFrame(idx){
     vdEnd();
     currentFrame=idx;
     var f=MD.frames[idx];
-    MD.atoms=f.atoms.map(function(a,i){a.index=i;return a});
-    MD.bonds=f.bonds||[];
-    if(MD.bonds.length===0){
-        MD.bonds=detectBondsFromAtoms(MD.atoms,MD.charge);
+    if(TRAJ_FRAMES){
+        // A trajectory keeps the template's elements, colours and bonds; only
+        // the coordinates (and the cell) belong to the frame. Fresh records are
+        // made every time so an edit of the frame on screen never reaches the
+        // template the next frame is built from.
+        var xyz=TRAJ_FRAMES[idx]?TRAJ_FRAMES[idx].xyz:null;
+        var tpl=MD.trajectoryTemplate||[];
+        var haveXyz=!!xyz&&xyz.length>=tpl.length*3;
+        MD.atoms=tpl.map(function(a,i){
+            var copy={};
+            for(var k in a)copy[k]=a[k];
+            copy.index=i;
+            if(haveXyz){
+                copy.x=xyz[i*3];
+                copy.y=xyz[i*3+1];
+                copy.z=xyz[i*3+2];
+            }
+            return copy;
+        });
+        MD.bonds=(MD.trajectoryBonds||[]).map(function(b){
+            var copy={};for(var k in b)copy[k]=b[k];return copy;
+        });
+        TRAJ_CELL=(TRAJ_FRAMES[idx]&&TRAJ_FRAMES[idx].cell)?TRAJ_FRAMES[idx].cell:null;
+    }else{
+        MD.atoms=f.atoms.map(function(a,i){a.index=i;return a});
+        MD.bonds=f.bonds||[];
+        if(MD.bonds.length===0){
+            MD.bonds=detectBondsFromAtoms(MD.atoms,MD.charge);
+        }
     }
     if(VMD){
         // A frame is a structure of its own; the script's recipe was resolved
@@ -20258,7 +20949,8 @@ class MolecularDocument implements vscode.CustomDocument {
         public readonly routes?: RouteSection[],
         public readonly vmdPayload?: VmdPayload,
         public readonly autoBeta: boolean = false,
-        public readonly optThresholds?: OptThresholds
+        public readonly optThresholds?: OptThresholds,
+        public readonly trajectoryFrames?: TrajectoryFramePayload[]
     ) {}
 
     dispose(): void {}

@@ -35,7 +35,7 @@ export function activate(context: vscode.ExtensionContext) {
                         canSelectMany: false,
                         openLabel: 'Select Molecular File',
                         filters: {
-                            'Molecular Files': ['gjf', 'xyz', 'extxyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta', 'abi', 'abo', 'stru', 'gro', 'molden', 'pwi', 'pwo', 'lammpstrj', 'dump', 'lmp', 'lammps', 'data', 'md_dump', 'xdatcar', 'outcar', 'xml', 'raw', 'npy', 'in'],
+                            'Molecular Files': ['gjf', 'xyz', 'extxyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta', 'abi', 'abo', 'stru', 'gro', 'xtc', 'trr', 'dcd', 'molden', 'pwi', 'pwo', 'lammpstrj', 'dump', 'lmp', 'lammps', 'data', 'md_dump', 'xdatcar', 'outcar', 'xml', 'raw', 'npy', 'in'],
                             'All Files': ['*']
                         }
                     });

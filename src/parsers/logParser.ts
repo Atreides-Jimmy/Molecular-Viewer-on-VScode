@@ -22,6 +22,12 @@ export interface LogFrame {
     stepLabel: string;
     charge?: number;
     multiplicity?: number;
+    /** The cell vectors (rows a, b, c, in Angstrom) a trajectory frame states. */
+    cell?: number[][];
+    /** The time the trajectory states, in the format's own unit. */
+    time?: number;
+    /** The integration step the trajectory states. */
+    step?: number;
     /** Single-point energy (Hartree) of the optimization step this frame is the
      *  geometry of, filled by the parser for opt logs so the webview can both
      *  label the frame and highlight its point in the convergence charts.

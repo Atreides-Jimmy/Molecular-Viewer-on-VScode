@@ -18,11 +18,12 @@ import { parseAbacusStru, parseAbacusLog, parseAbacusMdDump, parseAbacusInput, s
 import { parseAbinitInput, parseAbinitOutput, scanAbinitXyzfile, isAbinitOutput, isAbinitInput, AbinitExternalStructure, AbinitXyzfileScan } from './abinitParser';
 import { parseCp2kInput, parseCp2kOutput, isCp2kInput, isCp2kOutput, Cp2kParseOptions } from './cp2kParser';
 import { parseQeInput, parseQeOutput, isQeInput, isQeOutput } from './qeParser';
-import { parseLammpsData, parseLammpsDump, isLammpsData, isLammpsDump, isLammpsInput, isLammpsLog, parseLammpsInputStructure, scanLammpsInput, LammpsParseOptions, LammpsHints, LammpsInputScan, parseLammpsInputHints, lammpsTypeElements } from './lammpsParser';
+import { parseLammpsData, parseLammpsDump, parseLammpsDumpTrajectory, isLammpsData, isLammpsDump, isLammpsInput, isLammpsLog, parseLammpsInputStructure, scanLammpsInput, LammpsParseOptions, LammpsHints, LammpsInputScan, parseLammpsInputHints, lammpsTypeElements, lammpsLengthFactor, LammpsDumpFrame, LammpsDumpTrajectory, LammpsDumpTrajectoryOptions } from './lammpsParser';
 import { parseGro, isGro, isGromacsLog } from './gromacsParser';
 import { parseExtXyz, isExtXyz, isGpumdInput } from './extXyzParser';
 import { parseDeepmdDataset, isDeepmdDatasetFile, isDpgenModelDevi, DeepmdParseOptions, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox } from './deepmdParser';
 import { parsePyscfOutput, parseMolden, isPyscfOutput, isMolden } from './pyscfParser';
+import { detectBinaryTrajectory, readBinaryTrajectory, isTrajectoryFileName, BinaryTrajectory, TrajectoryFrame, TrajectoryFormat, TrajectoryReadOptions } from './trajectoryParser';
 
 export { parseGaussianLog, LogFrame, GaussianLogResult };
 export { RouteSection, RouteKeyword };
@@ -39,11 +40,12 @@ export { parseAbacusStru, parseAbacusLog, parseAbacusMdDump, parseAbacusInput, s
 export { parseAbinitInput, parseAbinitOutput, scanAbinitXyzfile, isAbinitOutput, isAbinitInput, AbinitExternalStructure, AbinitXyzfileScan };
 export { parseCp2kInput, parseCp2kOutput, isCp2kInput, isCp2kOutput, Cp2kParseOptions };
 export { parseQeInput, parseQeOutput, isQeInput, isQeOutput };
-export { parseLammpsData, parseLammpsDump, isLammpsData, isLammpsDump, isLammpsInput, isLammpsLog, parseLammpsInputStructure, scanLammpsInput, LammpsParseOptions, LammpsHints, LammpsInputScan, parseLammpsInputHints, lammpsTypeElements };
+export { parseLammpsData, parseLammpsDump, parseLammpsDumpTrajectory, isLammpsData, isLammpsDump, isLammpsInput, isLammpsLog, parseLammpsInputStructure, scanLammpsInput, LammpsParseOptions, LammpsHints, LammpsInputScan, parseLammpsInputHints, lammpsTypeElements, lammpsLengthFactor, LammpsDumpFrame, LammpsDumpTrajectory, LammpsDumpTrajectoryOptions };
 export { parseGro, isGro, isGromacsLog };
 export { parseExtXyz, isExtXyz, isGpumdInput };
 export { parseDeepmdDataset, isDeepmdDatasetFile, isDpgenModelDevi, DeepmdParseOptions, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox };
 export { parsePyscfOutput, parseMolden, isPyscfOutput, isMolden };
+export { detectBinaryTrajectory, readBinaryTrajectory, isTrajectoryFileName, BinaryTrajectory, TrajectoryFrame, TrajectoryFormat, TrajectoryReadOptions };
 // Visualization files: the VMD scripts and the bare scalar-carrying coordinate
 // files they describe (see src/parsers/vmdVisualization.ts).
 export { parseTcl, TclParseResult };

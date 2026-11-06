@@ -362,6 +362,29 @@ export interface MolecularData {
     /** Present when the structure was loaded through a VMD visualization script. */
     vmd?: VmdScene;
     crystal?: CrystalData;
+    /**
+     * Present when the structure was read together with a molecular-dynamics
+     * trajectory. The frames themselves live on the document (the viewer's
+     * frame list), not here; this only records where they came from and what
+     * the reader had to assume or leave out.
+     */
+    trajectory?: TrajectoryInfo;
+}
+
+/** What a trajectory file contributes, beside the frames themselves. */
+export interface TrajectoryInfo {
+    /** `xtc`, `trr`, `dcd` or `lammps-dump`. */
+    format: string;
+    /** The trajectory file's base name. */
+    source: string;
+    /** The topology file that named the elements and bonds, when one was paired. */
+    topology?: string;
+    /** Frames the file states, before the viewer's sampling limit. */
+    framesInFile: number;
+    /** Whether the viewer kept only an evenly spaced subset of the frames. */
+    sampled: boolean;
+    /** Whether the file ended in an incomplete record. */
+    truncated: boolean;
 }
 
 /**

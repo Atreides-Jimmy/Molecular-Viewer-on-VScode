@@ -2,6 +2,7 @@ import { MolecularData } from '../types';
 import { elementFromMass, normalizeElementSymbol, typeElementLabel } from '../tools/periodicTable';
 import { fracToCart } from '../tools/crystalGeometry';
 import { buildPeriodicStructure, isUsableLattice, oneLineTitle, Site } from './periodicUtils';
+import { chooseTrajectoryFrameIndexes } from './trajectoryParser';
 
 /**
  * LAMMPS reader: the data file and the dump trajectory.
@@ -26,6 +27,14 @@ export interface LammpsParseOptions {
     units?: string;
     /** The `atom_style` a companion input script states for this data file. */
     atomStyle?: string;
+    /**
+     * Order the atoms by their LAMMPS ID before building the structure.
+     *
+     * A binary `dump dcd`/`dump xtc` always writes atoms sorted by ID, so a
+     * data file whose Atoms section is not in ID order would otherwise pair
+     * another atom's element and bonds with each trajectory position.
+     */
+    orderById?: boolean;
 }
 
 const UNIT_TO_ANGSTROM: { [unit: string]: number } = {
@@ -39,7 +48,15 @@ const UNIT_TO_ANGSTROM: { [unit: string]: number } = {
     lj: 1
 };
 
-function lengthFactor(units: string | undefined): number {
+/**
+ * Angstrom per LAMMPS length unit for a `units` value.
+ *
+ * A text dump and a data file state coordinates in the run's units, so the
+ * loader scales them with this. A binary `dump dcd` also writes raw units;
+ * `dump xtc` always writes nanometres (LAMMPS converts even in `units lj`),
+ * so its reader keeps the XTC default of ten.
+ */
+export function lammpsLengthFactor(units: string | undefined): number {
     if (!units) return 1;
     const f = UNIT_TO_ANGSTROM[units.toLowerCase()];
     return f !== undefined ? f : 1;
@@ -311,7 +328,7 @@ export function parseLammpsData(content: string, options?: LammpsParseOptions): 
     const lines = content.split(/\r?\n/);
     const warnings: string[] = [];
     const title = oneLineTitle(lines[0] || '', 'LAMMPS data');
-    const unitFactor = lengthFactor(options && options.units);
+    const unitFactor = lammpsLengthFactor(options && options.units);
     const masses = parseMasses(lines);
     const typeElements: { [type: number]: string } = { ...(options && options.typeElements ? options.typeElements : {}) };
     for (const key of Object.keys(masses)) {
@@ -343,6 +360,9 @@ export function parseLammpsData(content: string, options?: LammpsParseOptions): 
             atoms: [], bonds: [], title, hasExplicitBonds: false,
             warnings: ['the Atoms section of the LAMMPS data file has no readable rows: no structure to show']
         };
+    }
+    if (options && options.orderById) {
+        data.rows.sort((a, b) => a.id - b.id);
     }
 
     // The box bounds are where the cell's origin sits; an atom coordinate is
@@ -450,16 +470,32 @@ interface DumpFrame {
     /** The box in Angstrom, for scaled coordinates. */
     xlo: number; xhi: number; ylo: number; yhi: number; zlo: number; zhi: number;
     tilt: [number, number, number];
+    /** Whether the block held every atom its header declared. */
+    complete: boolean;
 }
 
-function parseDumpFrames(content: string, options?: LammpsParseOptions): { first: DumpFrame | null; count: number } {
-    const lines = content.split(/\r?\n/);
-    const factor = lengthFactor(options && options.units);
-    const typeElements = options && options.typeElements ? options.typeElements : {};
-    // The viewer draws one frame; a long trajectory is counted, not held in
-    // memory frame by frame.
-    let first: DumpFrame | null = null;
-    let frameCount = 0;
+interface DumpHeader {
+    timestep: string;
+    count: number;
+    box: DumpBox;
+    /** First atom row (the line after `ITEM: ATOMS`). */
+    body: number;
+    columns: string[];
+    /** Angstrom per coordinate unit, from the run's `units`. */
+    factor: number;
+}
+
+/**
+ * Every complete `ITEM: TIMESTEP … BOX … ATOMS` header in the file.
+ *
+ * Only the headers are read; the atom rows are left for the frames the caller
+ * actually wants, which is what makes a multi-frame dump affordable to open.
+ * The scan always looks for the next `ITEM: TIMESTEP` instead of stepping by
+ * the declared atom count, so one short or overlong block does not hide the
+ * frames after it.
+ */
+function scanDumpHeaders(lines: string[], factor: number): DumpHeader[] {
+    const headers: DumpHeader[] = [];
     let i = 0;
     while (i < lines.length) {
         if (!/^ITEM:\s*TIMESTEP/i.test(lines[i].trim())) { i++; continue; }
@@ -470,88 +506,113 @@ function parseDumpFrames(content: string, options?: LammpsParseOptions): { first
             continue;
         }
         const count = parseInt((lines[numberHeader + 1] || '').trim(), 10);
+        if (!isFinite(count) || count <= 0) { i = numberHeader + 2; continue; }
         const boxHeader = numberHeader + 2;
         if (boxHeader >= lines.length || !/^ITEM:\s*BOX BOUNDS/i.test(lines[boxHeader].trim())) {
             i = boxHeader;
             continue;
         }
         const boxRead = readDumpBox(lines, boxHeader, factor);
-        i = boxRead.next;
-        if (i >= lines.length || !/^ITEM:\s*ATOMS/i.test(lines[i].trim())) continue;
-        const columns = lines[i].trim().replace(/^ITEM:\s*ATOMS\s*/i, '').trim().split(/\s+/);
-        i++;
-        const col = (names: string[]) => findColumn(columns, names);
-        const cId = col(['id']);
-        const cType = col(['type']);
-        const cElement = col(['element']);
-        // A dump may carry both wrapped (`x`) and scaled (`xs`) columns; one
-        // consistent triple decides both the index and whether the numbers are
-        // fractions. Picking each axis separately could read `x` as scaled just
-        // because an unused `xs` column exists elsewhere in the header.
-        const groups: { names: string[]; scaled: boolean }[] = [
-            { names: ['x', 'y', 'z'], scaled: false },
-            { names: ['xu', 'yu', 'zu'], scaled: false },
-            { names: ['xs', 'ys', 'zs'], scaled: true },
-            { names: ['xsu', 'ysu', 'zsu'], scaled: true }
-        ];
-        const group = groups.find(g => g.names.every(n => columns.indexOf(n) >= 0));
-        const cX = group ? columns.indexOf(group.names[0]) : -1;
-        const cY = group ? columns.indexOf(group.names[1]) : -1;
-        const cZ = group ? columns.indexOf(group.names[2]) : -1;
-        const xsScaled = group ? group.scaled : false;
-        if (cX < 0 || cY < 0 || cZ < 0) {
-            const skip = isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
-            i += skip;
+        const atomsHeader = boxRead.next;
+        if (atomsHeader >= lines.length || !/^ITEM:\s*ATOMS/i.test(lines[atomsHeader].trim())) {
+            i = atomsHeader;
             continue;
         }
-        const sites: Site[] = [];
-        const limit = isFinite(count) && count > 0 ? count : Infinity;
-        for (let row = 0; row < limit && i < lines.length; row++, i++) {
-            const parts = lines[i].trim().split(/\s+/);
-            if (parts.length <= cZ) break;
-            if (cId >= 0 && !isNumeric(parts[cId])) break;
-            const px = parseFloat(parts[cX]);
-            const py = parseFloat(parts[cY]);
-            const pz = parseFloat(parts[cZ]);
-            if (!isFinite(px) || !isFinite(py) || !isFinite(pz)) break;
-            const type = cType >= 0 ? parseInt(parts[cType], 10) : 1;
-            const label = cElement >= 0 ? parts[cElement] : '';
-            const element = (label ? normalizeElementSymbol(label) : undefined) ||
-                typeElements[type] || typeElementLabel(isFinite(type) ? type : 1);
-            let x: number, y: number, z: number;
-            if (xsScaled) {
-                // Scaled coordinates are fractions of the *restricted* box, so
-                // the cell origin has to be added back; omitting it would move
-                // every atom of a box whose xlo/ylo/zlo is not zero.
-                const cart = fracToCart([px, py, pz], boxRead.box.lattice || [[1, 0, 0], [0, 1, 0], [0, 0, 1]]);
-                x = cart[0] + boxRead.box.xlo;
-                y = cart[1] + boxRead.box.ylo;
-                z = cart[2] + boxRead.box.zlo;
-            } else {
-                // Like a data file, the dump's coordinates are absolute and the
-                // lattice below is built at the box origin.
-                x = px * factor - boxRead.box.xlo;
-                y = py * factor - boxRead.box.ylo;
-                z = pz * factor - boxRead.box.zlo;
-            }
-            sites.push({ element, cart: [x, y, z], label: label || element });
-        }
-        if (sites.length > 0) {
-            frameCount++;
-            if (first === null) {
-                first = {
-                    timestep,
-                    lattice: boxRead.box.lattice,
-                    sites,
-                    xlo: boxRead.box.xlo, xhi: boxRead.box.xhi,
-                    ylo: boxRead.box.ylo, yhi: boxRead.box.yhi,
-                    zlo: boxRead.box.zlo, zhi: boxRead.box.zhi,
-                    tilt: boxRead.box.tilt
-                };
-            }
-        }
+        const columns = lines[atomsHeader].trim().replace(/^ITEM:\s*ATOMS\s*/i, '').trim().split(/\s+/);
+        headers.push({ timestep, count, box: boxRead.box, body: atomsHeader + 1, columns, factor });
+        i = atomsHeader + 1;
     }
-    return { first, count: frameCount };
+    return headers;
+}
+
+function buildDumpFrame(lines: string[], header: DumpHeader, typeElements: { [type: number]: string }): DumpFrame {
+    const columns = header.columns;
+    const box = header.box;
+    const col = (names: string[]) => findColumn(columns, names);
+    const cId = col(['id']);
+    const cType = col(['type']);
+    const cElement = col(['element']);
+    // A dump may carry both wrapped (`x`) and scaled (`xs`) columns; one
+    // consistent triple decides both the index and whether the numbers are
+    // fractions. Picking each axis separately could read `x` as scaled just
+    // because an unused `xs` column exists elsewhere in the header.
+    const groups: { names: string[]; scaled: boolean }[] = [
+        { names: ['x', 'y', 'z'], scaled: false },
+        { names: ['xu', 'yu', 'zu'], scaled: false },
+        { names: ['xs', 'ys', 'zs'], scaled: true },
+        { names: ['xsu', 'ysu', 'zsu'], scaled: true }
+    ];
+    const group = groups.find(g => g.names.every(n => columns.indexOf(n) >= 0));
+    const rows: { id: number; site: Site }[] = [];
+    if (!group) {
+        return {
+            timestep: header.timestep, lattice: box.lattice, sites: [],
+            xlo: box.xlo, xhi: box.xhi, ylo: box.ylo, yhi: box.yhi,
+            zlo: box.zlo, zhi: box.zhi, tilt: box.tilt, complete: false
+        };
+    }
+    const cX = columns.indexOf(group.names[0]);
+    const cY = columns.indexOf(group.names[1]);
+    const cZ = columns.indexOf(group.names[2]);
+    const xsScaled = group.scaled;
+    const factor = header.factor;
+    let i = header.body;
+    for (let row = 0; row < header.count && i < lines.length; row++, i++) {
+        const parts = lines[i].trim().split(/\s+/);
+        if (parts.length <= cZ) break;
+        if (cId >= 0 && !isNumeric(parts[cId])) break;
+        const px = parseFloat(parts[cX]);
+        const py = parseFloat(parts[cY]);
+        const pz = parseFloat(parts[cZ]);
+        if (!isFinite(px) || !isFinite(py) || !isFinite(pz)) break;
+        const type = cType >= 0 ? parseInt(parts[cType], 10) : 1;
+        const label = cElement >= 0 ? parts[cElement] : '';
+        const element = (label ? normalizeElementSymbol(label) : undefined) ||
+            typeElements[type] || typeElementLabel(isFinite(type) ? type : 1);
+        let x: number, y: number, z: number;
+        if (xsScaled) {
+            // A scaled coordinate is a fraction of the restricted box, and the
+            // lattice is built at that box's origin, so the fraction is
+            // already relative to the cell: adding xlo back would translate
+            // every atom of a box that does not start at zero.
+            const cart = fracToCart([px, py, pz], box.lattice || [[1, 0, 0], [0, 1, 0], [0, 0, 1]]);
+            x = cart[0];
+            y = cart[1];
+            z = cart[2];
+        } else {
+            // Like a data file, the dump's coordinates are absolute and the
+            // lattice below is built at the box origin.
+            x = px * factor - box.xlo;
+            y = py * factor - box.ylo;
+            z = pz * factor - box.zlo;
+        }
+        rows.push({ id: cId >= 0 ? parseInt(parts[cId], 10) : row, site: { element, cart: [x, y, z], label: label || element } });
+    }
+    // An ID column gives every frame the same atom order even when LAMMPS
+    // wrote the rows out of order; without one the file order is the only
+    // correspondence the dump offers. A data-file topology read with
+    // `orderById` lines up with the sorted order.
+    if (cId >= 0) rows.sort((a, b) => a.id - b.id);
+    const sites = rows.map(r => r.site);
+    return {
+        timestep: header.timestep, lattice: box.lattice, sites,
+        xlo: box.xlo, xhi: box.xhi, ylo: box.ylo, yhi: box.yhi,
+        zlo: box.zlo, zhi: box.zhi, tilt: box.tilt,
+        complete: sites.length === header.count
+    };
+}
+
+/** The first frame with readable atoms, and how many frame headers exist. */
+function parseDumpFrames(content: string, options?: LammpsParseOptions): { first: DumpFrame | null; count: number } {
+    const lines = content.split(/\r?\n/);
+    const factor = lammpsLengthFactor(options && options.units);
+    const typeElements = options && options.typeElements ? options.typeElements : {};
+    const headers = scanDumpHeaders(lines, factor);
+    for (const header of headers) {
+        const frame = buildDumpFrame(lines, header, typeElements);
+        if (frame.sites.length > 0) return { first: frame, count: headers.length };
+    }
+    return { first: null, count: headers.length };
 }
 
 export function parseLammpsDump(content: string, options?: LammpsParseOptions): MolecularData {
@@ -568,6 +629,9 @@ export function parseLammpsDump(content: string, options?: LammpsParseOptions): 
     if (parsed.count > 1) {
         warnings.push(parsed.count + ' frames in the dump: showing the first (timestep ' + first.timestep + ')');
     }
+    if (!first.complete) {
+        warnings.push('the frame at timestep ' + first.timestep + ' is incomplete: showing the atoms it held');
+    }
     if (!first.lattice || !isUsableLattice(first.lattice)) {
         return {
             atoms: [], bonds: [], title, hasExplicitBonds: false,
@@ -581,6 +645,111 @@ export function parseLammpsDump(content: string, options?: LammpsParseOptions): 
             ' has no element column or companion data: read as typed labels');
     }
     return buildPeriodicStructure(first.lattice, first.sites, title + ' (timestep ' + first.timestep + ')', warnings);
+}
+
+export interface LammpsDumpFrame {
+    /** 0-based index of the frame among the blocks in the file. */
+    index: number;
+    timestep: string;
+    /** The timestep as a number, when it is an integer. */
+    step?: number;
+    sites: Site[];
+    lattice: number[][];
+}
+
+export interface LammpsDumpTrajectory {
+    frames: LammpsDumpFrame[];
+    /** Atom count of the first frame; every kept frame has this count. */
+    natoms: number;
+    /** Frames the dump contains, before sampling. */
+    frameCount: number;
+    sampled: boolean;
+    truncated: boolean;
+    warnings: string[];
+}
+
+export interface LammpsDumpTrajectoryOptions extends LammpsParseOptions {
+    maxFrames?: number;
+    maxTotalAtoms?: number;
+}
+
+/**
+ * A text LAMMPS dump as a trajectory.
+ *
+ * A dump is ASCII, so there is no random access to seek through; the scan
+ * still reads only the three `ITEM:` header lines of every block and decodes
+ * the atom rows of the sampled frames. Frames that are incomplete, state no
+ * usable box, or change the atom count are skipped with a warning rather than
+ * producing a frame whose positions would be paired with the wrong atoms.
+ */
+export function parseLammpsDumpTrajectory(
+    content: string,
+    options?: LammpsDumpTrajectoryOptions
+): LammpsDumpTrajectory {
+    const lines = content.split(/\r?\n/);
+    const factor = lammpsLengthFactor(options && options.units);
+    const typeElements = options && options.typeElements ? options.typeElements : {};
+    const headers = scanDumpHeaders(lines, factor);
+    const result: LammpsDumpTrajectory = {
+        frames: [],
+        natoms: headers.length > 0 ? headers[0].count : 0,
+        frameCount: headers.length,
+        sampled: false,
+        truncated: false,
+        warnings: []
+    };
+    if (headers.length === 0) {
+        result.warnings.push('no complete frame in the LAMMPS dump: no structure to show');
+        return result;
+    }
+    const last = headers[headers.length - 1];
+    result.truncated = last.body + last.count > lines.length;
+    if (result.truncated) {
+        result.warnings.push('the dump ends in an incomplete frame: showing the frames that could be read');
+    }
+    const chosen = chooseTrajectoryFrameIndexes(
+        headers.length, result.natoms,
+        options && options.maxFrames, options && options.maxTotalAtoms
+    );
+    result.sampled = chosen.length < headers.length;
+
+    let incomplete = 0;
+    let varying = 0;
+    let noBox = 0;
+    for (const index of chosen) {
+        const header = headers[index];
+        if (header.count !== result.natoms) { varying++; continue; }
+        if (!header.box.lattice || !isUsableLattice(header.box.lattice)) { noBox++; continue; }
+        const frame = buildDumpFrame(lines, header, typeElements);
+        if (frame.sites.length !== header.count) { incomplete++; continue; }
+        const parsed: LammpsDumpFrame = {
+            index,
+            timestep: frame.timestep,
+            sites: frame.sites,
+            lattice: frame.lattice as number[][]
+        };
+        if (/^[+-]?\d+$/.test(frame.timestep)) parsed.step = parseInt(frame.timestep, 10);
+        result.frames.push(parsed);
+    }
+    if (incomplete > 0) {
+        result.warnings.push(incomplete + ' incomplete frame' + (incomplete === 1 ? '' : 's') +
+            ' in the dump: skipped');
+    }
+    if (varying > 0) {
+        result.warnings.push(varying + ' frame' + (varying === 1 ? ' has' : 's have') +
+            ' a different atom count: skipped');
+    }
+    if (noBox > 0) {
+        result.warnings.push(noBox + ' frame' + (noBox === 1 ? '' : 's') +
+            ' states no usable box: skipped');
+    }
+    const missing = result.frames.length > 0 ? result.frames[0].sites.filter(s => /^T\d+$/.test(s.element)) : [];
+    if (missing.length > 0) {
+        const labels = Array.from(new Set(missing.map(s => s.element))).sort();
+        result.warnings.push('atom type' + (labels.length === 1 ? ' ' : 's ') + labels.join(', ') +
+            ' has no element column or companion data: read as typed labels');
+    }
+    return result;
 }
 
 export interface LammpsHints {

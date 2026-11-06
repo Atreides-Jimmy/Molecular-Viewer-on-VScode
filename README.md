@@ -54,14 +54,15 @@ A VS Code / Trae extension that brings a GaussView-style 3D molecular viewer and
 
 #### Trajectory and Vibrations
 
-- **Frame navigation** — ◀/▶ steps through optimisation frames, a jump field goes to any frame, and **Auto Play** runs at 350 ms per frame, stopping on the last (converged) geometry; pressing Play there starts again.
+- **MD trajectories** — GROMACS XTC/TRR, CHARMM/NAMD/LAMMPS DCD and multi-frame LAMMPS text dumps open as structures with the same frame navigation. Binary files are recognised by their magic, so a renamed `.xtc`, `.trr` or `.dcd` still opens; the matching topology (`.gro`, `.pdb`, `.ent`, `.xyz`/`.extxyz`, `.data`, or the LAMMPS `read_data` file) supplies elements, colours and bonds, and each frame's box is drawn as a plain wireframe. Frame labels name the step and XTC/TRR time (`Step 2500 · t = 5 ps`) or the LAMMPS timestep; large trajectories are sampled evenly with a warning, and missing topology, truncated frames and unknown elements are reported rather than guessed. Diff and Import ask which frame to use.
+- **Frame navigation** — ◀/▶ steps through optimisation or trajectory frames, a jump field goes to any frame, and **Auto Play** runs at 350 ms per frame, stopping on the last frame (the converged geometry of an optimisation); pressing Play there starts again.
 - **Route keywords** — Gaussian logs and ORCA outputs gain a collapsible **Route** panel that breaks the run's keywords into tokens and options, with an `opt` badge on optimisation jobs. The same parse decides whether the Convergence panel appears, so single-point `force`/`freq` jobs show no convergence curve.
 - **Convergence** — The **Convergence** panel plots energy, max/RMS force and max/RMS displacement against step, with threshold lines taken from the file (ORCA tolerances or the Gaussian defaults). Force and displacement use log axes; hovering a point shows its step, value and energy. Gaussian `SCF Done`, external-optimizer energies, ORCA cycles and xtb gradient norms are supported.
 - **Normal modes and manual displacement** — Frequency runs add a **Modes** panel listing harmonic frequencies and symmetries; imaginary modes are marked `*` and ORCA's zero translational/rotational modes are removed. Click a row (or ▶) to animate a mode. The circle at the row end selects a mode for **Manual Displacement**: set a scale from −1.00 to +1.00, combine several modes, and the structure becomes equilibrium + Σ(scale × mode). **Reset** returns to equilibrium and **Save As** writes the displaced geometry; playback always starts from the undisplaced equilibrium. Edits that replace the structure end the session.
 
 #### Structure Diff
 
-- **Any format** — Compare the current structure with any supported file; multi-frame logs ask which frame to use.
+- **Any format** — Compare the current structure with any supported file; multi-frame logs and trajectories ask which frame to use.
 - **Skeleton check** — Structures match by connectivity (graph isomorphism using element, degree and neighbour signature), ignoring bond order, so different bond orders at the same connectivity still match.
 - **Side-by-side view** — Each half rotates, pans and zooms independently and keeps its own aspect ratio.
 - **Differences** — Matching skeletons highlight bond length, angle and dihedral differences in orange on both sides, with percentage changes and a complete difference list. A 0–20% threshold slider controls what is highlighted; the results panel can be closed and reopened with **Show Results**.
@@ -123,7 +124,9 @@ A script also works as the comparison side of **Structure Diff**, using the scri
 | ABINIT | `.abi` `.abo` | `acell`/`rprim` (Bohr default or `angstrom`), `znucl`/`typat` with `N*value` repeats, `xred`/`xcart`/`xangst`, `xyzfile` (external XYZ) and `include` files; converged output geometry |
 | CP2K | `.inp` `.out` | `&CELL` (ABC + angles or A/B/C vectors), `&COORD` Cartesian/scaled, `&KIND`, `COORD_FILE_NAME` (XYZ/PDB/CP2K, last one wins), `@INCLUDE`/`@SET`/`@IF`/`@IFDEF`; output geometries |
 | Quantum ESPRESSO | `.in` `.pwi` `.pwo` | `ibrav` + `celldm` or `CELL_PARAMETERS`, `ATOMIC_POSITIONS` crystal/alat/bohr/angstrom; final output cell and geometry |
-| LAMMPS | `.lmp` `.lammps` `.data` `.lammpstrj` `.dump` `data` | Data box and tilt, `Masses`/`mass`/`dump_modify element` type names, atomic/charge/full/molecular styles, dump frames; an input script (`read_data`, `include`, `variable`) opens the structure it names, and the bare `data` file opens by itself |
+| LAMMPS | `.lmp` `.lammps` `.data` `.lammpstrj` `.dump` `data` | Data box and tilt, `Masses`/`mass`/`dump_modify element` type names, atomic/charge/full/molecular styles; a multi-frame dump opens with frame navigation and a per-frame triclinic box, a single frame stays a periodic crystal; an input script (`read_data`, `include`, `variable`) opens the structure it names, and the bare `data` file opens by itself |
+| GROMACS trajectory | `.xtc` `.trr` | Binary XTC/TRR recognised by magic: XTC integer-compressed coordinates, TRR coordinate blocks, nm → Å, per-frame box; topology, elements and bonds from the same-name `.gro`/`.pdb` (or a unique atom-count match) |
+| DCD trajectory | `.dcd` | CHARMM/NAMD/LAMMPS DCD with 4- or 8-byte Fortran records, either byte order, fixed atoms and unit-cell records; per-frame coordinates and box, with `.gro`/`.pdb`/`.xyz`/`.data` topology |
 | GROMACS | `.gro` | nm → Å, nine-value triclinic box in GROMACS order, velocities ignored; a zero box is a molecule |
 | Extended XYZ / GPUMD | `.xyz` `.extxyz` | `Lattice=`, `Properties=` and `pbc=` on the comment line, property layout resolved by name, frame count reported |
 | DeepMD / DP-GEN | `coord.raw` `coord.npy` | `type.raw`/`type_map.raw` types, `box.raw`/`box.npy` cell, empty `nopbc`; first frame shown |
@@ -131,7 +134,7 @@ A script also works as the comparison side of **Structure Diff**, using the scri
 | Molden | `.molden` | `[Atoms]` table with its AU/Å unit header |
 | VASP XDATCAR / OUTCAR / vasprun.xml | `.xdatcar` `.outcar` `vasprun.xml` | MD configurations (first shown), final geometry, cell and energies |
 
-Output files are dispatched by content, not by the suffix alone: Quantum ESPRESSO, CP2K, ABINIT, PySCF, ABACUS, MOPAC and xtb outputs saved as `.out`/`.log`, VASP `OUTCAR`/`vasprun.xml`/`XDATCAR`, LAMMPS dumps and ABACUS `MD_dump` all open directly even when renamed. The same holds for an output renamed to an input suffix (`.in`, `.inp`): a CP2K output is not read as its own echoed input, and a LAMMPS data file named `.dat` is not read as a MOPAC input. A recognised output that carries no coordinates (a GROMACS or LAMMPS log, DP-GEN `model_devi.out`, a GPUMD `run.in`) states that on the canvas and names the file that holds the geometry, rather than leaving an unexplained empty view.
+Output files are dispatched by content, not by the suffix alone: Quantum ESPRESSO, CP2K, ABINIT, PySCF, ABACUS, MOPAC and xtb outputs saved as `.out`/`.log`, VASP `OUTCAR`/`vasprun.xml`/`XDATCAR`, LAMMPS dumps and ABACUS `MD_dump` all open directly even when renamed. The same holds for an output renamed to an input suffix (`.in`, `.inp`): a CP2K output is not read as its own echoed input, and a LAMMPS data file named `.dat` is not read as a MOPAC input. Binary trajectories are recognised the same way — XTC/TRR magic and DCD's `CORD` record — so `.xtc`, `.trr` and `.dcd` open under any name and the three suffixes are in the selector, both context menus and the open dialog. A recognised output that carries no coordinates (a GROMACS or LAMMPS log, DP-GEN `model_devi.out`, a GPUMD `run.in`) states that on the canvas and names the file that holds the geometry, rather than leaving an unexplained empty view.
 
 ### Installation
 
@@ -315,14 +318,15 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 #### 轨迹与振动
 
-- **帧浏览** — ◀/▶ 在优化帧之间步进，跳转输入框可直达指定帧；**Auto Play** 以每帧 350 ms 播放，在最后一个（收敛）结构处停止，在该帧再次点击播放则从头开始。
+- **MD 轨迹** — GROMACS XTC/TRR、CHARMM/NAMD/LAMMPS DCD 以及多帧 LAMMPS 文本 dump 与优化轨迹共用同一套帧浏览。二进制文件按魔数识别，因此改名后的 `.xtc`、`.trr`、`.dcd` 仍能打开；同名拓扑（`.gro`、`.pdb`、`.ent`、`.xyz`/`.extxyz`、`.data`，或 LAMMPS `read_data` 指向的文件）提供元素、颜色与键，每帧的盒子以普通线框绘制。帧标签写出步数与 XTC/TRR 时间（`Step 2500 · t = 5 ps`）或 LAMMPS 的 timestep；过大的轨迹会等间隔抽样并给出提示，缺失拓扑、截断帧与未知元素都会报告而不是猜测。Diff 与 Import 会询问使用哪一帧。
+- **帧浏览** — ◀/▶ 在优化帧或轨迹帧之间步进，跳转输入框可直达指定帧；**Auto Play** 以每帧 350 ms 播放，在最后一帧停止（优化任务即收敛构型），在该帧再次点击播放则从头开始。
 - **路由关键字** — Gaussian 日志与 ORCA 输出会多出一个可折叠的 **Route** 面板，把运行的关键字拆成词元与选项，优化作业带 `opt` 徽标。同一份解析结果也决定 Convergence 面板是否出现，因此单点的 `force`/`freq` 作业不会显示收敛曲线。
 - **收敛面板** — **Convergence** 面板绘制能量、最大/RMS 力与最大/RMS 位移随步数的变化，阈值线取自文件（ORCA 的收敛容差或 Gaussian 的默认值）。力与位移使用对数轴，悬停数据点可查看步数、数值与能量。支持 Gaussian 的 `SCF Done`、外部优化器能量、ORCA 的每个循环以及 xtb 的梯度范数。
 - **简正模式与手动位移** — 频率计算会添加 **Modes** 面板，列出谐振频率与对称性；虚频以 `*` 标记，ORCA 的零平动/转动模式会被剔除。点击行（或 ▶）播放振动动画。行尾的小圆圈把模式指定给 **Manual Displacement**：设置 −1.00 到 +1.00 的比例、可叠加多个模式，结构会变为「平衡构型 + Σ(比例 × 模式)」。**Reset** 回到平衡构型，**Save As** 可写出位移后的几何；播放始终从无位移的平衡构型开始。会替换结构的编辑会结束该会话。
 
 #### 结构对比
 
-- **任意格式** — 把当前结构与任一受支持文件比较；多帧日志会询问使用哪一帧。
+- **任意格式** — 把当前结构与任一受支持文件比较；多帧日志与轨迹会询问使用哪一帧。
 - **骨架校验** — 按连接性做图同构匹配（元素、度数、邻居签名），不考虑键级，因此连接性相同但键级写得不一致的分子仍能匹配。
 - **并排视图** — 左右两半可各自独立旋转、平移与缩放，并保持各自的宽高比。
 - **差异显示** — 骨架匹配时，两侧以橙色高亮键长、键角与二面角差异，显示百分比变化和完整差异列表。0–20% 的阈值滑块控制高亮内容；结果面板可用 **Show Results** 关闭与重开。
@@ -384,7 +388,9 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 | ABINIT | `.abi` `.abo` | `acell`/`rprim`（默认 Bohr 或 `angstrom`）、`znucl`/`typat`（支持 `N*value` 重复）、`xred`/`xcart`/`xangst`、`xyzfile`（外部 XYZ）与 `include`；收敛后的输出几何 |
 | CP2K | `.inp` `.out` | `&CELL`（ABC + 角度或 A/B/C 矢量）、`&COORD` 笛卡尔/缩放坐标、`&KIND`、`COORD_FILE_NAME`（XYZ/PDB/CP2K，取最后一个）、`@INCLUDE`/`@SET`/`@IF`/`@IFDEF`；输出几何 |
 | Quantum ESPRESSO | `.in` `.pwi` `.pwo` | `ibrav` + `celldm` 或 `CELL_PARAMETERS`、`ATOMIC_POSITIONS` 的 crystal/alat/bohr/angstrom；输出中的最终晶胞与几何 |
-| LAMMPS | `.lmp` `.lammps` `.data` `.lammpstrj` `.dump` `data` | 数据文件盒与倾斜、`Masses`/`mass`/`dump_modify element` 类型名、atomic/charge/full/molecular 样式、dump 帧；输入脚本（`read_data`、`include`、`variable`）会打开它指向的结构，裸 `data` 文件也可单独打开 |
+| LAMMPS | `.lmp` `.lammps` `.data` `.lammpstrj` `.dump` `data` | 数据文件盒与倾斜、`Masses`/`mass`/`dump_modify element` 类型名、atomic/charge/full/molecular 样式；多帧 dump 以帧浏览打开并携带每帧三斜盒，单帧仍按周期晶体显示；输入脚本（`read_data`、`include`、`variable`）会打开它指向的结构，裸 `data` 文件也可单独打开 |
+| GROMACS 轨迹 | `.xtc` `.trr` | 按魔数识别的二进制 XTC/TRR：XTC 整数压缩坐标、TRR 坐标块、nm → Å、每帧盒子；元素、颜色与键来自同名 `.gro`/`.pdb`（或唯一原子数匹配） |
+| DCD 轨迹 | `.dcd` | CHARMM/NAMD/LAMMPS DCD，支持 4/8 字节 Fortran 记录、两种字节序、固定原子与晶胞记录；逐帧坐标与盒子，拓扑取 `.gro`/`.pdb`/`.xyz`/`.data` |
 | GROMACS | `.gro` | nm → Å、按 GROMACS 顺序排列的九值三斜盒、忽略速度列；零盒按分子处理 |
 | Extended XYZ / GPUMD | `.xyz` `.extxyz` | 注释行的 `Lattice=`、`Properties=` 与 `pbc=`，按列名解析属性布局，并报告帧数 |
 | DeepMD / DP-GEN | `coord.raw` `coord.npy` | `type.raw`/`type_map.raw` 类型、`box.raw`/`box.npy` 晶胞、空 `nopbc`；显示第一帧 |
@@ -392,7 +398,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 | Molden | `.molden` | `[Atoms]` 表及其 AU/Å 单位头 |
 | VASP XDATCAR / OUTCAR / vasprun.xml | `.xdatcar` `.outcar` `vasprun.xml` | MD 构型（显示第一帧）、最终几何、晶胞与能量 |
 
-输出文件按内容而不是仅按后缀分派：Quantum ESPRESSO、CP2K、ABINIT、PySCF、ABACUS、MOPAC 与 xtb 保存为 `.out`/`.log` 的输出、VASP 的 `OUTCAR`/`vasprun.xml`/`XDATCAR`、LAMMPS dump 与 ABACUS `MD_dump` 即使改名也能直接打开。改名为输入后缀（`.in`、`.inp`）的输出同样如此：CP2K 输出不会被当成它自己回显的输入，命名为 `.dat` 的 LAMMPS 数据文件也不会被当成 MOPAC 输入。若识别出的输出不含坐标（GROMACS/LAMMPS 日志、DP-GEN 的 `model_devi.out`、GPUMD 的 `run.in`），画布会明确说明，并指出真正保存结构的文件，而不是留下一个没有解释的空视图。
+输出文件按内容而不是仅按后缀分派：Quantum ESPRESSO、CP2K、ABINIT、PySCF、ABACUS、MOPAC 与 xtb 保存为 `.out`/`.log` 的输出、VASP 的 `OUTCAR`/`vasprun.xml`/`XDATCAR`、LAMMPS dump 与 ABACUS `MD_dump` 即使改名也能直接打开。改名为输入后缀（`.in`、`.inp`）的输出同样如此：CP2K 输出不会被当成它自己回显的输入，命名为 `.dat` 的 LAMMPS 数据文件也不会被当成 MOPAC 输入。二进制轨迹同样按内容识别（XTC/TRR 魔数与 DCD 的 `CORD` 记录），因此 `.xtc`、`.trr`、`.dcd` 无论改成什么名字都能打开，这三个后缀也已加入编辑器选择器、两处右键菜单与打开对话框。若识别出的输出不含坐标（GROMACS/LAMMPS 日志、DP-GEN 的 `model_devi.out`、GPUMD 的 `run.in`），画布会明确说明，并指出真正保存结构的文件，而不是留下一个没有解释的空视图。
 
 ### 安装
 
