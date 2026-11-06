@@ -345,15 +345,14 @@ export function parseGaussianLog(content: string): GaussianLogResult {
         if (titleLines.length > 0) title = titleLines[titleLines.length - 1].trim();
     }
 
-    const chargeMultMatch = content.match(/Charge\s*=\s*(-?\d+)\s+Multiplicity\s*=\s*(\d+)/);
+    // The charge and multiplicity printed with the geometry (`Charge = 0
+    // Multiplicity = 1`). A `--Link1--` file can run several jobs with
+    // different values, so the scan updates them as it passes each job's line
+    // and every frame keeps its own job's values; the old single match at the
+    // top of the file stamped the first job onto all of them.
     let chargeMultLine = '';
     let logCharge: number | undefined;
     let logMultiplicity: number | undefined;
-    if (chargeMultMatch) {
-        chargeMultLine = `Charge=${chargeMultMatch[1]} Mult=${chargeMultMatch[2]}`;
-        logCharge = parseInt(chargeMultMatch[1], 10);
-        logMultiplicity = parseInt(chargeMultMatch[2], 10);
-    }
 
     // Single pass over the file: geometry frames, convergence-table steps and
     // harmonic-frequency sections are all detected in ONE traversal (these
@@ -380,6 +379,20 @@ export function parseGaussianLog(content: string): GaussianLogResult {
     let i = 0;
     while (i < lines.length) {
         const line = lines[i];
+
+        // --- Charge/multiplicity of the job this frame belongs to ---
+        // Gaussian prints the line once per job, before that job's geometries,
+        // so updating the state here gives each frame the values of its own job.
+        if (line.indexOf('Charge') >= 0 && line.indexOf('Multiplicity') >= 0) {
+            const cm = line.match(/Charge\s*=\s*(-?\d+)\s+Multiplicity\s*=\s*(\d+)/);
+            if (cm) {
+                logCharge = parseInt(cm[1], 10);
+                logMultiplicity = parseInt(cm[2], 10);
+                chargeMultLine = `Charge=${cm[1]} Mult=${cm[2]}`;
+                i++;
+                continue;
+            }
+        }
 
         // --- Route card (keywords line) at the start of each job section ---
         // Route cards are enclosed between two dashed separator lines (the

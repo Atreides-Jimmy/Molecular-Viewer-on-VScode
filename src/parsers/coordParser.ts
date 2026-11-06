@@ -71,7 +71,14 @@ export function parseCoord(content: string): MolecularData {
             } else {
                 spinVal = parseInt(line.split(/\s+/)[1], 10);
             }
-            if (!isNaN(spinVal)) multiplicity = spinVal;
+            if (!isNaN(spinVal)) {
+                // TURBOMOLE (and xTB, which writes the same coord format):
+                // `$spin` states the number of unpaired electrons while
+                // `$mult` states the multiplicity itself, so a doublet is
+                // `$spin 1` or `$mult 2`. Reading both as the multiplicity
+                // turned every saved radical into a closed-shell system.
+                multiplicity = line.toLowerCase().startsWith('$spin') ? spinVal + 1 : spinVal;
+            }
         }
     }
 

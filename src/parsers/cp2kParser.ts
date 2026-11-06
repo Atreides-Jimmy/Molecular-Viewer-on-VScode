@@ -113,6 +113,27 @@ function lastSection(sections: Cp2kSection[], name: string): Cp2kSection | undef
     return undefined;
 }
 
+/** A section key read as a number; undefined when absent or unreadable. */
+function sectionNumber(section: Cp2kSection | undefined, key: string): number | undefined {
+    if (!section) return undefined;
+    const values = section.keys[key];
+    if (!values || values.length === 0) return undefined;
+    const value = parseFloat(values[0]);
+    return isFinite(value) ? value : undefined;
+}
+
+/**
+ * Carry the electronic state a CP2K input states in `&DFT` into the structure.
+ * A CP2K input can only describe one state per run, and the fields are the
+ * same total charge and multiplicity the other quantum-chemistry formats use,
+ * so they travel with the geometry and are written back by a save.
+ */
+function withElectronicState(data: MolecularData, charge: number | undefined, multiplicity: number | undefined): MolecularData {
+    if (charge !== undefined) data.charge = charge;
+    if (multiplicity !== undefined) data.multiplicity = multiplicity;
+    return data;
+}
+
 /** The keywords CP2K accepts as parameters on a section's own line. */
 const SECTION_PARAMS = ['SCALED', 'UNIT', 'PERIODIC', 'A', 'B', 'C', 'ABC', 'ALPHA_BETA_GAMMA'];
 
@@ -277,6 +298,12 @@ function cp2kCoordinateSites(content: string, format: string): Site[] {
 export function parseCp2kInput(content: string, options?: Cp2kParseOptions): MolecularData {
     const warnings: string[] = [];
     const sections = flattenSections(parseCp2kSections(content));
+    // &DFT states the total charge and the spin multiplicity of the run. A
+    // file with several &DFT sections describes the last one, like every other
+    // geometry-bearing section this reader prefers.
+    const dftSection = lastSection(sections, 'DFT');
+    const statedCharge = sectionNumber(dftSection, 'CHARGE');
+    const statedMultiplicity = sectionNumber(dftSection, 'MULTIPLICITY');
     const title = (() => {
         const global = lastSection(sections, 'GLOBAL');
         const project = global && global.keys['PROJECT'];
@@ -326,7 +353,7 @@ export function parseCp2kInput(content: string, options?: Cp2kParseOptions): Mol
         };
     }
     if (periodic && lattice && isUsableLattice(lattice)) {
-        return buildPeriodicStructure(lattice, sites, title, warnings);
+        return withElectronicState(buildPeriodicStructure(lattice, sites, title, warnings), statedCharge, statedMultiplicity);
     }
     if (lattice && !periodic) {
         // PERIODIC NONE: the ABC box is a bounding box, not a cell. SCALED
@@ -335,7 +362,7 @@ export function parseCp2kInput(content: string, options?: Cp2kParseOptions): Mol
         const molecular = sites.map(s => s.frac
             ? { element: s.element, label: s.label, ghost: s.ghost, cart: fracToCart(s.frac, lattice) }
             : s);
-        return buildMolecularStructure(molecular, title, warnings);
+        return withElectronicState(buildMolecularStructure(molecular, title, warnings), statedCharge, statedMultiplicity);
     }
     if (!lattice) warnings.push('the CP2K input states no &CELL: the structure is read as a molecule');
     else warnings.push('the CP2K &CELL is degenerate: the structure is read as a molecule');
@@ -348,7 +375,7 @@ export function parseCp2kInput(content: string, options?: Cp2kParseOptions): Mol
             warnings: warnings.concat('&COORD is SCALED but the input states no usable &CELL: the fractional coordinates cannot be placed')
         };
     }
-    return buildMolecularStructure(sites, title, warnings);
+    return withElectronicState(buildMolecularStructure(sites, title, warnings), statedCharge, statedMultiplicity);
 }
 
 interface Cp2kOutGeometry {

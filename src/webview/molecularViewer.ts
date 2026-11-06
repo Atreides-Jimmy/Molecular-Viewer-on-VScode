@@ -2956,6 +2956,12 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             atoms: f.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: atomColors[a.element] || '#FF1493', ghost: a.ghost === true ? true : undefined })),
             bonds: f.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order })),
             stepLabel: f.stepLabel,
+            // The electronic state the geometry was computed at. A log can run
+            // several jobs with different values (`--Link1--`, an ORCA file
+            // with more than one `* xyz` block), so every frame keeps its own;
+            // the page adopts them on a switch and a save writes them out.
+            charge: f.charge,
+            multiplicity: f.multiplicity,
             // Single-point energy of this frame's structure (opt logs only), used
             // by the convergence charts to highlight the selected step and to
             // report its exact value. [2026-09-12 | Atreides-Jimmy]
@@ -12016,6 +12022,14 @@ function switchFrame(idx){
         });
         TRAJ_CELL=(TRAJ_FRAMES[idx]&&TRAJ_FRAMES[idx].cell)?TRAJ_FRAMES[idx].cell:null;
     }else{
+        // Every frame states the electronic state it was computed at. Adopting
+        // it keeps the info panel, bond perception and a later save describing
+        // the frame on screen instead of the file's first job - an ORCA or
+        // --Link1-- Gaussian file can change charge between jobs. A frame
+        // that states no value (an xTB step, a structure-only block) leaves
+        // the one already shown in place.
+        if(f.charge!=null)MD.charge=f.charge;
+        if(f.multiplicity!=null)MD.multiplicity=f.multiplicity;
         MD.atoms=f.atoms.map(function(a,i){a.index=i;return a});
         MD.bonds=f.bonds||[];
         if(MD.bonds.length===0){
@@ -18894,6 +18908,36 @@ function provTitle(fallback,keepOriginal,extraHead){
     return PROV_PREFIX+line;
 }
 
+/**
+ * The charge/multiplicity line a Gaussian input states.
+ *
+ * A structure read from a GJF keeps its own line, including the extra pairs a
+ * multi-fragment input lists after the whole system's pair; that line is
+ * returned exactly as read when it already says what the viewer shows, so an
+ * unchanged file saves byte for byte. A structure read from a log has no
+ * Gaussian header to keep, but the charge and multiplicity are part of the
+ * geometry's identity - a frame of an optimisation was computed at them - so
+ * the line is built from MD instead of falling back to a fixed '0 1'. Values
+ * the page does not know become the neutral singlet a runnable input needs.
+ */
+function gjfChargeMultLine(meta){
+    var raw=meta&&meta.chargeMultLine?String(meta.chargeMultLine):'';
+    var toks=raw.trim()===''?[]:raw.trim().split(/\\s+/);
+    var haveC=typeof MD.charge==='number'&&isFinite(MD.charge);
+    var haveM=typeof MD.multiplicity==='number'&&isFinite(MD.multiplicity)&&MD.multiplicity>=1;
+    if(raw!==''&&toks.length>=2&&(!haveC||toks[0]===String(MD.charge))&&(!haveM||toks[1]===String(MD.multiplicity))){
+        return raw;
+    }
+    if(raw!==''&&!haveC&&!haveM)return raw;
+    var c=haveC?MD.charge:(toks.length>0?parseInt(toks[0],10):0);
+    var m=haveM?MD.multiplicity:(toks.length>1?parseInt(toks[1],10):1);
+    if(!isFinite(c))c=0;
+    if(!isFinite(m)||m<1)m=1;
+    // A multi-fragment input states one pair per fragment after the whole
+    // system's pair; only the first pair is the structure's own.
+    var trailing=toks.length>2?toks.slice(2):[];
+    return [c,m].concat(trailing).join(' ');
+}
 function doSave(){
     if(!MD.atoms||MD.atoms.length===0){alert('No atoms to save');return}
     for(var ci=0;ci<MD.atoms.length;ci++){var ca=MD.atoms[ci];if(isNaN(ca.x)||isNaN(ca.y)||isNaN(ca.z)){alert('Atom '+(ci+1)+' has invalid coordinates (NaN). Cannot save.');return}}
@@ -18934,9 +18978,9 @@ function doSave(){
             if(t.trim()==='')return;
             gjf+=t+'\\n';
         });
-        gjf+='\\n'+meta.chargeMultLine+'\\n';
+        gjf+='\\n'+gjfChargeMultLine(meta)+'\\n';
     }else{
-        gjf='%chk=molecule.chk\\n%mem=4GB\\n%nproc=4\\n# B3LYP/6-31G(d)\\n\\n'+saveTitle+'\\n\\n0 1\\n';
+        gjf='%chk=molecule.chk\\n%mem=4GB\\n%nproc=4\\n# B3LYP/6-31G(d)\\n\\n'+saveTitle+'\\n\\n'+gjfChargeMultLine(null)+'\\n';
     }
     MD.atoms.forEach(function(a){
         var el=gjfEl(a); while(el.length<2) el+=' ';
@@ -18978,7 +19022,10 @@ function doSave(){
     MD.atoms.forEach(function(a){coord+='  '+(a.x*ANG_TO_BOHR).toFixed(8)+'  '+(a.y*ANG_TO_BOHR).toFixed(8)+'  '+(a.z*ANG_TO_BOHR).toFixed(8)+' '+(isGhostAtom(a)?'q':a.element.toLowerCase())+'\\n'});
     coord+='$end\\n';
     if(chrg!==0)coord+='$chrg '+chrg+'\\n';
-    if(mult!==1)coord+='$spin '+(mult-1)/2+'\\n';
+    // TURBOMOLE's $spin is the number of unpaired electrons (a doublet is
+    // $spin 1), not the multiplicity; $mult would carry the multiplicity
+    // itself, but $spin is the one the reader and xTB share.
+    if(mult!==1)coord+='$spin '+(mult-1)+'\\n';
 
     // ORCA's first line is a comment line, so the provenance is one there and
     // the keywords keep their own line below it. ORCA spells a ghost with a
@@ -19590,10 +19637,10 @@ function buildClusterXyz(keepWhole){
 function buildClusterGjf(keepWhole){
     var cl=crystalCluster(keepWhole);
     var title=provTitle(MD.title||'Modified structure',false,crystalClusterTitle(cl.atoms.length,keepWhole));
-    var chrg=MD.charge||0,mult=MD.multiplicity||1;
     // A crystal has no Gaussian route of its own to preserve, so the cluster
-    // gets the same default header a fresh structure gets.
-    var out='%chk=cluster.chk\\n%mem=4GB\\n%nproc=4\\n# B3LYP/6-31G(d)\\n\\n'+title+'\\n\\n'+chrg+' '+mult+'\\n';
+    // gets the same default header a fresh structure gets - and its
+    // charge/multiplicity line is built the same way.
+    var out='%chk=cluster.chk\\n%mem=4GB\\n%nproc=4\\n# B3LYP/6-31G(d)\\n\\n'+title+'\\n\\n'+gjfChargeMultLine(null)+'\\n';
     cl.atoms.forEach(function(a){
         var el=isGhostAtom(a)?(a.element==='X'?'Bq':a.element+'-Bq'):a.element;
         while(el.length<2)el+=' ';
@@ -19901,7 +19948,14 @@ function buildCp2kContent(){
     var out='# '+provTitle(MD.title||'Modified structure',false)+'\\n';
     out+='&GLOBAL\\n  PROJECT modified\\n  RUN_TYPE ENERGY\\n&END GLOBAL\\n\\n';
     out+='&FORCE_EVAL\\n  METHOD Quickstep\\n';
-    out+='  &DFT\\n    BASIS_SET_FILE_NAME BASIS_MOLOPT\\n    POTENTIAL_FILE_NAME GTH_POTENTIALS\\n  &END DFT\\n';
+    out+='  &DFT\\n    BASIS_SET_FILE_NAME BASIS_MOLOPT\\n    POTENTIAL_FILE_NAME GTH_POTENTIALS\\n';
+    // CP2K states the system's total charge and spin multiplicity in &DFT.
+    // They are written only when the structure states a value different from
+    // CP2K's own default, so the file is unchanged for the neutral singlets
+    // these inputs have always been written from.
+    if(typeof MD.charge==='number'&&isFinite(MD.charge)&&MD.charge!==0)out+='    CHARGE '+MD.charge+'\\n';
+    if(typeof MD.multiplicity==='number'&&isFinite(MD.multiplicity)&&MD.multiplicity>1)out+='    MULTIPLICITY '+MD.multiplicity+'\\n';
+    out+='  &END DFT\\n';
     out+='  &SUBSYS\\n    &CELL\\n';
     var cellLv=CRY?CRY.latticeVectors:(TRAJ_CELL||null);
     if(cellLv){
