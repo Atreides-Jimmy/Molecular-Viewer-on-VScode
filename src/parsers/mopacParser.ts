@@ -1,4 +1,5 @@
 import { Atom, Bond, MolecularData } from '../types';
+import { elementFromZ, normalizeElementSymbol } from '../tools/periodicTable';
 
 const ATOMIC_NUMBER_TO_ELEMENT: { [key: number]: string } = {
     1: 'H', 2: 'He', 3: 'Li', 4: 'Be', 5: 'B', 6: 'C', 7: 'N', 8: 'O', 9: 'F', 10: 'Ne',
@@ -20,6 +21,52 @@ function parseMopacElement(token: string): string {
     const elem = token.charAt(0).toUpperCase() + token.slice(1).toLowerCase();
     if (/^[A-Za-z]{1,2}$/.test(elem)) return elem;
     return 'C';
+}
+
+interface MopacOutputRow {
+    element: string;
+    ghost: boolean;
+    x: number;
+    y: number;
+    z: number;
+}
+
+/** One element label of a MOPAC output table (`C`, `Cl`, `X`, or an atomic number). */
+function mopacOutputElement(token: string): { element: string; ghost: boolean } | undefined {
+    const upper = token.toUpperCase();
+    if (upper === 'X' || upper === 'XX') return { element: 'X', ghost: true };
+    if (/^\d+$/.test(token)) {
+        const element = elementFromZ(parseInt(token, 10));
+        return element ? { element, ghost: false } : undefined;
+    }
+    const element = normalizeElementSymbol(token);
+    return element ? { element, ghost: false } : undefined;
+}
+
+/**
+ * One row of a MOPAC output coordinate table.
+ *
+ * MOPAC writes `1 C -4.1918 2.5617 1.3518` — the serial number comes before
+ * the element label. Hand-written tables drop the serial, and an old table may
+ * use the atomic number instead of the symbol; all three spellings are read.
+ */
+function mopacOutputRow(line: string): MopacOutputRow | undefined {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 4) return undefined;
+    let at = 0;
+    if (/^\d+$/.test(parts[0])) {
+        // With a leading serial the element must follow it: treating the number
+        // as the element would turn `1 2 3 4` into a hydrogen at (2, 3, 4).
+        if (parts.length < 5 || !mopacOutputElement(parts[1])) return undefined;
+        at = 1;
+    }
+    const element = mopacOutputElement(parts[at]);
+    if (!element) return undefined;
+    const x = parseFloat(parts[at + 1]);
+    const y = parseFloat(parts[at + 2]);
+    const z = parseFloat(parts[at + 3]);
+    if (!isFinite(x) || !isFinite(y) || !isFinite(z)) return undefined;
+    return { element: element.element, ghost: element.ghost, x, y, z };
 }
 
 export function parseMopac(content: string): MolecularData {
@@ -48,20 +95,14 @@ export function parseMopac(content: string): MolecularData {
         // --- Fallback block rows: captured without consuming the line, so
         // the primary strategy still processes it as before ---
         if (fallbackPastHeader && line !== '' && !line.startsWith('-') && !line.startsWith('=')) {
-            const parts = line.split(/\s+/);
-            if (parts.length >= 4) {
-                const elem = parseMopacElement(parts[0]);
-                const x = parseFloat(parts[1]);
-                const y = parseFloat(parts[2]);
-                const z = parseFloat(parts[3]);
-                if (!isNaN(x) && !isNaN(y) && !isNaN(z)) {
-                    const atom: Atom = { element: elem, x, y, z, index: fallbackAtoms.length };
-                    if (elem === 'X' || elem === 'Xx' || elem === 'XX') {
-                        atom.element = 'X';
-                        atom.ghost = true;
-                    }
-                    fallbackAtoms.push(atom);
-                }
+            const row = mopacOutputRow(line);
+            if (row) {
+                const atom: Atom = {
+                    element: row.element, x: row.x, y: row.y, z: row.z,
+                    index: fallbackAtoms.length
+                };
+                if (row.ghost) atom.ghost = true;
+                fallbackAtoms.push(atom);
             }
         }
 
@@ -72,26 +113,39 @@ export function parseMopac(content: string): MolecularData {
         }
 
         if (i === 0) {
+            // The first line is the keyword line (`PM7 CHARGE=1 MS=2`), not
+            // the title; the title is the line after it. Reading the keywords
+            // as the title lost the input's charge and multiplicity.
+            const cmMatch = line.match(/\bCHARGE\s*=\s*(-?\d+)/i);
+            if (cmMatch) charge = parseInt(cmMatch[1], 10);
+            const msMatch = line.match(/\b(?:MULT|MS|MULTIPlicity)\s*=\s*(\d+)/i);
+            if (msMatch) multiplicity = parseInt(msMatch[1], 10);
+            continue;
+        }
+
+        if (i === 1) {
             title = line || 'MOPAC Calculation';
             continue;
         }
 
-        if (i === 1) continue;
-
+        // `foundChargeMult` only stops the charge scan; it must not stop the
+        // coordinate-block detection, or a charge on the keyword line (read
+        // above) would leave every geometry row unparsed.
         if (!foundChargeMult) {
-            const cmMatch = line.match(/CHARGE\s*=\s*(-?\d+)/i);
+            const cmMatch = line.match(/\bCHARGE\s*=\s*(-?\d+)/i);
             if (cmMatch) charge = parseInt(cmMatch[1], 10);
 
-            const msMatch = line.match(/(?:MULT|MS|MULTIPlicity)\s*=\s*(\d+)/i);
+            const msMatch = line.match(/\b(?:MULT|MS|MULTIPlicity)\s*=\s*(\d+)/i);
             if (msMatch) multiplicity = parseInt(msMatch[1], 10);
 
             if (cmMatch || msMatch) {
                 foundChargeMult = true;
             }
+        }
 
-            if (line.match(/^\s*[A-Za-z]{1,2}\s+/) || line.match(/^\s*\d+\s+/)) {
-                inCoords = true;
-            }
+        if (!inCoords &&
+            (line.match(/^\s*[A-Za-z]{1,2}\s+/) || line.match(/^\s*\d+\s+/))) {
+            inCoords = true;
         }
 
         if (inCoords) {
@@ -153,5 +207,77 @@ export function parseMopac(content: string): MolecularData {
         for (const fa of fallbackAtoms) atoms.push(fa);
     }
 
-    return { atoms, bonds, title, hasExplicitBonds, charge, multiplicity };
+    const data: MolecularData = { atoms, bonds, title, hasExplicitBonds, charge, multiplicity };
+    if (atoms.length === 0 && coordLines.length > 0) {
+        // MOPAC also accepts Z-matrix (internal-coordinate) input, whose rows
+        // have distances and angles rather than x/y/z triples. Saying so is
+        // better than an unexplained empty canvas.
+        data.warnings = ['the MOPAC input states internal coordinates: only a Cartesian geometry can be shown'];
+    }
+    return data;
+}
+
+/**
+ * Whether the text is a MOPAC calculation output rather than a MOPAC input.
+ *
+ * MOPAC inputs share `.dat`/`.mop` with data files and never print a version
+ * banner; outputs always announce the program and always print at least one
+ * `CARTESIAN COORDINATES` table.
+ */
+export function isMopacOutput(content: string): boolean {
+    return /\bMOPAC\s*:?\s*(?:Version\s*)?\(?\s*(?:20\d\d|[6-9]\d?(?:\.\d+)?)/i.test(content) &&
+        /^\s*CARTESIAN COORDINATES\b/im.test(content);
+}
+
+/**
+ * Read the final geometry from a MOPAC output.
+ *
+ * Every geometry change is followed by a fresh `CARTESIAN COORDINATES` table,
+ * so the last readable block is the structure the calculation ended with.
+ * Rows are Angstrom unless the heading says Bohr. A MOPAC output that stops
+ * before any table produces an explanatory warning instead of a blank canvas.
+ */
+export function parseMopacOutput(content: string): MolecularData {
+    const lines = content.split(/\r?\n/);
+    let atoms: Atom[] = [];
+    for (let i = 0; i < lines.length; i++) {
+        const header = lines[i];
+        if (!/^\s*CARTESIAN COORDINATES\b/i.test(header)) continue;
+        const scale = /BOHR/i.test(header) ? 0.529177249 : 1;
+        const block: Atom[] = [];
+        let skipped = 0;
+        for (let j = i + 1; j < lines.length; j++) {
+            const raw = lines[j];
+            const line = raw.trim();
+            if (line === '') continue;
+            // The next geometry block starts here; the outer loop reads it.
+            if (/^\s*CARTESIAN COORDINATES\b/i.test(raw)) break;
+            const row = mopacOutputRow(line);
+            if (row) {
+                const atom: Atom = {
+                    element: row.element,
+                    x: row.x * scale,
+                    y: row.y * scale,
+                    z: row.z * scale,
+                    index: block.length
+                };
+                if (row.ghost) atom.ghost = true;
+                block.push(atom);
+                continue;
+            }
+            // The column heading and a few banner lines sit between the
+            // heading and the first row; after the table has started, the
+            // first non-row line ends it.
+            if (block.length > 0 || ++skipped > 8) break;
+        }
+        if (block.length > 0) atoms = block;
+    }
+
+    if (atoms.length === 0) {
+        return {
+            atoms: [], bonds: [], title: 'MOPAC output', hasExplicitBonds: false,
+            warnings: ['the MOPAC output holds no readable Cartesian coordinate table']
+        };
+    }
+    return { atoms, bonds: [], title: 'MOPAC output', hasExplicitBonds: false };
 }

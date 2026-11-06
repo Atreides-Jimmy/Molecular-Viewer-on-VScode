@@ -27,6 +27,7 @@ A VS Code / Trae extension that brings a GaussView-style 3D molecular viewer and
 - **Orientation axes** — A gizmo at bottom-left shows Cartesian X/Y/Z axes for molecules and lattice a/b/c axes for crystals, following every rotation. **Reset View** restores the initial orientation.
 - **Remote-SSH** — Parsing and saving run on the remote host while the 3D view runs locally, so the extension works unchanged on a remote Linux server.
 - **VMD TCL scripts** — Opening a VMD script reproduces its representations, colours, selections and surfaces, including multiple molecules and optional egg metadata. See [VMD TCL scripts](#vmd-tcl-scripts).
+- **Main input files** — Opening a computational-chemistry input shows the structure it names instead of the script text. **LAMMPS** follows `read_data` and `include` (wildcards included) and applies `units`, `atom_style`, `mass` and `dump_modify element`; **ORCA** reads `* xyzfile <charge> <mult> <file>`; **ABINIT** reads `xyzfile` and `include`; **ABACUS** `INPUT` opens the `STRU` named by `stru_file` (default `STRU`); **CP2K** reads `COORD_FILE_NAME` (XYZ/PDB/CP2K) and expands `@INCLUDE`, `@SET`/`$VAR` and `@IF`/`@IFDEF` branches first. Quoted and relative/absolute paths are resolved, and a bare `data` file opens on its own. A reference that cannot be read is reported as a warning and no atoms are drawn (a CP2K inline `&COORD` is kept when its `COORD_FILE_NAME` is missing); Save As starts in the referenced file's folder.
 - **Performance with large structures** — The scene redraws only on interaction or change, and GPU resources are released on rebuild. Detail adapts to structure size, and spheres and bonds are drawn with instancing, so structures with thousands of atoms stay responsive. Move Atoms rebuilds only the bonds touching the selection, and long logs are parsed in a single pass.
 
 #### Molecular Editing
@@ -45,7 +46,7 @@ A VS Code / Trae extension that brings a GaussView-style 3D molecular viewer and
 - **Box Select** — Drag a rectangle to select every atom inside it. The selection carries over between Box Select and Select Atoms and into most editing tools.
 - **Clipboard and batch delete** — **Ctrl+C / Ctrl+X / Ctrl+V** copy, cut and paste fragments with the viewer's own clipboard; **Ctrl+A** selects all atoms; **Delete** removes the selection. Pasting is not available for crystals or in Diff.
 - **Undo** — Every edit is one undo step, the stack holds 50 entries, and it resets when the file is reloaded. **Cancel** in a dialog restores the coordinates it started from.
-- **Save As** — Export to XYZ, Gaussian GJF, ORCA Input, MOL2, MDL Mol, PDB, MOPAC, Turbomole Coord, CIF, VASP POSCAR, Gaussian Cube or VESTA. GJF keeps its Link 0, route, original title, charge/multiplicity and connect section. For crystals, two extra "displayed cluster" formats (XYZ/GJF) write the region on screen as a molecule, with a **Keep whole molecules** switch. Crystal formats are available whenever a crystal is loaded.
+- **Save As** — Export to XYZ, Gaussian GJF, ORCA Input, MOL2, MDL Mol, PDB, MOPAC, Turbomole Coord, CIF, VASP POSCAR, Gaussian Cube or VESTA, plus periodic **ABACUS STRU**, **ABINIT**, **Quantum ESPRESSO** (`pw.x`), **LAMMPS data**, **CP2K input**, **GROMACS** and **Extended XYZ**. GJF keeps its Link 0, route, original title, charge/multiplicity and connect section. For crystals, two extra "displayed cluster" formats (XYZ/GJF) write the region on screen as a molecule, with a **Keep whole molecules** switch. Periodic formats write the unit cell; CP2K, GROMACS and Extended XYZ also write the displayed atoms as a molecule (inside a bounding box, or with `pbc="F F F"`). A trajectory frame writes the frame on screen, and CP2K, GROMACS and Extended XYZ keep that frame's own cell instead of wrapping it in a bounding box. Crystal formats are available whenever a crystal is loaded.
 - **Saved files record their history** — Title or comment lines receive a short provenance line such as `MV: from opt.log, frame 12 of 40; 2 atoms deleted, translated`. It follows edits and undo, is not stacked when a viewer-produced file is saved again, and formats without a title line are written as before.
 - **Rotate Group** — Select a group and 2+ axis atoms, then rotate 0–360° around the orange axis with a slider or numeric input. Axis atoms stay fixed, bonded axis atoms must be joined by single bonds, each adjustment is one undo step, and **Reset** reverts the whole session.
 - **Move Atoms** — Plain left-drag or arrow keys rotate the view and right-drag pans it; **Ctrl+left-drag** or **Ctrl+arrow keys** rotate the selected fragment, and **Ctrl+right-drag** translates it. Bonds stretch with the atoms and are re-judged on release; authored MOL2/PDB/GJF bonds are kept unless pulled beyond the cutoff. One undo step per drag. Not available for crystals.
@@ -53,14 +54,15 @@ A VS Code / Trae extension that brings a GaussView-style 3D molecular viewer and
 
 #### Trajectory and Vibrations
 
-- **Frame navigation** — ◀/▶ steps through optimisation frames, a jump field goes to any frame, and **Auto Play** runs at 350 ms per frame, stopping on the last (converged) geometry; pressing Play there starts again.
+- **MD trajectories** — GROMACS XTC/TRR, CHARMM/NAMD/LAMMPS DCD, xTB `.trj` and multi-frame XYZ or LAMMPS text dumps open as structures with the same frame navigation. Binary files are recognised by their magic, so a renamed `.xtc`, `.trr` or `.dcd` still opens; the matching topology (`.gro`, `.pdb`, `.ent`, `.xyz`/`.extxyz`, `.data`, or the LAMMPS `read_data` file) supplies elements, colours and bonds, and each frame's box is drawn as a plain wireframe. A bond whose atoms are wrapped onto opposite faces is drawn to the nearest periodic image of its far atom — the same short stub across a face that a crystal draws — rather than through the whole box, triclinic frames included. The trajectory is drawn against one fixed centre, so the box wireframe holds still while the molecules move inside it. Frame labels name the step and XTC/TRR time (`Step 2500 · t = 5 ps`) or the LAMMPS timestep; large trajectories are sampled evenly with a warning, and missing topology, truncated frames and unknown elements are reported rather than guessed. Diff and Import ask which frame to use.
+- **Frame navigation** — ◀/▶ steps through optimisation or trajectory frames, a jump field goes to any frame, and **Auto Play** runs at 350 ms per frame, stopping on the last frame (the converged geometry of an optimisation); pressing Play there starts again.
 - **Route keywords** — Gaussian logs and ORCA outputs gain a collapsible **Route** panel that breaks the run's keywords into tokens and options, with an `opt` badge on optimisation jobs. The same parse decides whether the Convergence panel appears, so single-point `force`/`freq` jobs show no convergence curve.
 - **Convergence** — The **Convergence** panel plots energy, max/RMS force and max/RMS displacement against step, with threshold lines taken from the file (ORCA tolerances or the Gaussian defaults). Force and displacement use log axes; hovering a point shows its step, value and energy. Gaussian `SCF Done`, external-optimizer energies, ORCA cycles and xtb gradient norms are supported.
 - **Normal modes and manual displacement** — Frequency runs add a **Modes** panel listing harmonic frequencies and symmetries; imaginary modes are marked `*` and ORCA's zero translational/rotational modes are removed. Click a row (or ▶) to animate a mode. The circle at the row end selects a mode for **Manual Displacement**: set a scale from −1.00 to +1.00, combine several modes, and the structure becomes equilibrium + Σ(scale × mode). **Reset** returns to equilibrium and **Save As** writes the displaced geometry; playback always starts from the undisplaced equilibrium. Edits that replace the structure end the session.
 
 #### Structure Diff
 
-- **Any format** — Compare the current structure with any supported file; multi-frame logs ask which frame to use.
+- **Any format** — Compare the current structure with any supported file; multi-frame logs and trajectories ask which frame to use.
 - **Skeleton check** — Structures match by connectivity (graph isomorphism using element, degree and neighbour signature), ignoring bond order, so different bond orders at the same connectivity still match.
 - **Side-by-side view** — Each half rotates, pans and zooms independently and keeps its own aspect ratio.
 - **Differences** — Matching skeletons highlight bond length, angle and dihedral differences in orange on both sides, with percentage changes and a complete difference list. A 0–20% threshold slider controls what is highlighted; the results panel can be closed and reopened with **Show Results**.
@@ -70,7 +72,7 @@ A VS Code / Trae extension that brings a GaussView-style 3D molecular viewer and
 
 #### Crystal Structures
 
-- **Unit cell** — CIF, VASP, Cube and VESTA files open with a wireframe cell (grid lines when the view spans several cells) and a/b/c edge labels.
+- **Unit cell** — CIF, VASP, Cube, VESTA, ABACUS STRU, ABINIT, Quantum ESPRESSO, LAMMPS, CP2K, GROMACS and Extended XYZ files open with a wireframe cell (grid lines when the view spans several cells) and a/b/c edge labels.
 - **Supercell bounds** — Six inputs define the displayed region in fractional coordinates, with 2×2×2, 3×3×3 and 4×4×4 presets plus **Reset** (0–1) and **Align Origin**. The region is a cut-out of the crystal, not a deformation; atoms outside the range are simply not shown, and finite molecules are shown whole even across a boundary. The view keeps its centre and selection when bounds change, and a change that would exceed 30,000 atoms is refused with a message.
 - **Atom identity and cell info** — Hovering shows Cartesian and fractional coordinates, the periodic image `cell (i,j,k)`, site label and occupancy. The info panel adds cell volume, Z and density plus a collapsible asymmetric-unit table; expanded images name their site and symmetry operation.
 - **Local edits** — Bond-length, angle, dihedral and Rotate Group edits are written back into the unit cell as fractional displacements of the base site, appear in every periodic copy and survive crystal export. Each site is edited once. Bonds drawn as stubs across a cell face cannot be edited — grow the supercell instead. Add Atom wraps new sites into the cell, and the Bond Length dialog reports the shortest periodic image.
@@ -82,7 +84,7 @@ A VS Code / Trae extension that brings a GaussView-style 3D molecular viewer and
 - **Edit Cell** — Change a, b, c, α, β, γ while sites keep their fractional coordinates; invalid values or a cell above the atom ceiling are refused with the reason shown. Every export uses the edited cell.
 - **Disorder groups** — Choose **All** or a disorder group; the selected group can be counted at full occupancy in the formula, density and exports. Switching back to All is lossless.
 - **Occupancy and cleanup** — Partially occupied atoms are drawn partially coloured. **Remove Disorder** deletes sites below 0.5 occupancy, sets those above 0.5 to 1 and keeps 0.5.
-- **Crystal save** — CIF, VASP POSCAR, Cube and VESTA all write the unit cell rather than the supercell. CIF/VESTA declare P1 with wrapped fractional coordinates; POSCAR writes the cell; Cube writes a real cubic grid with a chosen number of points. Use the cluster XYZ/GJF formats to export the displayed region as a molecule.
+- **Crystal save** — CIF, VASP POSCAR, Cube, VESTA, ABACUS STRU, ABINIT, Quantum ESPRESSO input, LAMMPS data, CP2K input, GROMACS and Extended XYZ all write the unit cell rather than the supercell. CIF/VESTA declare P1 with wrapped fractional coordinates; POSCAR writes the cell; Cube writes a real cubic grid with a chosen number of points; STRU uses `Direct` sites under `LATTICE_CONSTANT`, ABINIT writes `acell`/`rprim`/`xred`, QE uses `ibrav = 0` with `CELL_PARAMETERS angstrom`, and LAMMPS is re-expressed in its restricted triclinic form. CP2K, GROMACS and Extended XYZ save the displayed atoms when no cell is loaded. A ghost is written as `X` (or `znucl 0`, a zero-mass LAMMPS type, or a CP2K `KIND` without a potential). Use the cluster XYZ/GJF formats to export the displayed region as a molecule.
 
 #### VMD TCL Scripts
 
@@ -107,16 +109,32 @@ A script also works as the comparison side of **Structure Diff**, using the scri
 | XYZ | `.xyz` | Standard XYZ; multi-frame trajectories (including ORCA `_trj.xyz`) with frame navigation and convergence when every frame has an energy; a truncated final frame is dropped |
 | MOL2 | `.mol2` | ATOM and BOND sections, aromatic `ar` bonds |
 | Gaussian log | `.log` | Optimisation trajectories, SCF energies, convergence, harmonic frequencies; xtb trajectories are detected automatically |
-| ORCA input | `.inp` | `* xyz … *` and `%coords` blocks, xyz/xyzfile data, Bohr/Å units |
+| ORCA input | `.inp` | `* xyz … *` and `* xyzfile` (opens the external XYZ it names), `%coords` blocks, Bohr/Å units |
 | ORCA output | `.out` | Cartesian coordinates in Å or a.u., cycles and final geometry, charge/multiplicity, convergence tolerances, frequencies/IR, route line; format detected by content |
 | Turbomole | `.coord` | `$coord` (Bohr → Å), `$chrg`, `$spin`/`$mult` |
 | PDB | `.pdb` `.ent` | ATOM/HETATM, element, occupancy, B-factor scalar, CONECT, duplicate serials |
-| MOPAC | `.mop` `.mopac` `.dat` | Internal coordinates, Å/Bohr auto-detection, CHARGE and MS, Cartesian fallback |
+| MOPAC | `.mop` `.mopac` `.dat` `.out` `.log` | Input: internal coordinates, Å/Bohr auto-detection, CHARGE and MS, Cartesian fallback. Output: the final `CARTESIAN COORDINATES` table, including serial-numbered rows; detected by content |
+| xtb | `.log` `.out` `.xyz` `.trj` | Optimisation trajectory (`xtbopt.log`/`xtb.trj`) with frame navigation and gradient norms; a run log's `final structure:` block is read as the final geometry |
 | VMD TCL | `.tcl` | Display recipe with molecules, representations, colours, selections, surfaces and egg metadata |
 | CIF | `.cif` | Cell, space group and symmetry operations, fractional/Cartesian sites, occupancy, asymmetric unit, `_geom_bond`; CIF 1.1, 1.2 and 2 tags |
 | VASP POSCAR | `.vasp` `POSCAR` `CONTCAR` | Scale (negative = target volume), lattice, element counts, selective dynamics, Direct/Cartesian |
 | Gaussian Cube | `.cube` | Voxel vectors and atoms, Bohr/Å auto-detection, robust lattice fallback |
 | VESTA | `.vesta` | CELLP, STRUC, GROUP and SYMOP; symmetry expansion and occupancy, with the same logic as CIF |
+| ABACUS | `.stru` `STRU` `STRU_MD_*` `.md_dump` `INPUT` | ATOMIC_SPECIES/MASS, LATTICE_CONSTANT (Bohr default), Direct/Cartesian positions, constraint flags; `INPUT` opens the `stru_file` it names (default `STRU`); SCF log and MD dump |
+| ABINIT | `.abi` `.abo` | `acell`/`rprim` (Bohr default or `angstrom`), `znucl`/`typat` with `N*value` repeats, `xred`/`xcart`/`xangst`, `xyzfile` (external XYZ) and `include` files; converged output geometry |
+| CP2K | `.inp` `.out` | `&CELL` (ABC + angles or A/B/C vectors), `&COORD` Cartesian/scaled, `&KIND`, `COORD_FILE_NAME` (XYZ/PDB/CP2K, last one wins), `@INCLUDE`/`@SET`/`@IF`/`@IFDEF`; output geometries |
+| Quantum ESPRESSO | `.in` `.pwi` `.pwo` | `ibrav` + `celldm` or `CELL_PARAMETERS`, `ATOMIC_POSITIONS` crystal/alat/bohr/angstrom; final output cell and geometry |
+| LAMMPS | `.lmp` `.lammps` `.data` `.lammpstrj` `.dump` `data` | Data box and tilt, `Masses`/`mass`/`dump_modify element` type names, atomic/charge/full/molecular styles; a multi-frame dump opens with frame navigation and a per-frame triclinic box (restricted or general `abc origin`), a single frame stays a periodic crystal; an input script (`read_data`, `include`, `variable`) opens the structure it names, and the bare `data` file opens by itself |
+| GROMACS trajectory | `.xtc` `.trr` | Binary XTC/TRR recognised by magic: XTC integer-compressed coordinates, TRR coordinate blocks, nm → Å, per-frame box; topology, elements and bonds from the same-name `.gro`/`.pdb` (or a unique atom-count match) |
+| DCD trajectory | `.dcd` | CHARMM/NAMD/LAMMPS DCD with 4- or 8-byte Fortran records, either byte order, fixed atoms and unit-cell records; per-frame coordinates and box, with `.gro`/`.pdb`/`.xyz`/`.data` topology |
+| GROMACS | `.gro` | nm → Å, nine-value triclinic box in GROMACS order, velocities ignored; a zero box is a molecule |
+| Extended XYZ / GPUMD | `.xyz` `.extxyz` | `Lattice=`, `Properties=` and `pbc=` on the comment line, property layout resolved by name, frame count reported |
+| DeepMD / DP-GEN | `coord.raw` `coord.npy` | `type.raw`/`type_map.raw` types, `box.raw`/`box.npy` cell, empty `nopbc`; first frame shown |
+| PySCF | `.out` `.log` | `[INPUT]` and `New geometry` blocks, periodic cell vectors in Bohr, final geometry |
+| Molden | `.molden` | `[Atoms]` table with its AU/Å unit header |
+| VASP XDATCAR / OUTCAR / vasprun.xml | `.xdatcar` `.outcar` `vasprun.xml` | MD configurations (first shown), final geometry, cell and energies |
+
+Output files are dispatched by content, not by the suffix alone: Quantum ESPRESSO, CP2K, ABINIT, PySCF, ABACUS, MOPAC and xtb outputs saved as `.out`/`.log`, VASP `OUTCAR`/`vasprun.xml`/`XDATCAR`, LAMMPS dumps and ABACUS `MD_dump` all open directly even when renamed. The same holds for an output renamed to an input suffix (`.in`, `.inp`): a CP2K output is not read as its own echoed input, and a LAMMPS data file named `.dat` is not read as a MOPAC input. Binary trajectories are recognised the same way — XTC/TRR magic and DCD's `CORD` record — so `.xtc`, `.trr` and `.dcd` open under any name and join the selector, both context menus and the open dialog; xTB's text `xtb.trj` is registered the same way. A recognised output that carries no coordinates (a GROMACS or LAMMPS log, DP-GEN `model_devi.out`, a GPUMD `run.in`) states that on the canvas and names the file that holds the geometry, rather than leaving an unexplained empty view.
 
 ### Installation
 
@@ -273,6 +291,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 - **方向坐标轴** — 左下角显示分子的笛卡尔 X/Y/Z 轴或晶体的晶格 a/b/c 轴，并跟随视图旋转；**Reset View** 恢复初始朝向。
 - **远程 SSH** — 解析与保存运行在远程主机，3D 视图在本地渲染，因此在远程 Linux 服务器上编辑文件也能直接使用。
 - **VMD TCL 脚本** — 打开 VMD 脚本会复现它的表示、颜色、选择与曲面，并支持多分子与可选的 egg 元数据。详见 [VMD TCL 脚本](#vmd-tcl-脚本)。
+- **主输入文件** — 打开计算化学的主输入文件时显示它指向的结构，而不是脚本文字。**LAMMPS** 会跟随 `read_data` 与 `include`（含通配符），并用 `units`、`atom_style`、`mass` 与 `dump_modify element` 描述结构；**ORCA** 读取 `* xyzfile <charge> <mult> <file>`；**ABINIT** 读取 `xyzfile` 与 `include`；**ABACUS** 的 `INPUT` 打开 `stru_file` 指定的 `STRU`（缺省为 `STRU`）；**CP2K** 读取 `COORD_FILE_NAME`（XYZ/PDB/CP2K），并先展开 `@INCLUDE`、`@SET`/`$VAR` 与 `@IF`/`@IFDEF` 分支。引号路径与相对/绝对路径都会解析，裸 `data` 文件也可单独打开。引用文件读不到时给出警告且不画原子（CP2K 的 `COORD_FILE_NAME` 缺失时保留内联 `&COORD`）；另存为默认落在被引用文件所在目录。
 - **大结构性能** — 场景只在交互或变化时重绘，空闲时不占用 GPU；重建时释放显存。细节层次随结构规模调整，球与键采用实例化绘制，数千原子的结构仍可流畅操作。Move Atoms 只重建受影响的键，长日志单趟解析。
 
 #### 分子编辑
@@ -291,7 +310,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 - **框选** — 拖出一个矩形，选中框内的所有原子。选择会在「框选」与「选择原子」之间保留，并可带入大多数编辑工具。
 - **剪贴板与批量删除** — **Ctrl+C / Ctrl+X / Ctrl+V** 使用查看器自己的剪贴板复制、剪切与粘贴片段；**Ctrl+A** 全选原子；**Delete** 删除选区。晶体结构与 Diff 模式下不可粘贴。
 - **撤销** — 每次编辑是一步 Undo，栈上限 50 条，重新载入文件时重置。对话框中的 **Cancel** 会恢复到打开对话框时的坐标。
-- **另存为** — 可导出为 XYZ、Gaussian GJF、ORCA Input、MOL2、MDL Mol、PDB、MOPAC、Turbomole Coord、CIF、VASP POSCAR、Gaussian Cube 或 VESTA。GJF 会保留 Link 0、route、原标题、电荷/多重度与 connect 段。对晶体结构，额外的两个「当前显示团簇」格式（XYZ/GJF）会把屏幕上的区域当作分子写出，并提供 **Keep whole molecules** 开关。载入晶体数据时才会提供晶体格式。
+- **另存为** — 可导出为 XYZ、Gaussian GJF、ORCA Input、MOL2、MDL Mol、PDB、MOPAC、Turbomole Coord、CIF、VASP POSCAR、Gaussian Cube、VESTA，以及周期性格式 **ABACUS STRU**、**ABINIT**、**Quantum ESPRESSO**（`pw.x`）、**LAMMPS data**、**CP2K input**、**GROMACS** 与 **Extended XYZ**。GJF 会保留 Link 0、route、原标题、电荷/多重度与 connect 段。对晶体结构，额外的两个「当前显示团簇」格式（XYZ/GJF）会把屏幕上的区域当作分子写出，并提供 **Keep whole molecules** 开关。周期性格式写出晶胞；CP2K、GROMACS 与 Extended XYZ 也能把显示的原子作为分子写出（放在包围盒中，或标记 `pbc="F F F"`）。轨迹帧保存的是屏幕上的那一帧，CP2K、GROMACS 与 Extended XYZ 会保留该帧自己的盒子，而不是把它包进新的包围盒。载入晶体数据时才会提供晶体格式。
 - **保存的文件记录来历** — 标题行或注释行会写入一行简短的来历，例如 `MV: from opt.log, frame 12 of 40; 2 atoms deleted, translated`。它跟随编辑与 Undo，重复保存不会层层叠加；没有标题行的格式保持原样。
 - **绕轴旋转基团** — 选择一个原子组和 2 个以上轴原子，然后用滑块或数值输入让原子组绕橙色轴线旋转 0–360°。轴原子保持不动，成键的轴原子之间必须是单键；每次调节是一步 Undo，面板的 **Reset** 一次性回退整个旋转会话。
 - **移动原子** — 普通左键拖拽或方向键旋转视图，右键拖拽平移视图；**Ctrl+左键拖拽**或 **Ctrl+方向键**旋转选中片段，**Ctrl+右键拖拽**平移片段。拖拽时键随原子拉伸，松开后重新判定连接性；MOL2/PDB/GJF 中写明的键会保留，除非被拉到成键范围之外。每次拖拽一步 Undo。晶体结构下不可用。
@@ -299,14 +318,15 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 #### 轨迹与振动
 
-- **帧浏览** — ◀/▶ 在优化帧之间步进，跳转输入框可直达指定帧；**Auto Play** 以每帧 350 ms 播放，在最后一个（收敛）结构处停止，在该帧再次点击播放则从头开始。
+- **MD 轨迹** — GROMACS XTC/TRR、CHARMM/NAMD/LAMMPS DCD、xTB `.trj` 以及多帧 XYZ 或 LAMMPS 文本 dump 与优化轨迹共用同一套帧浏览。二进制文件按魔数识别，因此改名后的 `.xtc`、`.trr`、`.dcd` 仍能打开；同名拓扑（`.gro`、`.pdb`、`.ent`、`.xyz`/`.extxyz`、`.data`，或 LAMMPS `read_data` 指向的文件）提供元素、颜色与键，每帧的盒子以普通线框绘制。若一条键的两个原子被包裹到盒子的相对两面，键会画向远端原子的最近周期像——与晶体跨面时相同的短残段——而不是横穿整个盒子，三斜盒子同样如此。播放时整条轨迹使用同一个固定中心，盒子线框保持不动，分子在盒内移动，构型变化更容易看清。帧标签写出步数与 XTC/TRR 时间（`Step 2500 · t = 5 ps`）或 LAMMPS 的 timestep；过大的轨迹会等间隔抽样并给出提示，缺失拓扑、截断帧与未知元素都会报告而不是猜测。Diff 与 Import 会询问使用哪一帧。
+- **帧浏览** — ◀/▶ 在优化帧或轨迹帧之间步进，跳转输入框可直达指定帧；**Auto Play** 以每帧 350 ms 播放，在最后一帧停止（优化任务即收敛构型），在该帧再次点击播放则从头开始。
 - **路由关键字** — Gaussian 日志与 ORCA 输出会多出一个可折叠的 **Route** 面板，把运行的关键字拆成词元与选项，优化作业带 `opt` 徽标。同一份解析结果也决定 Convergence 面板是否出现，因此单点的 `force`/`freq` 作业不会显示收敛曲线。
 - **收敛面板** — **Convergence** 面板绘制能量、最大/RMS 力与最大/RMS 位移随步数的变化，阈值线取自文件（ORCA 的收敛容差或 Gaussian 的默认值）。力与位移使用对数轴，悬停数据点可查看步数、数值与能量。支持 Gaussian 的 `SCF Done`、外部优化器能量、ORCA 的每个循环以及 xtb 的梯度范数。
 - **简正模式与手动位移** — 频率计算会添加 **Modes** 面板，列出谐振频率与对称性；虚频以 `*` 标记，ORCA 的零平动/转动模式会被剔除。点击行（或 ▶）播放振动动画。行尾的小圆圈把模式指定给 **Manual Displacement**：设置 −1.00 到 +1.00 的比例、可叠加多个模式，结构会变为「平衡构型 + Σ(比例 × 模式)」。**Reset** 回到平衡构型，**Save As** 可写出位移后的几何；播放始终从无位移的平衡构型开始。会替换结构的编辑会结束该会话。
 
 #### 结构对比
 
-- **任意格式** — 把当前结构与任一受支持文件比较；多帧日志会询问使用哪一帧。
+- **任意格式** — 把当前结构与任一受支持文件比较；多帧日志与轨迹会询问使用哪一帧。
 - **骨架校验** — 按连接性做图同构匹配（元素、度数、邻居签名），不考虑键级，因此连接性相同但键级写得不一致的分子仍能匹配。
 - **并排视图** — 左右两半可各自独立旋转、平移与缩放，并保持各自的宽高比。
 - **差异显示** — 骨架匹配时，两侧以橙色高亮键长、键角与二面角差异，显示百分比变化和完整差异列表。0–20% 的阈值滑块控制高亮内容；结果面板可用 **Show Results** 关闭与重开。
@@ -316,7 +336,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 #### 晶体结构
 
-- **晶胞显示** — 打开 CIF、VASP、Cube 或 VESTA 文件时，晶胞以线框显示（显示多个晶胞时内部晶面线更淡），原点相交的三条棱标注 a/b/c。
+- **晶胞显示** — 打开 CIF、VASP、Cube、VESTA、ABACUS STRU、ABINIT、Quantum ESPRESSO、LAMMPS、CP2K、GROMACS 或 Extended XYZ 文件时，晶胞以线框显示（显示多个晶胞时内部晶面线更淡），原点相交的三条棱标注 a/b/c。
 - **超胞边界** — 6 个输入框以分数坐标定义显示区域，并提供 2×2×2、3×3×3、4×4×4 预设以及 **Reset**（0–1）与 **Align Origin**。显示区域是晶体的剖切，不是晶格的形变；范围之外的原子不显示，有限分子即使跨越边界也完整显示。修改边界时视图保持中心与选择不变；若显示原子数将超过 30,000，会拒绝修改并提示。
 - **原子身份与晶胞信息** — 悬停原子可看到笛卡尔坐标、分数坐标、周期像 `cell (i,j,k)`、位点标签与占据率。信息面板额外显示晶胞体积、Z 与密度，以及可折叠的不对称单元表；展开的像会注明其位点与对称操作。
 - **晶体局部修改** — 键长、键角、二面角与绕轴旋转会以基础位点的分数位移写回晶胞，出现在每个周期副本中，并在导出 CIF/VESTA 后继续存在。同一基础位点只编辑一次。被画成跨晶面短桩的键不能编辑，应扩大超胞；添加原子会把新位点 wrap 回晶胞，键长对话框会报告最短周期像。
@@ -328,7 +348,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 - **编辑晶胞** — 修改 a、b、c、α、β、γ，所有位点保持分数坐标；非法数值或会超过原子上限的晶胞会被拒绝并说明原因。所有导出都使用修改后的晶胞。
 - **无序组** — 在 **All** 与某个无序组之间切换，所选组可在分子式、密度与导出中按满占据计算。切回 All 不会丢失任何信息。
 - **占据与清理** — 部分占据的原子按占据率部分着色。**Remove Disorder** 删除占据率低于 0.5 的位点，把高于 0.5 的置为 1，等于 0.5 的保留。
-- **晶体保存** — CIF、VASP POSCAR、Cube 与 VESTA 都写出晶胞而不是超胞。CIF/VESTA 声明 P1 并写入 wrap 后的分数坐标；POSCAR 写出晶胞；Cube 写出真正的立方网格（网格点数可选）。要把屏幕上的区域导出为分子，请使用 XYZ/GJF 的「当前显示团簇」格式。
+- **晶体保存** — CIF、VASP POSCAR、Cube、VESTA、ABACUS STRU、ABINIT、Quantum ESPRESSO 输入、LAMMPS data、CP2K input、GROMACS 与 Extended XYZ 都写出晶胞而不是超胞。CIF/VESTA 声明 P1 并写入 wrap 后的分数坐标；POSCAR 写出晶胞；Cube 写出真正的立方网格（网格点数可选）；STRU 在 `LATTICE_CONSTANT` 下使用 `Direct` 坐标，ABINIT 写出 `acell`/`rprim`/`xred`，QE 使用 `ibrav = 0` 与 `CELL_PARAMETERS angstrom`，LAMMPS 会改写为其受限三斜形式。没有晶胞时，CP2K、GROMACS 与 Extended XYZ 写出屏幕上的原子。幽灵原子写作 `X`（或 `znucl 0`、LAMMPS 的零质量类型、CP2K 中不带赝势的 `KIND`）。要把屏幕上的区域导出为分子，请使用 XYZ/GJF 的「当前显示团簇」格式。
 
 #### VMD TCL 脚本
 
@@ -353,16 +373,32 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 | XYZ | `.xyz` | 标准 XYZ；多帧轨迹（含 ORCA `_trj.xyz`）支持帧导航，每帧都带能量时显示收敛信息；被截断的末帧会被丢弃 |
 | MOL2 | `.mol2` | ATOM 与 BOND 段、芳香 `ar` 键 |
 | Gaussian 日志 | `.log` | 优化轨迹、SCF 能量、收敛、谐振频率；xtb 轨迹会自动识别 |
-| ORCA 输入 | `.inp` | `* xyz … *` 与 `%coords` 块、xyz/xyzfile 数据、Bohr/Å 单位 |
+| ORCA 输入 | `.inp` | `* xyz … *` 与 `* xyzfile`（打开其指向的外部 XYZ）、`%coords` 块、Bohr/Å 单位 |
 | ORCA 输出 | `.out` | Å 或 a.u. 的笛卡尔坐标、每个循环与最终几何、电荷/多重度、收敛容差、频率/IR、route 行；按内容识别格式 |
 | Turbomole | `.coord` | `$coord`（Bohr → Å）、`$chrg`、`$spin`/`$mult` |
 | PDB | `.pdb` `.ent` | ATOM/HETATM、元素、占据率、B 因子标量、CONECT、重复序号 |
-| MOPAC | `.mop` `.mopac` `.dat` | 内坐标、Å/Bohr 自动识别、CHARGE 与 MS、笛卡尔坐标回退 |
+| MOPAC | `.mop` `.mopac` `.dat` `.out` `.log` | 输入：内坐标、Å/Bohr 自动识别、CHARGE 与 MS、笛卡尔坐标回退。输出：最后的 `CARTESIAN COORDINATES` 表（含序号列），按内容识别 |
+| xtb | `.log` `.out` `.xyz` `.trj` | 优化轨迹（`xtbopt.log`/`xtb.trj`）支持帧导航与梯度范数；运行日志中的 `final structure:` 块作为最终几何读取 |
 | VMD TCL | `.tcl` | 显示配方：分子、表示、颜色、选择、曲面与 egg 元数据 |
 | CIF | `.cif` | 晶胞、空间群与对称操作、分数/笛卡尔位点、占据率、不对称单元、`_geom_bond`；支持 CIF 1.1、1.2 与 2 标签 |
 | VASP POSCAR | `.vasp` `POSCAR` `CONTCAR` | 缩放因子（负值表示目标体积）、晶格、元素数量、选择性动力学、Direct/Cartesian |
 | Gaussian Cube | `.cube` | 体素矢量与原子、Bohr/Å 自动识别、晶格损坏时的稳健回退 |
 | VESTA | `.vesta` | CELLP、STRUC、GROUP 与 SYMOP；对称展开与占据率，逻辑与 CIF 一致 |
+| ABACUS | `.stru` `STRU` `STRU_MD_*` `.md_dump` `INPUT` | ATOMIC_SPECIES/MASS、LATTICE_CONSTANT（默认 Bohr）、Direct/Cartesian 坐标、约束标记；`INPUT` 打开其 `stru_file`（缺省 `STRU`）；SCF 日志与 MD dump |
+| ABINIT | `.abi` `.abo` | `acell`/`rprim`（默认 Bohr 或 `angstrom`）、`znucl`/`typat`（支持 `N*value` 重复）、`xred`/`xcart`/`xangst`、`xyzfile`（外部 XYZ）与 `include`；收敛后的输出几何 |
+| CP2K | `.inp` `.out` | `&CELL`（ABC + 角度或 A/B/C 矢量）、`&COORD` 笛卡尔/缩放坐标、`&KIND`、`COORD_FILE_NAME`（XYZ/PDB/CP2K，取最后一个）、`@INCLUDE`/`@SET`/`@IF`/`@IFDEF`；输出几何 |
+| Quantum ESPRESSO | `.in` `.pwi` `.pwo` | `ibrav` + `celldm` 或 `CELL_PARAMETERS`、`ATOMIC_POSITIONS` 的 crystal/alat/bohr/angstrom；输出中的最终晶胞与几何 |
+| LAMMPS | `.lmp` `.lammps` `.data` `.lammpstrj` `.dump` `data` | 数据文件盒与倾斜、`Masses`/`mass`/`dump_modify element` 类型名、atomic/charge/full/molecular 样式；多帧 dump 以帧浏览打开并携带每帧三斜盒（restricted 或 general `abc origin`），单帧仍按周期晶体显示；输入脚本（`read_data`、`include`、`variable`）会打开它指向的结构，裸 `data` 文件也可单独打开 |
+| GROMACS 轨迹 | `.xtc` `.trr` | 按魔数识别的二进制 XTC/TRR：XTC 整数压缩坐标、TRR 坐标块、nm → Å、每帧盒子；元素、颜色与键来自同名 `.gro`/`.pdb`（或唯一原子数匹配） |
+| DCD 轨迹 | `.dcd` | CHARMM/NAMD/LAMMPS DCD，支持 4/8 字节 Fortran 记录、两种字节序、固定原子与晶胞记录；逐帧坐标与盒子，拓扑取 `.gro`/`.pdb`/`.xyz`/`.data` |
+| GROMACS | `.gro` | nm → Å、按 GROMACS 顺序排列的九值三斜盒、忽略速度列；零盒按分子处理 |
+| Extended XYZ / GPUMD | `.xyz` `.extxyz` | 注释行的 `Lattice=`、`Properties=` 与 `pbc=`，按列名解析属性布局，并报告帧数 |
+| DeepMD / DP-GEN | `coord.raw` `coord.npy` | `type.raw`/`type_map.raw` 类型、`box.raw`/`box.npy` 晶胞、空 `nopbc`；显示第一帧 |
+| PySCF | `.out` `.log` | `[INPUT]` 与 `New geometry` 块、Bohr 单位的周期晶格矢量、最终几何 |
+| Molden | `.molden` | `[Atoms]` 表及其 AU/Å 单位头 |
+| VASP XDATCAR / OUTCAR / vasprun.xml | `.xdatcar` `.outcar` `vasprun.xml` | MD 构型（显示第一帧）、最终几何、晶胞与能量 |
+
+输出文件按内容而不是仅按后缀分派：Quantum ESPRESSO、CP2K、ABINIT、PySCF、ABACUS、MOPAC 与 xtb 保存为 `.out`/`.log` 的输出、VASP 的 `OUTCAR`/`vasprun.xml`/`XDATCAR`、LAMMPS dump 与 ABACUS `MD_dump` 即使改名也能直接打开。改名为输入后缀（`.in`、`.inp`）的输出同样如此：CP2K 输出不会被当成它自己回显的输入，命名为 `.dat` 的 LAMMPS 数据文件也不会被当成 MOPAC 输入。二进制轨迹同样按内容识别（XTC/TRR 魔数与 DCD 的 `CORD` 记录），因此 `.xtc`、`.trr`、`.dcd` 无论改成什么名字都能打开，这些后缀也已加入编辑器选择器、两处右键菜单与打开对话框；xTB 的文本轨迹 `xtb.trj` 同样完成注册。若识别出的输出不含坐标（GROMACS/LAMMPS 日志、DP-GEN 的 `model_devi.out`、GPUMD 的 `run.in`），画布会明确说明，并指出真正保存结构的文件，而不是留下一个没有解释的空视图。
 
 ### 安装
 

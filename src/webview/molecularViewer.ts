@@ -1,13 +1,13 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { parseFile, parseLogFile, parseXyzTrajectory, LogFrame, OrcaFrame, RouteSection, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg } from '../parsers/index';
+import { parseFile, parseLogFile, parseXyzTrajectory, LogFrame, OrcaFrame, RouteSection, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg, ParseFileOptions, DeepmdParseOptions, LammpsParseOptions, LammpsHints, isStructuredProgramOutput, isExtXyz, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox, parseLammpsInputHints, lammpsTypeElements, isLammpsInput, isLammpsData, isLammpsDump, scanLammpsInput, scanOrcaXyzfile, scanAbinitXyzfile, scanAbacusInput, isAbacusInput, isAbinitInput, isCp2kInput, detectBinaryTrajectory, readBinaryTrajectory, lammpsLengthFactor, parseLammpsDumpTrajectory, BinaryTrajectory, TrajectoryFormat, LammpsDumpTrajectory } from '../parsers/index';
 import { ensureBonds } from '../tools/bondDetector';
 import { BOND_PERCEPTION_SOURCE } from '../tools/bondPerception';
 import { BVS_SOURCE } from '../tools/bvs';
 import { addHydrogens } from '../tools/addHydrogens';
 import { beginOptimization, describeForceField, MmHistoryPoint, MmOptimizeResult, MmSession } from '../tools/mmOptimizer';
 import { smilesTo3dSafe, validateSmiles } from '../tools/smilesTo3d';
-import { MolecularData, Atom, AsymAtom, AtomGroup, OptStep, NormalMode, OptThresholds, VmdScene, VmdMolecule } from '../types';
+import { MolecularData, Atom, Bond, AsymAtom, AtomGroup, OptStep, NormalMode, OptThresholds, VmdScene, VmdMolecule, TrajectoryInfo } from '../types';
 
 const ATOM_COLORS: { [key: string]: string } = {
     H: '#FFFFFF', He: '#D9FFFF', Li: '#CC80FF', Be: '#C2FF00', B: '#FFB5B5',
@@ -174,19 +174,1401 @@ interface LoadedStructure {
     error?: string;
 }
 
+/**
+ * One frame of a binary trajectory, compact enough to inline in the page.
+ *
+ * The frames of a log or an XYZ carry a whole atom object list because they can
+ * change composition. A trajectory cannot: every frame has the atoms of the
+ * topology, so only the coordinates travel and the page pairs them with the
+ * element template it already has. That keeps a 500-frame run from being
+ * serialised as half a million element names.
+ */
+interface TrajectoryFramePayload {
+    stepLabel: string;
+    /** `[x0, y0, z0, x1, …]`, Angstrom. */
+    xyz: number[];
+    cell?: number[][];
+    time?: number;
+    step?: number;
+}
+
+/** A trajectory and the template structure its frames are drawn with. */
+interface TrajectoryDocument {
+    data: MolecularData;
+    trajectoryFrames: TrajectoryFramePayload[];
+}
+
 const EMPTY_STRUCTURE: MolecularData = { atoms: [], bonds: [], title: 'Empty', hasExplicitBonds: false };
+
+/** A structure file a main input names, already read from disk. */
+interface StructureReference {
+    uri: vscode.Uri;
+    content: string;
+    fileName: string;
+}
+
+/** Everything reading one file's companions produced. */
+interface ParseSetup {
+    options: ParseFileOptions;
+    /** The structure a main input names (`read_data`, `xyzfile`, `stru_file`, `COORD_FILE_NAME`). */
+    reference?: StructureReference;
+    /** The input names a structure file, even if that file could not be read. */
+    referenceExpected?: boolean;
+    /** The text as parsed: include files spliced in when the format has directives. */
+    text?: string;
+    warnings: string[];
+}
+
+/** The file itself, or the same name in another case when the folder allows it. */
+async function fileIfExists(uri: vscode.Uri): Promise<vscode.Uri | undefined> {
+    try {
+        const stat = await vscode.workspace.fs.stat(uri);
+        if ((stat.type & vscode.FileType.File) !== 0) return uri;
+        return undefined;
+    } catch {
+        // The folder may be case-sensitive; try the name case-insensitively.
+    }
+    try {
+        const folder = vscode.Uri.file(path.dirname(uri.fsPath));
+        const wanted = path.basename(uri.fsPath).toLowerCase();
+        for (const [name, type] of await vscode.workspace.fs.readDirectory(folder)) {
+            if ((type & vscode.FileType.File) !== 0 && name.toLowerCase() === wanted) {
+                return vscode.Uri.joinPath(folder, name);
+            }
+        }
+    } catch {
+        // An unreadable folder has no file to offer.
+    }
+    return undefined;
+}
+
+/**
+ * Resolve a path a main input states.
+ *
+ * The job's working directory is usually the folder of the main input, so a
+ * relative path is tried there first and then beside the file that named it
+ * (an `include`). A path written for another launch directory falls back to
+ * the bare file name beside those two places, which is how the reader has
+ * always found a companion; an absolute path is used as written. A value that
+ * still holds `${var}` or `@var` is reported as unresolved instead of being
+ * searched for literally.
+ */
+async function resolveReferencedUri(
+    mainDir: vscode.Uri,
+    fromDir: vscode.Uri,
+    wanted: string
+): Promise<vscode.Uri | undefined> {
+    const cleaned = wanted.trim().replace(/^['"]|['"]$/g, '');
+    if (cleaned === '') return undefined;
+    // Anything still holding a LAMMPS/CP2K variable cannot be opened as
+    // written; searching for the literal text would name the wrong file.
+    if (/\$/.test(cleaned)) return undefined;
+    if (/^@[A-Za-z_]/.test(cleaned)) return undefined;
+    const normalized = cleaned.replace(/\\/g, '/');
+    if (path.isAbsolute(normalized) || /^[A-Za-z]:[\\/]/.test(cleaned)) {
+        return fileIfExists(vscode.Uri.file(normalized));
+    }
+    const bases: string[] = [];
+    for (const folder of [mainDir.fsPath, fromDir.fsPath]) {
+        if (!bases.includes(folder)) bases.push(folder);
+    }
+    const names = [normalized];
+    const bare = path.basename(normalized);
+    if (bare !== normalized) names.push(bare);
+    for (const name of names) {
+        for (const folder of bases) {
+            const hit = await fileIfExists(vscode.Uri.file(path.join(folder, name)));
+            if (hit) return hit;
+        }
+    }
+    return undefined;
+}
+
+async function readReferencedFile(
+    mainDir: vscode.Uri,
+    fromDir: vscode.Uri,
+    wanted: string
+): Promise<StructureReference | undefined> {
+    const uri = await resolveReferencedUri(mainDir, fromDir, wanted);
+    if (!uri) return undefined;
+    try {
+        return {
+            uri,
+            content: new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)),
+            fileName: path.basename(uri.fsPath)
+        };
+    } catch {
+        return undefined;
+    }
+}
+
+/**
+ * Every file an `include` names.
+ *
+ * LAMMPS expands `*` and `?` in an include name, so `include coords.*` reads
+ * every matching file in alphabetical order. A name without wildcards is the
+ * ordinary single-file lookup.
+ */
+async function resolveIncludeUris(
+    mainDir: vscode.Uri,
+    fromDir: vscode.Uri,
+    wanted: string
+): Promise<vscode.Uri[]> {
+    const cleaned = wanted.trim().replace(/^['"]|['"]$/g, '');
+    if (cleaned === '' || /\$/.test(cleaned) || /^@[A-Za-z_]/.test(cleaned)) return [];
+    const normalized = cleaned.replace(/\\/g, '/');
+    if (!/[*?]/.test(normalized)) {
+        const hit = await resolveReferencedUri(mainDir, fromDir, cleaned);
+        return hit ? [hit] : [];
+    }
+    const folderName = path.dirname(normalized);
+    const basePattern = path.basename(normalized);
+    const escape = (ch: string): string => ch.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    const matcher = new RegExp('^' + basePattern.split('').map(ch =>
+        ch === '*' ? '.*' : ch === '?' ? '.' : escape(ch)).join('') + '$',
+        process.platform === 'win32' ? 'i' : '');
+    const folders: vscode.Uri[] = [];
+    if (path.isAbsolute(normalized) || /^[A-Za-z]:[\\/]/.test(cleaned)) {
+        folders.push(vscode.Uri.file(folderName));
+    } else {
+        for (const base of [mainDir, fromDir]) {
+            const folder = vscode.Uri.file(path.join(base.fsPath, folderName));
+            if (!folders.some(f => f.fsPath === folder.fsPath)) folders.push(folder);
+        }
+    }
+    const hits: vscode.Uri[] = [];
+    for (const folder of folders) {
+        try {
+            const names = (await vscode.workspace.fs.readDirectory(folder))
+                .filter(([, type]) => (type & vscode.FileType.File) !== 0)
+                .map(([name]) => name)
+                .filter(name => matcher.test(name))
+                .sort();
+            for (const name of names) hits.push(vscode.Uri.joinPath(folder, name));
+        } catch {
+            // An unreadable folder contributes no include files.
+        }
+    }
+    return hits;
+}
+
+interface LammpsInputChain {
+    /** Each file with the variables visible when it started. */
+    texts: { content: string; variables: { [name: string]: string } }[];
+    readData: { name: string; fromDir: vscode.Uri }[];
+    readRestart?: string;
+    warnings: string[];
+}
+
+/**
+ * Follow a LAMMPS input and its `include` files in command order.
+ *
+ * A script can split `units`, `mass` and `read_data` across included files, so
+ * the chain contributes both the hints and the structure reference. Includes
+ * are read relative to the main input's folder first and the including file's
+ * folder second; a cycle, an unreadable include and an over-deep chain are
+ * warnings, never a hang.
+ */
+async function scanLammpsChain(
+    mainUri: vscode.Uri,
+    mainText: string,
+    mainDir: vscode.Uri
+): Promise<LammpsInputChain> {
+    const chain: LammpsInputChain = { texts: [], readData: [], warnings: [] };
+    const visited = new Set<string>();
+    const visit = async (
+        fileUri: vscode.Uri,
+        content: string,
+        depth: number,
+        inherited: { [name: string]: string }
+    ): Promise<{ [name: string]: string }> => {
+        const key = fileUri.fsPath.toLowerCase();
+        if (visited.has(key)) return inherited;
+        visited.add(key);
+        if (depth > 8) {
+            chain.warnings.push('the LAMMPS include chain is deeper than 8 files: stopped at ' +
+                path.basename(fileUri.fsPath));
+            return inherited;
+        }
+        const fromDir = vscode.Uri.file(path.dirname(fileUri.fsPath));
+        const scan = scanLammpsInput(content, inherited);
+        chain.texts.push({ content, variables: { ...inherited } });
+        for (const name of scan.readData) chain.readData.push({ name, fromDir });
+        if (scan.readRestart) chain.readRestart = scan.readRestart;
+        let variables = { ...inherited, ...scan.variables };
+        for (const include of scan.includes) {
+            const uris = await resolveIncludeUris(mainDir, fromDir, include);
+            if (uris.length === 0) {
+                chain.warnings.push('the LAMMPS include "' + include + '" could not be found');
+                continue;
+            }
+            for (const uri of uris) {
+                let text: string;
+                try {
+                    text = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
+                } catch {
+                    chain.warnings.push('the LAMMPS include "' + include + '" could not be read');
+                    continue;
+                }
+                variables = await visit(uri, text, depth + 1, variables);
+            }
+        }
+        return variables;
+    };
+    await visit(mainUri, mainText, 0, {});
+    return chain;
+}
+
+/** A directive value without surrounding quotes or a trailing comment. */
+function directiveValue(rest: string): string {
+    const value = rest.trim();
+    const quoted = /^(['"])(.*?)\1/.exec(value);
+    if (quoted) return quoted[2].trim();
+    const cut = value.search(/[#!]/);
+    return (cut >= 0 ? value.slice(0, cut) : value).trim();
+}
+
+/** Substitute CP2K's `$VAR` and `${VAR}` references; unknown ones stay as written. */
+function cp2kSubstitute(text: string, variables: { [name: string]: string }): string {
+    return text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
+        (whole: string, braced: string, bare: string) => {
+            const name = (braced || bare).toLowerCase();
+            return variables[name] !== undefined ? variables[name] : whole;
+        });
+}
+
+/** One `@IF` expression: `==`, `/=`, or a bare value's truthiness. */
+function cp2kConditionTrue(expression: string, variables: { [name: string]: string }): boolean {
+    let body = expression.trim();
+    if (body.startsWith('(') && body.endsWith(')')) body = body.slice(1, -1).trim();
+    const compare = /^(.+?)\s*(==|\/=|!=)\s*(.+?)$/.exec(body);
+    if (!compare) {
+        const value = cp2kSubstitute(body, variables).trim().replace(/^['"]|['"]$/g, '').toLowerCase();
+        return value !== '' && value !== '0' && value !== 'false' && value !== '.false.';
+    }
+    const left = cp2kSubstitute(compare[1], variables).trim().replace(/^['"]|['"]$/g, '');
+    const right = cp2kSubstitute(compare[3], variables).trim().replace(/^['"]|['"]$/g, '');
+    const equal = left === right;
+    return compare[2] === '==' ? equal : !equal;
+}
+
+interface IncludeExpansion {
+    /** The file's text with its include files spliced in. */
+    text: string;
+    /** Every directory the text came from, the main file's first. */
+    dirs: vscode.Uri[];
+    warnings: string[];
+}
+
+function addIncludeDir(dirs: vscode.Uri[], uri: vscode.Uri): void {
+    const folder = vscode.Uri.file(path.dirname(uri.fsPath));
+    if (!dirs.some(d => d.fsPath === folder.fsPath)) dirs.push(folder);
+}
+
+/**
+ * Expand CP2K's preprocessor enough to find the structure the input names:
+ * `@INCLUDE` splices a file in, `@SET`/`$VAR` resolve a path written through a
+ * variable, and `@IF`/`@ELSE`/`@ENDIF` hide the branches CP2K would not read.
+ * Cycles, unreadable files and over-deep chains warn instead of hanging.
+ */
+async function expandCp2kInput(
+    mainUri: vscode.Uri,
+    mainText: string,
+    mainDir: vscode.Uri
+): Promise<IncludeExpansion> {
+    const warnings: string[] = [];
+    const dirs: vscode.Uri[] = [];
+    const variables: { [name: string]: string } = {};
+    // The files on the current include stack: a repeat is a cycle, while the
+    // same file included twice along different branches is ordinary CP2K.
+    const visiting = new Set<string>();
+    addIncludeDir(dirs, mainUri);
+
+    const expand = async (fileUri: vscode.Uri, content: string, depth: number): Promise<string> => {
+        const key = fileUri.fsPath.toLowerCase();
+        if (visiting.has(key)) {
+            warnings.push('the CP2K include "' + path.basename(fileUri.fsPath) +
+                '" forms a cycle: stopped there');
+            return '';
+        }
+        visiting.add(key);
+        if (depth > 8) {
+            visiting.delete(key);
+            warnings.push('the CP2K include chain is deeper than 8 files: stopped at ' +
+                path.basename(fileUri.fsPath));
+            return content;
+        }
+        const fromDir = vscode.Uri.file(path.dirname(fileUri.fsPath));
+        const out: string[] = [];
+        const active: boolean[] = [];
+        const isActive = () => active.every(v => v);
+
+        for (const raw of content.split(/\r?\n/)) {
+            const trimmed = raw.trim();
+            const includeMatch = /^@INCLUDE\s*(?:=\s*)?(.+)$/i.exec(trimmed);
+            if (includeMatch) {
+                if (!isActive()) { out.push(''); continue; }
+                const wantedRaw = directiveValue(includeMatch[1]);
+                const wanted = cp2kSubstitute(wantedRaw, variables);
+                const target = wanted === '' ? undefined : await resolveReferencedUri(mainDir, fromDir, wanted);
+                if (!target) {
+                    warnings.push('the CP2K include "' + wantedRaw + '" could not be found');
+                    out.push('');
+                    continue;
+                }
+                let includeText: string;
+                try {
+                    includeText = new TextDecoder().decode(await vscode.workspace.fs.readFile(target));
+                } catch {
+                    warnings.push('the CP2K include "' + wantedRaw + '" could not be read');
+                    out.push('');
+                    continue;
+                }
+                addIncludeDir(dirs, target);
+                out.push(await expand(target, includeText, depth + 1));
+                continue;
+            }
+            const setMatch = /^@SET\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:)?\s*(.+)$/i.exec(trimmed);
+            if (setMatch) {
+                if (isActive()) {
+                    variables[setMatch[1].toLowerCase()] = cp2kSubstitute(directiveValue(setMatch[2]), variables);
+                }
+                out.push('');
+                continue;
+            }
+            const ifdefMatch = /^@IFDEF\s+([A-Za-z_][A-Za-z0-9_]*)/i.exec(trimmed);
+            if (ifdefMatch) {
+                active.push(isActive() && variables[ifdefMatch[1].toLowerCase()] !== undefined);
+                out.push('');
+                continue;
+            }
+            const ifndefMatch = /^@IFNDEF\s+([A-Za-z_][A-Za-z0-9_]*)/i.exec(trimmed);
+            if (ifndefMatch) {
+                active.push(isActive() && variables[ifndefMatch[1].toLowerCase()] === undefined);
+                out.push('');
+                continue;
+            }
+            const ifMatch = /^@IF\s+(.+)$/i.exec(trimmed);
+            if (ifMatch) {
+                active.push(isActive() && cp2kConditionTrue(ifMatch[1], variables));
+                out.push('');
+                continue;
+            }
+            if (/^@ELSE\b/i.test(trimmed)) {
+                if (active.length > 0) active[active.length - 1] = !active[active.length - 1];
+                out.push('');
+                continue;
+            }
+            if (/^@ENDIF\b/i.test(trimmed)) {
+                if (active.length > 0) active.pop();
+                out.push('');
+                continue;
+            }
+            out.push(isActive() ? cp2kSubstitute(raw, variables) : '');
+        }
+        visiting.delete(key);
+        return out.join('\n');
+    };
+
+    const text = await expand(mainUri, mainText, 0);
+    return { text, dirs, warnings };
+}
+
+/** ABINIT's include line: `include "file"` (quotes optional). */
+function abinitIncludeName(line: string): string | undefined {
+    const match = /^\s*include\s*(?:=\s*)?(.+)$/i.exec(line);
+    if (!match) return undefined;
+    return directiveValue(match[1]);
+}
+
+/** Splice ABINIT `include` files into one text, with the same cycle guards. */
+async function expandAbinitInput(
+    mainUri: vscode.Uri,
+    mainText: string,
+    mainDir: vscode.Uri
+): Promise<IncludeExpansion> {
+    const warnings: string[] = [];
+    const dirs: vscode.Uri[] = [];
+    // A file repeated on the current stack is a cycle; the same file included
+    // again along another branch is simply read again, as ABINIT would.
+    const visiting = new Set<string>();
+    addIncludeDir(dirs, mainUri);
+
+    const expand = async (fileUri: vscode.Uri, content: string, depth: number): Promise<string> => {
+        const key = fileUri.fsPath.toLowerCase();
+        if (visiting.has(key)) {
+            warnings.push('the ABINIT include "' + path.basename(fileUri.fsPath) +
+                '" forms a cycle: stopped there');
+            return '';
+        }
+        visiting.add(key);
+        if (depth > 8) {
+            visiting.delete(key);
+            warnings.push('the ABINIT include chain is deeper than 8 files: stopped at ' +
+                path.basename(fileUri.fsPath));
+            return content;
+        }
+        const fromDir = vscode.Uri.file(path.dirname(fileUri.fsPath));
+        const out: string[] = [];
+        for (const line of content.split(/\r?\n/)) {
+            const wanted = abinitIncludeName(line);
+            if (wanted === undefined) { out.push(line); continue; }
+            if (wanted === '') { out.push(''); continue; }
+            const target = await resolveReferencedUri(mainDir, fromDir, wanted);
+            if (!target) {
+                warnings.push('the ABINIT include "' + wanted + '" could not be found');
+                out.push('');
+                continue;
+            }
+            let includeText: string;
+            try {
+                includeText = new TextDecoder().decode(await vscode.workspace.fs.readFile(target));
+            } catch {
+                warnings.push('the ABINIT include "' + wanted + '" could not be read');
+                out.push('');
+                continue;
+            }
+            addIncludeDir(dirs, target);
+            out.push(await expand(target, includeText, depth + 1));
+        }
+        visiting.delete(key);
+        return out.join('\n');
+    };
+
+    const text = await expand(mainUri, mainText, 0);
+    return { text, dirs, warnings };
+}
+
+/** Read a named companion from the main folder first, then from each include's folder. */
+async function readReferencedFromDirs(
+    mainDir: vscode.Uri,
+    dirs: vscode.Uri[],
+    wanted: string
+): Promise<StructureReference | undefined> {
+    for (const fromDir of dirs) {
+        const file = await readReferencedFile(mainDir, fromDir, wanted);
+        if (file) return file;
+    }
+    return undefined;
+}
+
+/** Join host warnings into the parsed structure without duplicating a line. */
+function applySetupWarnings(data: MolecularData, setup: ParseSetup | undefined): void {
+    if (!setup) return;
+    let warnings = data.warnings ? data.warnings.slice() : [];
+    // The parser only sees the opened script, so an include-only read_data
+    // looks like "no read_data"; the host followed the chain and knows better.
+    if (setup.referenceExpected && !setup.reference) {
+        warnings = warnings.filter(w => !/builds its structure at run time/.test(w));
+    }
+    for (const warning of setup.warnings) {
+        if (!warnings.includes(warning)) warnings.push(warning);
+    }
+    if (warnings.length > 0) data.warnings = warnings;
+}
+
+/**
+ * The companion files of a trajectory.
+ *
+ * A binary trajectory states no elements, no bonds and — except for XTC/TRR's
+ * nanometres — no unit, so everything it is drawn with comes from beside it:
+ * the topology GROMACS wrote under the same name, or the LAMMPS script that
+ * ran the dump and the data file it read. The scripts are filtered by whether
+ * they name this trajectory, because a folder can hold several jobs whose
+ * `units` and masses would otherwise rescale or relabel this one.
+ */
+interface TrajectoryCompanions {
+    units?: string;
+    typeElements: { [type: number]: string };
+    readData: { name: string; fromDir: vscode.Uri }[];
+    /** Scripts that name this trajectory (0 when none does). */
+    scripts: number;
+    warnings: string[];
+}
+
+interface TrajectoryTopologyChoice {
+    data: MolecularData;
+    name: string;
+    path: string;
+}
+
+interface TrajectoryTopologyLookup {
+    topology?: TrajectoryTopologyChoice;
+    warnings: string[];
+}
+
+async function readDirectoryNames(dir: vscode.Uri): Promise<Map<string, string>> {
+    const index = new Map<string, string>();
+    try {
+        for (const [name, type] of await vscode.workspace.fs.readDirectory(dir)) {
+            if ((type & vscode.FileType.File) !== 0) index.set(name.toLowerCase(), name);
+        }
+    } catch {
+        // An unreadable folder simply has no companions.
+    }
+    return index;
+}
+
+async function collectTrajectoryCompanions(uri: vscode.Uri, fileName: string): Promise<TrajectoryCompanions> {
+    const result: TrajectoryCompanions = { typeElements: {}, readData: [], scripts: 0, warnings: [] };
+    const dir = vscode.Uri.file(path.dirname(uri.fsPath));
+    const index = await readDirectoryNames(dir);
+    const scriptFiles: { uri: vscode.Uri; text: string }[] = [];
+    // A folder may hold several LAMMPS scripts; reading them in a stable order
+    // keeps the hints (units, type elements) the same from one open to the next.
+    for (const name of Array.from(index.values()).sort((a, b) => a.localeCompare(b))) {
+        if (!/^in\./i.test(name) && !/\.in$/i.test(name) && !/\.lmp$/i.test(name) && !/\.lammps$/i.test(name)) continue;
+        try {
+            const scriptUri = vscode.Uri.joinPath(dir, name);
+            scriptFiles.push({
+                uri: scriptUri,
+                text: new TextDecoder().decode(await vscode.workspace.fs.readFile(scriptUri))
+            });
+        } catch {
+            // An unreadable script contributes no hints.
+        }
+    }
+    const escapedName = fileName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const namesFile = new RegExp('(^|[^A-Za-z0-9_.-])' + escapedName + '($|[^A-Za-z0-9_.-])', 'i');
+    let scripts = scriptFiles.filter(script => namesFile.test(script.text));
+    // One script in the folder is that folder's job even when it builds the
+    // dump name from a variable the name filter cannot see.
+    if (scripts.length === 0 && scriptFiles.length === 1) scripts = scriptFiles;
+    result.scripts = scripts.length;
+
+    let units: string | undefined;
+    for (const script of scripts) {
+        const chain = await scanLammpsChain(script.uri, script.text, dir);
+        result.warnings.push(...chain.warnings);
+        result.readData.push(...chain.readData);
+        for (const item of chain.texts) {
+            const hints = parseLammpsInputHints(item.content, item.variables);
+            if (!units && hints.units) units = hints.units;
+            for (const key of Object.keys(hints.typeElements)) {
+                const type = Number(key);
+                if (!result.typeElements[type]) result.typeElements[type] = hints.typeElements[type];
+            }
+        }
+    }
+    if (units) result.units = units;
+    return result;
+}
+
+/** A same-atom-count fallback candidate larger than this is not a topology. */
+const MAX_FALLBACK_TOPOLOGY_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Choose the structure a trajectory's atom order belongs to.
+ *
+ * The same-basename files come first because that is the name GROMACS itself
+ * uses (`water.xtc` beside `water.gro`), then the `read_data` file the LAMMPS
+ * script names, and only when neither exists a coordinate file with the same
+ * atom count. Every candidate is parsed through the ordinary readers, so a
+ * `.data`, `.gro` or `.pdb` topology means exactly what opening it means.
+ */
+async function chooseTrajectoryTopology(
+    uri: vscode.Uri,
+    fileName: string,
+    natoms: number,
+    companions: TrajectoryCompanions,
+    coordinateTopology: boolean
+): Promise<TrajectoryTopologyLookup> {
+    const lookup: TrajectoryTopologyLookup = { warnings: [] };
+    if (natoms <= 0) return lookup;
+    const dir = vscode.Uri.file(path.dirname(uri.fsPath));
+    const index = await readDirectoryNames(dir);
+    const stem = fileName.replace(/\.(xtc|trr|dcd|lammpstrj|dump|crd|trj)$/i, '');
+    const lammpsBase: LammpsParseOptions = {};
+    if (companions.units) lammpsBase.units = companions.units;
+    if (Object.keys(companions.typeElements).length > 0) lammpsBase.typeElements = companions.typeElements;
+
+    const parseTopology = async (name: string): Promise<MolecularData | undefined> => {
+        const actual = index.get(name.toLowerCase());
+        if (!actual) return undefined;
+        try {
+            const text = new TextDecoder().decode(
+                await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dir, actual))
+            );
+            const isData = /\.data$/i.test(actual) || /^data\b/i.test(actual);
+            const options: ParseFileOptions = {};
+            const lammps: LammpsParseOptions = { ...lammpsBase };
+            // Binary dumps (`dump dcd`, `dump xtc`) and this reader's text
+            // dumps order atoms by ID; a data file whose Atoms section is not
+            // sorted must be put in that order before its elements are paired.
+            if (isData) lammps.orderById = true;
+            if (Object.keys(lammps).length > 0) options.lammps = lammps;
+            const parsed = parseFile(text, actual, options);
+            if (parsed.atoms.length !== natoms) {
+                lookup.warnings.push('the topology "' + actual + '" holds ' + parsed.atoms.length +
+                    ' atoms, not ' + natoms + ': not paired');
+                return undefined;
+            }
+            return parsed;
+        } catch {
+            return undefined;
+        }
+    };
+    const accept = (data: MolecularData, name: string): TrajectoryTopologyLookup => {
+        const actual = index.get(name.toLowerCase()) || name;
+        lookup.topology = {
+            data,
+            name: actual,
+            path: vscode.Uri.joinPath(dir, actual).fsPath
+        };
+        return lookup;
+    };
+
+    if (coordinateTopology) {
+        for (const ext of ['.gro', '.pdb', '.ent', '.xyz', '.extxyz', '.data']) {
+            const data = await parseTopology(stem + ext);
+            if (data) return accept(data, stem + ext);
+        }
+    } else {
+        // A LAMMPS dump's rows follow atom IDs. Only a data file states the
+        // same order, so a coordinate topology is not paired with it.
+        const data = await parseTopology(stem + '.data');
+        if (data) return accept(data, stem + '.data');
+    }
+
+    for (const target of companions.readData) {
+        const file = await readReferencedFile(dir, target.fromDir, target.name);
+        if (!file) continue;
+        try {
+            const options: ParseFileOptions = {
+                lammps: { ...lammpsBase, orderById: true }
+            };
+            const data = parseFile(file.content, file.fileName, options);
+            if (data.atoms.length === natoms) return accept(data, file.fileName);
+            lookup.warnings.push('the read_data file "' + file.fileName + '" holds ' + data.atoms.length +
+                ' atoms, not ' + natoms + ': not paired');
+        } catch {
+            // A data file this viewer cannot read is not a topology candidate.
+        }
+    }
+
+    if (!coordinateTopology || natoms <= 0) return lookup;
+    // Last resort: exactly one coordinate file in the folder with the same
+    // atom count. With several there is no way to tell which order the
+    // trajectory used, so none is picked rather than guessing.
+    const candidates: string[] = [];
+    for (const name of Array.from(index.values()).sort((a, b) => a.localeCompare(b))) {
+        if (name.toLowerCase() === fileName.toLowerCase()) continue;
+        if (!/\.(gro|pdb|ent|xyz|extxyz)$/i.test(name) && !/\.data$/i.test(name) && !/^data\b/i.test(name)) continue;
+        candidates.push(name);
+        if (candidates.length > 40) break;
+    }
+    let match: { data: MolecularData; name: string } | undefined;
+    let matchedCount = 0;
+    for (const name of candidates) {
+        const actual = index.get(name.toLowerCase());
+        if (!actual) continue;
+        try {
+            const candidateUri = vscode.Uri.joinPath(dir, actual);
+            // Parsing every same-sized file in a folder can mean reading MD
+            // dumps that are larger than the trajectory itself; a coordinate
+            // topology is a small file, so an oversized candidate is skipped.
+            const info = await vscode.workspace.fs.stat(candidateUri);
+            if (info.size > MAX_FALLBACK_TOPOLOGY_BYTES) continue;
+            const text = new TextDecoder().decode(await vscode.workspace.fs.readFile(candidateUri));
+            const isData = /\.data$/i.test(actual) || /^data\b/i.test(actual);
+            const options: ParseFileOptions = {};
+            if (isData) options.lammps = { ...lammpsBase, orderById: true };
+            const parsed = parseFile(text, actual, options);
+            if (parsed.atoms.length !== natoms) continue;
+            matchedCount++;
+            if (!match) match = { data: parsed, name: actual };
+            if (matchedCount > 1) break;
+        } catch {
+            // Not a readable structure.
+        }
+    }
+    if (matchedCount === 1 && match) {
+        lookup.warnings.push('no same-name topology: paired with "' + match.name +
+            '" (same atom count); if that file orders its atoms differently, the elements will not match');
+        return accept(match.data, match.name);
+    }
+    if (matchedCount > 1) {
+        lookup.warnings.push('several files in the folder hold ' + natoms +
+            ' atoms: no topology was paired, so its elements and bonds are not known');
+    }
+    return lookup;
+}
+
+function formatTrajectoryNumber(value: number): string {
+    if (!isFinite(value)) return String(value);
+    const rounded = Math.round(value);
+    if (Math.abs(value - rounded) < 1e-6) return String(rounded);
+    return value.toPrecision(6).replace(/\.?0+$/, '');
+}
+
+function trajectoryStepLabel(
+    format: TrajectoryFormat | 'dump',
+    frame: { step?: number; time?: number; timestep?: string },
+    index: number
+): string {
+    let label: string;
+    if (format === 'dump') {
+        label = frame.timestep ? 'Timestep ' + frame.timestep : 'Frame ' + (index + 1);
+    } else {
+        label = frame.step !== undefined ? 'Step ' + frame.step : 'Frame ' + (index + 1);
+    }
+    if (frame.time !== undefined && isFinite(frame.time)) {
+        // DCD's time column is in the program's own unit — AKMA for
+        // CHARMM/NAMD, ps for LAMMPS — so only XTC/TRR's ps is labelled.
+        label += ' · t = ' + formatTrajectoryNumber(frame.time) +
+            (format === 'xtc' || format === 'trr' ? ' ps' : '');
+    }
+    return label;
+}
+
+function trajectoryTitle(format: TrajectoryFormat | 'dump'): string {
+    if (format === 'xtc') return 'XTC trajectory';
+    if (format === 'trr') return 'TRR trajectory';
+    if (format === 'dcd') return 'DCD trajectory';
+    return 'LAMMPS dump trajectory';
+}
+
+/**
+ * A trajectory template: the atom list every frame is drawn with.
+ *
+ * The elements come from the topology when there is one. Without it a binary
+ * trajectory has no element information at all; its atoms are shown as `Xx`,
+ * the conventional unknown species, rather than `X`, which this viewer treats
+ * as a ghost atom and would hide.
+ */
+function trajectoryTemplate(
+    natoms: number,
+    elements: string[] | undefined,
+    topology: TrajectoryTopologyChoice | undefined
+): { atoms: Atom[]; bonds: Bond[]; hasExplicitBonds: boolean; warnings: string[] } {
+    const warnings: string[] = [];
+    const atoms: Atom[] = [];
+    for (let i = 0; i < natoms; i++) {
+        const element = elements && elements[i] ? elements[i] : 'Xx';
+        const source = topology ? topology.data.atoms[i] : undefined;
+        atoms.push({
+            element,
+            x: 0, y: 0, z: 0,
+            index: i,
+            occupancy: source ? source.occupancy : undefined,
+            siteLabel: source ? source.siteLabel : undefined
+        });
+    }
+    if (!topology) {
+        return { atoms, bonds: [], hasExplicitBonds: false, warnings };
+    }
+    const bonded = ensureBonds({
+        atoms: topology.data.atoms,
+        bonds: topology.data.bonds,
+        title: topology.data.title,
+        hasExplicitBonds: topology.data.hasExplicitBonds
+    });
+    return {
+        atoms,
+        bonds: bonded.bonds,
+        hasExplicitBonds: bonded.hasExplicitBonds,
+        warnings
+    };
+}
+
+function finishTrajectoryDocument(
+    title: string,
+    template: { atoms: Atom[]; bonds: Bond[]; hasExplicitBonds: boolean },
+    trajectoryFrames: TrajectoryFramePayload[],
+    metadata: TrajectoryInfo,
+    warnings: string[]
+): TrajectoryDocument {
+    if (trajectoryFrames.length > 0) {
+        const first = trajectoryFrames[0];
+        for (let i = 0; i < template.atoms.length; i++) {
+            template.atoms[i].x = first.xyz[i * 3];
+            template.atoms[i].y = first.xyz[i * 3 + 1];
+            template.atoms[i].z = first.xyz[i * 3 + 2];
+        }
+    }
+    const data: MolecularData = {
+        atoms: template.atoms,
+        bonds: template.bonds,
+        title,
+        hasExplicitBonds: template.hasExplicitBonds,
+        trajectory: metadata,
+        warnings: Array.from(new Set(warnings))
+    };
+    if (data.warnings && data.warnings.length === 0) delete data.warnings;
+    return { data, trajectoryFrames };
+}
+
+function emptyTrajectoryDocument(title: string, warnings: string[]): TrajectoryDocument {
+    return {
+        data: {
+            atoms: [], bonds: [], title, hasExplicitBonds: false,
+            warnings: Array.from(new Set(warnings))
+        },
+        trajectoryFrames: []
+    };
+}
+
+async function loadBinaryTrajectoryDocument(
+    uri: vscode.Uri,
+    fileName: string,
+    bytes: Uint8Array,
+    format: TrajectoryFormat
+): Promise<TrajectoryDocument> {
+    const title = trajectoryTitle(format);
+    const companions = await collectTrajectoryCompanions(uri, fileName);
+    const warnings = companions.warnings.slice();
+    if (companions.units && companions.units.toLowerCase() === 'lj') {
+        warnings.push('the LAMMPS run uses units lj: DCD coordinates are in reduced units and are shown unscaled');
+    }
+    const lengthScale = format === 'dcd'
+        ? (companions.units ? lammpsLengthFactor(companions.units) : 1)
+        : 10;
+    const trajectory = readBinaryTrajectory(bytes, { lengthScale });
+    warnings.push(...trajectory.warnings);
+    if (trajectory.sampled) {
+        warnings.push(trajectory.frameCount + ' frames in the file: showing ' +
+            trajectory.frames.length + ' sampled evenly');
+    }
+    if (trajectory.frames.length === 0) {
+        warnings.push('the trajectory holds no frame this reader could decode');
+        return emptyTrajectoryDocument(title, warnings);
+    }
+    let topology: TrajectoryTopologyChoice | undefined;
+    if (trajectory.natoms > 0) {
+        const lookup = await chooseTrajectoryTopology(uri, fileName, trajectory.natoms, companions, true);
+        warnings.push(...lookup.warnings);
+        topology = lookup.topology;
+    }
+    if (!topology) {
+        warnings.push('no topology was found for this trajectory: its elements are unknown (shown as Xx) ' +
+            'and no bonds are drawn; open or keep the matching .gro/.pdb/.xyz or LAMMPS data file beside it');
+    }
+    const template = trajectoryTemplate(
+        trajectory.natoms,
+        topology ? topology.data.atoms.map(a => a.element) : undefined,
+        topology
+    );
+    warnings.push(...template.warnings);
+    const frames: TrajectoryFramePayload[] = [];
+    for (let k = 0; k < trajectory.frames.length; k++) {
+        const frame = trajectory.frames[k];
+        if (frame.positions.length !== trajectory.natoms * 3) continue;
+        frames.push({
+            stepLabel: trajectoryStepLabel(format, frame, k),
+            xyz: Array.from(frame.positions),
+            cell: frame.cell,
+            time: frame.time,
+            step: frame.step
+        });
+    }
+    return finishTrajectoryDocument(
+        topology ? title + ' — ' + topology.name : title,
+        template,
+        frames,
+        {
+            format,
+            source: fileName,
+            topology: topology ? topology.name : undefined,
+            framesInFile: trajectory.frameCount,
+            sampled: trajectory.sampled,
+            truncated: trajectory.truncated
+        },
+        warnings
+    );
+}
+
+async function loadDumpTrajectoryDocument(
+    uri: vscode.Uri,
+    fileName: string,
+    trajectory: LammpsDumpTrajectory,
+    options: LammpsParseOptions | undefined
+): Promise<TrajectoryDocument> {
+    const title = trajectoryTitle('dump');
+    const companions = await collectTrajectoryCompanions(uri, fileName);
+    const warnings = companions.warnings.slice();
+    if (companions.units && companions.units.toLowerCase() === 'lj') {
+        warnings.push('the LAMMPS run uses units lj: dump coordinates are in reduced units and are shown unscaled');
+    }
+    warnings.push(...trajectory.warnings);
+    if (trajectory.frames.length === 0) {
+        return emptyTrajectoryDocument(title, warnings);
+    }
+    if (trajectory.sampled) {
+        warnings.push(trajectory.frameCount + ' frames in the file: showing ' +
+            trajectory.frames.length + ' sampled evenly');
+    }
+    const lookup = await chooseTrajectoryTopology(uri, fileName, trajectory.natoms, companions, false);
+    warnings.push(...lookup.warnings);
+    const topology = lookup.topology;
+    const first = trajectory.frames[0];
+    const dumpElements = first.sites.map(s => s.element).filter(e => !/^T\d+$/.test(e));
+    const elements = topology
+        ? topology.data.atoms.map(a => a.element)
+        : (dumpElements.length === first.sites.length ? dumpElements : undefined);
+    const template = trajectoryTemplate(trajectory.natoms, elements, topology);
+    if (!topology && !elements) {
+        warnings.push('the dump names its atoms by LAMMPS type and no data file or element list was found: ' +
+            'the types are shown as labels and no bonds are drawn');
+    } else if (!topology) {
+        warnings.push('no topology was found for this dump: its element column names the atoms but no bonds are drawn; ' +
+            'keep the matching .data file beside it to draw bonds');
+    }
+    const frames: TrajectoryFramePayload[] = [];
+    for (let k = 0; k < trajectory.frames.length; k++) {
+        const frame = trajectory.frames[k];
+        const xyz: number[] = [];
+        for (const site of frame.sites) {
+            const cart = site.cart || [0, 0, 0];
+            xyz.push(cart[0], cart[1], cart[2]);
+        }
+        if (xyz.length !== trajectory.natoms * 3) continue;
+        frames.push({
+            stepLabel: trajectoryStepLabel('dump', { step: frame.step, timestep: frame.timestep }, k),
+            xyz,
+            cell: frame.lattice,
+            step: frame.step
+        });
+    }
+    return finishTrajectoryDocument(
+        topology ? title + ' — ' + topology.name : title,
+        template,
+        frames,
+        {
+            format: 'lammps-dump',
+            source: fileName,
+            topology: topology ? topology.name : undefined,
+            framesInFile: trajectory.frameCount,
+            sampled: trajectory.sampled,
+            truncated: trajectory.truncated
+        },
+        warnings
+    );
+}
+
+interface PickedTextFrame {
+    atoms: Atom[];
+    title: string;
+    label: string;
+    /** The frame's cell, when the file states one (a LAMMPS dump). */
+    lattice?: number[][];
+}
+
+/**
+ * The frame a multi-frame text trajectory contributes to Diff or Import.
+ *
+ * Opening such a file gives frame navigation, so silently using its first
+ * frame would compare or import a geometry the user never chose. A file that
+ * is not a multi-frame trajectory returns null and the caller keeps its
+ * ordinary single-structure path; 'cancelled' means the picker was dismissed.
+ */
+async function pickTextTrajectoryFrame(
+    content: string,
+    fileName: string,
+    ext: string,
+    options: ParseFileOptions | undefined,
+    action: 'compare' | 'import'
+): Promise<PickedTextFrame | null | 'cancelled'> {
+    const frames: PickedTextFrame[] = [];
+    if ((ext === 'xyz' || ext === 'trj') && !isExtXyz(content)) {
+        const trajectory = parseXyzTrajectory(content);
+        if (trajectory.frames.length < 2) return null;
+        for (let k = 0; k < trajectory.frames.length; k++) {
+            const frame = trajectory.frames[k];
+            frames.push({
+                atoms: frame.atoms,
+                title: frame.title,
+                label: 'Frame ' + (k + 1) + (frame.title ? ': ' + frame.title : '')
+            });
+        }
+    } else if (isLammpsDump(content)) {
+        const trajectory = parseLammpsDumpTrajectory(content, options && options.lammps);
+        if (trajectory.frames.length < 2) return null;
+        for (const frame of trajectory.frames) {
+            const atoms: Atom[] = frame.sites.map((site, i) => {
+                const cart = site.cart || [0, 0, 0];
+                return { element: site.element, x: cart[0], y: cart[1], z: cart[2], index: i };
+            });
+            frames.push({
+                atoms,
+                title: fileName,
+                label: 'Frame ' + (frame.index + 1) + ' · Timestep ' + frame.timestep,
+                lattice: frame.lattice
+            });
+        }
+    } else {
+        return null;
+    }
+
+    const picked = await vscode.window.showQuickPick(
+        frames.map((frame, i) => ({
+            label: frame.label,
+            description: frame.atoms.length + ' atoms',
+            index: i
+        })),
+        {
+            placeHolder: 'Select frame to ' + action + ' (' + frames.length + ' frames found)',
+            canPickMany: false
+        }
+    );
+    if (!picked) return 'cancelled';
+    return frames[picked.index];
+}
+
+/** Cell edge lengths and angles of a lattice, for the diff cell panel. */
+function latticeCellParameters(lattice: number[][]) {
+    const length = (v: number[]) => Math.hypot(v[0], v[1], v[2]);
+    const angle = (u: number[], v: number[]) => {
+        const denom = length(u) * length(v);
+        if (!(denom > 0)) return 90;
+        const cos = (u[0] * v[0] + u[1] * v[1] + u[2] * v[2]) / denom;
+        return Math.acos(Math.max(-1, Math.min(1, cos))) * 180 / Math.PI;
+    };
+    return {
+        a: length(lattice[0]), b: length(lattice[1]), c: length(lattice[2]),
+        alpha: angle(lattice[1], lattice[2]),
+        beta: angle(lattice[0], lattice[2]),
+        gamma: angle(lattice[0], lattice[1])
+    };
+}
+
+
+/**
+ * The companion files a structure names, read from beside it.
+ *
+ * A DeepMD dataset is a directory (`type.raw`, `type_map.raw`, `box.raw`, a
+ * `nopbc` marker), a LAMMPS dump takes its types and units from the input
+ * script that wrote it, and a CP2K input can keep its coordinates in a separate
+ * file. The parsers themselves never touch the file system — they receive what
+ * the host read — so this is the one place that decides what "beside it" means
+ * and how far up it looks.
+ */
+async function buildParseOptions(
+    uri: vscode.Uri,
+    fileName: string,
+    bytes: Uint8Array,
+    text: string
+): Promise<ParseSetup | undefined> {
+    const dir = vscode.Uri.file(path.dirname(uri.fsPath));
+    const parent = vscode.Uri.file(path.dirname(dir.fsPath));
+    const lowerName = fileName.toLowerCase();
+    const coordArray = /^coord\.(raw|npy)$/i.test(fileName);
+    const lammpsLog = /^LAMMPS\s*\(/im.test(text);
+    // A `.lammps`/`.lmp` file that is neither data nor a dump is the job's
+    // input even when it holds only one command (a lone `include`).
+    const lammpsInput = !lammpsLog && (isLammpsInput(text) ||
+        (/\.(lmp|lammps)$/i.test(lowerName) && !isLammpsData(text) && !isLammpsDump(text)));
+    // `.dat` is MOPAC's input name but also a common LAMMPS data name, and a
+    // renamed data/dump file keeps its content. Reading the sibling scripts is
+    // what supplies the units and type labels in those cases.
+    const lammpsFamily = lammpsInput || isLammpsData(text) || isLammpsDump(text) ||
+        /\.(lammpstrj|dump|lmp|lammps|data)$/i.test(lowerName) ||
+        /^dump\b/i.test(fileName) || /^data\b/i.test(fileName);
+    const cp2kInput = !lammpsInput && /\.(inp|in)$/i.test(lowerName) &&
+        (isCp2kInput(text) || /^\s*&(GLOBAL|FORCE_EVAL|SUBSYS|COORD|CELL)\b/im.test(text) ||
+         // A main input can hold nothing but preprocessor directives, with
+         // every section in an include; CP2K syntax still decides the file.
+         /^\s*@(INCLUDE|SET|IF|ELSE|ENDIF|IFDEF|IFNDEF)\b/im.test(text));
+    const abacusInput = !lammpsInput && !cp2kInput &&
+        (/^INPUT$/i.test(fileName) || (/\.(inp|in)$/i.test(lowerName) && isAbacusInput(text)));
+    const abinitInput = !lammpsInput && !cp2kInput && !abacusInput &&
+        (/\.abi$/i.test(lowerName) || (/\.(inp|in)$/i.test(lowerName) && isAbinitInput(text)));
+    const orcaReferences = !lammpsInput && !cp2kInput && !abacusInput && !abinitInput &&
+        /\.(inp|in)$/i.test(lowerName) ? scanOrcaXyzfile(text) : undefined;
+    const orcaInput = orcaReferences !== undefined && orcaReferences.length > 0;
+    if (!coordArray && !lammpsFamily && !cp2kInput && !abacusInput && !abinitInput &&
+        !orcaInput && !lowerName.endsWith('.npy')) return undefined;
+
+    const warnings: string[] = [];
+    let reference: StructureReference | undefined;
+    let referenceExpected = false;
+    let effectiveText: string | undefined;
+
+    const indexes = new Map<string, Map<string, string>>();
+    const indexOf = async (folder: vscode.Uri): Promise<Map<string, string>> => {
+        const key = folder.toString();
+        let index = indexes.get(key);
+        if (!index) {
+            index = new Map<string, string>();
+            try {
+                for (const [name, type] of await vscode.workspace.fs.readDirectory(folder)) {
+                    if (type === vscode.FileType.File) index.set(name.toLowerCase(), name);
+                }
+            } catch {
+                // An unreadable folder simply has no companions.
+            }
+            indexes.set(key, index);
+        }
+        return index;
+    };
+    const readCompanion = async (folder: vscode.Uri, wanted: string): Promise<{ name: string; bytes: Uint8Array } | undefined> => {
+        const actual = (await indexOf(folder)).get(wanted.toLowerCase());
+        if (!actual) return undefined;
+        try {
+            return { name: actual, bytes: await vscode.workspace.fs.readFile(vscode.Uri.joinPath(folder, actual)) };
+        } catch {
+            return undefined;
+        }
+    };
+
+    const options: ParseFileOptions = {};
+    if (lowerName.endsWith('.npy')) options.binary = bytes;
+
+    if (coordArray) {
+        const deepmd: DeepmdParseOptions = {};
+        if (lowerName.endsWith('.npy')) deepmd.binary = bytes;
+        // `box` accompanies the arrays (a raw dataset has it in the same folder,
+        // an npy one keeps it in `set.NNN`), while the type table describes the
+        // whole dataset and sits at its root, one level up for `set.NNN`.
+        const roots = [dir];
+        if (/^set\.\d+$/i.test(path.basename(dir.fsPath))) roots.push(parent);
+        const boxFile = await readCompanion(dir, 'box.raw') || await readCompanion(dir, 'box.npy');
+        if (boxFile) {
+            const np = boxFile.name.toLowerCase().endsWith('.npy');
+            const box = deepmdFirstBox(np ? '' : new TextDecoder().decode(boxFile.bytes), np ? boxFile.bytes : undefined);
+            if (box) deepmd.box = box;
+        }
+        for (const root of roots) {
+            if (!deepmd.types) {
+                const types = await readCompanion(root, 'type.raw');
+                if (types) deepmd.types = parseDeepmdTypes(new TextDecoder().decode(types.bytes));
+            }
+            if (!deepmd.typeMap) {
+                const map = await readCompanion(root, 'type_map.raw');
+                if (map) deepmd.typeMap = parseDeepmdTypeMap(new TextDecoder().decode(map.bytes));
+            }
+            if (!deepmd.nopbc && await readCompanion(root, 'nopbc')) deepmd.nopbc = true;
+        }
+        options.deepmd = deepmd;
+    }
+
+    if (lammpsFamily) {
+        const hints: LammpsHints = { typeElements: {}, typeMasses: {} };
+        let units: string | undefined;
+        let atomStyle: string | undefined;
+        const index = await indexOf(dir);
+        const chainTexts: { content: string; variables: { [name: string]: string } }[] = [];
+        const readData: { name: string; fromDir: vscode.Uri }[] = [];
+        let readRestart: string | undefined;
+
+        const addChain = async (scriptUri: vscode.Uri, scriptText: string): Promise<void> => {
+            const chain = await scanLammpsChain(scriptUri, scriptText, dir);
+            chainTexts.push(...chain.texts);
+            readData.push(...chain.readData);
+            if (!readRestart && chain.readRestart) readRestart = chain.readRestart;
+            warnings.push(...chain.warnings);
+        };
+
+        if (lammpsInput) {
+            // The opened script is the job; its own include chain describes it,
+            // not every other input that happens to sit in the folder.
+            await addChain(uri, text);
+        } else {
+            const scriptFiles: { uri: vscode.Uri; text: string }[] = [];
+            for (const name of index.values()) {
+                if (!/^in\./i.test(name) && !/\.in$/i.test(name)) continue;
+                const file = await readCompanion(dir, name);
+                if (file) {
+                    scriptFiles.push({
+                        uri: vscode.Uri.joinPath(dir, file.name),
+                        text: new TextDecoder().decode(file.bytes)
+                    });
+                }
+            }
+            // A folder often holds one input per job. With several, only the
+            // scripts that name this file describe it: an unrelated job's units
+            // and masses would rescale or relabel this geometry.
+            const escapedName = fileName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const namesFile = new RegExp('(^|[^A-Za-z0-9_.-])' + escapedName + '($|[^A-Za-z0-9_.-])', 'i');
+            let scripts = scriptFiles.filter(script => namesFile.test(script.text));
+            if (scripts.length === 0 && scriptFiles.length === 1) scripts = scriptFiles;
+            for (const script of scripts) await addChain(script.uri, script.text);
+        }
+
+        for (const item of chainTexts) {
+            const parsed = parseLammpsInputHints(item.content, item.variables);
+            if (!units && parsed.units) units = parsed.units;
+            if (!atomStyle && parsed.atomStyle) atomStyle = parsed.atomStyle;
+            for (const key of Object.keys(parsed.typeElements)) {
+                const type = Number(key);
+                if (!hints.typeElements[type]) hints.typeElements[type] = parsed.typeElements[type];
+            }
+        }
+
+        // Follow read_data in the same command order LAMMPS executes it. The
+        // first readable file is the geometry this editor shows; additional
+        // data files are reported instead of being silently dropped.
+        if (lammpsInput) {
+            for (const target of readData) {
+                const file = await readReferencedFile(dir, target.fromDir, target.name);
+                if (!file) continue;
+                reference = file;
+                break;
+            }
+            referenceExpected = readData.length > 0;
+            if (reference) {
+                options.externalStructureFile = {
+                    content: reference.content,
+                    fileName: reference.fileName,
+                    fsPath: reference.uri.fsPath
+                };
+                if (readData.length > 1) {
+                    warnings.push(readData.length + ' read_data files in the LAMMPS input: showing ' + reference.fileName);
+                }
+            } else if (readData.length > 0) {
+                warnings.push('the LAMMPS input reads its structure from "' + readData[0].name +
+                    '", but that file could not be read');
+            } else if (readRestart) {
+                warnings.push('the LAMMPS input continues from the restart file "' + readRestart +
+                    '": a restart file holds no readable atom list');
+            }
+        }
+
+        // The masses in the data file name its types too, and following
+        // `read_data` reaches the file the script itself used. Without that
+        // pointer, several sibling data files describe several jobs: merging
+        // all their masses would relabel this dump with another job's types.
+        let dataText: string | undefined;
+        if (lammpsInput) {
+            if (reference) dataText = reference.content;
+        } else {
+            for (const target of readData) {
+                const file = await readReferencedFile(dir, target.fromDir, target.name);
+                if (file) { dataText = file.content; break; }
+            }
+            if (dataText === undefined) {
+                const candidates: string[] = [];
+                for (const name of index.values()) if (/^data\b/i.test(name)) candidates.push(name);
+                if (candidates.length === 1) {
+                    const file = await readCompanion(dir, candidates[0]);
+                    if (file) dataText = new TextDecoder().decode(file.bytes);
+                }
+            }
+        }
+        if (dataText !== undefined) {
+            const masses = lammpsTypeElements(dataText);
+            for (const key of Object.keys(masses)) {
+                const type = Number(key);
+                if (!hints.typeElements[type]) hints.typeElements[type] = masses[type];
+            }
+        }
+        if (units || atomStyle || Object.keys(hints.typeElements).length > 0) {
+            const lammps: LammpsParseOptions = {};
+            if (units) lammps.units = units;
+            if (atomStyle) lammps.atomStyle = atomStyle;
+            if (Object.keys(hints.typeElements).length > 0) lammps.typeElements = hints.typeElements;
+            options.lammps = lammps;
+        }
+    }
+
+    if (cp2kInput) {
+        const expanded = await expandCp2kInput(uri, text, dir);
+        warnings.push(...expanded.warnings);
+        effectiveText = expanded.text;
+        // CP2K keeps the last value of a key; a file can repeat TOPOLOGY.
+        const coordPattern = /^\s*COORD_FILE_NAME\s+(.+?)\s*$/gim;
+        let coordMatch: RegExpExecArray | null;
+        let coordLine: string | undefined;
+        while ((coordMatch = coordPattern.exec(expanded.text)) !== null) coordLine = coordMatch[1];
+        if (coordLine !== undefined) {
+            const wanted = directiveValue(coordLine);
+            referenceExpected = true;
+            const file = wanted === '' ? undefined : await readReferencedFromDirs(dir, expanded.dirs, wanted);
+            if (file) {
+                reference = file;
+                options.externalCoordinateFile = { content: file.content, fileName: file.fileName };
+            } else {
+                warnings.push('the CP2K input reads its structure from "' + wanted +
+                    '", but that file could not be read');
+            }
+        }
+    }
+
+    if (abacusInput) {
+        referenceExpected = true;
+        const scan = scanAbacusInput(text);
+        // ABACUS defaults the structure name to `STRU` when INPUT omits it.
+        const wanted = scan.struFile || 'STRU';
+        const file = await readReferencedFile(dir, dir, wanted);
+        if (file) {
+            reference = file;
+            options.externalStructureFile = {
+                content: file.content,
+                fileName: file.fileName,
+                fsPath: file.uri.fsPath
+            };
+        } else {
+            warnings.push('the ABACUS INPUT reads its structure from "' + wanted +
+                '", but that file could not be read');
+        }
+    }
+
+    if (abinitInput) {
+        const expanded = await expandAbinitInput(uri, text, dir);
+        warnings.push(...expanded.warnings);
+        effectiveText = expanded.text;
+        const scan = scanAbinitXyzfile(expanded.text);
+        if (scan.xyzfile) {
+            referenceExpected = true;
+            const file = await readReferencedFromDirs(dir, expanded.dirs, scan.xyzfile);
+            if (file) {
+                reference = file;
+                options.externalStructureFile = {
+                    content: file.content,
+                    fileName: file.fileName,
+                    fsPath: file.uri.fsPath
+                };
+            } else {
+                warnings.push('the ABINIT input reads its structure from "' + scan.xyzfile +
+                    '", but that file could not be read');
+            }
+        }
+    }
+
+    if (orcaInput && orcaReferences) {
+        const wanted = orcaReferences.length > 0 ? orcaReferences[0].name : undefined;
+        if (wanted !== undefined) {
+            referenceExpected = true;
+            const file = await readReferencedFile(dir, dir, wanted);
+            if (file) {
+                reference = file;
+                options.externalStructureFile = {
+                    content: file.content,
+                    fileName: file.fileName,
+                    fsPath: file.uri.fsPath
+                };
+            } else {
+                warnings.push('the ORCA input reads its structure from "' + wanted +
+                    '", but that file could not be read');
+            }
+        }
+    }
+
+    return { options, warnings, reference, referenceExpected, text: effectiveText };
+}
 
 /** Load and parse one structure file (any supported format). */
 async function loadStructureFile(uri: vscode.Uri): Promise<LoadedStructure> {
     const content = await vscode.workspace.fs.readFile(uri);
-    const text = new TextDecoder().decode(content);
     const fileName = uri.path.split('/').pop() || 'unknown.xyz';
+    const binaryFormat = detectBinaryTrajectory(content);
+    if (binaryFormat) {
+        const loaded = await loadBinaryTrajectoryDocument(uri, fileName, content, binaryFormat);
+        return { data: loaded.data, frames: [] };
+    }
+    const text = new TextDecoder().decode(content);
     const ext = fileName.toLowerCase().split('.').pop() || '';
+    const setup = await buildParseOptions(uri, fileName, content, text);
+    const options = setup && setup.options;
 
-    if (ext === 'log' || ext === 'out') {
+    // A `.log`/`.out` is a Gaussian/ORCA/xTB trajectory only when a program
+    // this reader knows has not written it: QE, CP2K, PySCF, ABINIT, VASP
+    // (xml/OUTCAR), LAMMPS and ABACUS all use the same extensions.
+    if ((ext === 'log' || ext === 'out') && !isStructuredProgramOutput(text)) {
         const logResult = parseLogFile(text, fileName);
         if (logResult.frames.length === 0) {
-            return { data: { atoms: [], bonds: [], title: 'No structures found', hasExplicitBonds: false },
+            return { data: { atoms: [], bonds: [], title: 'No structures found', hasExplicitBonds: false,
+                             warnings: ['no Gaussian, ORCA or xTB structure frame was found in this log: ' +
+                                        'open the output file that holds the geometry'] },
                      frames: [], error: 'no structure found' };
         }
         const f = logResult.frames[0];
@@ -204,7 +1586,8 @@ async function loadStructureFile(uri: vscode.Uri): Promise<LoadedStructure> {
         };
     }
 
-    const parsed = parseFile(text, fileName);
+    const parsedText = setup && setup.text !== undefined ? setup.text : text;
+    const parsed = parseFile(parsedText, fileName, options);
     let data: MolecularData;
     if (parsed.crystal) {
         parsed.bonds = [];
@@ -213,7 +1596,8 @@ async function loadStructureFile(uri: vscode.Uri): Promise<LoadedStructure> {
     } else {
         data = ensureBonds(parsed);
     }
-    data.filePath = uri.fsPath;
+    applySetupWarnings(data, setup);
+    data.filePath = setup && setup.reference ? setup.reference.uri.fsPath : uri.fsPath;
     return { data: data, frames: [] };
 }
 
@@ -439,12 +1823,22 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         _token: vscode.CancellationToken
     ): Promise<MolecularDocument> {
         const content = await vscode.workspace.fs.readFile(uri);
-        const textContent = new TextDecoder().decode(content);
         const fileName = uri.path.split('/').pop() || 'unknown.xyz';
 
         const ext = fileName.toLowerCase().split('.').pop() || '';
+        // A binary trajectory is detected by its magic before anything decodes
+        // it as text; the companion scripts and topology beside it are read by
+        // the trajectory loader itself. Decoding first would also copy a
+        // multi-megabyte binary file through a string only to discard it.
+        const binaryFormat = detectBinaryTrajectory(content);
+        const textContent = binaryFormat ? '' : new TextDecoder().decode(content);
+        const setup = binaryFormat ? undefined : await buildParseOptions(uri, fileName, content, textContent);
+        const parseOptions = setup && setup.options;
+        const parseText = setup && setup.text !== undefined ? setup.text : textContent;
         let data: MolecularData;
         let frames: (LogFrame | OrcaFrame)[] = [];
+        let trajectoryFrames: TrajectoryFramePayload[] | undefined;
+        let trajectoryDocument = false;
         let atomGroups: AtomGroup[] | undefined;
         let optSteps: OptStep[] | undefined;
         let normalModes: NormalMode[] | undefined;
@@ -455,7 +1849,12 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         let autoBeta = false;
 
         try {
-        if (ext === 'tcl') {
+        if (binaryFormat) {
+            const loaded = await loadBinaryTrajectoryDocument(uri, fileName, content, binaryFormat);
+            data = loaded.data;
+            trajectoryFrames = loaded.trajectoryFrames;
+            trajectoryDocument = true;
+        } else if (ext === 'tcl') {
             // A script is a display recipe: every `mol new` it performs becomes
             // one selectable molecule in the viewer, and the first one that
             // loads is also the document's structure so Save As, Diff and the
@@ -475,7 +1874,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                 atomGroups = tclResult.groups.length > 0 ? tclResult.groups : undefined;
                 data.atomGroups = atomGroups;
             }
-        } else if (ext === 'log' || ext === 'out') {
+        } else if ((ext === 'log' || ext === 'out') && !isStructuredProgramOutput(textContent)) {
             const logResult = parseLogFile(textContent, fileName);
             frames = logResult.frames;
             optSteps = logResult.optSteps;
@@ -493,14 +1892,43 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                     multiplicity: frames[0].multiplicity
                 });
             } else {
-                data = { atoms: [], bonds: [], title: 'No structures found', hasExplicitBonds: false };
+                data = { atoms: [], bonds: [], title: 'No structures found', hasExplicitBonds: false,
+                         warnings: ['no Gaussian, ORCA or xTB structure frame was found in this log: ' +
+                                    'open the output file that holds the geometry'] };
             }
-        } else if (ext === 'xyz') {
+        } else if (isLammpsDump(textContent)) {
+            // A dump with more than one frame is a trajectory, not a crystal:
+            // its frames can change cell and the molecules cross the box, so it
+            // is drawn outside the symmetry machinery. A single-frame dump keeps
+            // the periodic-structure path it has always had. The decision uses
+            // the file's frame count, not the sampled list: a long dump sampled
+            // down to one frame is still a trajectory (and says so in its
+            // warnings), not the first frame of a crystal.
+            const dumpOptions = parseOptions && parseOptions.lammps ? parseOptions.lammps : undefined;
+            const dumpTrajectory = parseLammpsDumpTrajectory(textContent, dumpOptions);
+            if (dumpTrajectory.frameCount > 1) {
+                const loaded = await loadDumpTrajectoryDocument(uri, fileName, dumpTrajectory, dumpOptions);
+                data = loaded.data;
+                trajectoryFrames = loaded.trajectoryFrames;
+                trajectoryDocument = true;
+            } else {
+                data = parseFile(parseText, fileName, parseOptions);
+                if (data.crystal) {
+                    data.bonds = [];
+                    data.crystal.baseBonds = [];
+                } else {
+                    data = ensureBonds(data);
+                }
+            }
+        } else if ((ext === 'xyz' || ext === 'trj') && !isExtXyz(textContent)) {
             // A multi-frame XYZ is a trajectory — ORCA writes one for every
             // optimization as `<job>_trj.xyz`, with each frame's energy in its
             // comment line — so it gets the same frame navigation (and, when the
             // comment states an energy per frame, the same convergence chart) a
-            // log does. A single-frame file takes the ordinary structure path.
+            // log does. xTB's `xtb.trj` uses the same layout. A single-frame
+            // file takes the ordinary structure path. GPUMD/ASE extended XYZ
+            // keeps its cell on the comment line, which the trajectory reader
+            // cannot carry, so it takes the structure path.
             const traj = parseXyzTrajectory(textContent);
             if (traj.frames.length > 1) {
                 frames = traj.frames.map((f, k) => ({
@@ -527,10 +1955,10 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                     hasExplicitBonds: false
                 });
             } else {
-                data = ensureBonds(parseFile(textContent, fileName));
+                data = ensureBonds(parseFile(parseText, fileName, parseOptions));
             }
         } else {
-            data = parseFile(textContent, fileName);
+            data = parseFile(parseText, fileName, parseOptions);
             if (data.crystal) {
                 data.bonds = [];
                 data.crystal.baseBonds = [];
@@ -546,18 +1974,24 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         }
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            data = { atoms: [], bonds: [], title: 'Parse error: ' + msg, hasExplicitBonds: false };
+            data = { atoms: [], bonds: [], title: 'Parse error: ' + msg, hasExplicitBonds: false,
+                     warnings: ['the file could not be parsed: ' + msg] };
             frames = [];
             optSteps = undefined;
             normalModes = undefined;
             optThresholds = undefined;
         }
 
-        if (ext !== 'tcl') {
+        applySetupWarnings(data, setup);
+        if (trajectoryDocument) {
+            // A trajectory is its own file: a read_data an accompanying script
+            // names is a topology, and Save As must write beside the trajectory.
             data.filePath = uri.fsPath;
+        } else if (ext !== 'tcl') {
+            data.filePath = setup && setup.reference ? setup.reference.uri.fsPath : uri.fsPath;
         }
 
-        return new MolecularDocument(uri, data, frames, optSteps, normalModes, logSource, routes, vmdPayload, autoBeta, optThresholds);
+        return new MolecularDocument(uri, data, frames, optSteps, normalModes, logSource, routes, vmdPayload, autoBeta, optThresholds, trajectoryFrames);
     }
 
     /**
@@ -648,7 +2082,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             enableScripts: true,
         };
 
-        webviewPanel.webview.html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes, document.vmdPayload, document.autoBeta, document.optThresholds);
+        webviewPanel.webview.html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes, document.vmdPayload, document.autoBeta, document.optThresholds, document.trajectoryFrames);
 
         // The panel's Molecular Mechanics run (at most one at a time). The pump
         // steps it in chunks and yields between them, so the panel keeps
@@ -839,6 +2273,13 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                 'MDL Mol': ['mol'],
                                 'PDB': ['pdb'],
                                 'MOPAC': ['mop'],
+                                'ABACUS STRU': ['STRU'],
+                                'ABINIT Input': ['abi'],
+                                'CP2K Input': ['inp'],
+                                'Quantum ESPRESSO Input': ['in', 'pwi'],
+                                'LAMMPS Data': ['lmp', 'data'],
+                                'GROMACS': ['gro'],
+                                'Extended XYZ': ['xyz'],
                                 // The powder XRD panel exports a two-column
                                 // 2theta/intensity text file.
                                 'XY Data': ['xy', 'dat'],
@@ -859,7 +2300,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             canSelectMany: false,
                             openLabel: 'Select File to Compare',
                             filters: {
-                                'Molecular Files': ['gjf', 'xyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta'],
+                                'Molecular Files': ['gjf', 'xyz', 'extxyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta', 'abi', 'abo', 'stru', 'gro', 'xtc', 'trr', 'dcd', 'trj', 'molden', 'pwi', 'pwo', 'lammpstrj', 'dump', 'lmp', 'lammps', 'data', 'md_dump', 'xdatcar', 'outcar', 'xml'],
                                 'All Files': ['*']
                             }
                         });
@@ -869,9 +2310,15 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         }
                         const diffUri = result[0];
                         const diffContent = await vscode.workspace.fs.readFile(diffUri);
-                        const diffText = new TextDecoder().decode(diffContent);
+                        // A binary trajectory is compared by a frame the user
+                        // picks: decoding it as text would only yield mojibake.
+                        const diffBinary = detectBinaryTrajectory(diffContent);
+                        const diffText = diffBinary ? '' : new TextDecoder().decode(diffContent);
                         const diffFileName = diffUri.path.split('/').pop() || 'unknown.xyz';
                         const diffExt = diffFileName.toLowerCase().split('.').pop() || '';
+                        const diffSetup = diffBinary ? undefined : await buildParseOptions(diffUri, diffFileName, diffContent, diffText);
+                        const diffOptions = diffSetup && diffSetup.options;
+                        const diffParseText = diffSetup && diffSetup.text !== undefined ? diffSetup.text : diffText;
 
                         let diffData: MolecularData;
                         let diffFrames: (LogFrame | OrcaFrame)[] = [];
@@ -889,9 +2336,47 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             symmetryOps: string[];
                             symmetrySource?: 'file' | 'builtin';
                             baseAtoms: { element: string; x: number; y: number; z: number; occupancy?: number }[];
+                            // The compared file's own bond table, by base-site
+                            // index: the right half merges it over perception
+                            // exactly as the left half merges the open file's.
+                            fileBonds?: { atom1: number; atom2: number; order: number; shift?: number[]; valence?: number }[];
+                            /** One trajectory frame's cell, not a second cell to compare. */
+                            trajectory?: boolean;
                         } | null = null;
 
-                        if (diffExt === 'tcl') {
+                        if (diffBinary) {
+                            const loaded = await loadBinaryTrajectoryDocument(diffUri, diffFileName, diffContent, diffBinary);
+                            if (loaded.trajectoryFrames.length === 0 || loaded.data.atoms.length === 0) {
+                                vscode.window.showErrorMessage('Diff: no structure found in ' + diffFileName);
+                                webviewPanel.webview.postMessage({ command: 'diffResult', cancelled: true });
+                                break;
+                            }
+                            let frameIdx = 0;
+                            if (loaded.trajectoryFrames.length > 1) {
+                                const picked = await vscode.window.showQuickPick(
+                                    loaded.trajectoryFrames.map((f, i) => ({
+                                        label: `Frame ${i + 1}: ${f.stepLabel || ''}`,
+                                        index: i
+                                    })),
+                                    { placeHolder: `Select frame to compare (${loaded.trajectoryFrames.length} frames found)`, canPickMany: false }
+                                );
+                                if (!picked) {
+                                    webviewPanel.webview.postMessage({ command: 'diffResult', cancelled: true });
+                                    break;
+                                }
+                                frameIdx = picked.index;
+                            }
+                            const xyz = loaded.trajectoryFrames[frameIdx].xyz;
+                            diffData = {
+                                atoms: loaded.data.atoms.map((a, i) => ({
+                                    ...a, x: xyz[i * 3], y: xyz[i * 3 + 1], z: xyz[i * 3 + 2]
+                                })),
+                                bonds: loaded.data.bonds,
+                                title: diffFileName + ' — ' + loaded.trajectoryFrames[frameIdx].stepLabel,
+                                hasExplicitBonds: loaded.data.hasExplicitBonds,
+                                warnings: loaded.data.warnings
+                            };
+                        } else if (diffExt === 'tcl') {
                             const tclResult = parseTcl(diffText);
                             const loaded = await this.loadTclScene(tclResult.scene, diffUri);
                             diffData = loaded.data;
@@ -916,7 +2401,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             } else {
                                 diffData = { atoms: [], bonds: [], title: 'No source', hasExplicitBonds: false };
                             }
-                        } else if (diffExt === 'log' || diffExt === 'out') {
+                        } else if ((diffExt === 'log' || diffExt === 'out') && !isStructuredProgramOutput(diffText)) {
                             const logResult = parseLogFile(diffText, diffFileName);
                             diffFrames = logResult.frames;
                             if (diffFrames.length > 0) {
@@ -929,27 +2414,69 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                 diffData = { atoms: [], bonds: [], title: 'No structures', hasExplicitBonds: false };
                             }
                         } else {
-                            diffData = parseFile(diffText, diffFileName);
-                            if (diffData.crystal) {
-                                const c = diffData.crystal;
-                                diffCrystalPayload = {
-                                    a: c.a, b: c.b, c: c.c,
-                                    alpha: c.alpha, beta: c.beta, gamma: c.gamma,
-                                    latticeVectors: c.latticeVectors,
-                                    spaceGroup: c.spaceGroup || '',
-                                    symmetryOps: c.symmetryOps || [],
-                                    symmetrySource: c.symmetrySource,
-                                    baseAtoms: c.baseAtoms.map(a => ({
-                                        element: a.element, x: a.x, y: a.y, z: a.z,
-                                        occupancy: a.occupancy
-                                    }))
-                                };
-                                diffData.bonds = [];
-                                diffData.crystal.baseBonds = [];
+                            // A multi-frame XYZ/xTB trajectory or LAMMPS dump is
+                            // a trajectory when it is opened; comparing its first
+                            // frame behind the user's back would compare a
+                            // geometry they never picked.
+                            const pickedFrame = await pickTextTrajectoryFrame(
+                                diffParseText, diffFileName, diffExt, diffOptions, 'compare'
+                            );
+                            if (pickedFrame === 'cancelled') {
+                                webviewPanel.webview.postMessage({ command: 'diffResult', cancelled: true });
+                                break;
+                            }
+                            if (pickedFrame) {
+                                diffData = ensureBonds({
+                                    atoms: pickedFrame.atoms,
+                                    bonds: [],
+                                    title: diffFileName + ' — ' + pickedFrame.label,
+                                    hasExplicitBonds: false
+                                });
+                                if (pickedFrame.lattice) {
+                                    const cell = latticeCellParameters(pickedFrame.lattice);
+                                    diffCrystalPayload = {
+                                        a: cell.a, b: cell.b, c: cell.c,
+                                        alpha: cell.alpha, beta: cell.beta, gamma: cell.gamma,
+                                        latticeVectors: pickedFrame.lattice,
+                                        spaceGroup: '',
+                                        symmetryOps: [],
+                                        baseAtoms: pickedFrame.atoms.map(a => ({
+                                            element: a.element, x: a.x, y: a.y, z: a.z
+                                        })),
+                                        trajectory: true
+                                    };
+                                }
                             } else {
-                                diffData = ensureBonds(diffData);
+                                diffData = parseFile(diffParseText, diffFileName, diffOptions);
+                                if (diffData.crystal) {
+                                    const c = diffData.crystal;
+                                    diffCrystalPayload = {
+                                        a: c.a, b: c.b, c: c.c,
+                                        alpha: c.alpha, beta: c.beta, gamma: c.gamma,
+                                        latticeVectors: c.latticeVectors,
+                                        spaceGroup: c.spaceGroup || '',
+                                        symmetryOps: c.symmetryOps || [],
+                                        symmetrySource: c.symmetrySource,
+                                        baseAtoms: c.baseAtoms.map(a => ({
+                                            element: a.element, x: a.x, y: a.y, z: a.z,
+                                            occupancy: a.occupancy
+                                        })),
+                                        fileBonds: (c.fileBonds || []).map(b => ({
+                                            atom1: b.atom1, atom2: b.atom2, order: b.order,
+                                            shift: b.shift, valence: b.valence
+                                        }))
+                                    };
+                                    diffData.bonds = [];
+                                    diffData.crystal.baseBonds = [];
+                                } else {
+                                    diffData = ensureBonds(diffData);
+                                }
                             }
                             diffData.filePath = diffUri.fsPath;
+                            applySetupWarnings(diffData, diffSetup);
+                            if (diffSetup && diffSetup.reference) {
+                                diffData.filePath = diffSetup.reference.uri.fsPath;
+                            }
                         }
 
                         let selectedFrameIdx = 0;
@@ -1101,7 +2628,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             canSelectMany: false,
                             openLabel: 'Select Structure to Import',
                             filters: {
-                                'Molecular Files': ['gjf', 'xyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta'],
+                                'Molecular Files': ['gjf', 'xyz', 'extxyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta', 'abi', 'abo', 'stru', 'gro', 'xtc', 'trr', 'dcd', 'trj', 'molden', 'pwi', 'pwo', 'lammpstrj', 'dump', 'lmp', 'lammps', 'data', 'md_dump', 'xdatcar', 'outcar', 'xml'],
                                 'All Files': ['*']
                             }
                         });
@@ -1111,9 +2638,13 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         }
                         const impUri = result[0];
                         const impContent = await vscode.workspace.fs.readFile(impUri);
-                        const impText = new TextDecoder().decode(impContent);
+                        const impBinary = detectBinaryTrajectory(impContent);
+                        const impText = impBinary ? '' : new TextDecoder().decode(impContent);
                         const impFileName = impUri.path.split('/').pop() || 'unknown.xyz';
                         const impExt = impFileName.toLowerCase().split('.').pop() || '';
+                        const impSetup = impBinary ? undefined : await buildParseOptions(impUri, impFileName, impContent, impText);
+                        const impOptions = impSetup && impSetup.options;
+                        const impParseText = impSetup && impSetup.text !== undefined ? impSetup.text : impText;
 
                         if (impExt === 'tcl') {
                             vscode.window.showErrorMessage('Import: TCL scripts are not supported (use Diff for TCL).');
@@ -1122,7 +2653,39 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         }
 
                         let impData: MolecularData | undefined;
-                        if (impExt === 'log' || impExt === 'out') {
+                        if (impBinary) {
+                            const loaded = await loadBinaryTrajectoryDocument(impUri, impFileName, impContent, impBinary);
+                            if (loaded.trajectoryFrames.length === 0 || loaded.data.atoms.length === 0) {
+                                vscode.window.showErrorMessage('Import: no structure found in ' + impFileName);
+                                webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                                break;
+                            }
+                            let frameIdx = 0;
+                            if (loaded.trajectoryFrames.length > 1) {
+                                const picked = await vscode.window.showQuickPick(
+                                    loaded.trajectoryFrames.map((f, i) => ({
+                                        label: `Frame ${i + 1}: ${f.stepLabel || ''}`,
+                                        index: i
+                                    })),
+                                    { placeHolder: `Select frame to import (${loaded.trajectoryFrames.length} frames found)`, canPickMany: false }
+                                );
+                                if (!picked) {
+                                    webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                                    break;
+                                }
+                                frameIdx = picked.index;
+                            }
+                            const xyz = loaded.trajectoryFrames[frameIdx].xyz;
+                            impData = {
+                                atoms: loaded.data.atoms.map((a, i) => ({
+                                    ...a, x: xyz[i * 3], y: xyz[i * 3 + 1], z: xyz[i * 3 + 2]
+                                })),
+                                bonds: loaded.data.bonds,
+                                title: impFileName + ' — ' + loaded.trajectoryFrames[frameIdx].stepLabel,
+                                hasExplicitBonds: loaded.data.hasExplicitBonds,
+                                warnings: loaded.data.warnings
+                            };
+                        } else if ((impExt === 'log' || impExt === 'out') && !isStructuredProgramOutput(impText)) {
                             const logResult = parseLogFile(impText, impFileName);
                             if (logResult.frames.length === 0) {
                                 vscode.window.showErrorMessage('Import: no structure found in ' + impFileName);
@@ -1152,18 +2715,38 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                 hasExplicitBonds: sf.hasExplicitBonds, charge: sf.charge, multiplicity: sf.multiplicity
                             });
                         } else {
-                            impData = parseFile(impText, impFileName);
-                            // Crystal files (CIF/VASP/VESTA/Cube): import the
-                            // unit-cell content as a molecule; periodicity is
-                            // dropped (the current structure stays molecular).
-                            if (impData.crystal) {
-                                const cellAtoms = (impData.atoms.length > 0 ? impData.atoms : impData.crystal.baseAtoms)
-                                    .map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, index: 0 }));
-                                impData = ensureBonds({ atoms: cellAtoms, bonds: [], title: impData.title, hasExplicitBonds: false });
+                            // A multi-frame XYZ/xTB trajectory or LAMMPS dump is
+                            // opened as a trajectory, so importing it asks which
+                            // frame to bring in rather than taking the first.
+                            const pickedFrame = await pickTextTrajectoryFrame(
+                                impParseText, impFileName, impExt, impOptions, 'import'
+                            );
+                            if (pickedFrame === 'cancelled') {
+                                webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                                break;
+                            }
+                            if (pickedFrame) {
+                                impData = ensureBonds({
+                                    atoms: pickedFrame.atoms,
+                                    bonds: [],
+                                    title: impFileName + ' — ' + pickedFrame.label,
+                                    hasExplicitBonds: false
+                                });
                             } else {
-                                impData = ensureBonds(impData);
+                                impData = parseFile(impParseText, impFileName, impOptions);
+                                // Crystal files (CIF/VASP/VESTA/Cube): import the
+                                // unit-cell content as a molecule; periodicity is
+                                // dropped (the current structure stays molecular).
+                                if (impData.crystal) {
+                                    const cellAtoms = (impData.atoms.length > 0 ? impData.atoms : impData.crystal.baseAtoms)
+                                        .map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, index: 0 }));
+                                    impData = ensureBonds({ atoms: cellAtoms, bonds: [], title: impData.title, hasExplicitBonds: false });
+                                } else {
+                                    impData = ensureBonds(impData);
+                                }
                             }
                         }
+                        applySetupWarnings(impData, impSetup);
                         if (!impData || impData.atoms.length === 0) {
                             vscode.window.showErrorMessage('Import: no atoms found in ' + impFileName);
                             webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
@@ -1327,7 +2910,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         });
     }
 
-    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[], logSource?: string, routes?: RouteSection[], vmdPayload?: VmdPayload, autoBeta: boolean = false, optThresholds?: OptThresholds): Promise<string> {
+    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[], logSource?: string, routes?: RouteSection[], vmdPayload?: VmdPayload, autoBeta: boolean = false, optThresholds?: OptThresholds, trajectoryFrames?: TrajectoryFramePayload[]): Promise<string> {
         const nonce = getNonce();
 
         const threeJsBytes = await vscode.workspace.fs.readFile(
@@ -1440,7 +3023,31 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             maxDisplacement: optThresholds.maxDisplacement, rmsDisplacement: optThresholds.rmsDisplacement
         } : null;
 
-        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, optThresholds: optThresholdsData, routes: routesData, vmd: vmdData, autoBeta: !!(autoBeta && !vmdData), hasExplicitBonds: !!data.hasExplicitBonds, warnings: data.warnings || [], mmParams: describeForceField() });
+        // A trajectory frame carries no atom objects: the elements, colours and
+        // bonds are the same in every frame, so only the flat positions and the
+        // frame's own cell travel. The page pairs them with the template it
+        // already has, which keeps a 500-frame trajectory a few numbers per
+        // frame instead of a duplicate structure in every frame.
+        const trajectoryFramesData = trajectoryFrames && trajectoryFrames.length > 0
+            ? trajectoryFrames.map(f => ({
+                stepLabel: f.stepLabel,
+                xyz: f.xyz,
+                cell: f.cell,
+                time: f.time,
+                step: f.step
+            }))
+            : null;
+
+        const trajectoryData = data.trajectory ? {
+            format: data.trajectory.format,
+            source: data.trajectory.source,
+            topology: data.trajectory.topology,
+            framesInFile: data.trajectory.framesInFile,
+            sampled: data.trajectory.sampled,
+            truncated: data.trajectory.truncated
+        } : null;
+
+        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, optThresholds: optThresholdsData, routes: routesData, vmd: vmdData, autoBeta: !!(autoBeta && !vmdData), hasExplicitBonds: !!data.hasExplicitBonds, warnings: data.warnings || [], mmParams: describeForceField(), trajectory: trajectoryData, trajectoryFrames: trajectoryFramesData });
 
         // The bond perception module, as source. Both sides run this text —
         // the host calls the compiled function directly, the webview evaluates
@@ -1721,6 +3328,7 @@ canvas{display:block}
 #modal .bvs-meh{color:#e8a33d}
 #loading{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--vscode-editor-foreground,#ccc);font-size:14px}
 #error-msg{display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#f66;padding:20px;font-size:13px;text-align:center;max-width:80%;z-index:50}
+#empty-msg{display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#e8a33d;padding:20px;font-size:13px;text-align:center;max-width:80%;z-index:49;line-height:1.5;white-space:pre-wrap}
 .hidden{display:none!important}
 #frame-nav{display:none;align-items:center;gap:2px;flex-shrink:0}
 #frame-nav.show{display:flex}
@@ -1909,6 +3517,7 @@ canvas{display:block}
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
 <div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><div class="pn-head"><h4>Supercell Bounds</h4><button class="pn-close" id="crystal-close" type="button" title="Minimize the crystal panel">&times;</button></div><div class="bnd-row bnd-axis"><label for="bnd-a-min">a</label><input type="number" id="bnd-a-min" value="0" step="0.1" title="lower bound along a" aria-label="lower bound along a"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-a-max" value="1" step="0.1" title="upper bound along a" aria-label="upper bound along a"></div><div class="bnd-row bnd-axis"><label for="bnd-b-min">b</label><input type="number" id="bnd-b-min" value="0" step="0.1" title="lower bound along b" aria-label="lower bound along b"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-b-max" value="1" step="0.1" title="upper bound along b" aria-label="upper bound along b"></div><div class="bnd-row bnd-axis"><label for="bnd-c-min">c</label><input type="number" id="bnd-c-min" value="0" step="0.1" title="lower bound along c" aria-label="lower bound along c"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-c-max" value="1" step="0.1" title="upper bound along c" aria-label="upper bound along c"></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-p2" title="Eight unit cells, 0..2 along every axis">2×2×2</button><button class="bnd-mini" id="bnd-p3" title="Twenty-seven unit cells, 0..3 along every axis">3×3×3</button><button class="bnd-mini" id="bnd-p4" title="Sixty-four unit cells, 0..4 along every axis">4×4×4</button></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-reset" title="Back to the single unit cell, 0..1 along every axis">Reset</button><button class="bnd-mini" id="bnd-origin" title="Keep the spans, move the low corner onto the lattice origin">Align Origin</button></div><div class="bnd-cell" id="bnd-cell-line"></div><div class="bnd-sym" id="bnd-sym-note" style="display:none"></div><div class="bnd-row"><label>Disorder</label><select id="bnd-disorder" title="Show the ordered part plus one disorder group; All shows every alternative the cell lists"><option value="">All</option></select></div><label class="bnd-occ off" id="bnd-occ-label" for="bnd-occ-normalize" title="When one disorder group is selected, count its sites at occupancy 1 in the formula, density and saved files, so the cell describes the ordered variant on screen. All keeps every occupancy the file states."><input type="checkbox" id="bnd-occ-normalize" checked disabled>Selected group fully occupied</label><div class="hk-title">Lattice Planes (h k l)</div><div class="bnd-row hk-row"><label>(h k l)</label><input type="number" id="hk-h" value="0" step="1" title="h"><input type="number" id="hk-k" value="0" step="1" title="k"><input type="number" id="hk-l" value="1" step="1" title="l"></div><div class="hk-val" id="hk-d1"></div><div class="bnd-row hk-row"><label>2nd</label><input type="number" id="hk2-h" value="1" step="1" title="h of the second plane"><input type="number" id="hk2-k" value="0" step="1" title="k of the second plane"><input type="number" id="hk2-l" value="0" step="1" title="l of the second plane"></div><div class="hk-val" id="hk-d2"></div><button id="hk-show" class="bnd-btn" title="Draw the (hkl) plane through the centre of the box">Show Plane</button><button id="xrd-open" class="bnd-btn" title="Calculate the powder X-ray diffraction pattern of the unit cell">Powder XRD Pattern...</button><button id="bvs-open" class="bnd-btn" title="Bond-valence sums per site: how well the coordination around each cation and anion matches its formal valence (read-only)">Bond Valence (BVS)...</button><button id="cav-open" class="bnd-btn" title="Probe the unit cell for closed cavities and open channels and report their volume (read-only)">Cavities...</button><button id="bnd-edit-cell" class="bnd-btn" title="Change the cell parameters; every site keeps its fractional coordinates">Edit Cell...</button><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="pn-head"><span class="vp-title">Auto Rotate</span><button class="pn-close" id="view-close" type="button" title="Minimize the View controls">&times;</button></div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div><div class="vp-title vp-sub">Display</div><select id="style-select" title="How the structure is drawn: ball and stick (the default), van der Waals spheres, sticks without the atom spheres, or coordination polyhedra for a crystal"><option value="ball">Ball &amp; Stick</option><option value="spacefill">Space-filling</option><option value="stick">Stick</option>${(function(){try{return JSON.parse(jsonData).crystal?'<option value="polyhedra">Polyhedra</option>':'';}catch(e){return '';}}())}</select><label class="vp-check off" id="ortep-line" title="Draw atoms that carry anisotropic displacement parameters as 50% probability ellipsoids"><input type="checkbox" id="ortep-chk" disabled> Thermal ellipsoids (50%)</label></div><div id="bake-panel"><div class="pn-head"><span class="vp-title">Edit Coordinates</span><button class="pn-close" id="bake-close" type="button" title="Minimize the Edit Coordinates card">&times;</button></div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="pn-head"><span class="sp-title">Select Atoms</span><button class="pn-close" id="select-close" type="button" title="Minimize the selection panel">&times;</button></div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="neigh-panel"><div class="pn-head"><span class="ng-title">Neighbours</span><button class="pn-close" id="neigh-close" type="button" title="Minimize the neighbour list">&times;</button></div><div class="ng-line"><label for="ng-radius">Radius (A)</label><input type="number" id="ng-radius" value="3.5" min="0.1" max="12" step="0.1"><label class="ng-chk" for="ng-skip"><input type="checkbox" id="ng-skip" checked>skip bonded</label></div><div class="ng-line"><label>Anchor</label><span class="ng-anchor" id="ng-anchor">click an atom</span></div><div class="ng-summary" id="ng-summary"></div><div class="ng-list" id="ng-list"></div><div class="ng-btns"><button id="ng-select">Select listed</button></div><div class="ng-hint" id="ng-hint">Click a row to select that atom. Crystal images outside the drawn cell are listed with their cell offset.</div></div><div id="int-panel"><div class="pn-head"><span class="ng-title">Non-covalent Interactions</span><button class="pn-close" id="int-close" type="button" title="Minimize the interaction list">&times;</button></div><div class="ng-line ng-types"><label class="ng-chk" for="int-hb"><input type="checkbox" id="int-hb" checked>H-bond</label><label class="ng-chk" for="int-xb"><input type="checkbox" id="int-xb" checked>halogen</label><label class="ng-chk" for="int-cb"><input type="checkbox" id="int-cb" checked>chalcogen</label><label class="ng-chk" for="int-pn"><input type="checkbox" id="int-pn" checked>pnictogen</label><label class="ng-chk" for="int-pp"><input type="checkbox" id="int-pp" checked>&pi;-&pi;</label><label class="ng-chk" for="int-chpi"><input type="checkbox" id="int-chpi" checked>CH-&pi;</label></div><div class="ng-line"><label class="ng-chk" for="int-show"><input type="checkbox" id="int-show" checked>draw dashed lines</label></div><div class="ng-summary" id="int-summary"></div><div class="ng-list" id="int-list"></div><div class="ng-hint" id="int-hint">H-bond: d(H&middot;&middot;&middot;A) &lt; 2.5 &Aring; and D-H&middot;&middot;&middot;A &gt; 120&deg;. Halogen, chalcogen and pnictogen bonds: d(X&middot;&middot;&middot;A) &lt; vdW sum &minus; 0.1 &Aring; and D-X&middot;&middot;&middot;A &gt; 130&deg;; acceptors N, O, S, F, Cl, Br, I. &pi;-&pi;: aromatic 5&ndash;7 rings with a plane angle &le; 30&deg;, centroid distance &le; 4.5 &Aring; and a 2.8&ndash;3.8 &Aring; face gap (parallel/offset), or a &ge; 60&deg; T-shape with one ring edge 3.0&ndash;5.5 &Aring; over the other face. CH-&pi;: H&middot;&middot;&middot;centroid &lt; 3.0 &Aring;, C-H&middot;&middot;&middot;centroid &gt; 120&deg; and the H at least 1.0 &Aring; above the ring face.</div></div><div id="xrd-panel"><div class="xr-title"><span>Powder XRD</span><button class="xr-close" id="xrd-close" title="Close (Esc)">&times;</button></div><div class="xr-line"><label for="xrd-rad">Radiation</label><select id="xrd-rad" title="The X-ray wavelength the pattern is calculated for"></select><label for="xrd-2max">2&theta; max</label><select id="xrd-2max" class="xr-narrow" title="The highest diffraction angle in the pattern"></select></div><div class="xr-summary" id="xrd-summary"></div><canvas id="xrd-canvas" width="440" height="150"></canvas><div class="xr-note" id="xrd-peak-info"></div><div class="xr-note" id="xrd-exp-info"></div><div class="xr-note" id="xrd-note"></div><div class="xr-list" id="xrd-list"></div><div class="xr-btns"><button id="xrd-refresh" class="xr-secondary" title="Recalculate after the structure changed">Recalculate</button><button id="xrd-export" title="Save the drawn curve as a two-column text file">Export .xy</button></div><div class="xr-btns"><button id="xrd-import" class="xr-secondary" title="Overlay a measured two-column 2theta/intensity pattern">Import experimental .xy...</button><button id="xrd-clear-exp" class="xr-secondary" disabled title="Remove the experimental curve">Clear exp.</button></div><input type="file" id="xrd-file" accept=".xy,.txt,.csv,text/plain" style="display:none"><div class="xr-hint">Pattern of the unit cell on screen (the supercell bounds do not change it) with Cromer-Mann form factors, Lorenz-polarisation and a Caglioti Gaussian profile. Click a calculated peak to read its position against the experimental curve.</div></div><div id="cav-panel"><div class="cv-title"><span>Voids and Cavities</span><button class="cv-close" id="cav-close" title="Close (Esc)">&times;</button></div><div class="cv-line"><label for="cav-probe">Probe radius</label><input type="number" id="cav-probe" value="1.2" min="0" max="20" step="0.1" title="Radius of the spherical probe rolled through the cell"><span style="font-size:10px;opacity:.7">&Aring;</span><button id="cav-run" title="Scan the unit cell with this probe">Analyse</button><button id="cav-clear" class="cv-secondary" title="Remove the drawn surface">Clear</button></div><div class="cv-summary" id="cav-summary">Not analysed yet.</div><div class="cv-note" id="cav-note"></div><div class="cv-list" id="cav-list"></div><div class="cv-hint">A point is free when a probe of this radius fits there without touching an atom (van der Waals radii, periodic images included). The free space is split into components: one whose walk winds through a cell face is an open channel, otherwise it is a closed cavity. Click a row to draw that void as a translucent surface. Volumes are per unit cell, so a supercell shows the same numbers; pockets under 0.5 &Aring;&sup3; are ignored. r_free is the largest sphere that fits at the void's deepest point.</div></div><div id="rotate-panel"><div class="pn-head"><span class="rp-title">Rotate Group Around Axis</span><button class="pn-close" id="rotate-close" type="button" title="Minimize the rotate panel">&times;</button></div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div><div id="crystal-reopen" class="pn-chip" title="Open the crystal panel">Crystal</div><div id="egg-reopen" class="pn-chip" title="Open the egg list">Eggs</div><div id="view-reopen" class="pn-chip" title="Open the View controls">View</div><div id="bake-reopen" class="pn-chip" title="Open the Edit Coordinates card">Coordinates</div><div id="select-reopen" class="pn-chip" title="Open the Select Atoms panel">Select Atoms</div><div id="neigh-reopen" class="pn-chip" title="Open the Neighbours panel">Neighbours</div><div id="int-reopen" class="pn-chip" title="Open the Non-covalent Interactions panel">Interactions</div><div id="rotate-reopen" class="pn-chip" title="Open the Rotate Group panel">Rotate Group</div><div id="xrd-reopen" class="pn-chip" title="Open the powder XRD panel">Powder XRD</div><div id="cav-reopen" class="pn-chip" title="Open the cavity and void analysis">Cavities</div></div>
 <div id="error-msg"></div>
+<div id="empty-msg"></div>
 <div id="atom-tooltip"></div>
 <div id="box-select-rect"></div>
 <div id="modal-overlay"><div id="modal"></div></div>
@@ -1921,7 +3530,8 @@ try{
 var MD=${jsonData};
 var BP=${bondPerceptionSource};
 var BVS=${bvsSource};
-var AN={H:1,He:2,Li:3,Be:4,B:5,C:6,N:7,O:8,F:9,Ne:10,Na:11,Mg:12,Al:13,Si:14,P:15,S:16,Cl:17,Ar:18,K:19,Ca:20,Sc:21,Ti:22,V:23,Cr:24,Mn:25,Fe:26,Co:27,Ni:28,Cu:29,Zn:30,Ga:31,Ge:32,As:33,Se:34,Br:35,Kr:36,Rb:37,Sr:38,Y:39,Zr:40,Nb:41,Mo:42,Tc:43,Ru:44,Rh:45,Pd:46,Ag:47,Cd:48,In:49,Sn:50,Sb:51,Te:52,I:53,Xe:54,Cs:55,Ba:56,La:57,Ce:58,Pr:59,Nd:60,Pm:61,Sm:62,Eu:63,Gd:64,Tb:65,Dy:66,Ho:67,Er:68,Tm:69,Yb:70,Lu:71,Hf:72,Ta:73,W:74,Re:75,Os:76,Ir:77,Pt:78,Au:79,Hg:80,Tl:81,Pb:82,Bi:83,Po:84,At:85,Rn:86};
+var AN={H:1,He:2,Li:3,Be:4,B:5,C:6,N:7,O:8,F:9,Ne:10,Na:11,Mg:12,Al:13,Si:14,P:15,S:16,Cl:17,Ar:18,K:19,Ca:20,Sc:21,Ti:22,V:23,Cr:24,Mn:25,Fe:26,Co:27,Ni:28,Cu:29,Zn:30,Ga:31,Ge:32,As:33,Se:34,Br:35,Kr:36,Rb:37,Sr:38,Y:39,Zr:40,Nb:41,Mo:42,Tc:43,Ru:44,Rh:45,Pd:46,Ag:47,Cd:48,In:49,Sn:50,Sb:51,Te:52,I:53,Xe:54,Cs:55,Ba:56,La:57,Ce:58,Pr:59,Nd:60,Pm:61,Sm:62,Eu:63,Gd:64,Tb:65,Dy:66,Ho:67,Er:68,Tm:69,Yb:70,Lu:71,Hf:72,Ta:73,W:74,Re:75,Os:76,Ir:77,Pt:78,Au:79,Hg:80,Tl:81,Pb:82,Bi:83,Po:84,At:85,Rn:86,
+    Fr:87,Ra:88,Ac:89,Th:90,Pa:91,U:92,Np:93,Pu:94,Am:95,Cm:96,Bk:97,Cf:98,Es:99,Fm:100,Md:101,No:102,Lr:103,Rf:104,Db:105,Sg:106,Bh:107,Hs:108,Mt:109,Ds:110,Rg:111,Cn:112,Nh:113,Fl:114,Mc:115,Lv:116,Ts:117,Og:118};
 // Standard atomic weights (IUPAC 2021, abridged), the one table the density
 // line of the structure panel needs: a cell's occupancy-weighted mass over its
 // volume. It sits beside the atomic numbers it mirrors, above every reader; an
@@ -1935,7 +3545,10 @@ var MASS={H:1.008,He:4.0026,Li:6.94,Be:9.0122,B:10.81,C:12.011,N:14.007,O:15.999
     Sb:121.76,Te:127.60,I:126.90,Xe:131.29,Cs:132.91,Ba:137.33,La:138.91,Ce:140.12,Pr:140.91,Nd:144.24,
     Pm:145,Sm:150.36,Eu:151.96,Gd:157.25,Tb:158.93,Dy:162.50,Ho:164.93,Er:167.26,Tm:168.93,Yb:173.05,
     Lu:174.97,Hf:178.49,Ta:180.95,W:183.84,Re:186.21,Os:190.23,Ir:192.22,Pt:195.08,Au:196.97,Hg:200.59,
-    Tl:204.38,Pb:207.2,Bi:208.98,Po:209,At:210,Rn:222};
+    Tl:204.38,Pb:207.2,Bi:208.98,Po:209,At:210,Rn:222,
+    Fr:223,Ra:226,Ac:227,Th:232.04,Pa:231.04,U:238.03,Np:237,Pu:244,Am:243,Cm:247,Bk:247,Cf:251,
+    Es:252,Fm:257,Md:258,No:259,Lr:262,Rf:267,Db:268,Sg:269,Bh:270,Hs:269,Mt:278,Ds:281,Rg:282,
+    Cn:285,Nh:286,Fl:289,Mc:290,Lv:293,Ts:294,Og:294};
 // ===== Ghost atoms =====
 // A ghost is a position without a nucleus, electrons or bonds: the marker a
 // counterpoise calculation puts where the other fragment's atoms are. It keeps
@@ -2012,6 +3625,32 @@ function bondPieceRadius(b){
     return (b&&typeof b.vmdR==='number')?b.vmdR:BOND_R;
 }
 var CRY=MD.crystal||null;
+// ===== Trajectory frames =====
+// A molecular-dynamics trajectory (GROMACS XTC/TRR, CHARMM/NAMD/LAMMPS DCD,
+// a LAMMPS text dump) arrives as a position table plus this structure as the
+// template: elements, colours and bonds are the same in every frame, so
+// MD.frames carries only each frame's label, cell and flat xyz, and switchFrame
+// writes the positions into fresh atom records. A frame's cell is drawn by the
+// same box builder a crystal uses (TRAJ_CELL) but stays outside the
+// symmetry/supercell machinery: a box that changes between steps is not a
+// crystal to be expanded.
+var TRAJ_FRAMES=MD.trajectoryFrames||null;
+var TRAJ_CELL=null;
+if(TRAJ_FRAMES&&TRAJ_FRAMES.length){
+    // The template is a copy: the first frame on screen is an ordinary atom
+    // list the editing tools may change, and those changes must not follow
+    // the atoms into the next frame (which is built from the template).
+    MD.trajectoryTemplate=MD.atoms.map(function(a){
+        var copy={};for(var k in a)copy[k]=a[k];return copy;
+    });
+    MD.trajectoryBonds=(MD.bonds||[]).map(function(b){
+        var copy={};for(var k in b)copy[k]=b[k];return copy;
+    });
+    MD.frames=TRAJ_FRAMES.map(function(f){
+        return {stepLabel:f.stepLabel,cell:f.cell||null,time:f.time,step:f.step};
+    });
+    TRAJ_CELL=TRAJ_FRAMES[0].cell||null;
+}
 // ===== VMD visualization script =====
 // Present when the document is a .tcl script: every molecule the script
 // creates, with the drawing properties its representations resolve to. The
@@ -2478,6 +4117,7 @@ updateMolInfo();
 var container=document.getElementById('container');
 var loadingEl=document.getElementById('loading');
 var errorEl=document.getElementById('error-msg');
+var emptyEl=document.getElementById('empty-msg');
 var tooltipEl=document.getElementById('atom-tooltip');
 var boxRectEl=document.getElementById('box-select-rect');
 var modeInfoEl=document.getElementById('mode-info');
@@ -2486,7 +4126,28 @@ var modalOverlay=document.getElementById('modal-overlay');
 var modalEl=document.getElementById('modal');
 var vscodeApi=acquireVsCodeApi();
 
-function showError(msg){if(loadingEl)loadingEl.style.display='none';errorEl.style.display='block';errorEl.textContent=msg}
+function showError(msg){
+    if(loadingEl)loadingEl.style.display='none';
+    if(emptyEl)emptyEl.style.display='none';
+    errorEl.style.display='block';errorEl.textContent=msg;
+}
+
+/**
+ * Say on the canvas why there is nothing to draw. A log without a geometry
+ * frame, a program output that only records energies, or a structure whose
+ * every atom failed to parse must not look like a viewer that broke: the
+ * parser's own first warning names the file to open instead. The notice is
+ * cleared by rebuildScene as soon as atoms exist (an import, an edit or an
+ * undo), so it can never outlive the empty structure it describes.
+ */
+function updateEmptyNotice(){
+    if(!emptyEl)return;
+    if(MD.atoms&&MD.atoms.length>0){emptyEl.style.display='none';emptyEl.textContent='';return}
+    if(errorEl&&errorEl.style.display==='block')return;
+    var warn=(MD.warnings&&MD.warnings.length)?MD.warnings[0]:'';
+    emptyEl.textContent='No structure to draw'+(warn?': '+warn:'.');
+    emptyEl.style.display='block';
+}
 
 if(typeof THREE==='undefined'){showError('Three.js library failed to load. Please reinstall the extension.');return}
 
@@ -2555,8 +4216,10 @@ vmdSurfaceGroup=new THREE.Group();
 moleculeGroup.add(vmdSurfaceGroup);
 
 var CX=0,CY=0,CZ=0;
-MD.atoms.forEach(function(a){CX+=a.x;CY+=a.y;CZ+=a.z});
-CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length;
+if(MD.atoms.length>0){
+    MD.atoms.forEach(function(a){CX+=a.x;CY+=a.y;CZ+=a.z});
+    CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length;
+}
 
 var CR={H:0.31,He:0.28,Li:1.28,Be:0.96,B:0.84,C:0.76,N:0.71,O:0.66,F:0.57,Na:1.66,Mg:1.41,Al:1.21,Si:1.11,P:1.07,S:1.05,Cl:1.02,K:2.03,Ca:1.76,Fe:1.32,Cu:1.32,Zn:1.22,Br:1.20,I:1.39};
 function getR(el){return(CR[el]||1.50)*0.5}
@@ -3367,12 +5030,12 @@ function detectCrystalBaseBonds(){
 // and reported, not drawn: one bad row must not put a bond through a molecule
 // that the geometry says is not there, and the panel line is where the file's
 // disagreement is visible.
-function mergeCrystalFileBonds(){
-    if(!CRY)return;
-    var file=CRY.fileBonds||[];
-    CRY.bondSource=null;
-    if(!file.length)return;
-    var bonds=CRY.baseBonds||[];
+// Merge a file's own bond table over a detected list. Kept separate from the
+// CRY-bound wrapper because the comparison's right-hand cell is a plain object
+// with its own base sites and must be merged by the same rule, not by a second
+// implementation that could disagree with the left half.
+function mergeFileBondsInto(bonds,file){
+    if(!file||!file.length)return{bonds:bonds,source:null};
     var i,f;
     if(bonds.length===0){
         var only=[];
@@ -3382,9 +5045,7 @@ function mergeCrystalFileBonds(){
             only.push({atom1:fbOnly.atom1,atom2:fbOnly.atom2,order:fbOnly.order||1,
                 shift:fbOnly.shift||ZERO_SHIFT,valence:fbOnly.valence});
         }
-        CRY.baseBonds=only;
-        CRY.bondSource={file:file.length,detected:0,matched:only.length,fileOnly:0};
-        return;
+        return{bonds:only,source:{file:file.length,detected:0,matched:only.length,fileOnly:0}};
     }
     // One entry per undirected pair and shift, in the (atom1 < atom2) direction
     // the cell stores, so a table row written from either end finds the edge.
@@ -3414,7 +5075,13 @@ function mergeCrystalFileBonds(){
         if(fb.order>0)hit.order=fb.order;
         if(fb.valence>0)hit.valence=fb.valence;
     }
-    CRY.bondSource={file:file.length,detected:bonds.length,matched:matched,fileOnly:file.length-matched};
+    return{bonds:bonds,source:{file:file.length,detected:bonds.length,matched:matched,fileOnly:file.length-matched}};
+}
+function mergeCrystalFileBonds(){
+    if(!CRY)return;
+    var merged=mergeFileBondsInto(CRY.baseBonds||[],CRY.fileBonds||[]);
+    CRY.baseBonds=merged.bonds;
+    CRY.bondSource=merged.source;
 }
 
 // The connected components of a base bond list, each walked once with an
@@ -4145,6 +5812,23 @@ function restoreCrystalBaseFromUndoTop(){
     CRY.baseBonds=snap.baseBonds;
 }
 
+// A bond list keyed by base-atom index, carried through a deletion: a bond
+// whose end was removed goes with it, and the rest are renumbered. Order,
+// image shift and the file's valence survive; dropping the shift would turn a
+// bond across a cell face into a bond through the cell.
+function remapCrystalBonds(bonds,oldToNew){
+    if(!bonds)return bonds;
+    var out=[];
+    for(var i=0;i<bonds.length;i++){
+        var b=bonds[i];
+        if(!b||oldToNew[b.atom1]==null||oldToNew[b.atom2]==null)continue;
+        var nb={atom1:oldToNew[b.atom1],atom2:oldToNew[b.atom2],order:b.order,shift:b.shift};
+        if(b.valence!=null)nb.valence=b.valence;
+        out.push(nb);
+    }
+    return out;
+}
+
 function removeDisorder(){
     if(!CRY)return;
     pushUndo();
@@ -4166,11 +5850,8 @@ function removeDisorder(){
             uAniso:ba.uAniso
         });
     });
-    CRY.baseBonds=CRY.baseBonds.filter(function(b){
-        return oldToNew[b.atom1]!=null&&oldToNew[b.atom2]!=null;
-    }).map(function(b){
-        return{atom1:oldToNew[b.atom1],atom2:oldToNew[b.atom2],order:b.order,shift:b.shift};
-    });
+    CRY.baseBonds=remapCrystalBonds(CRY.baseBonds,oldToNew);
+    CRY.fileBonds=remapCrystalBonds(CRY.fileBonds,oldToNew);
     CRY.baseAtoms=newBaseAtoms;
     if(CRY.baseAtoms.length<baseCountBefore)provMark('disorder',1);
     rebuildCrystal();
@@ -4214,8 +5895,8 @@ function buildCellWireframe(){
         if(sp.material){if(sp.material.map)sp.material.map.dispose();sp.material.dispose()}
     });
     cellEdgeLabels=[];
-    if(!CRY)return;
-    var lv=CRY.latticeVectors;
+    var lv=CRY?CRY.latticeVectors:TRAJ_CELL;
+    if(!lv)return;
     var aMin=boundary.aMin,aMax=boundary.aMax;
     var bMin=boundary.bMin,bMax=boundary.bMax;
     var cMin=boundary.cMin,cMax=boundary.cMax;
@@ -4307,8 +5988,9 @@ function updateAxesIndicator(){
     var el=document.getElementById('axes-indicator');
     if(!el)return;
     var vectors;
-    if(CRY){
-        var lv=CRY.latticeVectors;
+    var cellLv=CRY?CRY.latticeVectors:TRAJ_CELL;
+    if(cellLv){
+        var lv=cellLv;
         vectors=[
             {dir:new THREE.Vector3(lv[0][0],lv[0][1],lv[0][2]).normalize(),color:'#FF4444',label:'a'},
             {dir:new THREE.Vector3(lv[1][0],lv[1][1],lv[1][2]).normalize(),color:'#44FF44',label:'b'},
@@ -5222,8 +6904,11 @@ function rebuildScene(keepCenter){
     // centre follows it). A supercell bounds change passes keepCenter: the
     // atoms the old bounds already showed keep their exact screen positions
     // and the new material appears around them, instead of the whole picture
-    // jumping to the enlarged structure's new centroid.
-    if(!keepCenter){
+    // jumping to the enlarged structure's new centroid. A trajectory is read
+    // against its box, so a rebuild that is not a frame switch (a style change,
+    // an undo, an edit) leaves the centre where the box is rather than chasing
+    // the atoms; only an explicit re-centre moves it.
+    if(!keepCenter&&!TRAJ_FRAMES){
         CX=0;CY=0;CZ=0;
         MD.atoms.forEach(function(a){CX+=a.x;CY+=a.y;CZ+=a.z});
         if(MD.atoms.length>0){CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length}
@@ -5272,7 +6957,7 @@ function rebuildScene(keepCenter){
     sphereLayerBuild(mainSphereLayer,atomMeshes,moleculeGroup,segs,false);
     rebuildBondPieces();
     buildPolyhedra();
-    if(CRY)buildCellWireframe();
+    if(CRY||TRAJ_CELL)buildCellWireframe();
     highlightSelected();
     needsRender=true;
     if(diffMode)refreshDiff();
@@ -5305,6 +6990,11 @@ function rebuildScene(keepCenter){
     // aniso table) leaves it disabled rather than offering a view that would
     // draw the same spheres as before.
     syncOrtepControl();
+    // A file that carries no coordinates (a GROMACS/LAMMPS log, DP-GEN's
+    // model_devi.out, a failed run) must say so on the canvas instead of
+    // leaving an unexplained empty view; the notice clears itself as soon as
+    // an edit or import puts atoms back.
+    updateEmptyNotice();
 }
 function updateScenePositions(keepCenter){
     if(!keepCenter){
@@ -5316,7 +7006,7 @@ function updateScenePositions(keepCenter){
     sphereLayerSyncPositions(mainSphereLayer);
     rebuildBondPieces();
     buildPolyhedra();
-    if(CRY)buildCellWireframe();
+    if(CRY||TRAJ_CELL)buildCellWireframe();
     hklRefresh();
     highlightSelected();
     hideVmdSurfaces();
@@ -5489,6 +7179,70 @@ function rebuildMovedBondMeshes(oldBonds,selSet){
     placeBondPieces();
 }
 
+// ===== Periodic bonds in a trajectory frame =====
+//
+// A trajectory document is a molecule list with a box, not a crystal: it has
+// no CRY, and its atoms are wrapped into each frame's cell. Two bonded atoms
+// can therefore sit on opposite faces of the box, with the raw difference
+// spanning the whole cell. The bond has to be drawn to the nearest periodic
+// image of its far atom — the short split stub a crystal draws across a face —
+// rather than through the box.
+var TRAJ_INV=null,TRAJ_INV_FOR=null;
+function trajectoryInverse(){
+    if(!TRAJ_CELL){TRAJ_INV=null;TRAJ_INV_FOR=null;return null}
+    if(TRAJ_INV_FOR!==TRAJ_CELL){
+        TRAJ_INV_FOR=TRAJ_CELL;
+        TRAJ_INV=crystalInverseOf(TRAJ_CELL);
+    }
+    return TRAJ_INV;
+}
+// The far endpoint of a bond in the nearest image of atom2 around atom1.
+// The 27 repeats around the rounded displacement are enumerated instead of
+// trusting rounding, because a skewed box can put the nearest image in an
+// adjacent repeat (the same reason the crystal bond search enumerates).
+function trajectoryBondEnd(a1,a2,out){
+    var lv=TRAJ_CELL,inv=trajectoryInverse();
+    if(!lv||!inv)return false;
+    var dx=a2.x-a1.x,dy=a2.y-a1.y,dz=a2.z-a1.z;
+    var fx=inv[0][0]*dx+inv[0][1]*dy+inv[0][2]*dz;
+    var fy=inv[1][0]*dx+inv[1][1]*dy+inv[1][2]*dz;
+    var fz=inv[2][0]*dx+inv[2][1]*dy+inv[2][2]*dz;
+    var bx=Math.round(fx),by=Math.round(fy),bz=Math.round(fz);
+    var bestD2=Infinity,bestX=dx,bestY=dy,bestZ=dz;
+    for(var sx=bx+1;sx>=bx-1;sx--){
+        var gx=fx-sx;
+        for(var sy=by+1;sy>=by-1;sy--){
+            var gy=fy-sy;
+            for(var sz=bz+1;sz>=bz-1;sz--){
+                var gz=fz-sz;
+                var ax=gx*lv[0][0]+gy*lv[1][0]+gz*lv[2][0];
+                var ay=gx*lv[0][1]+gy*lv[1][1]+gz*lv[2][1];
+                var az=gx*lv[0][2]+gy*lv[1][2]+gz*lv[2][2];
+                var d2=ax*ax+ay*ay+az*az;
+                if(d2<bestD2-1e-12){bestD2=d2;bestX=ax;bestY=ay;bestZ=az}
+            }
+        }
+    }
+    out[0]=a1.x+bestX;out[1]=a1.y+bestY;out[2]=a1.z+bestZ;
+    return true;
+}
+// The endpoint a bond is actually drawn to: a crystal adds the shift its bond
+// states, a trajectory takes the nearest image in the frame's own box, and
+// every other structure draws the atom where it stands.
+var _bondFarPoint=[0,0,0];
+function bondDrawnEnd(b,a1,a2,out){
+    if(b.shift&&CRY){
+        var lv=CRY.latticeVectors;
+        out[0]=a2.x+b.shift[0]*lv[0][0]+b.shift[1]*lv[1][0]+b.shift[2]*lv[2][0];
+        out[1]=a2.y+b.shift[0]*lv[0][1]+b.shift[1]*lv[1][1]+b.shift[2]*lv[2][1];
+        out[2]=a2.z+b.shift[0]*lv[0][2]+b.shift[1]*lv[1][2]+b.shift[2]*lv[2][2];
+        return true;
+    }
+    if(!CRY&&TRAJ_CELL&&trajectoryBondEnd(a1,a2,out))return true;
+    out[0]=a2.x;out[1]=a2.y;out[2]=a2.z;
+    return true;
+}
+
 // Place one piece from the current atom coordinates. The piece's position,
 // orientation and size all follow the two atoms it spans, so this is the single
 // source of bond geometry: building the scene, dragging an atom, streaming an
@@ -5499,13 +7253,8 @@ function placePiece(pool,slot){
     if(!b||p.bondIdx<0||p.bondIdx>=MD.bonds.length){poolHide(pool,slot);return}
     var a1=MD.atoms[b.atom1],a2=MD.atoms[b.atom2];
     if(!a1||!a2){poolHide(pool,slot);return}
-    var a2x=a2.x,a2y=a2.y,a2z=a2.z;
-    if(b.shift&&CRY){
-        var lv=CRY.latticeVectors;
-        a2x+=b.shift[0]*lv[0][0]+b.shift[1]*lv[1][0]+b.shift[2]*lv[2][0];
-        a2y+=b.shift[0]*lv[0][1]+b.shift[1]*lv[1][1]+b.shift[2]*lv[2][1];
-        a2z+=b.shift[0]*lv[0][2]+b.shift[1]*lv[1][2]+b.shift[2]*lv[2][2];
-    }
+    bondDrawnEnd(b,a1,a2,_bondFarPoint);
+    var a2x=_bondFarPoint[0],a2y=_bondFarPoint[1],a2z=_bondFarPoint[2];
     var sx=a1.x-CX,sy=a1.y-CY,sz=a1.z-CZ;
     var ex=a2x-CX,ey=a2y-CY,ez=a2z-CZ;
     var dx=ex-sx,dy=ey-sy,dz=ez-sz;
@@ -5640,19 +7389,12 @@ var aromPlan={sign:null,nx:null,ny:null,nz:null};
 function isAromaticOrder(o){return o>=1.25&&o<1.75}
 // The far endpoint of a bond as it is drawn, with the periodic shift applied
 // exactly as placePiece() applies it, so a crystal's wrapped bond is planned
-// along the line it is actually drawn on.
+// along the line it is actually drawn on. A trajectory frame has no CRY, so its
+// endpoint comes from the nearest image in the frame's own box.
 function bondEnd(b,out){
-    var a2=MD.atoms[b.atom2];
-    if(!a2)return false;
-    var ex=a2.x,ey=a2.y,ez=a2.z;
-    if(b.shift&&CRY){
-        var lv=CRY.latticeVectors;
-        ex+=b.shift[0]*lv[0][0]+b.shift[1]*lv[1][0]+b.shift[2]*lv[2][0];
-        ey+=b.shift[0]*lv[0][1]+b.shift[1]*lv[1][1]+b.shift[2]*lv[2][1];
-        ez+=b.shift[0]*lv[0][2]+b.shift[1]*lv[1][2]+b.shift[2]*lv[2][2];
-    }
-    out[0]=ex;out[1]=ey;out[2]=ez;
-    return true;
+    var a1=MD.atoms[b.atom1],a2=MD.atoms[b.atom2];
+    if(!a1||!a2)return false;
+    return bondDrawnEnd(b,a1,a2,out);
 }
 // Unit direction of one bond.
 var _bondScratch=[0,0,0];
@@ -6669,6 +8411,18 @@ updateAxesIndicator();
 function computeInitialCamDist(){
     var maxD=0;
     MD.atoms.forEach(function(a){var dx=a.x-CX,dy=a.y-CY,dz=a.z-CZ,dd=Math.sqrt(dx*dx+dy*dy+dz*dz);if(dd>maxD)maxD=dd});
+    // A trajectory frame's box can extend past every atom; frame the corners
+    // too, so the first view shows the cell the atoms move in.
+    var lv=CRY?CRY.latticeVectors:TRAJ_CELL;
+    if(lv){
+        for(var ai=0;ai<=1;ai++)for(var bj=0;bj<=1;bj++)for(var ck=0;ck<=1;ck++){
+            var dx=ai*lv[0][0]+bj*lv[1][0]+ck*lv[2][0]-CX;
+            var dy=ai*lv[0][1]+bj*lv[1][1]+ck*lv[2][1]-CY;
+            var dz=ai*lv[0][2]+bj*lv[1][2]+ck*lv[2][2]-CZ;
+            var dd=Math.sqrt(dx*dx+dy*dy+dz*dz);
+            if(dd>maxD)maxD=dd;
+        }
+    }
     return maxD*2.5+5;
 }
 var initCam=computeInitialCamDist();
@@ -7654,7 +9408,7 @@ function restoreRotSessionBase(){
     }
     return false;
 }
-function resetRotAxisState(){
+function resetRotAxisState(skipRecenter){
     // A previewed angle still on screen when the session ends (Done, Clear, a
     // mode switch) is its last word: carry it into the base cell before the set
     // of moved atoms is cleared.
@@ -7671,8 +9425,9 @@ function resetRotAxisState(){
     var ain=document.getElementById('rp-angle-input');if(ain)ain.value='0';
     var av=document.getElementById('rp-angle-val');if(av)av.textContent='0°';
     // 分组旋转会改变质心, 而这里是每个旋转会话的收尾点 (Done / Clear / 换模式 /
-    // 撤销 / 换帧 …), 所以统一在这里重定旋转中心。
-    updateRotationCenter();
+    // 撤销 / 换帧 …), 所以统一在这里重定旋转中心。A trajectory frame passes
+    // skipRecenter: its box is the reference and must not move with the atoms.
+    if(!skipRecenter)updateRotationCenter();
 }
 function syncRotatePanelGroupField(){
     if(currentMode!=='rotateGroup')return;
@@ -7948,6 +9703,17 @@ function pushUndo(symmetryState){
         // the cell it restores.
         snap.baseAtoms=JSON.parse(JSON.stringify(CRY.baseAtoms));
         snap.baseBonds=JSON.parse(JSON.stringify(CRY.baseBonds));
+        // The file's own bond table (_geom_bond) is indexed like baseAtoms, so
+        // an edit that removes or renumbers sites changes it too. The snapshot
+        // carries it for the same reason it carries baseBonds: an undo that
+        // restored the sites but not the table keyed to them would leave the
+        // file's statement pointing at the wrong atoms.
+        snap.fileBonds=CRY.fileBonds?JSON.parse(JSON.stringify(CRY.fileBonds)):undefined;
+        snap.bondSource=CRY.bondSource?{
+            file:CRY.bondSource.file,detected:CRY.bondSource.detected,
+            matched:CRY.bondSource.matched,fileOnly:CRY.bondSource.fileOnly
+        }:null;
+        snap.bondsDetected=!!CRY.bondsDetected;
         snap.boundary={aMin:boundary.aMin,aMax:boundary.aMax,bMin:boundary.bMin,bMax:boundary.bMax,cMin:boundary.cMin,cMax:boundary.cMax};
         // The cell is part of the state an edit can change (Edit Cell), and a
         // snapshot that restored the atoms but not the box would put them back
@@ -7994,6 +9760,10 @@ function doUndo(){
         // is rebuilt from them — this is the step that keeps a large supercell's
         // undo as cheap as a unit cell's.
         CRY.baseAtoms=snap.baseAtoms;CRY.baseBonds=snap.baseBonds;
+        // The table and the counts that describe how much of it the geometry
+        // confirmed travel with the sites they name.
+        CRY.fileBonds=snap.fileBonds;
+        CRY.bondSource=snap.bondSource||null;
         if(snap.boundary){
             boundary.aMin=snap.boundary.aMin;boundary.aMax=snap.boundary.aMax;
             boundary.bMin=snap.boundary.bMin;boundary.bMax=snap.boundary.bMax;
@@ -8023,6 +9793,11 @@ function doUndo(){
             CRY.bondsDetected=snap.symmetry.bondsDetected;
             CRY.symmetryCheck=snap.symmetry.check;
             CRY.symmetryAlternative=snap.symmetry.alternative;
+        }else{
+            // An ordinary edit does not change how the bonds were perceived;
+            // restoring the flag with the cell keeps a later rebuild from
+            // re-running a merge the restored geometry already carries.
+            CRY.bondsDetected=!!snap.bondsDetected;
         }
         syncCellPanel();
         rebuildCrystal();
@@ -9413,6 +11188,9 @@ function startCrystalDiff(msg){
     if(!CRY.bondsDetected)detectCrystalBaseBonds();
     var leftBonds=CRY.baseBonds;
     var rightBonds=detectCrystalBaseBondsFor(right,rightInv);
+    // The compared file may carry a bond table too (_geom_bond); the left half
+    // merges its table, so the right half must read its own by the same rule.
+    rightBonds=mergeFileBondsInto(rightBonds,right.fileBonds||[]).bonds;
     diffRightCrystal=right;diffRightInv=rightInv;diffRightBonds=rightBonds;
     diffDetBonds1=leftBonds;diffDetBonds2=rightBonds;
     var res=crystalStructureDiff(CRY,CRY_INV,leftBonds,right,rightInv,rightBonds,diffThresholdPct);
@@ -9484,11 +11262,17 @@ function startDiff(msg){
     diffReverseBaseMapping=null;diffRightCrystal=null;diffRightInv=null;diffRightBonds=null;
 
     // A crystal on either side is compared as a cell, never as the two atom
-    // lists the screen and the file happen to hold.
+    // lists the screen and the file happen to hold. The one exception is a
+    // trajectory frame: its cell describes the frame, but with a molecule on
+    // screen there are no two cells to compare, so its atoms are compared as a
+    // molecule instead of refusing the comparison.
     if(CRY||msg.crystal){
         diffHasCrystal=true;
-        startCrystalDiff(msg);
-        return;
+        if(CRY||!msg.crystal||!msg.crystal.trajectory){
+            startCrystalDiff(msg);
+            return;
+        }
+        diffHasCrystal=false;
     }
 
     var detBonds1=detectBondsFromAtoms(MD.atoms,MD.charge);
@@ -10183,6 +11967,14 @@ function updateFrameInfo(){
 }
 function switchFrame(idx){
     if(idx<0||idx>=totalFrames)return;
+    // A trajectory is one system over time, and its frames are read against
+    // each other: the centre the first frame was framed with is kept while the
+    // frames play. Re-centring on every frame's own atoms would slide a cell
+    // wireframe around the viewport, making the box look like it moves when the
+    // molecules are what changed. Ordinary frame sequences (optimisation steps)
+    // still follow their structure's centre.
+    var keepTrajCenter=!!TRAJ_FRAMES;
+    var keepX=CX,keepY=CY,keepZ=CZ;
     // A frame is a structure of its own, so anything still writing the one on
     // screen has to let go before it is replaced: a normal-mode playback
     // rewrites every atom on each animation frame, and its own stop puts the
@@ -10194,12 +11986,41 @@ function switchFrame(idx){
     // A frame is a structure of its own: the equilibrium a displacement session
     // was measured from belongs to the frame being left.
     vdEnd();
+    // Those cleanups may have re-centred the outgoing frame; the atoms are
+    // about to be replaced wholesale, so the centre that was on screen is put
+    // back and the new frame is built against it.
+    if(keepTrajCenter){CX=keepX;CY=keepY;CZ=keepZ}
     currentFrame=idx;
     var f=MD.frames[idx];
-    MD.atoms=f.atoms.map(function(a,i){a.index=i;return a});
-    MD.bonds=f.bonds||[];
-    if(MD.bonds.length===0){
-        MD.bonds=detectBondsFromAtoms(MD.atoms,MD.charge);
+    if(TRAJ_FRAMES){
+        // A trajectory keeps the template's elements, colours and bonds; only
+        // the coordinates (and the cell) belong to the frame. Fresh records are
+        // made every time so an edit of the frame on screen never reaches the
+        // template the next frame is built from.
+        var xyz=TRAJ_FRAMES[idx]?TRAJ_FRAMES[idx].xyz:null;
+        var tpl=MD.trajectoryTemplate||[];
+        var haveXyz=!!xyz&&xyz.length>=tpl.length*3;
+        MD.atoms=tpl.map(function(a,i){
+            var copy={};
+            for(var k in a)copy[k]=a[k];
+            copy.index=i;
+            if(haveXyz){
+                copy.x=xyz[i*3];
+                copy.y=xyz[i*3+1];
+                copy.z=xyz[i*3+2];
+            }
+            return copy;
+        });
+        MD.bonds=(MD.trajectoryBonds||[]).map(function(b){
+            var copy={};for(var k in b)copy[k]=b[k];return copy;
+        });
+        TRAJ_CELL=(TRAJ_FRAMES[idx]&&TRAJ_FRAMES[idx].cell)?TRAJ_FRAMES[idx].cell:null;
+    }else{
+        MD.atoms=f.atoms.map(function(a,i){a.index=i;return a});
+        MD.bonds=f.bonds||[];
+        if(MD.bonds.length===0){
+            MD.bonds=detectBondsFromAtoms(MD.atoms,MD.charge);
+        }
     }
     if(VMD){
         // A frame is a structure of its own; the script's recipe was resolved
@@ -10210,9 +12031,11 @@ function switchFrame(idx){
     }
     undoStack.length=0;updateUndoBtn();
     if(diffMode)resetSelection();
-    resetRotAxisState();
+    // The rotate-group teardown normally re-centres on the geometry it leaves
+    // behind; a trajectory frame is built against the fixed centre instead.
+    resetRotAxisState(keepTrajCenter);
     if(currentMode==='mmOpt'){mmLastResult=null;refreshMmPanel()}
-    rebuildScene();
+    rebuildScene(keepTrajCenter);
     updateFrameInfo();
     // [2026-09-12 | Atreides-Jimmy] Follow the structure change in the
     // convergence charts: the point of the step now on screen gets highlighted
@@ -16728,6 +18551,16 @@ function showDeleteAtomModal(){
             CRY.baseBonds=CRY.baseBonds.filter(function(b){return b.atom1!==baseIdx&&b.atom2!==baseIdx}).map(function(b){
                 return{atom1:b.atom1>baseIdx?b.atom1-1:b.atom1,atom2:b.atom2>baseIdx?b.atom2-1:b.atom2,order:b.order,shift:b.shift};
             });
+            // The file's bond table names the same sites and must move with
+            // them; a remap that skipped it would leave every row one short
+            // after the deleted site.
+            CRY.fileBonds=CRY.fileBonds?CRY.fileBonds.filter(function(b){
+                return b.atom1!==baseIdx&&b.atom2!==baseIdx;
+            }).map(function(b){
+                var nb={atom1:b.atom1>baseIdx?b.atom1-1:b.atom1,atom2:b.atom2>baseIdx?b.atom2-1:b.atom2,order:b.order,shift:b.shift};
+                if(b.valence!=null)nb.valence=b.valence;
+                return nb;
+            }):CRY.fileBonds;
             rebuildCrystal();rebuildScene();hideModal();resetSelection();
         }else{
             MD.atoms.splice(idx,1);
@@ -16779,11 +18612,8 @@ function batchDeleteSelected(){
                 siteLabel:ba.siteLabel,asymIdx:ba.asymIdx,symOp:ba.symOp,
                 constraint:ba.constraint,disorderGroup:ba.disorderGroup,uAniso:ba.uAniso});
         });
-        CRY.baseBonds=CRY.baseBonds.filter(function(b){
-            return !baseToDelete[b.atom1]&&!baseToDelete[b.atom2];
-        }).map(function(b){
-            return{atom1:oldToNew[b.atom1],atom2:oldToNew[b.atom2],order:b.order,shift:b.shift};
-        });
+        CRY.baseBonds=remapCrystalBonds(CRY.baseBonds,oldToNew);
+        CRY.fileBonds=remapCrystalBonds(CRY.fileBonds,oldToNew);
         CRY.baseAtoms=newBaseAtoms;
         rebuildCrystal();rebuildScene();hideModal();resetSelection();
     }else{
@@ -17448,7 +19278,8 @@ function doSave(){
         ?'<div class="current-val"><b>'+nGhosts+' ghost atom'+(nGhosts===1?'':'s')+'</b>: '+
             'written as <code>C-Bq</code> in the Gaussian input and <code>C:</code> in the ORCA input '+
             '(element kept), and as a dummy point - <code>X</code> / <code>Du</code> / <code>q</code> / '+
-            '<code>*</code> / <code>XX</code> - in the formats that have no ghost atom.</div>'
+            '<code>*</code> / <code>XX</code> / <code>znucl 0</code> - in the formats that have no ghost atom '+
+            '(STRU, ABINIT, QE, LAMMPS, CP2K, GRO and extended XYZ write it as <code>X</code>).</div>'
         :'';
     // A crystal's two families of files do different jobs, and the dialog says
     // so before it writes either: the crystal formats describe the unit cell
@@ -17456,11 +19287,16 @@ function doSave(){
     // formats cut what is on screen out as a molecule — the file a QM job
     // starts from, and the only way to get one cage out of a framework.
     var crystalNote=CRY
-        ?'<div class="current-val">Crystal formats (CIF / POSCAR / VESTA / cube) write the <b>unit cell</b> - '+
-            'every symmetry operation expanded into one cell, declared P1. '+
+        ?'<div class="current-val">Periodic formats (CIF / POSCAR / VESTA / cube / STRU / ABINIT / QE / '+
+            'LAMMPS / CP2K / GRO / extended XYZ) write the <b>unit cell</b> - every symmetry operation '+
+            'expanded into one cell, declared P1 where the format states symmetry. '+
             'The cluster formats (XYZ / GJF - displayed cluster) write <b>what is on screen</b>, '+
             'cut to the bounds below, as a molecule.</div>'
-        :'';
+        :'<div class="current-val">CP2K and GROMACS always declare a box: a molecule is written inside a '+
+            'bounding box (CP2K marks it <code>PERIODIC NONE</code>), and extended XYZ marks it '+
+            '<code>pbc="F F F"</code>.'+
+            (TRAJ_CELL?' The current trajectory frame keeps its own cell in CP2K, GROMACS and extended XYZ.':'')+
+            '</div>';
     showModal('<h3>Save File</h3>'+vdNote+ghostNote+crystalNote+
         '<label>Format:</label><select id="m-fmt">'+
         // The molecular formats keep their old order (plain XYZ is still the
@@ -17474,6 +19310,13 @@ function doSave(){
         (CRY?'<option value="vasp">VASP POSCAR (.vasp)</option>':'')+
         (CRY?'<option value="cube">Gaussian Cube (.cube)</option>':'')+
         (CRY?'<option value="vesta">VESTA (.vesta)</option>':'')+
+        (CRY?'<option value="stru">ABACUS STRU (STRU)</option>':'')+
+        (CRY?'<option value="abi">ABINIT Input (.abi)</option>':'')+
+        (CRY?'<option value="qe">Quantum ESPRESSO Input (.pwi)</option>':'')+
+        (CRY?'<option value="lmp">LAMMPS Data (.lmp)</option>':'')+
+        '<option value="cp2k">CP2K Input (.inp)</option>'+
+        '<option value="gro">GROMACS (.gro)</option>'+
+        '<option value="extxyz">Extended XYZ (.xyz)</option>'+
         '<option value="coord">Turbomole Coord (.coord)</option>'+
         '<option value="inp">ORCA Input (.inp)</option>'+
         '<option value="mol2">MOL2 (.mol2)</option>'+
@@ -17504,11 +19347,19 @@ function doSave(){
     document.getElementById('m-ok').addEventListener('click',function(){
         var fmt=document.getElementById('m-fmt').value;
         var content,ext;
+        var suggestName='molecule_modified';
         try{
         switch(fmt){
             case 'gjf':content=gjf;ext='.gjf';break;
             case 'cif':content=cifContent;ext='.cif';break;
             case 'vasp':content=vaspContent;ext='.vasp';break;
+            case 'stru':content=buildStruContent();ext='';suggestName='STRU';break;
+            case 'abi':content=buildAbinitContent();ext='.abi';break;
+            case 'qe':content=buildQeContent();ext='.pwi';break;
+            case 'lmp':content=buildLammpsDataContent();ext='.lmp';break;
+            case 'cp2k':content=buildCp2kContent();ext='.inp';break;
+            case 'gro':content=buildGroContent();ext='.gro';break;
+            case 'extxyz':content=buildExtendedXyzContent();ext='.xyz';break;
             // The grid is the one thing about the cube the dialog lets a user
             // size, so it is read here rather than at open time. A grid whose
             // value block would be unreasonably large is refused before a file
@@ -17539,7 +19390,7 @@ function doSave(){
             alert('Failed to generate save content: '+(err&&err.message?err.message:String(err)));
             return;
         }
-        vscodeApi.postMessage({command:'saveFile',content:content,suggestedName:'molecule_modified'+ext,filePath:MD.filePath||''});
+        vscodeApi.postMessage({command:'saveFile',content:content,suggestedName:suggestName+ext,filePath:MD.filePath||''});
         hideModal();
     });
     document.getElementById('m-cancel').addEventListener('click',function(){hideModal()});
@@ -17610,6 +19461,71 @@ function crystalFracWrapped(x,y,z){
         f[i]=w;
     }
     return f;
+}
+/** The element a format without a ghost concept can name; a ghost is X. */
+function crystalSaveElement(atom){return isGhostAtom(atom)?'X':atom.element}
+/** Standard atomic weight for a saved species table; a dummy point has none. */
+function saveMassOf(element){if(element==='X')return 0;return MASS[element]!==undefined?MASS[element]:0}
+/** A cell's sites grouped by the element a saved species table names. */
+function crystalSaveGroups(atoms){
+    var order=[],groups={};
+    atoms.forEach(function(atom){
+        var el=crystalSaveElement(atom);
+        if(!groups[el]){groups[el]=[];order.push(el)}
+        groups[el].push(atom);
+    });
+    return {order:order,groups:groups};
+}
+/** A base site's Cartesian position, wrapped into its own cell. */
+function crystalSiteCart(atom){
+    var f=crystalFracWrapped(atom.x,atom.y,atom.z);
+    var lv=CRY.latticeVectors;
+    return [f[0]*lv[0][0]+f[1]*lv[1][0]+f[2]*lv[2][0],
+            f[0]*lv[0][1]+f[1]*lv[1][1]+f[2]*lv[2][1],
+            f[0]*lv[0][2]+f[1]*lv[1][2]+f[2]*lv[2][2]];
+}
+/**
+ * The cell in the lower-triangular form a LAMMPS triclinic box carries.
+ *
+ * A restricted triclinic box has a along x and b in the xy plane, while a
+ * cell read from CIF or POSCAR may be oriented any way; writing its rows
+ * directly would make LAMMPS read a sheared, wrong cell. The vectors are
+ * re-expressed on an orthonormal basis built from a, which preserves every
+ * length and angle (a left-handed c is reflected, an isometry a box has no
+ * way to state), and the atom positions are mapped with the same basis, so the
+ * file describes the same solid in another orientation.
+ */
+function lammpsBoxOf(lv,cart){
+    var dot=function(u,v){return u[0]*v[0]+u[1]*v[1]+u[2]*v[2]};
+    var cross=function(u,v){return [u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]]};
+    var len=function(v){return Math.sqrt(dot(v,v))};
+    var A=lv[0],B=lv[1],C=lv[2];
+    var lx=len(A);
+    var e1=lx>0?[A[0]/lx,A[1]/lx,A[2]/lx]:[1,0,0];
+    var xy=dot(B,e1);
+    var bp=[B[0]-xy*e1[0],B[1]-xy*e1[1],B[2]-xy*e1[2]];
+    var ly=len(bp);
+    var e2=ly>0?[bp[0]/ly,bp[1]/ly,bp[2]/ly]:[0,1,0];
+    var e3=cross(e1,e2);
+    var xz=dot(C,e1),yz=dot(C,e2),lz=dot(C,e3);
+    var flip=lz<0;
+    if(flip)lz=-lz;
+    var toBox=function(p){
+        var z=dot(p,e3);
+        return [dot(p,e1),dot(p,e2),flip?-z:z];
+    };
+    var points=cart.map(toBox);
+    // The box is declared around the points instead of over-riding a coordinate
+    // that is already fractional-exact: a wrapped site can miss [0, lx] by a
+    // rounding step at a face, and a reader that subtracts the origin (LAMMPS
+    // does) must find the same atom either way.
+    var min=[0,0,0];
+    points.forEach(function(p){for(var i=0;i<3;i++)if(p[i]<min[i])min[i]=p[i]});
+    return {
+        lx:lx,ly:ly,lz:lz,xy:xy,xz:xz,yz:yz,
+        xlo:min[0],ylo:min[1],zlo:min[2],
+        points:points
+    };
 }
 /**
  * The displayed region as a molecule: atoms plus the bonds among them.
@@ -17740,6 +19656,327 @@ function buildCubeContent(nGrid){
         if((vi+1)%6===0||vi===nVals-1)out+='\\n';else out+='  ';
     }
     return out;
+}
+
+// ===== Saves for the other computational-chemistry formats =====
+//
+// These writers answer the same two questions the crystal exports do: a
+// periodic format gets the *unit cell* (symmetry expanded, sites wrapped), and
+// a format that also holds a molecule gets the displayed geometry when there
+// is no cell. Every one is written so the reader in src/parsers reads it back
+// with the same units; that round trip is the only check a save has.
+
+/** A number in a fixed-width column, wider only when the value overflows. */
+function saveCol(value,digits,width){
+    var s=value.toFixed(digits);
+    while(s.length<width)s=' '+s;
+    return s;
+}
+/**
+ * Standard GTH-PBE valence counts, Z = 1..118 — the N in GTH-PBE-qN.
+ *
+ * ABINIT/CP2K have no element table of their own to consult, so the save names
+ * the potential a run would most likely use. The block pattern is the GTH one:
+ * a 3s3p (4s4p, 5s5p) semicore through the d block, the f shell in valence for
+ * the lanthanides, and the main-group count (group - 10) after it. Z > 86 has
+ * no GTH potential at all; those entries only keep the saved KIND well formed.
+ */
+var GTH_VALENCE=(
+    '1 2 3 4 3 4 5 6 7 8 9 2 3 4 5 6 7 8 '+
+    '9 10 11 12 13 14 15 16 17 18 11 12 '+
+    '13 4 5 6 7 8 '+
+    '9 10 11 12 13 14 15 16 17 18 11 12 '+
+    '13 4 5 6 7 8 '+
+    '9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 '+
+    '12 13 14 15 16 17 18 11 12 '+
+    '13 4 5 6 7 8 '+
+    '9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 '+
+    '12 13 14 15 16 17 18 11 12 '+
+    '13 4 5 6 7 8').split(' ');
+function gthValenceOf(element){
+    var z=AN[element]||0;
+    return z>=1&&z<=GTH_VALENCE.length?GTH_VALENCE[z-1]:'0';
+}
+/**
+ * ABACUS STRU of the unit cell.
+ *
+ * The vectors are written in Angstrom and LATTICE_CONSTANT is the Angstrom ->
+ * Bohr factor (1.8897 Bohr per Angstrom), because the constant is what ABACUS
+ * scales the vector block by. Writing Angstrom numbers under the default 1.0
+ * would shrink the cell by that factor on the next read. Positions are Direct,
+ * the one mode that cannot drift when the vector block is rescaled.
+ */
+function buildStruContent(){
+    var base=crystalVisibleBaseAtoms();
+    var g=crystalSaveGroups(base);
+    var out='# '+provTitle(MD.title||'Modified structure',false)+'\\n\\n';
+    out+='ATOMIC_SPECIES\\n';
+    g.order.forEach(function(el){
+        out+=el+' '+saveMassOf(el).toFixed(4)+' '+el+'.upf\\n';
+    });
+    out+='\\nLATTICE_CONSTANT\\n1.8897259886\\n\\nLATTICE_VECTORS\\n';
+    var lv=CRY.latticeVectors;
+    for(var i=0;i<3;i++)out+='  '+lv[i][0].toFixed(10)+'  '+lv[i][1].toFixed(10)+'  '+lv[i][2].toFixed(10)+'\\n';
+    out+='\\nATOMIC_POSITIONS\\nDirect\\n';
+    g.order.forEach(function(el){
+        var atoms=g.groups[el];
+        out+='\\n'+el+'\\n0.0\\n'+atoms.length+'\\n';
+        atoms.forEach(function(a){
+            var f=crystalFracWrapped(a.x,a.y,a.z);
+            var line='  '+f[0].toFixed(10)+'  '+f[1].toFixed(10)+'  '+f[2].toFixed(10);
+            // STRU's three trailing flags are 1 = free, 0 = fixed; a site
+            // without flags keeps ABACUS's own default (free).
+            if(a.constraint&&/^[TF] [TF] [TF]$/.test(a.constraint)){
+                line+='  m '+a.constraint.split(' ').map(function(c){return c==='T'?'1':'0'}).join(' ');
+            }
+            out+=line+'\\n';
+        });
+    });
+    return out;
+}
+/**
+ * ABINIT geometry: acell = 1 Angstrom, rprim = the cell in Angstrom, xred.
+ *
+ * Splitting the cell into acell and a dimensionless rprim is ABINIT's own
+ * layout; with acell 1 the rprim rows are the vectors the viewer drew. The
+ * input may be read back as a cell, and a run only has to add its pseudos and
+ * cutoff. A ghost has no znucl, so it is written as 0 and the reader keeps it
+ * the dummy element X.
+ */
+function buildAbinitContent(){
+    var base=crystalVisibleBaseAtoms();
+    var g=crystalSaveGroups(base);
+    var out='# '+provTitle(MD.title||'Modified structure',false)+'\\n\\n';
+    out+='acell 1.0 1.0 1.0 Angstrom\\n';
+    out+='rprim\\n';
+    var lv=CRY.latticeVectors;
+    for(var i=0;i<3;i++)out+='  '+lv[i][0].toFixed(10)+'  '+lv[i][1].toFixed(10)+'  '+lv[i][2].toFixed(10)+'\\n';
+    out+='\\nnatom '+base.length+'\\nntypat '+g.order.length+'\\n';
+    out+='znucl';
+    g.order.forEach(function(el){out+=' '+(AN[el]||0)});
+    out+='\\n\\n';
+    var typeOf={};
+    g.order.forEach(function(el,ti){typeOf[el]=ti+1});
+    out+='typat';
+    base.forEach(function(a){out+=' '+typeOf[crystalSaveElement(a)]});
+    out+='\\n\\nxred\\n';
+    base.forEach(function(a){
+        var f=crystalFracWrapped(a.x,a.y,a.z);
+        out+='  '+f[0].toFixed(10)+'  '+f[1].toFixed(10)+'  '+f[2].toFixed(10)+'\\n';
+    });
+    return out;
+}
+/**
+ * Quantum ESPRESSO pw.x input: ibrav 0, CELL_PARAMETERS in Angstrom, crystal
+ * positions. The cell is stated as vectors rather than as a Bravais index, so
+ * every cell the viewer can draw round-trips without a lattice-matching step.
+ */
+function buildQeContent(){
+    var base=crystalVisibleBaseAtoms();
+    var g=crystalSaveGroups(base);
+    var out='! '+provTitle(MD.title||'Modified structure',false)+'\\n';
+    out+='&CONTROL\\n  calculation = \\'scf\\'\\n  prefix = \\'modified\\'\\n/\\n';
+    out+='&SYSTEM\\n  ibrav = 0\\n  nat = '+base.length+'\\n  ntyp = '+g.order.length+'\\n  ecutwfc = 60.0\\n/\\n';
+    out+='&ELECTRONS\\n  conv_thr = 1.0d-8\\n/\\n\\n';
+    out+='ATOMIC_SPECIES\\n';
+    g.order.forEach(function(el){
+        out+=el+' '+saveMassOf(el).toFixed(4)+' '+el+'.UPF\\n';
+    });
+    out+='\\nCELL_PARAMETERS angstrom\\n';
+    var lv=CRY.latticeVectors;
+    for(var i=0;i<3;i++)out+='  '+lv[i][0].toFixed(10)+'  '+lv[i][1].toFixed(10)+'  '+lv[i][2].toFixed(10)+'\\n';
+    out+='\\nATOMIC_POSITIONS crystal\\n';
+    base.forEach(function(a){
+        var f=crystalFracWrapped(a.x,a.y,a.z);
+        out+=crystalSaveElement(a)+'  '+f[0].toFixed(10)+'  '+f[1].toFixed(10)+'  '+f[2].toFixed(10)+'\\n';
+    });
+    out+='\\nK_POINTS gamma\\n';
+    return out;
+}
+/**
+ * LAMMPS data file of the unit cell.
+ *
+ * The cell is re-expressed in LAMMPS's restricted triclinic form (a along x, b
+ * in the xy plane) and the atoms are mapped with the same basis, so the box
+ * bounds and the coordinates describe the solid that was drawn. Masses are
+ * written per type with the element in a comment as well as in the mass, which
+ * is how the reader names a type even when a rounded weight is ambiguous.
+ */
+function buildLammpsDataContent(){
+    var base=crystalVisibleBaseAtoms();
+    var g=crystalSaveGroups(base);
+    var box=lammpsBoxOf(CRY.latticeVectors,base.map(function(a){return crystalSiteCart(a)}));
+    var out=provTitle(MD.title||'Modified structure',false)+'\\n\\n';
+    out+=base.length+' atoms\\n'+g.order.length+' atom types\\n\\n';
+    out+=box.xlo.toFixed(10)+' '+(box.xlo+box.lx).toFixed(10)+' xlo xhi\\n';
+    out+=box.ylo.toFixed(10)+' '+(box.ylo+box.ly).toFixed(10)+' ylo yhi\\n';
+    out+=box.zlo.toFixed(10)+' '+(box.zlo+box.lz).toFixed(10)+' zlo zhi\\n';
+    out+=box.xy.toFixed(10)+' '+box.xz.toFixed(10)+' '+box.yz.toFixed(10)+' xy xz yz\\n\\n';
+    out+='Masses\\n\\n';
+    g.order.forEach(function(el,i){
+        out+=(i+1)+' '+saveMassOf(el).toFixed(4)+' # '+el+'\\n';
+    });
+    var typeOf={};
+    g.order.forEach(function(el,ti){typeOf[el]=ti+1});
+    out+='\\nAtoms # atomic\\n\\n';
+    base.forEach(function(a,i){
+        var p=box.points[i];
+        out+=(i+1)+' '+typeOf[crystalSaveElement(a)]+' '+
+            p[0].toFixed(10)+' '+p[1].toFixed(10)+' '+p[2].toFixed(10)+'\\n';
+    });
+    return out;
+}
+/**
+ * GROMACS .gro.
+ *
+ * Coordinates and the box are in nanometres and the nine box numbers are in
+ * GROMACS's order (v1x v2y v3z v1y v1z v2x v2z v3x v3y), not row-major, which
+ * is the same trap the reader avoids. A molecule has no cell of its own, but a
+ * .gro always declares one, so it is written inside a bounding box with a one
+ * Angstrom margin rather than a zero box a GRO tool would reject.
+ */
+function buildGroContent(){
+    var out=provTitle(MD.title||'Modified structure',true)+'\\n';
+    var lines=[];
+    var bx,by,bz,bxy,bxz,byz;
+    // A trajectory frame carries the box it was simulated in; saving that frame
+    // as a .gro keeps the periodic cell instead of wrapping it in a new
+    // bounding box that would change the run's geometry.
+    var cellLv=CRY?CRY.latticeVectors:(TRAJ_CELL||null);
+    if(cellLv){
+        var base=CRY?crystalVisibleBaseAtoms():MD.atoms;
+        var carts=base.map(function(a){return CRY?crystalSiteCart(a):[a.x,a.y,a.z]});
+        var box=lammpsBoxOf(cellLv,carts);
+        // A .gro has no box origin: shift the whole solid so its lowest point
+        // sits at zero and the coordinates are inside the box they declare.
+        var dx=-box.xlo,dy=-box.ylo,dz=-box.zlo;
+        base.forEach(function(a,i){
+            var p=box.points[i];
+            lines.push(groAtomLine(i+1,crystalSaveElement(a),(p[0]+dx)/10,(p[1]+dy)/10,(p[2]+dz)/10));
+        });
+        bx=box.lx/10;by=box.ly/10;bz=box.lz/10;
+        bxy=box.xy/10;bxz=box.xz/10;byz=box.yz/10;
+    }else{
+        var min=[Infinity,Infinity,Infinity],max=[-Infinity,-Infinity,-Infinity];
+        MD.atoms.forEach(function(a){
+            min[0]=Math.min(min[0],a.x);min[1]=Math.min(min[1],a.y);min[2]=Math.min(min[2],a.z);
+            max[0]=Math.max(max[0],a.x);max[1]=Math.max(max[1],a.y);max[2]=Math.max(max[2],a.z);
+        });
+        // One Angstrom of vacuum on each side keeps every atom strictly inside
+        // the box a periodic tool will wrap it into.
+        var m=1.0;
+        bx=(max[0]-min[0]+2*m)/10;by=(max[1]-min[1]+2*m)/10;bz=(max[2]-min[2]+2*m)/10;
+        bxy=0;bxz=0;byz=0;
+        MD.atoms.forEach(function(a,i){
+            lines.push(groAtomLine(i+1,isGhostAtom(a)?'X':a.element,
+                (a.x-min[0]+m)/10,(a.y-min[1]+m)/10,(a.z-min[2]+m)/10));
+        });
+    }
+    out+=lines.length+'\\n';
+    lines.forEach(function(l){out+=l});
+    out+=bx.toFixed(5)+' '+by.toFixed(5)+' '+bz.toFixed(5)+' 0.00000 0.00000 '+
+        bxy.toFixed(5)+' 0.00000 '+bxz.toFixed(5)+' '+byz.toFixed(5)+'\\n';
+    return out;
+}
+/** One fixed-width GRO atom row: resid, resname, atom name, serial, x, y, z. */
+function groAtomLine(serial,element,x,y,z){
+    var sn=String(serial);while(sn.length<5)sn=' '+sn;
+    var res='MOL';while(res.length<5)res+=' ';
+    var name=element;while(name.length<5)name+=' ';
+    return sn+res+name+sn+saveCol(x,3,8)+saveCol(y,3,8)+saveCol(z,3,8)+'\\n';
+}
+/**
+ * CP2K Quickstep input.
+ *
+ * A periodic structure gets its cell as A/B/C vectors and PERIODIC XYZ; a
+ * molecule gets a bounding box with PERIODIC NONE, which is CP2K's way to say
+ * "a box around a molecule" and exactly what the reader drops the cell for.
+ * Basis and potential are named per KIND so the file is a runnable skeleton;
+ * the q of a GTH-PBE potential follows the element's standard valence, and a
+ * ghost KIND has a basis but no potential (CP2K's own ghost convention).
+ */
+function buildCp2kContent(){
+    var base=CRY?crystalVisibleBaseAtoms():MD.atoms;
+    var g=crystalSaveGroups(base);
+    var out='# '+provTitle(MD.title||'Modified structure',false)+'\\n';
+    out+='&GLOBAL\\n  PROJECT modified\\n  RUN_TYPE ENERGY\\n&END GLOBAL\\n\\n';
+    out+='&FORCE_EVAL\\n  METHOD Quickstep\\n';
+    out+='  &DFT\\n    BASIS_SET_FILE_NAME BASIS_MOLOPT\\n    POTENTIAL_FILE_NAME GTH_POTENTIALS\\n  &END DFT\\n';
+    out+='  &SUBSYS\\n    &CELL\\n';
+    var cellLv=CRY?CRY.latticeVectors:(TRAJ_CELL||null);
+    if(cellLv){
+        var lv=cellLv;
+        out+='      A '+lv[0][0].toFixed(10)+' '+lv[0][1].toFixed(10)+' '+lv[0][2].toFixed(10)+'\\n';
+        out+='      B '+lv[1][0].toFixed(10)+' '+lv[1][1].toFixed(10)+' '+lv[1][2].toFixed(10)+'\\n';
+        out+='      C '+lv[2][0].toFixed(10)+' '+lv[2][1].toFixed(10)+' '+lv[2][2].toFixed(10)+'\\n';
+        out+='      PERIODIC XYZ\\n';
+    }else{
+        var min=[Infinity,Infinity,Infinity],max=[-Infinity,-Infinity,-Infinity];
+        MD.atoms.forEach(function(a){
+            min[0]=Math.min(min[0],a.x);min[1]=Math.min(min[1],a.y);min[2]=Math.min(min[2],a.z);
+            max[0]=Math.max(max[0],a.x);max[1]=Math.max(max[1],a.y);max[2]=Math.max(max[2],a.z);
+        });
+        var m=1.0;
+        out+='      A '+(max[0]-min[0]+2*m).toFixed(10)+' 0.0 0.0\\n';
+        out+='      B 0.0 '+(max[1]-min[1]+2*m).toFixed(10)+' 0.0\\n';
+        out+='      C 0.0 0.0 '+(max[2]-min[2]+2*m).toFixed(10)+'\\n';
+        out+='      PERIODIC NONE\\n';
+    }
+    out+='    &END CELL\\n    &COORD\\n';
+    if(cellLv){
+        base.forEach(function(a){
+            var p=CRY?crystalSiteCart(a):[a.x,a.y,a.z];
+            out+='      '+crystalSaveElement(a)+' '+p[0].toFixed(10)+' '+p[1].toFixed(10)+' '+p[2].toFixed(10)+'\\n';
+        });
+    }else{
+        // &CELL has its origin at (0,0,0): without this shift a molecule that
+        // is not already near the origin would sit outside its own box.
+        MD.atoms.forEach(function(a){
+            out+='      '+(isGhostAtom(a)?'X':a.element)+' '+
+                (a.x-min[0]+m).toFixed(10)+' '+(a.y-min[1]+m).toFixed(10)+' '+(a.z-min[2]+m).toFixed(10)+'\\n';
+        });
+    }
+    out+='    &END COORD\\n';
+    g.order.forEach(function(el){
+        out+='    &KIND '+el+'\\n      BASIS_SET DZVP-MOLOPT-SR-GTH\\n';
+        if(el==='X')out+='      # a ghost KIND: basis functions and no potential\\n';
+        else out+='      POTENTIAL GTH-PBE-q'+gthValenceOf(el)+'\\n';
+        out+='    &END KIND\\n';
+    });
+    out+='  &END SUBSYS\\n&END FORCE_EVAL\\n';
+    return out;
+}
+/**
+ * Extended XYZ (GPUMD / ASE / OVITO): the cell on the comment line.
+ *
+ * A periodic structure states Lattice and pbc="T T T"; a molecule states
+ * pbc="F F F" and no Lattice, which the reader takes as a molecule rather than
+ * wrapping it in a box it does not have.
+ */
+function buildExtendedXyzContent(){
+    var title=provTitle(MD.title||'Modified structure',false);
+    // A trajectory frame keeps the cell it was run in; extended XYZ is the one
+    // snapshot format that can state it, and losing it would make a reloaded
+    // frame look like a molecule.
+    var cellLv=CRY?CRY.latticeVectors:(TRAJ_CELL||null);
+    if(cellLv){
+        var base=CRY?crystalVisibleBaseAtoms():MD.atoms;
+        var lv=cellLv;
+        var vals=[];
+        for(var i=0;i<3;i++)vals.push(lv[i][0].toFixed(10),lv[i][1].toFixed(10),lv[i][2].toFixed(10));
+        var out=base.length+'\\n'+title+' Lattice="'+vals.join(' ')+
+            '" Properties=species:S:1:pos:R:3 pbc="T T T"\\n';
+        base.forEach(function(a){
+            var p=CRY?crystalSiteCart(a):[a.x,a.y,a.z];
+            out+=crystalSaveElement(a)+' '+p[0].toFixed(8)+' '+p[1].toFixed(8)+' '+p[2].toFixed(8)+'\\n';
+        });
+        return out;
+    }
+    var mol=MD.atoms.length+'\\n'+title+' Properties=species:S:1:pos:R:3 pbc="F F F"\\n';
+    MD.atoms.forEach(function(a){
+        mol+=(isGhostAtom(a)?'X':a.element)+' '+a.x.toFixed(8)+' '+a.y.toFixed(8)+' '+a.z.toFixed(8)+'\\n';
+    });
+    return mol;
 }
 
 function parseSelectInput(input){
@@ -18955,7 +21192,8 @@ class MolecularDocument implements vscode.CustomDocument {
         public readonly routes?: RouteSection[],
         public readonly vmdPayload?: VmdPayload,
         public readonly autoBeta: boolean = false,
-        public readonly optThresholds?: OptThresholds
+        public readonly optThresholds?: OptThresholds,
+        public readonly trajectoryFrames?: TrajectoryFramePayload[]
     ) {}
 
     dispose(): void {}
