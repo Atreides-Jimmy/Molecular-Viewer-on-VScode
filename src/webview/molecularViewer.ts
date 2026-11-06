@@ -6749,8 +6749,11 @@ function rebuildScene(keepCenter){
     // centre follows it). A supercell bounds change passes keepCenter: the
     // atoms the old bounds already showed keep their exact screen positions
     // and the new material appears around them, instead of the whole picture
-    // jumping to the enlarged structure's new centroid.
-    if(!keepCenter){
+    // jumping to the enlarged structure's new centroid. A trajectory is read
+    // against its box, so a rebuild that is not a frame switch (a style change,
+    // an undo, an edit) leaves the centre where the box is rather than chasing
+    // the atoms; only an explicit re-centre moves it.
+    if(!keepCenter&&!TRAJ_FRAMES){
         CX=0;CY=0;CZ=0;
         MD.atoms.forEach(function(a){CX+=a.x;CY+=a.y;CZ+=a.z});
         if(MD.atoms.length>0){CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length}
@@ -9250,7 +9253,7 @@ function restoreRotSessionBase(){
     }
     return false;
 }
-function resetRotAxisState(){
+function resetRotAxisState(skipRecenter){
     // A previewed angle still on screen when the session ends (Done, Clear, a
     // mode switch) is its last word: carry it into the base cell before the set
     // of moved atoms is cleared.
@@ -9267,8 +9270,9 @@ function resetRotAxisState(){
     var ain=document.getElementById('rp-angle-input');if(ain)ain.value='0';
     var av=document.getElementById('rp-angle-val');if(av)av.textContent='0°';
     // 分组旋转会改变质心, 而这里是每个旋转会话的收尾点 (Done / Clear / 换模式 /
-    // 撤销 / 换帧 …), 所以统一在这里重定旋转中心。
-    updateRotationCenter();
+    // 撤销 / 换帧 …), 所以统一在这里重定旋转中心。A trajectory frame passes
+    // skipRecenter: its box is the reference and must not move with the atoms.
+    if(!skipRecenter)updateRotationCenter();
 }
 function syncRotatePanelGroupField(){
     if(currentMode!=='rotateGroup')return;
@@ -11802,6 +11806,14 @@ function updateFrameInfo(){
 }
 function switchFrame(idx){
     if(idx<0||idx>=totalFrames)return;
+    // A trajectory is one system over time, and its frames are read against
+    // each other: the centre the first frame was framed with is kept while the
+    // frames play. Re-centring on every frame's own atoms would slide a cell
+    // wireframe around the viewport, making the box look like it moves when the
+    // molecules are what changed. Ordinary frame sequences (optimisation steps)
+    // still follow their structure's centre.
+    var keepTrajCenter=!!TRAJ_FRAMES;
+    var keepX=CX,keepY=CY,keepZ=CZ;
     // A frame is a structure of its own, so anything still writing the one on
     // screen has to let go before it is replaced: a normal-mode playback
     // rewrites every atom on each animation frame, and its own stop puts the
@@ -11813,6 +11825,10 @@ function switchFrame(idx){
     // A frame is a structure of its own: the equilibrium a displacement session
     // was measured from belongs to the frame being left.
     vdEnd();
+    // Those cleanups may have re-centred the outgoing frame; the atoms are
+    // about to be replaced wholesale, so the centre that was on screen is put
+    // back and the new frame is built against it.
+    if(keepTrajCenter){CX=keepX;CY=keepY;CZ=keepZ}
     currentFrame=idx;
     var f=MD.frames[idx];
     if(TRAJ_FRAMES){
@@ -11854,9 +11870,11 @@ function switchFrame(idx){
     }
     undoStack.length=0;updateUndoBtn();
     if(diffMode)resetSelection();
-    resetRotAxisState();
+    // The rotate-group teardown normally re-centres on the geometry it leaves
+    // behind; a trajectory frame is built against the fixed centre instead.
+    resetRotAxisState(keepTrajCenter);
     if(currentMode==='mmOpt'){mmLastResult=null;refreshMmPanel()}
-    rebuildScene();
+    rebuildScene(keepTrajCenter);
     updateFrameInfo();
     // [2026-09-12 | Atreides-Jimmy] Follow the structure change in the
     // convergence charts: the point of the step now on screen gets highlighted
