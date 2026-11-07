@@ -47,6 +47,7 @@ A clean, fully featured 3D molecular viewer and editor for VS Code / Trae — en
 - **Clipboard and batch delete** — **Ctrl+C / Ctrl+X / Ctrl+V** copy, cut and paste fragments with the viewer's own clipboard; **Ctrl+A** selects all atoms; **Delete** removes the selection. Pasting is not available for crystals or in Diff.
 - **Undo** — Every edit is one undo step, the stack holds 50 entries, and it resets when the file is reloaded. **Cancel** in a dialog restores the coordinates it started from.
 - **Save As** — Export to XYZ, Gaussian GJF, ORCA Input, MOL2, MDL Mol, PDB, MOPAC, Turbomole Coord, CIF, VASP POSCAR, Gaussian Cube or VESTA, plus periodic **ABACUS STRU**, **ABINIT**, **Quantum ESPRESSO** (`pw.x`), **LAMMPS data**, **CP2K input**, **GROMACS** and **Extended XYZ**. GJF keeps its Link 0, route, original title, charge/multiplicity and connect section. For crystals, two extra "displayed cluster" formats (XYZ/GJF) write the region on screen as a molecule, with a **Keep whole molecules** switch. Periodic formats write the unit cell; CP2K, GROMACS and Extended XYZ also write the displayed atoms as a molecule (inside a bounding box, or with `pbc="F F F"`). A trajectory frame writes the frame on screen, and CP2K, GROMACS and Extended XYZ keep that frame's own cell instead of wrapping it in a bounding box. Crystal formats are available whenever a crystal is loaded.
+- **PNG snapshot** — **PNG**, beside Save As, exports the 3D view as a PNG image. Choose 1–4× the viewport and a background: the viewer's dark, white, or transparent. The image is the structure exactly as drawn — orientation, display style, cell edges and their a/b/c labels, and any surface, plane or interaction guide — without the panels, info box or orientation axes. It is drawn at exactly the pixel size the dialog names (a 4× request past the GPU or the 20 MP export limit is reduced evenly, and the option says so), and the file starts beside the source as `<name>-snapshot.png`.
 - **Saved files record their history** — Title or comment lines receive a short provenance line such as `MV: from opt.log, frame 12 of 40; 2 atoms deleted, translated`. It follows edits and undo, is not stacked when a viewer-produced file is saved again, and formats without a title line are written as before.
 - **Rotate Group** — Select a group and 2+ axis atoms, then rotate 0–360° around the orange axis with a slider or numeric input. Axis atoms stay fixed, bonded axis atoms must be joined by single bonds, each adjustment is one undo step, and **Reset** reverts the whole session.
 - **Move Atoms** — Plain left-drag or arrow keys rotate the view and right-drag pans it; **Ctrl+left-drag** or **Ctrl+arrow keys** rotate the selected fragment, and **Ctrl+right-drag** translates it. Bonds stretch with the atoms and are re-judged on release; authored MOL2/PDB/GJF bonds are kept unless pulled beyond the cutoff. One undo step per drag. Not available for crystals.
@@ -226,6 +227,7 @@ The list mirrors the extensions the viewer registers; drop any line you do not w
 | ◀ ▶ (molecule selector) | Switch between molecules created by a VMD script |
 | Color by Beta | Toggle scalar colouring for PDB scalar files |
 | Auto Rotate | Toggle flick-to-spin in View mode |
+| PNG | Export the 3D view as a PNG (size and background) |
 | Reset View | Return to the initial view orientation |
 
 Shortcuts work when the 3D view has focus and do not override editor keybindings; text fields keep their own keys. Copy and paste use the viewer's own clipboard, so they never replace text you copied elsewhere.
@@ -311,6 +313,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 - **剪贴板与批量删除** — **Ctrl+C / Ctrl+X / Ctrl+V** 使用查看器自己的剪贴板复制、剪切与粘贴片段；**Ctrl+A** 全选原子；**Delete** 删除选区。晶体结构与 Diff 模式下不可粘贴。
 - **撤销** — 每次编辑是一步 Undo，栈上限 50 条，重新载入文件时重置。对话框中的 **Cancel** 会恢复到打开对话框时的坐标。
 - **另存为** — 可导出为 XYZ、Gaussian GJF、ORCA Input、MOL2、MDL Mol、PDB、MOPAC、Turbomole Coord、CIF、VASP POSCAR、Gaussian Cube、VESTA，以及周期性格式 **ABACUS STRU**、**ABINIT**、**Quantum ESPRESSO**（`pw.x`）、**LAMMPS data**、**CP2K input**、**GROMACS** 与 **Extended XYZ**。GJF 会保留 Link 0、route、原标题、电荷/多重度与 connect 段。对晶体结构，额外的两个「当前显示团簇」格式（XYZ/GJF）会把屏幕上的区域当作分子写出，并提供 **Keep whole molecules** 开关。周期性格式写出晶胞；CP2K、GROMACS 与 Extended XYZ 也能把显示的原子作为分子写出（放在包围盒中，或标记 `pbc="F F F"`）。轨迹帧保存的是屏幕上的那一帧，CP2K、GROMACS 与 Extended XYZ 会保留该帧自己的盒子，而不是把它包进新的包围盒。载入晶体数据时才会提供晶体格式。
+- **PNG 截图** — 工具栏的 **PNG**（紧邻另存为）把 3D 视图导出为 PNG 图片。尺寸可选当前视图的 1–4 倍，背景可选查看器的深色、白色或透明。图像就是屏幕上画出的结构——朝向、显示样式、晶胞边框及其 a/b/c 标号，以及任何表面、晶面或相互作用虚线——但不包含浮动面板、信息框和方向坐标轴。像素尺寸与对话框中标注的完全一致（4× 若超出 GPU 或 2000 万像素上限会等比缩小，并在选项中标明），文件默认保存在源文件旁，命名为 `<名称>-snapshot.png`。
 - **保存的文件记录来历** — 标题行或注释行会写入一行简短的来历，例如 `MV: from opt.log, frame 12 of 40; 2 atoms deleted, translated`。它跟随编辑与 Undo，重复保存不会层层叠加；没有标题行的格式保持原样。
 - **绕轴旋转基团** — 选择一个原子组和 2 个以上轴原子，然后用滑块或数值输入让原子组绕橙色轴线旋转 0–360°。轴原子保持不动，成键的轴原子之间必须是单键；每次调节是一步 Undo，面板的 **Reset** 一次性回退整个旋转会话。
 - **移动原子** — 普通左键拖拽或方向键旋转视图，右键拖拽平移视图；**Ctrl+左键拖拽**或 **Ctrl+方向键**旋转选中片段，**Ctrl+右键拖拽**平移片段。拖拽时键随原子拉伸，松开后重新判定连接性；MOL2/PDB/GJF 中写明的键会保留，除非被拉到成键范围之外。每次拖拽一步 Undo。晶体结构下不可用。
@@ -490,6 +493,7 @@ SMILES 支持有机子集以及分支、`%nn` 环闭合、芳香性、显式键�
 | ◀ ▶（分子选择器） | 在 VMD 脚本创建的多个分子之间切换 |
 | Color by Beta | 切换 PDB 标量文件的逐原子着色 |
 | Auto Rotate | 在 View 模式下切换甩动自转 |
+| PNG | 把 3D 视图导出为 PNG（可选尺寸与背景） |
 | Reset View | 恢复初始视图朝向 |
 
 快捷键只在 3D 视图获得焦点时生效，不会占用编辑器的快捷键；文本输入框保留自己的按键。复制粘贴使用查看器自己的剪贴板，不会替换你在别处复制的文本。

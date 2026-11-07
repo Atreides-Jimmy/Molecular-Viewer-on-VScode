@@ -2254,12 +2254,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             switch (message.command) {
                 case 'saveFile':
                     try {
-                        const srcPath = message.filePath || '';
-                        const srcDir = srcPath ? srcPath.substring(0, srcPath.replace(/\\/g, '/').lastIndexOf('/')) : '';
-                        const defaultName = message.suggestedName || 'molecule.xyz';
-                        const defaultUri = srcDir ? vscode.Uri.file(srcDir + '/' + defaultName) : vscode.Uri.file(defaultName);
                         const uri = await vscode.window.showSaveDialog({
-                            defaultUri: defaultUri,
+                            defaultUri: this.saveDialogUri(message.filePath, message.suggestedName, 'molecule.xyz'),
                             filters: {
                                 'XYZ Files': ['xyz'],
                                 'Gaussian Input': ['gjf'],
@@ -2293,6 +2289,14 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                     } catch (e: any) {
                         vscode.window.showErrorMessage('Save failed: ' + (e.message || e));
                     }
+                    break;
+                // A PNG snapshot travels as base64: a webview message is the
+                // page's only channel to the host, and bytes are what the file
+                // has to be written as. The decode, the PNG signature and the
+                // save dialog all live in savePng(), beside the Save As helper
+                // that decides where the dialog opens.
+                case 'savePng':
+                    await this.savePng(message);
                     break;
                 case 'diffFile':
                     try {
@@ -2910,6 +2914,62 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         });
     }
 
+    /** Where a Save dialog starts: the folder the structure came from, with the suggested name. */
+    private saveDialogUri(filePath: unknown, suggestedName: unknown, fallbackName: string): vscode.Uri {
+        const srcPath = typeof filePath === 'string' ? filePath : '';
+        const srcDir = srcPath ? srcPath.substring(0, srcPath.replace(/\\/g, '/').lastIndexOf('/')) : '';
+        const name = typeof suggestedName === 'string' && suggestedName ? suggestedName : fallbackName;
+        return srcDir ? vscode.Uri.file(srcDir + '/' + name) : vscode.Uri.file(name);
+    }
+
+    /**
+     * Write the PNG the page captured.
+     *
+     * The page sends base64 without a data-URL prefix, because that is what a
+     * canvas hands out and the message is its only transport. The bytes are
+     * written exactly as decoded — the page is the only thing that knows what it
+     * drew — but they have to be a PNG: a truncated message, an empty canvas
+     * read or a corrupted string must fail loudly instead of leaving a file the
+     * user will find unopenable later.
+     */
+    private async savePng(message: { data?: unknown; suggestedName?: unknown; filePath?: unknown }): Promise<void> {
+        const base64 = typeof message.data === 'string' ? message.data : '';
+        if (!base64) {
+            vscode.window.showErrorMessage('Snapshot failed: the page sent no image data.');
+            return;
+        }
+        // 96 MB of base64 is ~72 MB of PNG — already far past a 20 MP capture,
+        // so a larger message is a corrupted one rather than a big picture.
+        if (base64.length > 96 * 1024 * 1024) {
+            vscode.window.showErrorMessage('Snapshot failed: the image is too large to write.');
+            return;
+        }
+        try {
+            const bytes = Buffer.from(base64, 'base64');
+            // 0x89 'P' 'N' 'G': the eight-byte signature every PNG file starts with.
+            if (bytes.length < 8 || bytes[0] !== 0x89 || bytes[1] !== 0x50 || bytes[2] !== 0x4e || bytes[3] !== 0x47) {
+                throw new Error('the captured data is not a PNG image');
+            }
+            const uri = await vscode.window.showSaveDialog({
+                defaultUri: this.saveDialogUri(message.filePath, message.suggestedName, 'structure-snapshot.png'),
+                filters: {
+                    'PNG Image': ['png'],
+                    'All Files': ['*']
+                }
+            });
+            if (!uri) {
+                return;
+            }
+            // A name typed without an extension would otherwise become a PNG with
+            // no .png on it, which no image viewer would offer to open.
+            const target = /[^/\\]+\.[^/\\]+$/.test(uri.fsPath) ? uri : vscode.Uri.file(uri.fsPath + '.png');
+            await vscode.workspace.fs.writeFile(target, bytes);
+            vscode.window.showInformationMessage('Saved: ' + target.fsPath);
+        } catch (e: any) {
+            vscode.window.showErrorMessage('Snapshot failed: ' + (e && e.message ? e.message : e));
+        }
+    }
+
     private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[], logSource?: string, routes?: RouteSection[], vmdPayload?: VmdPayload, autoBeta: boolean = false, optThresholds?: OptThresholds, trajectoryFrames?: TrajectoryFramePayload[]): Promise<string> {
         const nonce = getNonce();
 
@@ -3503,6 +3563,7 @@ canvas{display:block}
 <button class="tbtn" id="egg-btn" style="display:none">Eggs</button>
 <button class="tbtn" id="undo-btn" disabled>Undo</button>
 <button class="tbtn" id="save-btn">Save As</button>
+<button class="tbtn" id="snap-btn">PNG</button>
 <button class="tbtn" id="reset-btn">Reset View</button>
 <div class="tsep" id="frame-sep"></div>
 <div id="frame-nav">
@@ -4175,7 +4236,13 @@ scene.background=new THREE.Color(0x1e1e1e);
 var camera=new THREE.PerspectiveCamera(60,cw/ch,0.1,1000);
 var renderer=null;
 try{
-    renderer=new THREE.WebGLRenderer({antialias:true});
+    // alpha:true gives the drawing buffer an alpha channel, which is what lets a
+    // PNG snapshot leave its background out (Export PNG -> Transparent). It
+    // changes no pixel of the screen: scene.background is a Color, and three
+    // clears a Color background with alpha 1 (WebGLBackground clears with
+    // (r,g,b,1) for a Color and with the clear alpha only when there is no
+    // background), so the canvas the page composites is still opaque.
+    renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
 }catch(webglErr){
     // three.js throws here only when neither webgl2, webgl nor
     // experimental-webgl could be created at all — which in an editor webview
@@ -9897,6 +9964,7 @@ function doUndo(){
 }
 document.getElementById('undo-btn').addEventListener('click',doUndo);
 document.getElementById('save-btn').addEventListener('click',doSave);
+document.getElementById('snap-btn').addEventListener('click',openSnapshotDialog);
 document.getElementById('import-btn').addEventListener('click',function(){
     if(diffMode){modeInfoEl.textContent='Import is not available in diff mode';return}
     if(CRY){modeInfoEl.textContent='Import is not available for crystal structures';return}
@@ -21281,6 +21349,7 @@ function escapeOneLevel(){
     // The two mouse-free actions say their own keys, on the buttons that do them.
     var ub=document.getElementById('undo-btn');if(ub)ub.title='Undo ('+KEY_MOD+'+Z)';
     var sb=document.getElementById('save-btn');if(sb)sb.title='Save As ('+KEY_MOD+'+S)';
+    var nb=document.getElementById('snap-btn');if(nb)nb.title='Export the 3D view as a PNG image';
 })();
 document.addEventListener('keydown',function(e){
     if(e.key==='Escape'&&!e.ctrlKey&&!e.metaKey&&!e.altKey){
@@ -21475,10 +21544,198 @@ function animate(){
     if(!needsRender&&!keyActive)return;
     needsRender=false;
     updateAxesIndicator();
+    var frameSize=viewSize();
+    renderFrame(frameSize.w,frameSize.h);
+}
+
+// ===== PNG snapshot =====
+//
+// A figure needs the picture the user has been arranging - the camera pose they
+// turned to, the display style, the labels and every surface on screen - and
+// that picture is the WebGL canvas. The panels, the info box and the
+// orientation axes are page furniture drawn in HTML and are deliberately left
+// out; what is captured is the structure.
+//
+// A capture must not disturb the view it is taken from, so the renderer is
+// changed for the length of one synchronous step: the drawing buffer is resized
+// at pixel ratio 1 (the PNG is then exactly the size the dialog states, on a
+// HiDPI display too), one frame is drawn at that size by the same renderFrame()
+// the animation loop uses, and the buffer is read before the browser composites
+// - a WebGL buffer without preserveDrawingBuffer is only readable inside the
+// task that drew it. Size, ratio, background and clear alpha are restored in a
+// finally, so a failure cannot leave a resized or blurry view behind.
+var SNAP_SCALES=[1,2,3,4];
+// 20 MP and 8k per edge: a 4x capture of an ordinary panel fits inside both, and
+// a request past them is reduced rather than allowed to allocate a buffer the
+// driver refuses (or a base64 message the host struggles to decode).
+var SNAP_MAX_PIXELS=20000000;
+var SNAP_MAX_SIDE=8192;
+
+/** Logical size of the 3D view - the size a frame is drawn at. */
+function viewSize(){
     var w=container.clientWidth||window.innerWidth;
     var h=container.clientHeight||(window.innerHeight-60);
     if(w<1)w=window.innerWidth;
     if(h<1)h=window.innerHeight-60;
+    return {w:Math.max(1,Math.floor(w)),h:Math.max(1,Math.floor(h))};
+}
+
+/** The largest drawing buffer this GPU can render into, inside SNAP_MAX_SIDE. */
+function snapshotMaxSide(){
+    var side=SNAP_MAX_SIDE;
+    try{
+        var caps=renderer.capabilities;
+        if(caps&&caps.maxTextureSize>0)side=Math.min(side,caps.maxTextureSize);
+        var gl=renderer.getContext();
+        if(gl&&!gl.isContextLost()){
+            var rb=gl.getParameter(gl.MAX_RENDERBUFFER_SIZE);
+            if(rb>0)side=Math.min(side,rb);
+            var vp=gl.getParameter(gl.MAX_VIEWPORT_DIMS);
+            if(vp&&vp.length>=2&&vp[0]>0&&vp[1]>0)side=Math.min(side,vp[0],vp[1]);
+        }
+    }catch(e){}
+    return Math.max(64,Math.floor(side));
+}
+
+/**
+ * Pixel size of a capture at the requested scale.
+ *
+ * Both edges take one factor, so the image keeps the frame's own framing and is
+ * never distorted; only when the GPU (or the pixel ceiling) cannot hold that
+ * size is the factor reduced, and the dialog says so instead of quietly
+ * returning a smaller file than the one that was asked for.
+ */
+function snapshotTarget(scale){
+    var v=viewSize();
+    var side=snapshotMaxSide();
+    var s=scale>0?scale:1;
+    var fit=Math.min(side/v.w,side/v.h,Math.sqrt(SNAP_MAX_PIXELS/(v.w*v.h)));
+    var limited=false;
+    if(s>fit){s=fit;limited=true}
+    // Floored, so a reduced capture can never round its way past the ceiling it
+    // was reduced to fit.
+    return {w:Math.max(1,Math.min(side,Math.floor(v.w*s))),h:Math.max(1,Math.min(side,Math.floor(v.h*s))),limited:limited};
+}
+
+/** A name that says what it is: the source file's stem plus -snapshot.png. */
+function snapshotFileName(){
+    var base=provBaseName(MD.filePath)||'';
+    var dot=base.lastIndexOf('.');
+    if(dot>0)base=base.substring(0,dot);
+    return (base||'structure')+(diffMode?'-diff':'')+'-snapshot.png';
+}
+
+/**
+ * The Export PNG dialog: a size, a background, and the export itself.
+ *
+ * The sizes offered are the ones this GPU can actually draw, labelled with the
+ * pixels they will produce, so "4x" is never a promise the driver breaks. Two
+ * factors that clamp to the same size are one entry, not two identical choices.
+ */
+function openSnapshotDialog(){
+    if(!MD.atoms||MD.atoms.length===0){alert('There is no structure on screen to export.');return}
+    if(!renderer){alert('The 3D view is not ready yet.');return}
+    if(contextLost){alert('The 3D view has no WebGL context at the moment, so there is nothing to capture. Wait for it to come back, or run "Developer: Reload Window".');return}
+    var list=[],seen={};
+    SNAP_SCALES.forEach(function(s){
+        var t=snapshotTarget(s);
+        var key=t.w+'x'+t.h;
+        if(seen[key])return;
+        seen[key]=1;
+        list.push({s:s,w:t.w,h:t.h,limited:t.limited});
+    });
+    var pick=list[0];
+    for(var i=0;i<list.length;i++){if(list[i].s===2)pick=list[i]}
+    var opts='';
+    list.forEach(function(o){
+        opts+='<option value="'+o.s+'"'+(o===pick?' selected':'')+'>'+o.s+'&times; &mdash; '+
+            o.w+' &times; '+o.h+' px'+(o.limited?' (reduced to the export limit)':'')+'</option>';
+    });
+    showModal('<h3>Export PNG Snapshot</h3>'+
+        '<div class="current-val">The image is the 3D view exactly as drawn: the orientation on screen, '+
+        'the display style, cell edges and their a/b/c labels, and any surface, plane or interaction '+
+        'guide. Panels, the info box and the orientation axes are interface and stay out of it.</div>'+
+        (diffMode?'<div class="current-val">Diff mode: both halves are captured as drawn, without the two '+
+            'file-name labels (they are page text, not part of the picture).</div>':'')+
+        '<label for="sn-scale">Size</label><select id="sn-scale">'+opts+'</select>'+
+        '<label for="sn-bg">Background</label><select id="sn-bg">'+
+        '<option value="viewer">As on screen (dark)</option>'+
+        '<option value="white">White</option>'+
+        '<option value="transparent">Transparent</option>'+
+        '</select>'+
+        '<div class="modal-btns"><button class="mbtn mbtn-cancel" id="m-cancel">Cancel</button>'+
+        '<button class="mbtn mbtn-ok" id="m-ok">Export PNG&hellip;</button></div>',null);
+    document.getElementById('m-cancel').addEventListener('click',hideModal);
+    document.getElementById('m-ok').addEventListener('click',function(){
+        var sEl=document.getElementById('sn-scale'),bEl=document.getElementById('sn-bg');
+        var scale=sEl?Number(sEl.value):2;
+        var bg=bEl?bEl.value:'viewer';
+        // The dialog goes first: it is page furniture, and the save dialog that
+        // follows belongs to the editor window rather than to this page.
+        hideModal();
+        exportSnapshotPNG(scale,bg);
+    });
+}
+
+/**
+ * Draw the view at the chosen size and hand the PNG to the host.
+ *
+ * The two setSize calls around setPixelRatio are ordered small-first: restoring
+ * the old ratio onto the capture-sized buffer would allocate capture x DPI, and
+ * a 4x snapshot of a HiDPI window is 16x the pixels of the view.
+ */
+function exportSnapshotPNG(scale,bg){
+    var t=snapshotTarget(scale);
+    var v=viewSize();
+    var savedPR=renderer.getPixelRatio();
+    var savedBg=scene.background;
+    var savedAlpha=renderer.getClearAlpha();
+    var url='',failure='';
+    try{
+        // A transparent capture is the same scene with no background: a null
+        // background is exactly the case three clears with the clear alpha,
+        // while a Color background is cleared with alpha 1 whatever the alpha is.
+        if(bg==='transparent'){scene.background=null;renderer.setClearAlpha(0)}
+        else if(bg==='white'){scene.background=new THREE.Color(0xffffff);renderer.setClearAlpha(1)}
+        renderer.setPixelRatio(1);
+        renderer.setSize(t.w,t.h,false);   // false: the canvas' CSS size must not move
+        renderFrame(t.w,t.h);
+        url=renderer.domElement.toDataURL('image/png');
+    }catch(err){
+        failure=err&&err.message?err.message:String(err);
+    }finally{
+        scene.background=savedBg;
+        try{renderer.setClearAlpha(savedAlpha)}catch(e){}
+        try{renderer.setSize(v.w,v.h,false)}catch(e){}
+        try{renderer.setPixelRatio(savedPR)}catch(e){}
+        try{renderer.setSize(v.w,v.h)}catch(e){}
+        // A Diff frame draws with autoClear off and the scissor on; if it threw
+        // half way, leaving those behind would carry into the next frame.
+        try{renderer.autoClear=true;renderer.setScissorTest(false)}catch(e){}
+        needsRender=true;
+    }
+    if(failure){alert('The PNG could not be captured: '+failure);return}
+    if(!url||url.indexOf('data:image/png;base64,')!==0){
+        alert('The 3D view did not return a PNG - the WebGL context may have just been lost. Try again.');
+        return;
+    }
+    vscodeApi.postMessage({
+        command:'savePng',
+        data:url.substring(url.indexOf(',')+1),
+        suggestedName:snapshotFileName(),
+        filePath:MD.filePath||''
+    });
+}
+
+/**
+ * Draw one frame at a logical size.
+ *
+ * Pulled out of animate() so a snapshot draws the very same picture at another
+ * size: the Diff split, its two scissor boxes and the two cameras are the
+ * frame's own logic, and a second copy of that logic in the capture path would
+ * be a second thing to keep in step with this one.
+ */
+function renderFrame(w,h){
     if(diffMode){
         var halfW=Math.floor(w/2);
         renderer.autoClear=false;
