@@ -3811,7 +3811,9 @@ function crystalUseDeclaredSymmetry(){
     resetSelection();
     rebuildCrystal();
     syncCellPanel();
-    rebuildScene(true);
+    // A different setting places the cell's atoms in different places, so the
+    // picture re-centres on what it now shows (one rule for every rebuild).
+    rebuildScene();
     layoutPanels();
 }
 function crystalCellEstimate(nb){
@@ -3966,7 +3968,10 @@ function applyCellEdit(a,b,c,al,be,ga){
         provSet('cellEdit',a.toFixed(3)+' x '+b.toFixed(3)+' x '+c.toFixed(3)+' A, '+
             al.toFixed(1)+'/'+be.toFixed(1)+'/'+ga.toFixed(1)+' deg');
     }
-    rebuildScene(true);
+    // The sites moved within the same box, so the view follows them: the same
+    // derivation every other rebuild uses. The camera distance is left alone on
+    // purpose — the point of a cell edit is to see the stretch at one scale.
+    rebuildScene();
     mmSelectionChanged();
     layoutPanels();
     return true;
@@ -6906,19 +6911,15 @@ function rebuildScene(keepCenter){
     // recreates them from the geometry this build produces.
     polyFacesMesh=null;
     polyEdgesMesh=null;
-    // Recomputing the centroid is the default (the structure changed, the
-    // centre follows it). A supercell bounds change passes keepCenter: the
-    // atoms the old bounds already showed keep their exact screen positions
-    // and the new material appears around them, instead of the whole picture
-    // jumping to the enlarged structure's new centroid. A trajectory is read
-    // against its box, so a rebuild that is not a frame switch (a style change,
-    // an undo, an edit) leaves the centre where the box is rather than chasing
-    // the atoms; only an explicit re-centre moves it.
-    if(!keepCenter&&!TRAJ_FRAMES){
-        CX=0;CY=0;CZ=0;
-        MD.atoms.forEach(function(a){CX+=a.x;CY+=a.y;CZ+=a.z});
-        if(MD.atoms.length>0){CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length}
-    }
+    // Recomputing the centre is the default (the structure changed, the centre
+    // follows it). keepCenter is passed by the one caller that deliberately
+    // holds the picture still: a trajectory frame switch, where the box is the
+    // reference the motion is read against. The bounds door deliberately does
+    // not pass it — each set of bounds is a view of its own and gets its own
+    // centre (recomputeRotationCentre reads the atoms this build just placed),
+    // and the rebuild is deterministic, so returning to earlier bounds
+    // reproduces that view exactly.
+    if(!keepCenter&&!TRAJ_FRAMES)recomputeRotationCentre();
     var segs=sphereSegs();
     // The pools are caches: an entry outlives the meshes that drew with it, so
     // a rebuild after an edit or a colour toggle does not re-create every
@@ -7003,11 +7004,7 @@ function rebuildScene(keepCenter){
     updateEmptyNotice();
 }
 function updateScenePositions(keepCenter){
-    if(!keepCenter){
-        CX=0;CY=0;CZ=0;
-        MD.atoms.forEach(function(a){CX+=a.x;CY+=a.y;CZ+=a.z});
-        if(MD.atoms.length>0){CX/=MD.atoms.length;CY/=MD.atoms.length;CZ/=MD.atoms.length}
-    }
+    if(!keepCenter)recomputeRotationCentre();
     atomMeshes.forEach(function(m,i){var a=MD.atoms[i];if(a)m.position.set(a.x-CX,a.y-CY,a.z-CZ)});
     sphereLayerSyncPositions(mainSphereLayer);
     rebuildBondPieces();
@@ -7056,19 +7053,60 @@ function shiftAllMeshesForCenter(dx,dy,dz){
     // Surface meshes need no shift: their geometry is written relative to the
     // centre, and refreshVmdSurfaces rebuilds them for the new one.
 }
-// 重新确定旋转中心 (全部原子的质心)。增删原子、移动/旋转原子、导入结构等凡改变
-// 几何的操作在收尾时都要调用它 —— 否则旋转会绕着一个已经不是结构中心的点转,
-// 分子看起来就会"绕着圈外的某点在打转"。空结构时中心回到原点。
+// ===== Where the view turns =====
+//
+// The camera sits on the scene origin and every atom is drawn at
+// (coordinate - centre), so CX/CY/CZ *is* the point the structure turns about.
+// One rule serves every structure: **the centre is the centroid of the atoms on
+// screen**. A molecule turns about its middle; a 2x2x2 block turns about the
+// middle of the block rather than about a corner of the cell it was built from,
+// so each set of bounds gets its own pivot and the structure stays where the
+// user is looking while it spins.
+//
+// A crystal is a set of copies of the cell's contents at integer lattice
+// offsets, so the centroid of the displayed list *does* depend on the bounds
+// (0..2 sits half a cell further along every axis than 0..1). That dependence
+// is the point here, but it puts one obligation on the caller: the bounds door
+// has to re-derive the centre. It does — applyBoundary rebuilds the scene
+// without keeping the centre and re-frames the camera — so every set of bounds
+// lands on its own centre, and because the rebuild is deterministic a round
+// trip returns to the exact point and camera distance the earlier view had. The
+// arrangement this replaces was the opposite one: the bounds change kept the
+// old centre while a later routine re-centre (leaving Rotate Group, a deleted
+// atom, an undo, the WebGL context coming back) derived the displayed one, so a
+// restored cell was drawn off-centre and turned about a point outside itself.
+//
+// Every other re-deriving path — an edit, an undo, a mode switch, a restyle —
+// now agrees with the bounds door by construction, because there is exactly one
+// derivation and it reads the atoms that are actually on screen.
+//
+// The one inline sum left in the page is the seed CX/CY/CZ are declared with a
+// few hundred lines below: it runs before the first build, which replaces it.
+//
+// The plain atom centroid of what is on screen: the one definition every caller
+// shares.
+function displayedCentroid(){
+    var n=MD.atoms.length;
+    if(n<1)return null;
+    var cx=0,cy=0,cz=0;
+    for(var i=0;i<n;i++){cx+=MD.atoms[i].x;cy+=MD.atoms[i].y;cz+=MD.atoms[i].z}
+    return [cx/n,cy/n,cz/n];
+}
+// The one place a rotation centre is computed. Empty structure: the origin.
+// Deterministic in the atom list, so calling it twice answers the same point
+// and a rebuild that reproduces an earlier list reproduces that view's centre.
+function recomputeRotationCentre(){
+    var p=displayedCentroid();
+    CX=p?p[0]:0;CY=p?p[1]:0;CZ=p?p[2]:0;
+}
+// 重新确定旋转中心。增删原子、移动/旋转原子、导入结构等凡改变几何的操作在收尾
+// 时都要调用它 —— 否则旋转会绕着一个已经不是结构中心的点转, 分子看起来就会
+// "绕着圈外的某点在打转"。空结构时中心回到原点。
 // 已有的网格按中心位移整体平移 (O(原子数+键数) 次赋值), 不重建几何; 拖拽/预览
 // 期间中心保持不变, 只在收尾时重算。
 function updateRotationCenter(){
     var oldX=CX,oldY=CY,oldZ=CZ;
-    var n=MD.atoms.length;
-    CX=0;CY=0;CZ=0;
-    if(n>0){
-        for(var i=0;i<n;i++){CX+=MD.atoms[i].x;CY+=MD.atoms[i].y;CZ+=MD.atoms[i].z}
-        CX/=n;CY/=n;CZ/=n;
-    }
+    recomputeRotationCentre();
     shiftAllMeshesForCenter(CX-oldX,CY-oldY,CZ-oldZ);
     if(rotAxisLineMesh)showRotAxisLine();   // 轴指示线也是相对中心画的
     // 接触线同样相对中心存放, 中心一变就按新的几何重画。
@@ -8190,8 +8228,8 @@ if(CRY){
     layoutPanels();
     // One door for every way the bounds change: the six inputs, the N×N×N
     // presets, Reset and Align Origin all go through applyBoundary, so the size
-    // guard, the steady centre and the selection remap behave the same no
-    // matter which one moved.
+    // guard, the view's own rotation centre and the selection remap behave the
+    // same no matter which one moved.
     function boundsEqual(a,b){
         return a.aMin===b.aMin&&a.aMax===b.aMax&&a.bMin===b.bMin&&a.bMax===b.bMax&&a.cMin===b.cMin&&a.cMax===b.cMax;
     }
@@ -8231,9 +8269,15 @@ if(CRY){
         selectedAtoms=selKeys.filter(function(k){
             return k!=null&&newIdx[k]!==undefined;
         }).map(function(k){return newIdx[k]});
-        // The old centre stays the rotation centre (rebuildScene(true)): the
-        // picture does not jump when the bounds move.
-        rebuildScene(true);
+        // A different block is a different view, so the centre belongs to it:
+        // rebuild without the steady flag (rebuildScene derives the centre from
+        // the atoms it just built) and frame the new extent, so the picture
+        // lands centred on what is on screen instead of on the old block's
+        // point. Returning to earlier bounds then reproduces that view exactly,
+        // because the rebuild is deterministic — that is what makes the round
+        // trip safe now that the centre follows the bounds.
+        rebuildScene();
+        reframeView();
         refreshSelectionText();
         mmSelectionChanged();
         layoutPanels();
@@ -8360,7 +8404,9 @@ if(CRY){
             selectedAtoms=selKeys.filter(function(k){
                 return k!=null&&newIdx[k]!==undefined;
             }).map(function(k){return newIdx[k]});
-            rebuildScene(true);
+            // A different alternative is a different structure, so the view
+            // re-centres on it like any other rebuild.
+            rebuildScene();
             refreshSelectionText();
             mmSelectionChanged();
             layoutPanels();
@@ -8430,6 +8476,17 @@ function computeInitialCamDist(){
         }
     }
     return maxD*2.5+5;
+}
+// Re-frame the picture the way a load frames it: the farthest atom (and the
+// cell corners) with margin. The bounds door calls it, so a bigger block
+// arrives filling the viewport the way a freshly opened one would, and
+// returning to a smaller one restores the framing it had. Orientation and pan
+// are the user's own view state and are left alone.
+function reframeView(){
+    var d=diffMode?camDiffInit():computeInitialCamDist();
+    camDist=d;initCam=d;
+    if(diffMode)diffCamDist=d;
+    camera.position.set(0,0,d);
 }
 var initCam=computeInitialCamDist();
 camera.position.set(0,0,initCam);camera.lookAt(0,0,0);
