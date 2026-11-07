@@ -10,7 +10,7 @@
 
 ## English
 
-A VS Code / Trae extension that brings a GaussView-style 3D molecular viewer and editor into your IDE. It opens Gaussian, ORCA, MOPAC, xtb and VMD output alongside common structure formats, renders and edits them interactively, follows optimisation trajectories, compares structures and inspects crystals — including files on remote servers over Remote-SSH.
+A clean, fully featured 3D molecular viewer and editor for VS Code / Trae — entirely self-contained, with no external program to install or launch, and able to stand in for common desktop structure-visualization software in everyday viewing and editing work. It opens Gaussian, ORCA, MOPAC, xtb and VMD output alongside common structure formats, renders and edits them interactively, follows optimisation trajectories, compares structures and inspects crystals — including files on remote servers over Remote-SSH.
 
 ### Features
 
@@ -268,7 +268,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 **简体中文** | [English](#english)
 
-一个把 GaussView 风格的 3D 分子查看与编辑功能带进 VS Code / Trae 的插件。它可以打开 Gaussian、ORCA、MOPAC、xtb、VMD 的输出以及常见结构格式，交互式渲染与编辑，浏览优化轨迹、比较结构并查看晶体——包括通过 Remote-SSH 编辑远程服务器上的文件。
+一个简洁而功能齐全的 3D 分子查看与编辑插件，适用于 VS Code / Trae。它完全独立实现，无需安装或调用任何外部程序，日常查看与编辑可在一定程度上平替常用的本地结构可视化软件。它可以打开 Gaussian、ORCA、MOPAC、xtb、VMD 的输出以及常见结构格式，交互式渲染与编辑，浏览优化轨迹、比较结构并查看晶体——包括通过 Remote-SSH 编辑远程服务器上的文件。
 
 **目录**
 
