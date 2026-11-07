@@ -12286,7 +12286,7 @@ var isAutoPlaying=false;
 // still, not a film frame: every step is a whole scene rebuild, and it has to
 // stay on screen long enough to be read as one structure — but short enough
 // that a run of a few hundred steps is watchable rather than a slideshow.
-var FRAME_PLAY_MS=350;
+var FRAME_PLAY_MS=250;
 var frameNavEl=document.getElementById('frame-nav');
 var frameSepEl=document.getElementById('frame-sep');
 if(totalFrames>1){
@@ -13129,7 +13129,11 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
 // Vibration animation
 var vibActive=false,vibModeIdx=-1,vibBasePositions=null,vibTimer=null;
 var vibPaused=false,vibPausedElapsed=0,vibStartTime=0;
-var vibPeriodMs=3000,vibAmplitude=0.35,vibMaxMag=1;
+// One full swing of a mode — equilibrium -> + -> equilibrium -> - -> equilibrium.
+// At 3 s a mode read as the structure breathing rather than vibrating; 2.2 s is
+// a vibration one can follow atom by atom without turning into a blur, and it
+// is still one constant, so the phase maths keeps a single speed to divide by.
+var vibPeriodMs=2200,vibAmplitude=0.35,vibMaxMag=1;
 // A playback frame moves every atom and then re-places every bond piece from
 // the new coordinates — the same routine the scene build and a drag use, so a
 // bond can never disagree with the atoms it spans. Only the instance buffers
