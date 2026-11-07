@@ -11988,6 +11988,228 @@ function applyBetaColoring(on){
     if(next)next.addEventListener('click',function(){switchMolecule(vmdMolIdx+1)});
 })();
 
+// ===== A frame sequence is one system, and it is held still =====
+//
+// The frames of a log are one structure at successive steps, and the reason to
+// play them is to watch what changes *inside* it. Some programs also move the
+// whole molecule between steps, and that motion is not chemistry: Gaussian
+// prints the geometry it was given in the input orientation and every later
+// step in the standard orientation (principal axes), so a symmetry-constrained
+// optimisation — Opt=Symm, whose frame is re-derived from the point group at
+// every step — turns the molecule end over end while it relaxes. Played back,
+// that tumbling is all that is visible.
+//
+// Every frame is therefore superimposed on the first one by its best rigid fit
+// (rotation + translation over the atoms in file order; nothing is stretched),
+// and the fitted geometry is what the page draws, measures and saves. This is
+// what a trajectory viewer calls "align frames", applied to the sequence a log
+// carries: an ORCA or xTB run that re-orients its frames is corrected by the
+// same pass, and a run that does not is left alone — a fit that would move
+// nothing is never applied, so those frames keep their numbers exactly.
+//
+// Three cases are excluded on purpose:
+//   * a molecular-dynamics trajectory (TRAJ_FRAMES): its box is the reference
+//     the motion is read against, so the atoms must not move inside it;
+//   * a crystal (CRY) or any frame that states a cell: where a periodic
+//     structure sits in its cell is part of the structure;
+//   * a frame whose atom list is not the first frame's (a log can hold several
+//     jobs, each with its own molecule): there is no correspondence to fit.
+var FRAME_FIT=null;
+// The largest eigenvector of a symmetric 4x4 matrix, by cyclic Jacobi rotations:
+// the unit quaternion that minimises the fit error. null when the matrix
+// carries no spread at all (one atom, or every atom at the same point), where
+// a rotation is meaningless and a pure translation is the whole answer.
+function frameFitQuat(m){
+    // The caller passes the ten distinct entries of the symmetric matrix; it is
+    // expanded to the full 4x4 here so the rotations below can work on rows and
+    // columns directly.
+    var a=new Float64Array(16),v=new Float64Array(16);
+    a[0]=m[0];a[1]=m[1];a[2]=m[2];a[3]=m[3];
+    a[4]=m[1];a[5]=m[4];a[6]=m[5];a[7]=m[6];
+    a[8]=m[2];a[9]=m[5];a[10]=m[7];a[11]=m[8];
+    a[12]=m[3];a[13]=m[6];a[14]=m[8];a[15]=m[9];
+    var i,j,p,q,k;
+    v[0]=1;v[5]=1;v[10]=1;v[15]=1;
+    for(var sweep=0;sweep<48;sweep++){
+        var off=0;
+        for(i=0;i<4;i++)for(j=i+1;j<4;j++)off+=a[i*4+j]*a[i*4+j];
+        if(off<1e-26)break;
+        for(p=0;p<3;p++){
+            for(q=p+1;q<4;q++){
+                var apq=a[p*4+q];
+                if(Math.abs(apq)<1e-20)continue;
+                var theta=(a[q*4+q]-a[p*4+p])/(2*apq);
+                var t=(theta>=0?1:-1)/(Math.abs(theta)+Math.sqrt(theta*theta+1));
+                var c=1/Math.sqrt(t*t+1),s=t*c;
+                for(k=0;k<4;k++){
+                    var kp=a[k*4+p],kq=a[k*4+q];
+                    a[k*4+p]=c*kp-s*kq;a[k*4+q]=s*kp+c*kq;
+                }
+                for(k=0;k<4;k++){
+                    var pk=a[p*4+k],qk=a[q*4+k];
+                    a[p*4+k]=c*pk-s*qk;a[q*4+k]=s*pk+c*qk;
+                }
+                for(k=0;k<4;k++){
+                    var vp=v[k*4+p],vq=v[k*4+q];
+                    v[k*4+p]=c*vp-s*vq;v[k*4+q]=s*vp+c*vq;
+                }
+            }
+        }
+    }
+    var best=0;
+    for(i=1;i<4;i++)if(a[i*4+i]>a[best*4+best])best=i;
+    if(!(a[best*4+best]>1e-18))return null;
+    var qw=v[best],qx=v[4+best],qy=v[8+best],qz=v[12+best];
+    var len=Math.sqrt(qw*qw+qx*qx+qy*qy+qz*qz);
+    if(!(len>1e-12))return null;
+    return [qw/len,qx/len,qy/len,qz/len];
+}
+// The first frame as loaded: the pose every later frame is brought back to.
+// The numbers are snapshotted rather than the atom records, so the reference
+// stays exactly what the file said whatever happens to frame 0 afterwards.
+function frameFitReference(){
+    if(FRAME_FIT)return FRAME_FIT;
+    FRAME_FIT={ref:null,done:[]};
+    var f=MD.frames&&MD.frames[0];
+    if(!f||!f.atoms||!f.atoms.length||f.cell)return FRAME_FIT;
+    var n=f.atoms.length;
+    var ref={n:n,el:new Array(n),x:new Float64Array(n*3),cx:0,cy:0,cz:0};
+    var i,a;
+    for(i=0;i<n;i++){
+        a=f.atoms[i];
+        // A frame whose own coordinates are not numbers cannot be a reference:
+        // every fit against it would be NaN, and NaN would then be written into
+        // the frames that were readable. The whole pass stands down instead.
+        if(!isFinite(a.x)||!isFinite(a.y)||!isFinite(a.z))return FRAME_FIT;
+        // The element as written: the comparison below takes the fast path when
+        // the two spellings are identical, which is every frame of a real log.
+        ref.el[i]=String(a.element||'');
+        ref.x[i*3]=a.x;ref.x[i*3+1]=a.y;ref.x[i*3+2]=a.z;
+        ref.cx+=a.x;ref.cy+=a.y;ref.cz+=a.z;
+    }
+    ref.cx/=n;ref.cy/=n;ref.cz/=n;
+    for(i=0;i<n;i++){
+        ref.x[i*3]-=ref.cx;ref.x[i*3+1]-=ref.cy;ref.x[i*3+2]-=ref.cz;
+    }
+    FRAME_FIT.ref=ref;
+    return FRAME_FIT;
+}
+// The best rigid fit of one frame onto the reference, or null when the two are
+// not the same atom list. "apply" says whether the fit is worth making at all:
+// a frame that is already in the reference pose is left bit for bit as the
+// file wrote it, so files that never needed this pass are unaffected by it.
+function frameRigidFit(ref,atoms){
+    var n=ref.n,i,a;
+    if(!atoms||atoms.length!==n||n<1)return null;
+    for(i=0;i<n;i++){
+        a=atoms[i];
+        // The same atom list means the same elements in the same order; a log
+        // that runs several jobs can change the molecule, and there is nothing
+        // to superimpose then. The spellings are compared as written first and
+        // only folded to one case when they differ — the fold allocates a string
+        // per atom, and doing it unconditionally cost more than the fit itself
+        // (measured: 2.39 of 2.53 ms per 5000-atom frame).
+        var el=a.element;
+        if(el!==ref.el[i]&&String(el||'').toUpperCase()!==String(ref.el[i]||'').toUpperCase())return null;
+        // A coordinate that is not a number is refused for the same reason the
+        // reference refuses one. The test is arithmetic — x - x is 0 exactly
+        // when x is a finite number — because calling isFinite per coordinate
+        // dominated the whole pass (measured: 350 of 370 ns per atom, against
+        // 20 ns with this form): a frame is read as JSON numbers or not at all,
+        // so the typeof is the only coercion guard the data can need.
+        var ax=a.x,ay=a.y,az=a.z;
+        if(typeof ax!=='number'||typeof ay!=='number'||typeof az!=='number')return null;
+        if(ax-ax!==0||ay-ay!==0||az-az!==0)return null;
+    }
+    var cx=0,cy=0,cz=0;
+    for(i=0;i<n;i++){a=atoms[i];cx+=a.x;cy+=a.y;cz+=a.z}
+    cx/=n;cy/=n;cz/=n;
+    // 3x3 covariance of the frame against the reference, both about their own
+    // centroid: S[a][b] = sum (x_a - cx_a)(ref_b - cr_b). Its larger
+    // singular directions are the rotation the fit has to undo.
+    var sxx=0,sxy=0,sxz=0,syx=0,syy=0,syz=0,szx=0,szy=0,szz=0;
+    var before=0;
+    for(i=0;i<n;i++){
+        a=atoms[i];
+        var dx=a.x-cx,dy=a.y-cy,dz=a.z-cz;
+        var rx=ref.x[i*3],ry=ref.x[i*3+1],rz=ref.x[i*3+2];
+        sxx+=dx*rx;sxy+=dx*ry;sxz+=dx*rz;
+        syx+=dy*rx;syy+=dy*ry;syz+=dy*rz;
+        szx+=dz*rx;szy+=dz*ry;szz+=dz*rz;
+        var ex=dx-rx,ey=dy-ry,ez=dz-rz;
+        before+=ex*ex+ey*ey+ez*ez;
+    }
+    var quat=frameFitQuat([
+        sxx+syy+szz, syz-szy, szx-sxz, sxy-syx,
+        sxx-syy-szz, sxy+syx, szx+sxz,
+        -sxx+syy-szz, syz+szy,
+        -sxx-syy+szz
+    ]);
+    var r0=1,r1=0,r2=0,r3=0,r4=1,r5=0,r6=0,r7=0,r8=1;
+    if(quat){
+        var qw=quat[0],qx=quat[1],qy=quat[2],qz=quat[3];
+        r0=qw*qw+qx*qx-qy*qy-qz*qz;
+        r1=2*(qx*qy-qw*qz);
+        r2=2*(qx*qz+qw*qy);
+        r3=2*(qx*qy+qw*qz);
+        r4=qw*qw-qx*qx+qy*qy-qz*qz;
+        r5=2*(qy*qz-qw*qx);
+        r6=2*(qx*qz-qw*qy);
+        r7=2*(qy*qz+qw*qx);
+        r8=qw*qw-qx*qx-qy*qy+qz*qz;
+    }
+    var maxMove=0,after=0;
+    for(i=0;i<n;i++){
+        a=atoms[i];
+        var ux=a.x-cx,uy=a.y-cy,uz=a.z-cz;
+        var vx=r0*ux+r1*uy+r2*uz;
+        var vy=r3*ux+r4*uy+r5*uz;
+        var vz=r6*ux+r7*uy+r8*uz;
+        var gx=vx-ref.x[i*3],gy=vy-ref.x[i*3+1],gz=vz-ref.x[i*3+2];
+        after+=gx*gx+gy*gy+gz*gz;
+        // The displacement the transform really applies (the frame is moved
+        // onto the reference centroid, not left on its own).
+        var mx=vx+ref.cx-a.x,my=vy+ref.cy-a.y,mz=vz+ref.cz-a.z;
+        var m2=mx*mx+my*my+mz*mz;
+        if(m2>maxMove)maxMove=m2;
+    }
+    // One part in a million Angstrom is the threshold: below it the two frames
+    // are the same pose as far as any picture, measurement or saved number is
+    // concerned, and rewriting the coordinates would only add noise to a file
+    // that is already aligned. The fit is also rejected when it would not
+    // improve the agreement (a degenerate atom list can land there), because
+    // then it is not the same structure in two poses. The comparison is
+    // relative: the error terms scale with the atom count and the size of the
+    // structure, so an absolute allowance would refuse a large system that the
+    // fit plainly improves.
+    var apply=maxMove>1e-12&&after<=before*1.000001+1e-9;
+    return {r:[r0,r1,r2,r3,r4,r5,r6,r7,r8],cx:cx,cy:cy,cz:cz,
+            tx:ref.cx,ty:ref.cy,tz:ref.cz,apply:apply};
+}
+// Bring one frame into the reference pose. Called once per frame, at the moment
+// it is put on screen: the fitted coordinates become that frame's own, so an
+// edit made afterwards, an export, a measurement and a save all describe the
+// same geometry. Marking the frame as done is what keeps a revisit from
+// applying the same transform twice.
+function fixFrameRigid(idx){
+    if(TRAJ_FRAMES||CRY)return;
+    var f=MD.frames&&MD.frames[idx];
+    if(!f||!f.atoms||!f.atoms.length||idx===0||f.cell)return;
+    var st=frameFitReference();
+    if(!st.ref||st.done[idx])return;
+    st.done[idx]=true;
+    var fit=frameRigidFit(st.ref,f.atoms);
+    if(!fit||!fit.apply)return;
+    var r=fit.r,n=f.atoms.length;
+    for(var i=0;i<n;i++){
+        var a=f.atoms[i];
+        var dx=a.x-fit.cx,dy=a.y-fit.cy,dz=a.z-fit.cz;
+        a.x=r[0]*dx+r[1]*dy+r[2]*dz+fit.tx;
+        a.y=r[3]*dx+r[4]*dy+r[5]*dz+fit.ty;
+        a.z=r[6]*dx+r[7]*dy+r[8]*dz+fit.tz;
+    }
+}
+
 var currentFrame=0;
 var totalFrames=MD.frames?MD.frames.length:0;
 var autoPlayTimer=null;
@@ -12088,6 +12310,13 @@ function switchFrame(idx){
         if(f.charge!=null)MD.charge=f.charge;
         if(f.multiplicity!=null)MD.multiplicity=f.multiplicity;
         MD.atoms=f.atoms.map(function(a,i){a.index=i;return a});
+        // One system seen at successive steps: the frame is brought into the
+        // pose of the first one, so what the picture shows changing is the
+        // structure and not the orientation its program happened to print it
+        // in (see "A frame sequence is one system" above). The fitted numbers
+        // are written into the frame's own atoms, which are the records just
+        // taken on screen — editing, measuring and saving all see one geometry.
+        fixFrameRigid(idx);
         MD.bonds=f.bonds||[];
         if(MD.bonds.length===0){
             MD.bonds=detectBondsFromAtoms(MD.atoms,MD.charge);
