@@ -56,10 +56,12 @@ const UNIT_TO_ANGSTROM: { [unit: string]: number } = {
  * `dump xtc` always writes nanometres (LAMMPS converts even in `units lj`),
  * so its reader keeps the XTC default of ten.
  */
-export function lammpsLengthFactor(units: string | undefined): number {
-    if (!units) return 1;
-    const f = UNIT_TO_ANGSTROM[units.toLowerCase()];
-    return f !== undefined ? f : 1;
+export function lammpsLengthFactor(units: string | undefined): number | undefined {
+    // `undefined` means "unknown", not "one Angstrom per unit". The caller
+    // decides what to show, but it can only warn if the unknown answer is
+    // distinguishable from a real factor of 1 (`metal`/`real`/`lj`).
+    if (!units) return undefined;
+    return UNIT_TO_ANGSTROM[units.toLowerCase()];
 }
 
 function isNumeric(token: string | undefined): boolean {
@@ -440,7 +442,12 @@ export function parseLammpsData(content: string, options?: LammpsParseOptions): 
     const lines = content.split(/\r?\n/);
     const warnings: string[] = [];
     const title = oneLineTitle(lines[0] || '', 'LAMMPS data');
-    const unitFactor = lammpsLengthFactor(options && options.units);
+    const unitFactorRead = lammpsLengthFactor(options && options.units);
+    if (options && options.units && unitFactorRead === undefined) {
+        warnings.push('the LAMMPS units "' + options.units +
+            '" are not a length unit this reader knows: coordinates are shown unscaled');
+    }
+    const unitFactor = unitFactorRead === undefined ? 1 : unitFactorRead;
     const masses = parseMasses(lines);
     const typeElements: { [type: number]: string } = { ...(options && options.typeElements ? options.typeElements : {}) };
     for (const key of Object.keys(masses)) {
@@ -761,7 +768,7 @@ function buildDumpFrame(lines: string[], header: DumpHeader, typeElements: { [ty
 /** The first frame with readable atoms, and how many frame headers exist. */
 function parseDumpFrames(content: string, options?: LammpsParseOptions): { first: DumpFrame | null; count: number } {
     const lines = content.split(/\r?\n/);
-    const factor = lammpsLengthFactor(options && options.units);
+    const factor = lammpsLengthFactor(options && options.units) ?? 1;
     const typeElements = options && options.typeElements ? options.typeElements : {};
     const headers = scanDumpHeaders(lines, factor);
     for (const header of headers) {
@@ -774,6 +781,13 @@ function parseDumpFrames(content: string, options?: LammpsParseOptions): { first
 export function parseLammpsDump(content: string, options?: LammpsParseOptions): MolecularData {
     const parsed = parseDumpFrames(content, options);
     const warnings: string[] = [];
+    // An unknown unit is read as close to raw units — showing nano/micro/si
+    // coordinates as Angstrom would misplace every atom by 10 to 1e10 — and
+    // said out loud instead of passing as a real scale.
+    if (options && options.units && lammpsLengthFactor(options.units) === undefined) {
+        warnings.push('the LAMMPS units "' + options.units +
+            '" are not a length unit this reader knows: coordinates are shown unscaled');
+    }
     const title = 'LAMMPS dump';
     const first = parsed.first;
     if (first === null) {
@@ -843,7 +857,8 @@ export function parseLammpsDumpTrajectory(
     options?: LammpsDumpTrajectoryOptions
 ): LammpsDumpTrajectory {
     const lines = content.split(/\r?\n/);
-    const factor = lammpsLengthFactor(options && options.units);
+    const factorRead = lammpsLengthFactor(options && options.units);
+    const factor = factorRead === undefined ? 1 : factorRead;
     const typeElements = options && options.typeElements ? options.typeElements : {};
     const headers = scanDumpHeaders(lines, factor);
     const result: LammpsDumpTrajectory = {
@@ -854,6 +869,10 @@ export function parseLammpsDumpTrajectory(
         truncated: false,
         warnings: []
     };
+    if (options && options.units && factorRead === undefined) {
+        result.warnings.push('the LAMMPS units "' + options.units +
+            '" are not a length unit this reader knows: coordinates are shown unscaled');
+    }
     if (headers.length === 0) {
         result.warnings.push('no complete frame in the LAMMPS dump: no structure to show');
         return result;

@@ -37,7 +37,7 @@ A clean, fully featured 3D molecular viewer and editor for VS Code / Trae — en
 - **Dihedral** — Select four atoms and adjust the dihedral the same way.
 - **Add atom** — Click an anchor atom, pick one of 70+ elements, set the bond length and order. The direction maximizes separation from existing neighbours, producing linear, trigonal, tetrahedral or octahedral geometry; repeated additions fan out.
 - **Delete atom** — Click an atom and confirm; indices are updated automatically. To delete several atoms, select them first and press Delete.
-- **Replace atom** — Click **Replace Atom**, click one or more atoms (click again to deselect), then click the button again to pick a new element from 70+. Coordinates are preserved, and crystal base atoms can be replaced too.
+- **Replace atom** — Click **Replace Atom**, click one or more atoms (click again to deselect), then click the button again to pick a new element from 70+. Coordinates are preserved, and crystal base atoms can be replaced too: the bonds touching a replaced site are re-perceived for the new element's radius and valence, while bonds between untouched atoms keep their order.
 - **Ghost atoms** — Mark a position with no nucleus, electrons or bonds — the counterpoise (BSSE) marker. Add one with the Add Atom dialog's Ghost switch or the `X (dummy point)` element; the Replace Atom dialog's Ghost switch turns a whole selection into ghosts of their own elements. Ghosts are excluded from bonding, formula, electron count, Add H and MM, are drawn as faint markers, and round-trip through every format that can express them (Gaussian `C-Bq`, ORCA `C:`, XYZ/PDB dummy markers and others). Crystal structures cannot contain ghosts.
 - **Add H** — **Add H** fills the selected atoms' missing valences with hydrogens, using element-specific bond lengths, angles and the centre's hybridization. Existing atoms never move, re-running adds nothing, hydrogens that would clash are skipped and reported, and the whole addition is one undo step. Not available for crystals or in Diff.
 - **MM Optimize** — The **MM Optimize** panel runs the built-in, dependency-free force field. Set every parameter yourself or use **Low / Medium / High** presets, choose the atoms to relax and start. Only the selected atoms move, but fixed atoms still exert bonded and non-bonded forces. The run streams live coordinates with energy and force plots, reports the energy change, steps, stop reason and final forces, and offers **Pause/Resume** and **Restore initial**. A run is one undo step and is interrupted when you switch tool, frame or molecule; limits are 3000 atoms, 500 steps or 5 s. Not available for crystals or in Diff.
@@ -66,7 +66,7 @@ A clean, fully featured 3D molecular viewer and editor for VS Code / Trae — en
 - **Any format** — Compare the current structure with any supported file; multi-frame logs and trajectories ask which frame to use.
 - **Skeleton check** — Structures match by connectivity (graph isomorphism using element, degree and neighbour signature), ignoring bond order, so different bond orders at the same connectivity still match.
 - **Side-by-side view** — Each half rotates, pans and zooms independently and keeps its own aspect ratio.
-- **Differences** — Matching skeletons highlight bond length, angle and dihedral differences in orange on both sides, with percentage changes and a complete difference list. A 0–20% threshold slider controls what is highlighted; the results panel can be closed and reopened with **Show Results**.
+- **Differences** — Matching skeletons highlight bond length, angle and dihedral differences in orange on both sides, with percentage changes and a complete difference list. Bond-order differences at the same skeleton are listed too (single / aromatic / double / triple) at any threshold, so a single↔double change is never reported as identical. A 0–20% threshold slider controls what is highlighted (0% really means 0%); the results panel can be closed and reopened with **Show Results**.
 - **Statistics** — A collapsible **Internal Coordinate Statistics** block gives n, RMS, max |Δ|, mean and standard deviation per element-composition group and overall. It covers every compared coordinate, not only those above the threshold.
 - **Auto-mirror selection** — Measuring a bond, angle or dihedral on one side selects the mapped atoms on the other and shows both values plus Δ.
 - **Crystal Diff** — Crystals are compared as unit cells: cell parameters first, then the periodic base-cell graph, so a file compared with itself is identical at any supercell size. Distances are measured through periodic images, and every displayed copy of a differing site is marked. A crystal and a molecule are reported as not comparable, and Polyhedra is refused during Diff.
@@ -80,7 +80,7 @@ A clean, fully featured 3D molecular viewer and editor for VS Code / Trae — en
 - **Bonds and symmetry** — Bonds use a minimum-image search (27 images normally, more for narrow or skewed cells) and the same perception module as molecules, including aromatic orders, and are drawn as split stubs at cell faces. A CIF's own `_geom_bond` table is read with its symmetry codes and stated order, and unusable rows are reported. CIFs that state only a space-group name use a built-in table of all 230 groups (530 settings); unreadable operations are reported as P1.
 - **Neighbours** — Lists contacts around a clicked atom within an adjustable radius (3.5 Å default, up to 12 Å), skipping bonded atoms unless enabled. Rows name the periodic image, clicking selects both ends, and **Select listed** takes the whole shell. Escape or View clears the dashed guides.
 - **Lattice planes** — Two h k l triples give d-spacing and the angle between normals; **Show Plane** draws the plane through the centre of the box. Hidden in Diff.
-- **Powder XRD** — Calculates a pattern for Cu/Mo/Co/Fe/Cr/Ag Kα radiation and 2θ limits of 60/90/120/150°, with real systematic absences, enumerated multiplicities, Debye–Waller damping and the Kα1/Kα2 doublet. The panel plots the curve, lists the strongest lines and notes elements outside the form-factor table; it runs in the background with progress and Cancel, and exports as `.xy`. Not available in Diff.
+- **Powder XRD** — Calculates a pattern for Cu/Mo/Co/Fe/Cr/Ag Kα radiation and 2θ limits of 60/90/120/150°, with real systematic absences, enumerated multiplicities, Debye–Waller damping and the Kα1/Kα2 doublet. Peak positions use the source's **Kα1** wavelength and the curve adds the Kα2 line at its 2:1 intensity; the panel and the export state both, so the pattern and its label agree. The panel plots the curve, lists the strongest lines and notes elements outside the form-factor table; it runs in the background with progress and Cancel, and exports as `.xy`. Not available in Diff.
 - **Cavities** — Probes the unit cell with an adjustable probe radius on a 0.25 Å grid, reporting open channels versus closed cavities, per-cell volume, centre and largest fitting sphere. Click a row to draw the void as a translucent surface; very large voids report their volume without drawing. Read-only and not available in Diff.
 - **Edit Cell** — Change a, b, c, α, β, γ while sites keep their fractional coordinates; invalid values or a cell above the atom ceiling are refused with the reason shown. Every export uses the edited cell.
 - **Disorder groups** — Choose **All** or a disorder group; the selected group can be counted at full occupancy in the formula, density and exports. Switching back to All is lossless.
@@ -305,7 +305,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 - **二面角** — 选择 4 个原子，用同样的方式调节。
 - **添加原子** — 点击锚点原子，选择元素（70+ 种），设定键长与键级。方向会最大化与已有邻居的夹角，自然得到直线、三角、四面体或八面体构型；对同一锚点重复添加会扇形展开。
 - **删除原子** — 点击原子并确认，原子与键会自动重新编号。要一次删除多个原子，先选中它们再按 Delete。
-- **替换原子** — 点击 **Replace Atom**，在 3D 视图中点击一个或多个原子（再次点击取消选中），然后再次点击按钮，从 70+ 种元素中选择新元素。坐标保持不变，晶体的基础原子也可以替换。
+- **替换原子** — 点击 **Replace Atom**，在 3D 视图中点击一个或多个原子（再次点击取消选中），然后再次点击按钮，从 70+ 种元素中选择新元素。坐标保持不变，晶体的基础原子也可以替换：与被替换位点相连的键会按新元素的半径与价重新感知，未受影响原子之间的键保持原有键级。
 - **幽灵原子** — 一个只有位置、没有原子核、电子和化学键的标记，用于 counterpoise（BSSE）计算。可在添加原子弹窗中打开 Ghost 开关或选择 `X (dummy point)` 元素；替换原子弹窗的 Ghost 开关可以把整个选区变成各自元素的幽灵原子。幽灵原子不参与成键、分子式、电子数、补氢与 MM，绘制为淡色小标记，并能在各格式中往返（Gaussian `C-Bq`、ORCA `C:`、XYZ/PDB 占位标记等）。晶体结构中不允许幽灵原子。
 - **补氢** — **Add H** 为所选原子补齐缺失的价，采用元素专属的键长、键角与中心杂化态。已有原子绝不会移动，重复运行不会新增，放不下（会与别的原子重叠）的氢会被跳过并报告，整次添加是一步 Undo。晶体结构与 Diff 模式下不可用。
 - **MM 优化** — **MM Optimize** 面板运行内置、零依赖的力场。可以逐项设置参数，或一键选择 **Low / Medium / High** 三档预设，再选择要松弛的原子并开始。只有选中的原子会移动，但固定原子仍通过键、角、二面角与非键作用施力。运行中实时更新坐标，并绘制能量与受力曲线；结束后报告能量变化、步数、停止原因与最终受力，支持 **Pause/Resume** 与 **Restore initial**。整次运行是一步 Undo，切换工具、帧或分子会中断运行；上限为 3000 原子、500 步或 5 秒。晶体结构与 Diff 模式下不可用。
@@ -334,7 +334,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 - **任意格式** — 把当前结构与任一受支持文件比较；多帧日志与轨迹会询问使用哪一帧。
 - **骨架校验** — 按连接性做图同构匹配（元素、度数、邻居签名），不考虑键级，因此连接性相同但键级写得不一致的分子仍能匹配。
 - **并排视图** — 左右两半可各自独立旋转、平移与缩放，并保持各自的宽高比。
-- **差异显示** — 骨架匹配时，两侧以橙色高亮键长、键角与二面角差异，显示百分比变化和完整差异列表。0–20% 的阈值滑块控制高亮内容；结果面板可用 **Show Results** 关闭与重开。
+- **差异显示** — 骨架匹配时，两侧以橙色高亮键长、键角与二面角差异，显示百分比变化和完整差异列表。同一骨架上的键级差异也会单独列出（单键 / 芳香 / 双键 / 三键），不受阈值影响，因此单键↔双键不会被误报为“完全相同”。0–20% 的阈值滑块控制高亮内容（0% 即真正的 0%）；结果面板可用 **Show Results** 关闭与重开。
 - **分组统计** — 可折叠的 **Internal Coordinate Statistics** 区块按元素组成分组，给出 n、RMS、最大 |Δ|、均值与标准差，并附一行总体统计。统计覆盖所有比较过的坐标，而不只是超过阈值的那些。
 - **自动镜像选择** — 在一侧测量键长、键角或二面角时，另一侧会自动选中对应原子，并同时显示两侧数值与 Δ。
 - **晶体对比** — 晶体按晶胞比较：先核对六个晶胞参数，再匹配基础晶胞的周期性图，因此同一文件在任何超胞尺寸下都与自身相同。距离沿周期像测量，差异位点的每个显示副本都会标记。晶体与分子会明确提示不可比较，Diff 模式下也不能使用多面体。
@@ -348,7 +348,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 - **成键与对称性** — 晶体键使用最小镜像搜索（普通晶胞枚举 27 个像，窄或斜的晶胞会自动扩大），并采用与分子相同的感知模块（含芳香键级），跨晶面的键绘制为延伸到视图外的短分割键。CIF 自带的 `_geom_bond` 表会连同对称码与写明的键级一起读取，无法使用的行会被报告。只写空间群名的 CIF 使用内置的 230 个空间群（530 个设置）表；无法读取的对称操作会按 P1 报告。
 - **邻居** — 列出点击原子周围的接触，半径可调（默认 3.5 Å，最大 12 Å），默认跳过已成键的原子（可用复选框恢复）。每行注明周期像，点击一行会选中两端，**Select listed** 选中整个壳层。Escape 或 View 清除虚线。
 - **晶面** — 两组 h k l 给出 d 间距与法线夹角；**Show Plane** 在显示盒子中心画出该晶面。Diff 中不显示。
-- **粉末 XRD** — 按 Cu/Mo/Co/Fe/Cr/Ag Kα 辐射与 60/90/120/150° 的 2θ 上限计算衍射图，包含真实的系统消光、枚举出的多重度、Debye–Waller 衰减与 Kα1/Kα2 双线。面板绘制曲线、列出最强线并标注形状因子表之外的元素；计算在后台分片进行，带进度与 Cancel，并可把曲线导出为 `.xy`。Diff 模式下不可用。
+- **粉末 XRD** — 按 Cu/Mo/Co/Fe/Cr/Ag Kα 辐射与 60/90/120/150° 的 2θ 上限计算衍射图，包含真实的系统消光、枚举出的多重度、Debye–Waller 衰减与 Kα1/Kα2 双线。峰位使用辐射的 **Kα1** 波长，曲线再按 2:1 强度叠加 Kα2 线；面板与导出会同时写明两者，使峰位与标注一致。面板绘制曲线、列出最强线并标注形状因子表之外的元素；计算在后台分片进行，带进度与 Cancel，并可把曲线导出为 `.xy`。Diff 模式下不可用。
 - **空腔** — 用可调探针半径在 0.25 Å 网格上扫描晶胞，区分开放通道与闭合空腔，并给出单胞体积、中心与可容纳的最大球。点击一行可把空腔绘制为半透明曲面；体素过多时只报告体积。只读，Diff 模式下不可用。
 - **编辑晶胞** — 修改 a、b、c、α、β、γ，所有位点保持分数坐标；非法数值或会超过原子上限的晶胞会被拒绝并说明原因。所有导出都使用修改后的晶胞。
 - **无序组** — 在 **All** 与某个无序组之间切换，所选组可在分子式、密度与导出中按满占据计算。切回 All 不会丢失任何信息。

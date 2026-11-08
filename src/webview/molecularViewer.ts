@@ -1027,9 +1027,12 @@ async function loadBinaryTrajectoryDocument(
     if (companions.units && companions.units.toLowerCase() === 'lj') {
         warnings.push('the LAMMPS run uses units lj: DCD coordinates are in reduced units and are shown unscaled');
     }
-    const lengthScale = format === 'dcd'
-        ? (companions.units ? lammpsLengthFactor(companions.units) : 1)
-        : 10;
+    const dcdUnits = companions.units ? lammpsLengthFactor(companions.units) : 1;
+    if (format === 'dcd' && companions.units && dcdUnits === undefined) {
+        warnings.push('the LAMMPS units "' + companions.units +
+            '" are not a length unit this reader knows: DCD coordinates are shown unscaled');
+    }
+    const lengthScale = format === 'dcd' ? (dcdUnits === undefined ? 1 : dcdUnits) : 10;
     const trajectory = readBinaryTrajectory(bytes, { lengthScale });
     warnings.push(...trajectory.warnings);
     if (trajectory.sampled) {
@@ -5938,6 +5941,11 @@ function remapCrystalBonds(bonds,oldToNew){
 function removeDisorder(){
     if(!CRY)return;
     pushUndo();
+    // The rebuild below renumbers every base site, so the display indices a
+    // selection or a rotate-group session holds stop naming the atoms they
+    // were taken from. Both sessions end before the numbering moves.
+    resetRotAxisState();
+    resetSelection();
     var baseCountBefore=CRY.baseAtoms.length;
     var newBaseAtoms=[];
     var oldToNew={};
@@ -11224,9 +11232,30 @@ function crystalStructureDiff(leftCry,leftInv,leftBonds,rightCry,rightInv,rightB
 // bond's periodic image, so the same loops, the same statistics and the same
 // difference list serve both — and a crystal can never quietly use a different
 // notion of "bond length" from a molecule.
+// A dihedral is one path through four bonded atoms, and reversal is the same
+// torsion read backwards. Canonicalising only its direction — never sorting
+// the four indices — keeps the four distinct torsions of a ring apart while a
+// walk that re-entered the same path from the other end still collapses to one.
+function diffDihedralKey(a,b,c,d){
+    var f=[a,b,c,d],r=[d,c,b,a];
+    for(var i=0;i<4;i++){
+        if(f[i]<r[i])return f.join('-');
+        if(f[i]>r[i])return r.join('-');
+    }
+    return f.join('-');
+}
+function diffOrderLabel(o){
+    if(o===1.5)return 'aromatic';
+    if(o===1)return 'single';
+    if(o===2)return 'double';
+    if(o===3)return 'triple';
+    return String(o);
+}
 function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct,geo){
-    var diffs={bonds:[],angles:[],dihedrals:[]};
-    var tp=threshPct||2;
+    var diffs={bonds:[],orders:[],angles:[],dihedrals:[]};
+    // A threshold of zero means zero, not "unset": a truthiness fallback
+    // silently replaced the slider's leftmost position with the default.
+    var tp=threshPct==null?2:threshPct;
     var statAcc={bonds:{},angles:{},dihedrals:{}};
     var dist1=geo?geo.dist1:function(i,j){return dist3d(atoms1[i],atoms1[j])};
     var dist2=geo?geo.dist2:function(i,j){return dist3d(atoms2[i],atoms2[j])};
@@ -11242,6 +11271,15 @@ function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct,
         var a2m=Math.max(mapping[b.atom1],mapping[b.atom2]);
         var key=a1m+'-'+a2m;
         if(bondSet2[key]!==undefined){
+            // The same skeleton can carry a different bond order (a single
+            // bond read as double, an aromatic ring perceived as alternating
+            // single/double). That is a chemical difference even when every
+            // length, angle and torsion agrees, so it is listed beside them.
+            var order1=b.order==null?1:b.order;
+            var order2=bondSet2[key]==null?1:bondSet2[key];
+            if(Math.abs(order1-order2)>1e-9){
+                diffs.orders.push({i1:b.atom1,i2:b.atom2,o1:order1,o2:order2});
+            }
             var d1=dist1(b.atom1,b.atom2);
             var d2=dist2(mapping[b.atom1],mapping[b.atom2]);
             collectDiffStat(statAcc.bonds,diffPairKey(atoms1[b.atom1].element,atoms1[b.atom2].element),d1-d2);
@@ -11261,13 +11299,11 @@ function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct,
         for(var k=0;k<nbs.length;k++){
             for(var m=k+1;m<nbs.length;m++){
                 var i1=nbs[k],i3=nbs[m];
-                // Dedup key over the three atom indices, order-insensitive:
-                // the pair is already visited once per centre, this only stops
-                // a repeated neighbour entry from counting the same angle twice.
-                // (A min/max key over the two outer atoms collides for two
-                // different angles sharing the higher atom, silently dropping
-                // angles whose centre has a smaller index than its neighbours.)
-                var key=[i1,j,i3].sort().join('-');
+                // The centre stays in the middle and only the two ends are
+                // ordered: an angle is symmetric in its outer atoms but not in
+                // its vertex. Sorting all three indices made a three-membered
+                // ring's three angles share one key, so two of them vanished.
+                var key=Math.min(i1,i3)+'-'+j+'-'+Math.max(i1,i3);
                 if(angleSeen[key])continue;
                 angleSeen[key]=true;
                 var a1=angle1(i1,j,i3);
@@ -11294,7 +11330,7 @@ function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct,
                 adj1[start].forEach(function(e1){
                     var s0=e1.to;
                     if(s0===mid)return;
-                    var key=[s0,start,mid,end].sort().join('-');
+                    var key=diffDihedralKey(s0,start,mid,end);
                     if(dihedralSeen[key])return;
                     dihedralSeen[key]=true;
                     var d1=dihedral1(s0,start,mid,end);
@@ -11304,8 +11340,12 @@ function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct,
                         diffWrap180(d1-d2));
                     var dd=Math.abs(d1-d2);
                     if(dd>180)dd=360-dd;
-                    var avgD=(Math.abs(d1)+Math.abs(d2))/2;
-                    var pctD=avgD>1.0?dd/avgD*100:dd*10;
+                    // A torsion lives on a 0-180 circle, so its relative change
+                    // is the wrapped angle difference over 180 degrees. Using
+                    // the angles themselves as the denominator made a 0.1 deg
+                    // wobble near 0 explode in percentage and made a real
+                    // 60 -> 75 deg change look smaller than it is.
+                    var pctD=dd/180*100;
                     if(pctD>tp){
                         diffs.dihedrals.push({i1:s0,i2:start,i3:mid,i4:end,d1:d1,d2:d2,diff:dd,pct:pctD});
                     }
@@ -11425,7 +11465,7 @@ function startCrystalDiff(msg){
     if(res.status==='ok'){
         crystalDiffDisplayMaps(res.mapping);
         var diffs=res.diffs;
-        var total=diffs.bonds.length+diffs.angles.length+diffs.dihedrals.length;
+        var total=diffs.bonds.length+diffs.orders.length+diffs.angles.length+diffs.dihedrals.length;
         showDiffPanel(buildDiffResultsHTML(diffs,total),true);
         wireDiffSlider();
         diffLabelRight.textContent='Diff: '+diffData.fileName;
@@ -11452,7 +11492,7 @@ function crystalDiffRefresh(){
     diffBaseIndices=true;diffLabelAtoms=CRY.baseAtoms;
     crystalDiffDisplayMaps(res.mapping);
     var diffs=res.diffs;
-    var total=diffs.bonds.length+diffs.angles.length+diffs.dihedrals.length;
+    var total=diffs.bonds.length+diffs.orders.length+diffs.angles.length+diffs.dihedrals.length;
     var listEl=diffPanelEl.querySelector('#diff-results-list');
     if(listEl){
         listEl.innerHTML=buildDiffListHTML(diffs,total);
@@ -11534,7 +11574,7 @@ function startDiff(msg){
     }
 
     var diffs=computeConformationDiffs(MD.atoms,detBonds1,diffData.atoms,detBonds2,mapping,diffThresholdPct);
-    var totalDiff=diffs.bonds.length+diffs.angles.length+diffs.dihedrals.length;
+    var totalDiff=diffs.bonds.length+diffs.orders.length+diffs.angles.length+diffs.dihedrals.length;
 
     diffMapping=mapping;
     diffReverseMapping=new Array(diffData.atoms.length).fill(-1);
@@ -11561,7 +11601,7 @@ function buildDiffResultsHTML(diffs,totalDiff){
     html+='<div class="diff-row" style="margin-bottom:4px">';
     html+='<label style="font-size:11px">Threshold: <b><span id="thresh-val">'+diffThresholdPct.toFixed(1)+'</span>%</b></label>';
     html+='<input type="range" id="thresh-slider" min="0" max="20" step="0.5" value="'+diffThresholdPct+'" style="width:100%;accent-color:var(--vscode-textLink-foreground,#3794ff)">';
-    html+='<div style="font-size:10px;color:var(--vscode-descriptionForeground,#999)">Relative difference: Δ/avg × 100%</div>';
+    html+='<div style="font-size:10px;color:var(--vscode-descriptionForeground,#999)">Relative difference: Δ/avg × 100% (dihedrals: Δ/180°) · bond orders are listed at any threshold</div>';
     html+='</div>';
     html+='<div id="diff-results-list">';
     html+=buildDiffListHTML(diffs,totalDiff);
@@ -11575,12 +11615,19 @@ function buildDiffListHTML(diffs,totalDiff){
     // from that list; the molecular one keeps MD.atoms.
     var labelAtoms=diffLabelAtoms||MD.atoms;
     if(totalDiff===0){
-        html+='<div class="diff-row" style="color:#4ec9b0">Structures are identical (same conformation within thresholds).</div>';
+        html+='<div class="diff-row" style="color:#4ec9b0">Structures are identical (same bond orders and conformation within thresholds).</div>';
     }else{
         html+='<div class="diff-row">Mapping: '+labelAtoms.length+' atoms matched. '+totalDiff+' differences found.</div>';
     }
     html+=buildDiffStatsHTML(diffs.stats);
     if(totalDiff>0){
+        if(diffs.orders.length>0){
+            html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Bond Order Differences ('+diffs.orders.length+')</b></div>';
+            diffs.orders.forEach(function(d){
+                html+='<div class="diff-row">  '+atomLabel(labelAtoms[d.i1],d.i1)+'-'+atomLabel(labelAtoms[d.i2],d.i2)+
+                    ': '+diffOrderLabel(d.o1)+' vs '+diffOrderLabel(d.o2)+'</div>';
+            });
+        }
         if(diffs.bonds.length>0){
             html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Bond Length Differences ('+diffs.bonds.length+')</b></div>';
             diffs.bonds.sort(function(a,b){return b.pct-a.pct});
@@ -11690,7 +11737,7 @@ function recomputeDiff(){
     }
     if(!diffMapping||!diffDetBonds1||!diffDetBonds2)return;
     var diffs=computeConformationDiffs(MD.atoms,diffDetBonds1,diffData.atoms,diffDetBonds2,diffMapping,diffThresholdPct);
-    var totalDiff=diffs.bonds.length+diffs.angles.length+diffs.dihedrals.length;
+    var totalDiff=diffs.bonds.length+diffs.orders.length+diffs.angles.length+diffs.dihedrals.length;
     var listEl=diffPanelEl.querySelector('#diff-results-list');
     if(listEl){
         listEl.innerHTML=buildDiffListHTML(diffs,totalDiff);
@@ -11737,6 +11784,10 @@ function updateDiffHighlights(diffs){
     var highlightAtoms={};
     var highlightBonds={};
     diffs.bonds.forEach(function(d){
+        highlightAtoms[d.i1]=true;highlightAtoms[d.i2]=true;
+        highlightBonds[Math.min(d.i1,d.i2)+'-'+Math.max(d.i1,d.i2)]=true;
+    });
+    diffs.orders.forEach(function(d){
         highlightAtoms[d.i1]=true;highlightAtoms[d.i2]=true;
         highlightBonds[Math.min(d.i1,d.i2)+'-'+Math.max(d.i1,d.i2)]=true;
     });
@@ -11937,6 +11988,10 @@ function enterDiffRender(diffs,mapping){
             markHi(d.i1);markHi(d.i2);
             hiBond[Math.min(d.i1,d.i2)+'-'+Math.max(d.i1,d.i2)]=true;
         });
+        diffs.orders.forEach(function(d){
+            markHi(d.i1);markHi(d.i2);
+            hiBond[Math.min(d.i1,d.i2)+'-'+Math.max(d.i1,d.i2)]=true;
+        });
         diffs.angles.forEach(function(d){markHi(d.i1);markHi(d.i2);markHi(d.i3)});
         diffs.dihedrals.forEach(function(d){markHi(d.i1);markHi(d.i2);markHi(d.i3);markHi(d.i4)});
     }
@@ -11953,6 +12008,7 @@ function enterDiffRender(diffs,mapping){
             }else leftHi[idx]=true;
         };
         diffs.bonds.forEach(function(d){markLeft(d.i1);markLeft(d.i2)});
+        diffs.orders.forEach(function(d){markLeft(d.i1);markLeft(d.i2)});
         diffs.angles.forEach(function(d){markLeft(d.i1);markLeft(d.i2);markLeft(d.i3)});
         diffs.dihedrals.forEach(function(d){markLeft(d.i1);markLeft(d.i2);markLeft(d.i3);markLeft(d.i4)});
         atomMeshes.forEach(function(m,i){
@@ -12485,7 +12541,13 @@ function switchFrame(idx){
         // are written into the frame's own atoms, which are the records just
         // taken on screen — editing, measuring and saving all see one geometry.
         fixFrameRigid(idx);
-        MD.bonds=f.bonds||[];
+        // The frame's own bond list is copied, not aliased: an edit on this
+        // frame pushes a bond (Add Atom, a re-perception), and an alias would
+        // append to the file's stored list too — a later return to this frame
+        // would draw bonds pointing at the wrong atoms.
+        MD.bonds=(f.bonds||[]).map(function(b){
+            var copy={};for(var k in b)copy[k]=b[k];return copy;
+        });
         if(MD.bonds.length===0){
             MD.bonds=detectBondsFromAtoms(MD.atoms,MD.charge);
         }
@@ -12498,7 +12560,11 @@ function switchFrame(idx){
         setVmdNavEnabled(false);
     }
     undoStack.length=0;updateUndoBtn();
-    if(diffMode)resetSelection();
+    // A selection names atoms of the frame being left. Every frame switch
+    // clears it, not only one inside a comparison: keeping the numbers would
+    // silently select the atoms that happen to hold the same indices in the
+    // new frame, which can be a different element in a different place.
+    resetSelection();
     // The rotate-group teardown normally re-centres on the geometry it leaves
     // behind; a trajectory frame is built against the fixed centre instead.
     resetRotAxisState(keepTrajCenter);
@@ -13275,7 +13341,29 @@ function startVibration(modeIdx){
     // playback is about to rewrite.
     stopFrameAutoPlay();
     stopMoveSession();
-    if(totalFrames>0&&currentFrame!==totalFrames-1){switchFrame(totalFrames-1)}
+    // Playing a mode is a view of the structure, not a change of it. The last
+    // frame is the one the frequency job computed the modes for, so starting a
+    // playback there is normal bookkeeping — but a frame switch clears the
+    // undo stack, and pressing Play once must not throw away the edits the
+    // user made. The history is carried across the switch when both frames
+    // describe the same atom list (a multi-job log can change molecule between
+    // frames, and a snapshot of one must never be applied to the other).
+    if(totalFrames>0&&currentFrame!==totalFrames-1){
+        var fromAtoms=MD.frames[currentFrame]&&MD.frames[currentFrame].atoms;
+        var toAtoms=MD.frames[totalFrames-1]&&MD.frames[totalFrames-1].atoms;
+        var sameList=!!(fromAtoms&&toAtoms&&fromAtoms.length===toAtoms.length);
+        if(sameList){
+            for(var fi=0;fi<fromAtoms.length;fi++){
+                if(fromAtoms[fi].element!==toAtoms[fi].element){sameList=false;break}
+            }
+        }
+        var keptUndo=sameList?undoStack.slice():null;
+        switchFrame(totalFrames-1);
+        if(keptUndo){
+            undoStack=keptUndo;
+            updateUndoBtn();
+        }
+    }
     var mode=NORMAL_MODES[modeIdx];
     if(!mode.displacements||mode.displacements.length!==MD.atoms.length)return;
     // A manual displacement is the user's structure, not a pose: the playback
@@ -15909,8 +15997,13 @@ function intCrystalPrep(){
         var s=bb.shift||ZERO_SHIFT;
         if(a2.element==='H'&&a1.element!=='H')hbonds.push({d:bb.atom1,h:bb.atom2,hShift:[s[0],s[1],s[2]]});
         else if(a1.element==='H'&&a2.element!=='H')hbonds.push({d:bb.atom2,h:bb.atom1,hShift:[-s[0],-s[1],-s[2]]});
-        if(INT_SIGMA[a2.element])sigmas.push({type:INT_SIGMA[a2.element],x:bb.atom2,d:bb.atom1,dShift:[s[0],s[1],s[2]]});
-        if(INT_SIGMA[a1.element])sigmas.push({type:INT_SIGMA[a1.element],x:bb.atom1,d:bb.atom2,dShift:[-s[0],-s[1],-s[2]]});
+        // A bond record says "atom2 sits s cells from atom1". The sigma-hole
+        // angle is measured with the centre X in the home cell, so the
+        // substituent's image is the opposite direction in each branch: when
+        // X is atom2 the substituent atom1 is at -s, and when X is atom1 the
+        // substituent atom2 is at +s. Both used to carry the other branch's sign.
+        if(INT_SIGMA[a2.element])sigmas.push({type:INT_SIGMA[a2.element],x:bb.atom2,d:bb.atom1,dShift:[-s[0],-s[1],-s[2]]});
+        if(INT_SIGMA[a1.element])sigmas.push({type:INT_SIGMA[a1.element],x:bb.atom1,d:bb.atom2,dShift:[s[0],s[1],s[2]]});
     }
     return {base:base,lv:lv,fracs:fracs,widths:widths,lim:lim,limHb:limHb,
         hbonds:hbonds,sigmas:sigmas,accList:accList,rings:null,
@@ -16059,12 +16152,17 @@ function intDisplayIndexFor(bi,shift){
 // actually sits in.
 function intDisplayPair(row){
     var di=row.xBi!=null?row.xBi:row.dBi;
+    // A crystal H-bond row anchors on the donor, but its acceptor offset was
+    // measured from the hydrogen's image: the hydrogen can sit a whole cell
+    // away from the donor (a bond across a face), and its own hShift is part
+    // of the path from the drawn donor to the drawn acceptor.
+    var extra=row.hShift||ZERO_SHIFT;
     for(var i=0;i<MD.atoms.length;i++){
         var a=MD.atoms[i];
         if(a.baseIdx!==di||!a.imgShift)continue;
-        var want=[a.imgShift[0]+row.aShift[0],
-                  a.imgShift[1]+row.aShift[1],
-                  a.imgShift[2]+row.aShift[2]];
+        var want=[a.imgShift[0]+extra[0]+row.aShift[0],
+                  a.imgShift[1]+extra[1]+row.aShift[1],
+                  a.imgShift[2]+extra[2]+row.aShift[2]];
         var j=intDisplayIndexFor(row.aBi,want);
         if(j>=0)return [i,j];
     }
@@ -16616,6 +16714,13 @@ function xrdRadiationById(id){
         if(XRD_RADIATIONS[i].id===id)return XRD_RADIATIONS[i];
     }
     return XRD_RADIATIONS[0];
+}
+// The wavelength the peak positions are actually computed at. A doublet entry
+// states a weighted mean in its lambda field, but the calculation uses the
+// Kalpha1 line; the panel and the export must name the number the pattern was
+// built from, not the average printed in the radiation table.
+function xrdPrimaryLambda(rad){
+    return rad&&rad.k1?rad.k1:rad.lambda;
 }
 // Lorentz-polarisation for an unpolarised laboratory beam, in the powder form.
 function xrdLp(twoDeg){
@@ -17270,7 +17375,13 @@ function xrdRenderResult(res){
     var listEl=document.getElementById('xrd-list');
     var expBtn=document.getElementById('xrd-export');
     if(sumEl){
-        sumEl.textContent=rad.label+' '+rad.lambda.toFixed(4)+' A - '+pat.peaks.length+' peak'+
+        // The line positions come from the primary (Kalpha1) wavelength; the
+        // doublet's second line only broadens the curve. The summary states
+        // the number the peaks were computed at, then names the doublet.
+        var lam=xrdPrimaryLambda(rad);
+        sumEl.textContent=rad.label+' '+lam.toFixed(4)+' A'+
+            (rad.k2?' (Kα1 line; Kα2 at '+rad.k2.toFixed(4)+' A)':'')+
+            ' - '+pat.peaks.length+' peak'+
             (pat.peaks.length===1?'':'s')+' from '+pat.reflections+' reflection'+
             (pat.reflections===1?'':'s')+' ('+pat.min+'-'+pat.twoMax+' deg)';
         sumEl.classList.remove('xr-running');
@@ -17407,7 +17518,13 @@ function xrdFillControls(){
         for(i=0;i<XRD_RADIATIONS.length;i++){
             var o=document.createElement('option');
             o.value=XRD_RADIATIONS[i].id;
-            o.textContent=XRD_RADIATIONS[i].label+' ('+XRD_RADIATIONS[i].lambda.toFixed(4)+' A)';
+            // A doublet entry is chosen for both lines; name the Kalpha1
+            // wavelength the peaks are placed at, then the Kalpha2 line beside
+            // it — never the weighted mean, which places no peak.
+            var rInfo=XRD_RADIATIONS[i].k2
+                ?'Kα1 '+XRD_RADIATIONS[i].k1.toFixed(4)+' A; Kα2 '+XRD_RADIATIONS[i].k2.toFixed(4)+' A'
+                :XRD_RADIATIONS[i].lambda.toFixed(4)+' A';
+            o.textContent=XRD_RADIATIONS[i].label+' ('+rInfo+')';
             rad.appendChild(o);
         }
     }
@@ -17465,9 +17582,12 @@ function xrdExport(){
     var pat=xrdResult.pattern,rad=xrdResult.rad;
     var out=[];
     out.push('# Molecular Viewer - powder X-ray diffraction');
-    out.push('# Radiation: '+rad.label+' (lambda = '+rad.lambda.toFixed(5)+' A)');
-    if(rad.k2)out.push('# Doublet: Kα1 = '+rad.k1.toFixed(5)+' A, Kα2 = '+rad.k2.toFixed(5)+
-        ' A, I(Kα2)/I(Kα1) = '+XRD_K2_RATIO.toFixed(2));
+    // The peak positions were computed at the primary wavelength; a doublet
+    // source's weighted mean must not be written as if it placed them.
+    out.push('# Radiation: '+rad.label+' (lambda = '+xrdPrimaryLambda(rad).toFixed(5)+' A'+
+        (rad.k2?', the Kα1 line':'')+')');
+    if(rad.k2)out.push('# Doublet: Kα2 = '+rad.k2.toFixed(5)+
+        ' A, I(Kα2)/I(Kα1) = '+XRD_K2_RATIO.toFixed(2)+' (the Kα2 line broadens the curve beside each Kα1 peak)');
     out.push('# Structure: '+(MD.title||'crystal'));
     out.push('# Range: '+pat.min.toFixed(2)+' - '+(pat.min+pat.step*(pat.values.length-1)).toFixed(2)+' deg, step '+pat.step+' deg');
     out.push('# 2theta(deg) intensity');
@@ -17767,14 +17887,36 @@ function cavComponents(field,nx,ny,nz,voxelVolume){
 function cavFreeRadius(x,y,z,atoms,lv,nx,ny,nz){
     var u=(x+0.5)/nx,v=(y+0.5)/ny,w=(z+0.5)/nz;
     var best=1e9;
+    // Rounding each fractional difference separately picks the nearest image
+    // only in an orthogonal cell. In a skew cell the shortest image can carry
+    // an offset one cell off from the rounded one, and the rounded answer
+    // overstates the free radius. The 3x3x3 neighbourhood of the rounded
+    // offset contains every candidate that can beat it; the orthogonal case
+    // keeps the single rounded image, exactly as before.
+    var ortho=(Math.abs(lv[0][1])<1e-12&&Math.abs(lv[0][2])<1e-12&&
+               Math.abs(lv[1][0])<1e-12&&Math.abs(lv[1][2])<1e-12&&
+               Math.abs(lv[2][0])<1e-12&&Math.abs(lv[2][1])<1e-12);
     for(var a=0;a<atoms.length;a++){
         var at=atoms[a];
         var du=u-at.fx,dv=v-at.fy,dw=w-at.fz;
-        du-=Math.round(du);dv-=Math.round(dv);dw-=Math.round(dw);
-        var dx=du*lv[0][0]+dv*lv[1][0]+dw*lv[2][0];
-        var dy=du*lv[0][1]+dv*lv[1][1]+dw*lv[2][1];
-        var dz=du*lv[0][2]+dv*lv[1][2]+dw*lv[2][2];
-        var d=Math.sqrt(dx*dx+dy*dy+dz*dz)-at.r;
+        var bx=Math.round(du),by=Math.round(dv),bz=Math.round(dw);
+        var bestD2=Infinity;
+        var lo=ortho?0:-1,hi=ortho?0:1;
+        for(var ox=lo;ox<=hi;ox++){
+            var gx=du-(bx+ox);
+            for(var oy=lo;oy<=hi;oy++){
+                var gy=dv-(by+oy);
+                for(var oz=lo;oz<=hi;oz++){
+                    var gz=dw-(bz+oz);
+                    var dx=gx*lv[0][0]+gy*lv[1][0]+gz*lv[2][0];
+                    var dy=gx*lv[0][1]+gy*lv[1][1]+gz*lv[2][1];
+                    var dz=gx*lv[0][2]+gy*lv[1][2]+gz*lv[2][2];
+                    var d2=dx*dx+dy*dy+dz*dz;
+                    if(d2<bestD2)bestD2=d2;
+                }
+            }
+        }
+        var d=Math.sqrt(bestD2)-at.r;
         if(d<best)best=d;
     }
     return best;
@@ -18936,6 +19078,7 @@ function showReplaceAtomModal(){
             if(changedReal>0)provMark('unghostAtoms',changedReal);
         }
         var becameReal=[];
+        var changedBase=[];
         selectedAtoms.forEach(function(idx){
             var a=MD.atoms[idx];
             if(!a)return;
@@ -18950,9 +19093,15 @@ function showReplaceAtomModal(){
             if(CRY){
                 var bi=a.baseIdx!=null?a.baseIdx:idx;
                 if(CRY.baseAtoms[bi]){
+                    var wasElement=CRY.baseAtoms[bi].element;
                     CRY.baseAtoms[bi].element=a.element;
                     CRY.baseAtoms[bi].color=a.color;
                     CRY.baseAtoms[bi].ghost=a.ghost;
+                    // A new element is a new atom chemically: its radius,
+                    // valence and bond orders are not the old element's. The
+                    // bonds that touch this site have to be perceived again,
+                    // or a C->O replacement keeps every C-H order in the cell.
+                    if(wasElement!==a.element)changedBase.push(bi);
                 }
             }
         });
@@ -18961,8 +19110,40 @@ function showReplaceAtomModal(){
         // geometry the same way a load would, and only the bonds that touch a
         // converted atom are added, so no existing bond changes.
         dropGhostBonds();
-        if(becameReal.length>0)rebondAtoms(becameReal);
-        if(CRY){rebuildCrystal();}
+        if(becameReal.length>0&&!CRY)rebondAtoms(becameReal);
+        if(CRY){
+            if(changedBase.length>0&&CRY_INV){
+                // Re-perceive the bonds of the replaced sites only. A bond
+                // between two untouched atoms keeps whatever the file or the
+                // user's own order edit said; a bond touching a new element is
+                // re-derived from the geometry and the valence rule.
+                var changedSet={};
+                changedBase.forEach(function(bi){changedSet[bi]=true});
+                // The file's bond table was written for the old elements; a row
+                // that names a replaced site would put its stale order back.
+                if(CRY.fileBonds){
+                    CRY.fileBonds=CRY.fileBonds.filter(function(b){
+                        return !changedSet[b.atom1]&&!changedSet[b.atom2];
+                    });
+                }
+                var fresh=detectCrystalBaseBondsFor(CRY,CRY_INV);
+                var keptBonds=[];
+                CRY.baseBonds.forEach(function(b){
+                    if(changedSet[b.atom1]||changedSet[b.atom2])return;
+                    keptBonds.push(b);
+                });
+                fresh.forEach(function(b){
+                    if(changedSet[b.atom1]||changedSet[b.atom2])keptBonds.push(b);
+                });
+                CRY.baseBonds=keptBonds;
+                // This edit has just re-derived the affected bonds; a later
+                // rebuild must not run a full re-perception that would also
+                // rewrite the untouched bonds' preserved orders.
+                CRY.bondsDetected=true;
+                mergeCrystalFileBonds();
+            }
+            rebuildCrystal();
+        }
         rebuildScene();hideModal();originalCoords=null;resetSelection();
     });
     document.getElementById('m-cancel').addEventListener('click',function(){hideModal();originalCoords=null;resetSelection()});
