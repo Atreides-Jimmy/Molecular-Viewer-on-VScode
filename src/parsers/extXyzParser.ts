@@ -103,12 +103,29 @@ function countFrames(lines: string[]): number {
     let frames = 0;
     let i = 0;
     while (i < lines.length) {
-        const line = lines[i].trim();
-        if (line === '') { i++; continue; }
-        const count = parseInt(line, 10);
-        if (!isFinite(count) || count < 0) break;
+        // Frames are separated by an optional blank line in several writers;
+        // skipping it keeps the next count line from being read as a comment.
+        while (i < lines.length && lines[i].trim() === '') i++;
+        if (i >= lines.length) break;
+
+        const countLine = lines[i].trim();
+        if (!/^\d+$/.test(countLine)) break;
+        const count = parseInt(countLine, 10);
+        if (!isFinite(count)) break;
+        i++;
+
+        // The count line is followed by exactly one comment line (which may be
+        // blank), then `count` non-empty atom rows.
+        if (i < lines.length) i++;
+        let rows = 0;
+        while (i < lines.length && rows < count) {
+            if (lines[i].trim() !== '') rows++;
+            i++;
+        }
         frames++;
-        i += 2 + count;
+        // A cut-off frame ends the file: the rows after it cannot be attributed
+        // without its missing atoms.
+        if (rows < count) break;
     }
     return frames;
 }

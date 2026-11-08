@@ -13,7 +13,18 @@ const ATOMIC_NUMBER_MAP: { [key: string]: number } = {
     PA: 91, U: 92, NP: 93, PU: 94, AM: 95, CM: 96, BK: 97, CF: 98
 };
 
-function pdbElement(atomName: string, altElement?: string): string {    if (altElement && altElement.trim() !== '') {
+/**
+ * The element of an atom, from the PDB element column when it is present and
+ * from the atom-name field otherwise.
+ *
+ * PDB alignment is what tells a protein's C-alpha from a calcium ion: a
+ * one-letter element's atom name is right-justified (column 13 is blank,
+ * ` CA ` in a protein), while a two-letter element's name starts in column 13
+ * (`CA  ` for calcium). Trimming the name first loses that distinction and
+ * turned every protein `CA`, `CD`, `CE`, `HG` into a metal.
+ */
+function pdbElement(atomNameField: string, altElement?: string): string {
+    if (altElement && altElement.trim() !== '') {
         const e = altElement.trim();
         const upper = e.toUpperCase();
         if (ATOMIC_NUMBER_MAP[upper] !== undefined) {
@@ -21,28 +32,31 @@ function pdbElement(atomName: string, altElement?: string): string {    if (altE
         }
         return e.charAt(0).toUpperCase() + e.slice(1).toLowerCase();
     }
-    let name = atomName.trim();
-    const match = name.match(/^([A-Za-z]+)/);
-    if (!match) return 'C';
-    let elem = match[1];
-    if (elem.length >= 2) {
-        const first = elem.charAt(0).toUpperCase();
-        const second = elem.charAt(1).toLowerCase();
-        const upper2 = elem.substring(0, 2).toUpperCase();
-        if (ATOMIC_NUMBER_MAP[upper2] !== undefined) {
-            return first + second;
-        }
-        if (ATOMIC_NUMBER_MAP[first] !== undefined) {
-            return first;
-        }
+    const field = atomNameField || '';
+    const name = field.trim();
+    if (!name) return 'C';
+    const startsInColumn13 = field.charAt(0) !== ' ' && field.charAt(0) !== '\t';
+    const numericPrefix = /^[0-9]/.test(name);
+    const letters = name.replace(/^[0-9]+/, '');
+    if (!letters) return 'C';
+
+    const two = letters.slice(0, 2);
+    let twoSymbol = '';
+    const upper2 = two.toUpperCase();
+    if (two.length === 2 && ATOMIC_NUMBER_MAP[upper2] !== undefined) {
+        twoSymbol = two.charAt(0).toUpperCase() + two.charAt(1).toLowerCase();
     }
-    if (elem.length === 1) {
-        const upper = elem.toUpperCase();
-        if (ATOMIC_NUMBER_MAP[upper] !== undefined) {
-            return upper;
-        }
+    // Only a name that starts in the element column can name a two-letter
+    // element; a right-justified name (` CA `) is a single-letter element.
+    if (startsInColumn13 && !numericPrefix && twoSymbol) {
+        return twoSymbol;
     }
-    return elem.charAt(0).toUpperCase();
+    const first = letters.charAt(0).toUpperCase();
+    if (ATOMIC_NUMBER_MAP[first] !== undefined) {
+        return first;
+    }
+    if (twoSymbol) return twoSymbol;
+    return first;
 }
 
 export function parsePdb(content: string): MolecularData {    const lines = content.split(/\r?\n/);
@@ -62,10 +76,16 @@ export function parsePdb(content: string): MolecularData {    const lines = cont
 
         if (recType === 'ATOM' || recType === 'HETATM') {
             const serial = parseInt(line.substring(6, 11).trim(), 10);
-            if (seenSerials.has(serial)) continue;
-            seenSerials.add(serial);
+            // A blank or hybrid-36 serial is not a number. `Set.has(NaN)` is
+            // true after the first one, so adding NaN to the set would drop
+            // every further atom with such a serial; only real numbers take
+            // part in the duplicate check.
+            if (!isNaN(serial)) {
+                if (seenSerials.has(serial)) continue;
+                seenSerials.add(serial);
+            }
 
-            const atomName = line.substring(12, 16).trim();
+            const atomNameField = line.substring(12, 16);
             let altElement = '';
             if (line.length > 76) {
                 const tail = line.substring(76).trim();
@@ -81,7 +101,7 @@ export function parsePdb(content: string): MolecularData {    const lines = cont
                     altElement = lastWord;
                 }
             }
-            const element = pdbElement(atomName, altElement);
+            const element = pdbElement(atomNameField, altElement);
 
             const x = parseFloat(line.substring(30, 38).trim());
             const y = parseFloat(line.substring(38, 46).trim());
@@ -108,7 +128,7 @@ export function parsePdb(content: string): MolecularData {    const lines = cont
                 if (!isNaN(beta) && line.length > 65) {
                     atom.beta = beta;
                 }
-                atomSerialMap.set(serial, atomIndex);
+                if (!isNaN(serial)) atomSerialMap.set(serial, atomIndex);
                 atoms.push(atom);
                 atomIndex++;
             }

@@ -9,8 +9,20 @@ export function parseMol2(content: string): MolecularData {
     let hasExplicitBonds = false;
 
     let i = 0;
-    let atomCount = 0;
-    let bondCount = 0;
+    // The counter runs across the whole file, not per `@<TRIPOS>ATOM` block: a
+    // MOL2 may hold several MOLECULE blocks, and restarting the numbering at
+    // each block made two atoms share `index` and let a bond from the second
+    // block address the first block's atoms.
+    let atomIndex = 0;
+    // MOL2 bonds name atoms by `atom_id` (the first column), which need not be
+    // contiguous — a coordinate row this reader has to skip would otherwise
+    // shift every later bond onto the wrong atom. The map is built as the atom
+    // rows are accepted, so a bond resolves to the atom that actually exists.
+    // It is block-local: a second MOLECULE block usually restarts its ids at 1,
+    // and a file-wide map would resolve those bonds to the first block's atoms.
+    // `atomIndex` alone stays continuous across blocks.
+    let idToIndex: { [id: number]: number } = {};
+    let unresolvedBonds = 0;
 
     while (i < lines.length) {
         const line = lines[i].trim();
@@ -22,7 +34,7 @@ export function parseMol2(content: string): MolecularData {
             }
         } else if (line.startsWith('@<TRIPOS>ATOM')) {
             i++;
-            let atomIndex = 0;
+            idToIndex = {};
             while (i < lines.length && lines[i].trim() !== '' && !lines[i].trim().startsWith('@<TRIPOS>')) {
                 const parts = lines[i].trim().split(/\s+/);
                 if (parts.length >= 6) {
@@ -42,12 +54,13 @@ export function parseMol2(content: string): MolecularData {
                         const atom: Atom = { element, x, y, z, index: atomIndex };
                         if (ghost) atom.ghost = true;
                         atoms.push(atom);
+                        const id = parseInt(parts[0], 10);
+                        if (!isNaN(id) && idToIndex[id] === undefined) idToIndex[id] = atomIndex;
                         atomIndex++;
                     }
                 }
                 i++;
             }
-            atomCount = atomIndex;
             continue;
         } else if (line.startsWith('@<TRIPOS>BOND')) {
             hasExplicitBonds = true;
@@ -55,8 +68,8 @@ export function parseMol2(content: string): MolecularData {
             while (i < lines.length && lines[i].trim() !== '' && !lines[i].trim().startsWith('@<TRIPOS>')) {
                 const parts = lines[i].trim().split(/\s+/);
                 if (parts.length >= 4) {
-                    const atom1 = parseInt(parts[1], 10) - 1;
-                    const atom2 = parseInt(parts[2], 10) - 1;
+                    const id1 = parseInt(parts[1], 10);
+                    const id2 = parseInt(parts[2], 10);
                     const bondTypeStr = parts[3].toLowerCase();
                     let order = 1;
                     if (bondTypeStr === '2') {
@@ -74,7 +87,15 @@ export function parseMol2(content: string): MolecularData {
                         if (!isNaN(parsed)) order = parsed;
                     }
 
-                    if (!isNaN(atom1) && !isNaN(atom2) && atom1 >= 0 && atom2 >= 0 && atom1 !== atom2) {
+                    const atom1 = id1 >= 0 ? idToIndex[id1] : undefined;
+                    const atom2 = id2 >= 0 ? idToIndex[id2] : undefined;
+                    if (atom1 === undefined || atom2 === undefined) {
+                        // A bond whose id names no atom this file listed cannot
+                        // be drawn; falling back to `id - 1` would silently join
+                        // whatever atom now sits at that position. Count it so
+                        // the file's own defect can be reported.
+                        unresolvedBonds++;
+                    } else if (atom1 !== atom2) {
                         const exists = bonds.some(b =>
                             (b.atom1 === atom1 && b.atom2 === atom2) ||
                             (b.atom1 === atom2 && b.atom2 === atom1)
@@ -86,12 +107,18 @@ export function parseMol2(content: string): MolecularData {
                 }
                 i++;
             }
-            bondCount = bonds.length;
             continue;
         }
 
         i++;
     }
 
-    return { atoms, bonds, title, hasExplicitBonds };
+    const warnings: string[] = [];
+    if (unresolvedBonds > 0) {
+        warnings.push(unresolvedBonds + ' bond' + (unresolvedBonds === 1 ? '' : 's') +
+            ' name an atom id the file does not list: those bonds were left out');
+    }
+    return warnings.length > 0
+        ? { atoms, bonds, title, hasExplicitBonds, warnings }
+        : { atoms, bonds, title, hasExplicitBonds };
 }

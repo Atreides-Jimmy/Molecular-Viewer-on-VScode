@@ -11,7 +11,8 @@ const ATOMIC_NUMBER_MAP: { [key: number]: string } = {
     71: 'Lu', 72: 'Hf', 73: 'Ta', 74: 'W', 75: 'Re', 76: 'Os', 77: 'Ir', 78: 'Pt', 79: 'Au', 80: 'Hg',
     81: 'Tl', 82: 'Pb', 83: 'Bi', 84: 'Po', 85: 'At', 86: 'Rn', 87: 'Fr', 88: 'Ra', 89: 'Ac', 90: 'Th',
     91: 'Pa', 92: 'U', 93: 'Np', 94: 'Pu', 95: 'Am', 96: 'Cm', 97: 'Bk', 98: 'Cf', 99: 'Es', 100: 'Fm',
-    101: 'Md', 102: 'No', 103: 'Lr'
+    101: 'Md', 102: 'No', 103: 'Lr', 104: 'Rf', 105: 'Db', 106: 'Sg', 107: 'Bh', 108: 'Hs', 109: 'Mt', 110: 'Ds',
+    111: 'Rg', 112: 'Cn', 113: 'Nh', 114: 'Fl', 115: 'Mc', 116: 'Lv', 117: 'Ts', 118: 'Og'
 };
 
 export interface LogFrame {
@@ -44,13 +45,29 @@ export interface GaussianLogResult {
     routes?: RouteSection[];
 }
 
+/**
+ * How far a table header may be scanned for its dashed rules. Gaussian's
+ * orientation header is five lines; a limit keeps a damaged file whose dashes
+ * are missing from swallowing every later frame, convergence table and
+ * frequency section to EOF.
+ */
+const MAX_DASHED_HEADER_LINES = 24;
+
 function skipDashedLines(lines: string[], startIdx: number, count: number): number {
     let i = startIdx;
     let skipped = 0;
-    while (i < lines.length && skipped < count) {
-        if (lines[i].includes('---')) {
+    const limit = Math.min(lines.length, startIdx + MAX_DASHED_HEADER_LINES);
+    while (i < limit && skipped < count) {
+        const text = lines[i].trim();
+        if (text.includes('---')) {
             skipped++;
+            i++;
+            continue;
         }
+        // The header is over as soon as an atom row appears, even when one or
+        // both of its dashed rules is missing: counting dashes only would scan
+        // past the geometry and lose the frame (and everything after it).
+        if (/^\d/.test(text)) break;
         i++;
     }
     return i;

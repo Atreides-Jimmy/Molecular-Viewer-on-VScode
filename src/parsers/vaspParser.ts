@@ -175,15 +175,33 @@ export function parseVasp(content: string): MolecularData {
 
     let coordLine = lines[lineIdx] !== undefined ? lines[lineIdx].trim() : '';
     let selective = false;
-    if (/^s/i.test(coordLine)) {
+    if (/^s(?:elective)?\b/i.test(coordLine)) {
         selective = true;
         lineIdx++;
         coordLine = lines[lineIdx] !== undefined ? lines[lineIdx].trim() : '';
     }
 
-    const isFractional = /^d/i.test(coordLine);
-    const isCartesian = /^c/i.test(coordLine);
-    lineIdx++;
+    // Only a line that actually states a coordinate mode may be consumed as
+    // one. A POSCAR whose mode line is missing starts its coordinates here;
+    // skipping this row unconditionally fed the first coordinate to the mode
+    // reader and moved every atom's fractional/cartesian interpretation.
+    let mode: 'direct' | 'cartesian' | null = null;
+    if (/^d(?:irect)?\b/i.test(coordLine)) {
+        mode = 'direct';
+    } else if (/^c(?:artesian)?\b/i.test(coordLine)) {
+        mode = 'cartesian';
+    }
+    if (mode) {
+        lineIdx++;
+    } else {
+        // No mode line: VASP itself would reject the file, and the viewer has
+        // to pick a reading. Direct is the convention POSCAR writers default
+        // to; the warning keeps the choice from being silent.
+        mode = 'direct';
+        warnings.push('the POSCAR coordinate mode line is missing: coordinates are read as Direct (fractional)');
+    }
+    const isFractional = mode === 'direct';
+    const isCartesian = mode === 'cartesian';
 
     if (elementTypes.length === 0 || elementCounts.length === 0) {
         const totalAtoms = symbolCountsMissing > 0

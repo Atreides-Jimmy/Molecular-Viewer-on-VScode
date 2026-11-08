@@ -2,6 +2,7 @@ import { MolecularData, AtomGroup, OptStep, NormalMode, OptThresholds } from '..
 import { parseGjf } from './gjfParser';
 import { parseXyz, parseXyzTrajectory, XyzFrame, XyzTrajectory } from './xyzParser';
 import { parseMol2 } from './mol2Parser';
+import { parseMol, isMdlMol } from './molParser';
 import { parseGaussianLog, LogFrame, GaussianLogResult, RouteSection, RouteKeyword } from './logParser';
 import { parseCoord } from './coordParser';
 import { parseOrcainp, scanOrcaXyzfile, OrcaExternalStructure, OrcaXyzReference } from './orcaInpParser';
@@ -31,6 +32,7 @@ export { parseOrcaOut, isOrcaOutput, OrcaFrame, OrcaLogResult };
 export { scanOrcaXyzfile, OrcaExternalStructure, OrcaXyzReference };
 export { parseXyzTrajectory, XyzFrame, XyzTrajectory };
 export { parseCif };
+export { parseMol, isMdlMol };
 export { parseVasp, parseXdatcar, parseOutcar, parseVasprunXml, isXdatcar, isOutcar, isVasprunXml };
 export { parseCube };
 export { parseVesta };
@@ -204,10 +206,30 @@ export function parseFile(content: string, fileName: string, options?: ParseFile
             return parseExtXyz(content);
         case 'mol2':
             return parseMol2(content);
+        case 'mol':
+            // Save As writes MDL Mol, so the same reader opens it back. A file
+            // whose header was damaged still gets the warning from `parseMol`
+            // rather than the empty XYZ structure the fallback produced.
+            return parseMol(content);
         case 'log':
         case 'out': {
             const structured = structuredOutput(content, options);
-            return structured || parseLogAsSingleFrame(content);
+            if (structured) return structured;
+            // An xTB trajectory log has an XYZ block per frame and would
+            // otherwise be read by the plain XYZ fallback below, losing the
+            // frame's charge/multiplicity. Keep its own frame reader first.
+            if (isXtbLog(content)) return parseLogAsSingleFrame(content);
+            // Old MOPAC outputs state no version banner, so the detector that
+            // knows their Cartesian table lives in the content sniffers. A
+            // Gaussian/ORCA/xTB frame log reaches its own reader there as well;
+            // `tryAutoParse` only says nothing (no atoms, no warning) when no
+            // reader recognised the file at all, which is when this branch
+            // reports the frame reader's own explanation.
+            const guessed = tryAutoParse(content, fileName, options);
+            if (guessed.atoms.length > 0 || (guessed.warnings && guessed.warnings.length > 0)) {
+                return guessed;
+            }
+            return parseLogAsSingleFrame(content);
         }
         case 'coord':
             return parseCoord(content);
@@ -393,7 +415,36 @@ function parseLogAsSingleFrame(content: string): MolecularData {
 export function tryAutoParse(content: string, fileName: string = '', options?: ParseFileOptions): MolecularData {
     const lines = content.split(/\r?\n/).filter(l => l.trim() !== '');
 
-    if (content.includes('$coord')) {
+    // Program outputs echo their own inputs, so what wrote the file has to win
+    // over the input syntax it repeats. An ORCA output contains its `* xyz`
+    // block; reading that echo as an ORCA input returned no atoms and no
+    // warning, so structured output is detected first.
+    const structured = structuredOutput(content, options);
+    if (structured) return structured;
+
+    // ORCA output is recognised by ORCA-only markers, not by its echoed input.
+    // A renamed output (a `.txt` or an extensionless file) therefore opens
+    // with its geometry instead of being read as the input it repeats.
+    if (isOrcaOutput(content)) {
+        const result = parseOrcaOut(content);
+        if (result.frames.length > 0) {
+            return {
+                atoms: result.frames[0].atoms,
+                bonds: result.frames[0].bonds,
+                title: result.frames[0].title,
+                hasExplicitBonds: result.frames[0].hasExplicitBonds,
+                charge: result.charge,
+                multiplicity: result.multiplicity
+            };
+        }
+        return {
+            atoms: [], bonds: [], title: result.title || 'ORCA output', hasExplicitBonds: false,
+            warnings: ['this is an ORCA output but no geometry frame was found in it: ' +
+                'open the output file that holds the coordinates']
+        };
+    }
+
+    if (/^[ \t]*\$coord\b/im.test(content)) {
         return parseCoord(content);
     }
 
@@ -407,9 +458,6 @@ export function tryAutoParse(content: string, fileName: string = '', options?: P
     if (isExtXyz(content)) {
         return parseExtXyz(content);
     }
-
-    const structured = structuredOutput(content, options);
-    if (structured) return structured;
 
     if (isLammpsInput(content)) {
         return parseLammpsInputStructure(content, options && options.externalStructureFile, options && options.lammps);
@@ -479,18 +527,11 @@ export function tryAutoParse(content: string, fileName: string = '', options?: P
         return parseAbinitInput(content, options && options.externalStructureFile);
     }
 
-    if (isOrcaOutput(content)) {
-        const result = parseOrcaOut(content);
-        if (result.frames.length > 0) {
-            return {
-                atoms: result.frames[0].atoms,
-                bonds: result.frames[0].bonds,
-                title: result.frames[0].title,
-                hasExplicitBonds: result.frames[0].hasExplicitBonds,
-                charge: result.charge,
-                multiplicity: result.multiplicity
-            };
-        }
+    // A molfile has no extension of its own in some toolchains; the CTfile
+    // counts line and `M  END` identify it before the first-line-is-a-count
+    // fallback can claim the title line.
+    if (isMdlMol(content)) {
+        return parseMol(content);
     }
 
     if (lines.length > 0) {

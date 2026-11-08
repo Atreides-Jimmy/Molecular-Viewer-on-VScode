@@ -314,12 +314,9 @@ function bpGeometricOrder(el1: string, el2: string, d: number): number {
         return order;
     }
 
-    const r1 = COV_R[bpNorm(el1)];
-    const r2 = COV_R[bpNorm(el2)];
-    const rSum = (r1 === undefined ? 1.5 : r1) + (r2 === undefined ? 1.5 : r2);
-    const ratio = rSum !== 0 ? d / rSum : 1.0;
-    if (ratio < 0.85) return 3.0;
-    if (ratio < 0.90) return 2.0;
+    // No tabulated lengths for this pair means no evidence for anything above
+    // a single bond: a covalent-radius ratio cannot tell an ionic Na-Cl pair
+    // from a triple bond (it classified Na-Cl as double and Li-F as triple).
     return 1.0;
 }
 
@@ -1922,7 +1919,13 @@ export function perceiveBonds(rawAtoms: Atom[], opts?: PerceptionOptions): Perce
         if (comp.length > maxSolver) continue;
         if (!bpHasViolation(bondMap, atoms, comp)) continue;
 
-        const attempt = bpSolveComponent(bondMap, atoms, comp, totalCharge);
+        // The total charge describes the whole structure, not each fragment.
+        // Giving +1 to every component of a two-fragment +1 system asked each
+        // one to be a cation; only a component that covers every atom can
+        // inherit the stated total, and a fragment of a larger structure is
+        // solved as neutral (its own charge is not stated anywhere).
+        const compCharge = comp.length === n ? totalCharge : 0;
+        const attempt = bpSolveComponent(bondMap, atoms, comp, compCharge);
         if (!attempt.solution) {
             diagnostics.declined++;
             if (attempt.reason === 'combo-overflow') diagnostics.declinedByCombos++;

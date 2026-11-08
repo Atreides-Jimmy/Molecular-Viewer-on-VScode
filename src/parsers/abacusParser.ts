@@ -507,16 +507,19 @@ function abacusLabelElement(label: string): string | undefined {
     return normalizeElementSymbol(cleaned) || elementFromAtomName(cleaned);
 }
 
-function abacusTypeElement(types: LogAtomType[], index: number): string {
+function abacusTypeElement(types: LogAtomType[], index: number): string | undefined {
     // The per-type list is a lookup, not an array the size of the log's atom
     // count: a corrupted `number of atom` must not allocate a huge table.
     let remaining = index;
     for (const t of types) {
-        const n = Math.max(t.count, 1);
-        // An ATOMIC_SPECIES row with no readable label leaves the type
-        // unnamed; the site is then a dummy rather than an empty element.
-        if (remaining < n) return t.element || 'X';
-        remaining -= n;
+        // A type whose count was never read cannot say how many sites belong
+        // to it. Padding it with one (the old `Math.max(count, 1)`) shifted
+        // every later type by that one site, so a whole block of elements was
+        // silently wrong; the site now stays an unknown dummy and the caller
+        // reports it.
+        if (!isFinite(t.count) || t.count <= 0) return undefined;
+        if (remaining < t.count) return t.element || 'X';
+        remaining -= t.count;
     }
     return 'X';
 }
@@ -538,6 +541,7 @@ export function parseAbacusLog(content: string): MolecularData {
     // The last complete DIRECT COORDINATES table is the final geometry: a log
     // that ran ionic steps prints the starting cell before each step.
     const sites: Site[] = [];
+    let typeUnresolved = false;
     const tableStarts: number[] = [];
     for (let i = 0; i < lines.length; i++) {
         if (/DIRECT COORDINATES/i.test(lines[i])) tableStarts.push(i);
@@ -561,7 +565,13 @@ export function parseAbacusLog(content: string): MolecularData {
             // coordinate columns stop being numbers, not on an uppercase letter.
             if (!isFinite(x) || !isFinite(y) || !isFinite(z)) break;
             let element = abacusLabelElement(parts[0]);
-            if (!element) element = abacusTypeElement(types, sites.length);
+            if (!element) {
+                element = abacusTypeElement(types, sites.length);
+                if (element === undefined) {
+                    element = 'X';
+                    typeUnresolved = true;
+                }
+            }
             sites.push({ element, frac: [x, y, z], label: parts[0] });
         }
     }
@@ -593,7 +603,14 @@ export function parseAbacusLog(content: string): MolecularData {
                 const y = parseFloat(parts[2]);
                 const z = parseFloat(parts[3]);
                 if (!isFinite(x) || !isFinite(y) || !isFinite(z)) break;
-                const element = abacusLabelElement(parts[0]) || abacusTypeElement(types, sites.length);
+                let element = abacusLabelElement(parts[0]);
+                if (!element) {
+                    element = abacusTypeElement(types, sites.length);
+                    if (element === undefined) {
+                        element = 'X';
+                        typeUnresolved = true;
+                    }
+                }
                 sites.push({ element, cart: [x * factor, y * factor, z * factor], label: parts[0] });
             }
         }
@@ -604,6 +621,10 @@ export function parseAbacusLog(content: string): MolecularData {
             atoms: [], bonds: [], title, hasExplicitBonds: false,
             warnings: ['the ABACUS log states a cell but no coordinate table: no structure to show']
         };
+    }
+    if (typeUnresolved) {
+        warnings.push('one or more ABACUS atom types state no atom count: ' +
+            'sites not named by their own label are read as the dummy element X');
     }
     if (tableStarts.length > 1) {
         warnings.push(tableStarts.length + ' coordinate tables in the log: showing the last');
