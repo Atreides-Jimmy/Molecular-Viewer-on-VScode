@@ -3389,10 +3389,10 @@ input,textarea{-webkit-user-select:text;user-select:text}
 #neigh-panel .ng-list,#int-panel .ng-list{max-height:220px;overflow-y:auto;border-top:1px solid rgba(128,128,128,0.25);margin-top:4px}
 #neigh-panel .ng-item,#int-panel .ng-item{display:flex;align-items:baseline;gap:8px;padding:2px 3px;font-size:11px;cursor:pointer;white-space:nowrap}
 #neigh-panel .ng-item:hover,#int-panel .ng-item:hover{background:rgba(255,255,255,0.08)}
-#neigh-panel .ng-item.ng-off{opacity:0.6;cursor:default}
+#neigh-panel .ng-item.ng-off,#int-panel .ng-item.ng-off{opacity:0.6;cursor:default}
 #neigh-panel .ng-name,#int-panel .ng-name{flex:1;overflow:hidden;text-overflow:ellipsis}
 #neigh-panel .ng-d,#int-panel .ng-d{color:var(--vscode-descriptionForeground,#999);font-variant-numeric:tabular-nums}
-#neigh-panel .ng-cell{color:#e8a33d;font-size:10px}
+#neigh-panel .ng-cell,#int-panel .ng-cell{color:#e8a33d;font-size:10px}
 #neigh-panel .ng-empty,#int-panel .ng-empty{font-size:11px;color:var(--vscode-descriptionForeground,#999);padding:4px 3px}
 #neigh-panel .ng-btns{display:flex;gap:4px;margin-top:6px}
 #neigh-panel .ng-btns button{flex:1;padding:4px 6px;border-radius:3px;cursor:pointer;font-size:11px;border:1px solid var(--vscode-button-background,#0e639c);background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff)}
@@ -14655,6 +14655,19 @@ function selectAtom(idx){
             return;
         }
     }
+    // A required-count mode (bond length/angle/dihedral, add/delete atom) can
+    // be over-filled by Select All or a box drag. A following click must start
+    // a new choice instead of being swallowed as "this atom is already
+    // selected", or the tool looks dead until the mode is left.
+    var needCount=requiredCount();
+    if(needCount<999&&selectedAtoms.length>needCount){
+        selectedAtoms=[idx];diffSelectedAtoms=[];originalCoords=null;
+        highlightSelected();
+        selInfoEl.textContent='Selected: '+formatAtomList(selectedAtoms);
+        checkSelectionComplete();
+        mmSelectionChanged();
+        return;
+    }
     if(selectedAtoms.indexOf(idx)>=0)return;
     selectedAtoms.push(idx);
     highlightSelected();
@@ -16242,7 +16255,11 @@ function intRowTitle(row){
         row.angle.toFixed(1)+' deg'+extra+' - click to select its sites';
 }
 
-function intDisplayIndexFor(bi,shift){
+function intDisplayIndexFor(bi,shift,map){
+    if(map){
+        var key=bi+'_'+shift[0]+'_'+shift[1]+'_'+shift[2];
+        return map[key]===undefined?-1:map[key];
+    }
     for(var i=0;i<MD.atoms.length;i++){
         var a=MD.atoms[i];
         if(a.baseIdx===bi&&a.imgShift&&
@@ -16251,25 +16268,63 @@ function intDisplayIndexFor(bi,shift){
     return -1;
 }
 
+// One pass over the drawn atoms, reused when several hundred interaction rows
+// are checked for selectability in a big supercell.
+function intDisplayMap(){
+    var map={},byBase={};
+    for(var i=0;i<MD.atoms.length;i++){
+        var a=MD.atoms[i];
+        if(a.baseIdx==null||!a.imgShift)continue;
+        map[a.baseIdx+'_'+a.imgShift[0]+'_'+a.imgShift[1]+'_'+a.imgShift[2]]=i;
+        (byBase[a.baseIdx]||(byBase[a.baseIdx]=[])).push(i);
+    }
+    return {key:map,byBase:byBase};
+}
+
 // Both ends of a crystal interaction on screen, in the same translated cell.
 // The interaction is reported for the donor's home cell, but any drawn image of
 // that donor is as good: the acceptor is looked for in the cell the donor image
 // actually sits in.
-function intDisplayPair(row){
+function intDisplayPair(row,disp){
     var di=row.xBi!=null?row.xBi:row.dBi;
     // A crystal H-bond row anchors on the donor, but its acceptor offset was
     // measured from the hydrogen's image: the hydrogen can sit a whole cell
     // away from the donor (a bond across a face), and its own hShift is part
     // of the path from the drawn donor to the drawn acceptor.
     var extra=row.hShift||ZERO_SHIFT;
-    for(var i=0;i<MD.atoms.length;i++){
-        var a=MD.atoms[i];
-        if(a.baseIdx!==di||!a.imgShift)continue;
+    var list=disp&&disp.byBase?disp.byBase[di]:null;
+    if(!list){
+        list=[];
+        for(var k=0;k<MD.atoms.length;k++){
+            var ak=MD.atoms[k];
+            if(ak.baseIdx===di&&ak.imgShift)list.push(k);
+        }
+    }
+    var map=disp?disp.key:null;
+    for(var li=0;li<list.length;li++){
+        var i=list[li],a=MD.atoms[i];
         var want=[a.imgShift[0]+extra[0]+row.aShift[0],
                   a.imgShift[1]+extra[1]+row.aShift[1],
                   a.imgShift[2]+extra[2]+row.aShift[2]];
-        var j=intDisplayIndexFor(row.aBi,want);
+        var j=intDisplayIndexFor(row.aBi,want,map);
         if(j>=0)return [i,j];
+    }
+    return null;
+}
+
+// D, H and A of a crystal H-bond row, when all three images are drawn. This
+// keeps the clicked row naming the same three atoms its label does; intDisplayPair
+// (D and A only) remains the fallback when the hydrogen image is outside.
+function intDisplayHbPair(row){
+    var extra=row.hShift||ZERO_SHIFT;
+    for(var i=0;i<MD.atoms.length;i++){
+        var a=MD.atoms[i];
+        if(a.baseIdx!==row.dBi||!a.imgShift)continue;
+        var hs=[a.imgShift[0]+extra[0],a.imgShift[1]+extra[1],a.imgShift[2]+extra[2]];
+        var jh=intDisplayIndexFor(row.hBi,hs);
+        var as=[hs[0]+row.aShift[0],hs[1]+row.aShift[1],hs[2]+row.aShift[2]];
+        var ja=intDisplayIndexFor(row.aBi,as);
+        if(jh>=0&&ja>=0)return [i,jh,ja];
     }
     return null;
 }
@@ -16277,20 +16332,15 @@ function intDisplayPair(row){
 // A crystal ring contact names several atoms at each end, each with its own
 // image shift. Anchor the first site-A atom on any image drawn on screen, then
 // take every other site in the cell that anchor's image actually sits in.
-function intDisplaySites(row){
+function intDisplaySites(row,disp){
     var A=row.sitesA,B=row.sitesB;
     if(!A||!B||!A.length||!B.length)return null;
-    var map={},i;
-    for(i=0;i<MD.atoms.length;i++){
-        var a=MD.atoms[i];
-        if(a.baseIdx==null||!a.imgShift)continue;
-        map[a.baseIdx+'_'+a.imgShift[0]+'_'+a.imgShift[1]+'_'+a.imgShift[2]]=i;
-    }
+    if(!disp)disp=intDisplayMap();
+    var map=disp.key,byBase=disp.byBase;
     function at(bi,sh){return map[bi+'_'+sh[0]+'_'+sh[1]+'_'+sh[2]];}
-    var anchor=A[0];
-    for(i=0;i<MD.atoms.length;i++){
-        var d=MD.atoms[i];
-        if(d.baseIdx!==anchor.bi||!d.imgShift)continue;
+    var anchor=A[0],candidates=byBase[anchor.bi]||[];
+    for(var ci=0;ci<candidates.length;ci++){
+        var i=candidates[ci],d=MD.atoms[i];
         var ox=d.imgShift[0]-anchor.sh[0],
             oy=d.imgShift[1]-anchor.sh[1],
             oz=d.imgShift[2]-anchor.sh[2];
@@ -16316,7 +16366,13 @@ function intRowClick(index){
     if(!row)return;
     var picks;
     if(row.selAtoms)picks=row.selAtoms;
-    else if(row.mol)picks=[row.xIdx!=null?row.xIdx:row.dIdx,row.aIdx];
+    else if(row.mol){
+        // A molecular H-bond names D-H...A; select the hydrogen too, not just
+        // the two heavy ends.
+        if(row.type==='hb'&&row.hIdx!=null)picks=[row.dIdx,row.hIdx,row.aIdx];
+        else picks=[row.xIdx!=null?row.xIdx:row.dIdx,row.aIdx];
+    }
+    else if(row.type==='hb'&&row.dBi!=null&&row.hBi!=null)picks=intDisplayHbPair(row)||intDisplaySites(row)||intDisplayPair(row);
     else picks=intDisplaySites(row)||intDisplayPair(row);
     if(!picks||!picks.length){
         modeInfoEl.textContent='Interaction '+intRowName(row)+' is outside the drawn supercell - grow the bounds to select it';
@@ -16404,15 +16460,24 @@ function intRefresh(){
     }
     if(sumEl)sumEl.textContent=txt;
     var html='';
+    // A crystal row whose periodic images are not all drawn on screen cannot
+    // be selected; mark it so the list says that before the click does. The
+    // display map is built once for every row that needs the check.
+    var disp=(CRY&&CRY_INV&&shown.length>0)?intDisplayMap():null;
     for(i=0;i<shown.length;i++){
         var row=shown[i];
+        var off=false;
+        if(disp&&!row.selAtoms&&!row.mol){
+            off=!(intDisplaySites(row,disp)||intDisplayPair(row,disp));
+        }
         var tag=INT_TYPE_TAG[row.type]||row.type;
         if(row.subtype)tag+=' '+row.subtype;
-        html+='<div class="ng-item" data-row="'+i+'" title="'+escapeHtml(intRowTitle(row))+'">'+
+        html+='<div class="ng-item'+(off?' ng-off':'')+'" data-row="'+i+'" title="'+escapeHtml(intRowTitle(row)+(off?' - outside the drawn supercell':''))+'">'+
             '<span class="ng-type ng-type-'+row.type+'">'+escapeHtml(tag)+'</span>'+
             '<span class="ng-name">'+escapeHtml(intRowName(row))+'</span>'+
             '<span class="ng-a">'+row.angle.toFixed(0)+'&deg;</span>'+
             '<span class="ng-d">'+row.d.toFixed(3)+' A</span>'+
+            (off?'<span class="ng-cell">image</span>':'')+
             '</div>';
     }
     if(listEl)listEl.innerHTML=html||'<div class="ng-empty">No interactions match the criteria.</div>';

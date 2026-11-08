@@ -72,9 +72,21 @@ export function isMdlMol(content: string): boolean {
 }
 
 function v2000Counts(line: string): { atoms: number; bonds: number } {
+    // V2000 states the two counts in fixed columns 1-3 and 4-6. When both are
+    // three digits there is no separator at all (`294340`), so a whitespace
+    // regex reads them as one number (or nothing) and the whole file comes back
+    // empty. The whitespace form is still what hand-edited and some exporter
+    // files use (`12 13 0…`), so it is the fallback, not the first choice.
+    const head = line.substring(0, 6);
+    if (!/\s/.test(head)) {
+        const atoms = parseInt(head.substring(0, 3), 10);
+        const bonds = parseInt(head.substring(3, 6), 10);
+        if (isFinite(atoms) && isFinite(bonds)) {
+            return { atoms, bonds };
+        }
+    }
     // Padded (` 12 13  0…`) and merely spaced (`12 13 0…`) both give the two
-    // counts as the leading integers; the fixed-width slice would read a
-    // leading-blank file as `12` and ` 1`.
+    // counts as the leading integers.
     const m = /(\d+)\s+(\d+)/.exec(line);
     if (!m) return { atoms: 0, bonds: 0 };
     return { atoms: parseInt(m[1], 10), bonds: parseInt(m[2], 10) };
