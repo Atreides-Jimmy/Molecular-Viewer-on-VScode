@@ -68,6 +68,13 @@ interface MmRunState {
     session: MmSession;
     paused: boolean;
     stopped: boolean;
+    /**
+     * Whether a pump wake-up is already queued. A run is stepped by exactly one
+     * timer chain: a Resume that arrives while this run is already running (or
+     * while a queued wake-up has not fired yet) must not add a second chain, or
+     * the same session is stepped twice per interval.
+     */
+    scheduled: boolean;
     lastStep: number;
     lastPost: number;
 }
@@ -2175,7 +2182,17 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         // there — so after a cancel-and-restart the new run would be driven by
         // two chains at once, at twice the chunk rate it was asked for.
         const mmSchedulePump = (run: MmRunState): void => {
-            setTimeout(() => mmPump(run), 0);
+            // One chain per run. The flag is cleared at the moment the wake-up
+            // actually runs, so a Resume (or any other request) arriving while
+            // a wake-up is queued joins that chain instead of starting another.
+            if (run.scheduled) {
+                return;
+            }
+            run.scheduled = true;
+            setTimeout(() => {
+                run.scheduled = false;
+                mmPump(run);
+            }, 0);
         };
 
         // Passes the next chunk will ask for, adapted from the last one's cost
@@ -2304,7 +2321,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             canSelectMany: false,
                             openLabel: 'Select File to Compare',
                             filters: {
-                                'Molecular Files': ['gjf', 'xyz', 'extxyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta', 'abi', 'abo', 'stru', 'gro', 'xtc', 'trr', 'dcd', 'trj', 'molden', 'pwi', 'pwo', 'lammpstrj', 'dump', 'lmp', 'lammps', 'data', 'md_dump', 'xdatcar', 'outcar', 'xml'],
+                                'Molecular Files': ['gjf', 'xyz', 'extxyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta', 'abi', 'abo', 'stru', 'gro', 'xtc', 'trr', 'dcd', 'trj', 'molden', 'pwi', 'pwo', 'lammpstrj', 'dump', 'lmp', 'lammps', 'data', 'md_dump', 'xdatcar', 'outcar', 'xml'],
                                 'All Files': ['*']
                             }
                         });
@@ -2632,7 +2649,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             canSelectMany: false,
                             openLabel: 'Select Structure to Import',
                             filters: {
-                                'Molecular Files': ['gjf', 'xyz', 'extxyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta', 'abi', 'abo', 'stru', 'gro', 'xtc', 'trr', 'dcd', 'trj', 'molden', 'pwi', 'pwo', 'lammpstrj', 'dump', 'lmp', 'lammps', 'data', 'md_dump', 'xdatcar', 'outcar', 'xml'],
+                                'Molecular Files': ['gjf', 'xyz', 'extxyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta', 'abi', 'abo', 'stru', 'gro', 'xtc', 'trr', 'dcd', 'trj', 'molden', 'pwi', 'pwo', 'lammpstrj', 'dump', 'lmp', 'lammps', 'data', 'md_dump', 'xdatcar', 'outcar', 'xml'],
                                 'All Files': ['*']
                             }
                         });
@@ -2777,6 +2794,11 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         webviewPanel.webview.postMessage({
                             command: 'hydrogenResult',
                             ok: true,
+                            // The request's identity and the structure version it
+                            // was computed from travel back, so the page can drop
+                            // an answer whose frame/molecule/edit is gone.
+                            requestId: typeof message.requestId === 'number' ? message.requestId : undefined,
+                            revision: typeof message.revision === 'string' ? message.revision : undefined,
                             atomCount: Array.isArray(message.atoms) ? message.atoms.length : 0,
                             atoms: hResult.atoms,
                             bonds: hResult.bonds,
@@ -2787,6 +2809,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         webviewPanel.webview.postMessage({
                             command: 'hydrogenResult',
                             ok: false,
+                            requestId: typeof message.requestId === 'number' ? message.requestId : undefined,
+                            revision: typeof message.revision === 'string' ? message.revision : undefined,
                             message: 'Add H failed: ' + (e && e.message ? e.message : e)
                         });
                     }
@@ -2828,6 +2852,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             session: session,
                             paused: false,
                             stopped: false,
+                            scheduled: false,
                             lastStep: -1,
                             lastPost: Date.now()
                         };
@@ -2888,6 +2913,9 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         // even when it asked to resume a run that was already
                         // going (its optimistic state flip is then confirmed).
                         webviewPanel.webview.postMessage(mmStateMessage(run, 'mmProgress'));
+                        // The scheduler refuses a second chain when one is
+                        // already queued (run.scheduled), so resuming a run
+                        // that never stopped cannot step the session twice.
                         mmSchedulePump(run);
                     } else if (typeof message.runId === 'string' && message.runId.length > 0) {
                         // Same as the pause above: a resume for a run that is no
@@ -9180,6 +9208,12 @@ function applyMmResult(msg){
         if(msg&&msg.message)modeInfoEl.textContent=msg.message;
         return;
     }
+    if(mmRun.restored){
+        // Restore Initial already put this run's starting geometry back. The
+        // answer was computed on the optimised geometry the restore removed,
+        // so writing its coordinates now would silently undo the restore.
+        return;
+    }
     if(mmRunActive()){mmRun.state='done';mmEndLiveRefresh()}
     if(!msg||!msg.ok){
         mmErrorMsg=(msg&&msg.message)||'Molecular Mechanics failed';
@@ -9573,6 +9607,18 @@ function showRotAxisLine(){
     removeRotAxisLine();
     if(!rotAxisParams)return;
     var p=rotAxisParams;
+    // The line is drawn in the molecule group's own frame, so its length comes
+    // from how far the atoms reach from the rotation centre. There is no shared
+    // maxD in scope here (the camera distances compute a local one each), and
+    // reading an undeclared name threw a ReferenceError before the axis was
+    // ever shown — Apply included. Derived here from MD.atoms, at call time.
+    var maxD=0;
+    for(var i=0;i<MD.atoms.length;i++){
+        var a=MD.atoms[i];
+        var dx=a.x-CX,dy=a.y-CY,dz=a.z-CZ;
+        var dd=Math.sqrt(dx*dx+dy*dy+dz*dz);
+        if(dd>maxD)maxD=dd;
+    }
     var len=maxD*2+5;
     var s=new THREE.Vector3(p.ox-CX-p.dx*len,p.oy-CY-p.dy*len,p.oz-CZ-p.dz*len);
     var e=new THREE.Vector3(p.ox-CX+p.dx*len,p.oy-CY+p.dy*len,p.oz-CZ+p.dz*len);
@@ -9813,6 +9859,10 @@ var provEdits=[];         // [{k,n}] — what changed it, in the order it happen
 var provModes={};         // mode index -> {freq,scale}: displacement kept in the geometry
 
 function pushUndo(symmetryState){
+    // An edit is about to change the structure; anything computed from the old
+    // one (an Add H request in flight) is now stale. The counter lives on the
+    // structure itself so every path that can carry it does (see Add H).
+    MD.structureRevision=(MD.structureRevision||0)+1;
     // Every coordinate edit opens with a snapshot. An open manual displacement
     // is a *pending* rewrite of the whole structure — its next slider move would
     // put every atom back onto base + amplitude — so it is closed here, once,
@@ -9873,6 +9923,9 @@ function pushUndo(symmetryState){
 function updateUndoBtn(){var b=document.getElementById('undo-btn');if(b)b.disabled=undoStack.length===0}
 function doUndo(){
     if(undoStack.length===0)return;
+    // The restore replaces the geometry, so every computed-from-older answer
+    // (an Add H request in flight) is stale from here on.
+    MD.structureRevision=(MD.structureRevision||0)+1;
     if(mmRun)mmCancelRun();
     if(vibActive||vibPaused)stopVibration();
     if(moveDragActive||moveKeyActive||fragRotActive)stopMoveSession();
@@ -10364,6 +10417,28 @@ function pasteClipboard(){
 // is never moved. The request carries the structure as it stands in the view
 // (edits included) and the answer carries only the new hydrogens.
 var addHPending=false;
+// Identity and structure version of the newest request. An answer names the
+// request it belongs to, so a reply that arrives after the user changed
+// frame/molecule/edit is dropped instead of being written into whatever now
+// sits at the same indices.
+var addHReqSeq=0;
+function structureRevisionToken(){
+    // The counter lives on MD; the frame and molecule indices name which
+    // structure of the file it is. A page cut into pieces (the test harnesses
+    // slice functions out of it) may not carry the frame counters, so they are
+    // read through typeof rather than assumed.
+    var rev=MD.structureRevision||0;
+    var frame=(typeof currentFrame==='number')?currentFrame:0;
+    var molecule=(typeof vmdMolIdx==='number')?vmdMolIdx:0;
+    return String(rev)+'|'+String(frame)+'|'+String(molecule)+'|'+String(MD.atoms.length);
+}
+// Every structure replacement ends the completion in flight: the answer could
+// no longer name the atoms it was computed from, and a new one may be started.
+function invalidateAddHRequests(){
+    addHPending=false;
+    addHCrystalCtx=null;
+    addHReqSeq++;
+}
 function startAddHydrogens(){
     if(addHPending)return;
     if(diffMode){modeInfoEl.textContent='Add H is not available in diff mode';return}
@@ -10383,15 +10458,23 @@ function startAddHydrogens(){
         return;
     }
     addHPending=true;
+    var reqSeq=++addHReqSeq;
+    var reqRev=structureRevisionToken();
     modeInfoEl.textContent='Add H: completing '+hSel.length+' selected atom(s)...';
     vscodeApi.postMessage({
         command:'addHydrogens',
         atoms:MD.atoms.map(function(a){return{element:isGhostAtom(a)?'X':a.element,x:a.x,y:a.y,z:a.z}}),
         bonds:MD.bonds.map(function(b){return{atom1:b.atom1,atom2:b.atom2,order:b.order}}),
-        selected:hSel
+        selected:hSel,
+        requestId:reqSeq,
+        revision:reqRev
     });
 }
 function applyHydrogenResult(msg){
+    // A reply from a request the view has already left (a frame or molecule
+    // switch invalidated it) is not this request's answer: it must not clear
+    // the pending flag of a newer request, and nothing is written.
+    if(msg&&typeof msg.requestId==='number'&&msg.requestId!==addHReqSeq)return;
     addHPending=false;
     if(addHCrystalCtx){
         var cryCtx=addHCrystalCtx;
@@ -10403,6 +10486,13 @@ function applyHydrogenResult(msg){
     var newAtoms=Array.isArray(msg.atoms)?msg.atoms:[];
     var newBonds=Array.isArray(msg.bonds)?msg.bonds:[];
     if(newAtoms.length===0){modeInfoEl.textContent=msg.message||'Add H: nothing to add';return}
+    if(typeof msg.revision==='string'&&msg.revision!==structureRevisionToken()){
+        // Same atom count is not the same structure: another frame of the same
+        // molecule, another VMD molecule, or an edited geometry all keep the
+        // count while moving the atoms the answer addresses.
+        modeInfoEl.textContent='Add H: the structure changed while computing - nothing was added';
+        return;
+    }
     if(typeof msg.atomCount==='number'&&msg.atomCount!==MD.atoms.length){
         // The answer names atom indices of the structure it was computed from;
         // if the structure changed while it was in flight, the bonds address
@@ -10635,14 +10725,19 @@ function startCrystalAddHydrogens(){
         return;
     }
     addHPending=true;
+    var reqSeq=++addHReqSeq;
+    var reqRev=structureRevisionToken();
     addHCrystalCtx={cry:CRY,baseCount:CRY.baseAtoms.length,toBase:view.toBase,
-        atomCount:cluster.atoms.length,anchors:cluster.anchors};
+        atomCount:cluster.atoms.length,anchors:cluster.anchors,
+        requestId:reqSeq,revision:reqRev};
     modeInfoEl.textContent='Add H: completing '+anchors.length+' selected site'+(anchors.length===1?'':'s')+'...';
     vscodeApi.postMessage({
         command:'addHydrogens',
         atoms:cluster.atoms.map(function(a){return{element:a.element,x:a.x,y:a.y,z:a.z}}),
         bonds:cluster.bonds.map(function(b){return{atom1:b.atom1,atom2:b.atom2,order:b.order}}),
-        selected:cluster.anchors.map(function(a){return a.node})
+        selected:cluster.anchors.map(function(a){return a.node}),
+        requestId:reqSeq,
+        revision:reqRev
     });
 }
 
@@ -12336,6 +12431,11 @@ function switchFrame(idx){
     if(vibActive||vibPaused)stopVibration();
     stopMoveSession();
     mmCancelRun();
+    // An Add H answer in flight names atoms of the frame being left. The request
+    // is voided here (and its pending flag cleared), so a late reply cannot put
+    // hydrogens on the same-numbered atoms of the new frame.
+    invalidateAddHRequests();
+    MD.structureRevision=(MD.structureRevision||0)+1;
     // A frame is a structure of its own: the equilibrium a displacement session
     // was measured from belongs to the frame being left.
     vdEnd();
@@ -12440,6 +12540,10 @@ function switchMolecule(idx){
     stopMoveSession();
     mmCancelRun();
     vdEnd();
+    // An Add H answer in flight names atoms of the molecule being left; the
+    // request is voided before the new molecule's atoms are put on screen.
+    invalidateAddHRequests();
+    MD.structureRevision=(MD.structureRevision||0)+1;
     vmdMolIdx=idx;
     var m=VMD.molecules[idx];
     MD.atoms=m.atoms;
@@ -18958,6 +19062,11 @@ function showBatchDeleteModal(){
 }
 
 function batchDeleteSelected(){
+    // A normal-mode playback rewrites coordinates by atom index on every tick;
+    // deleting atoms renumbers the array under it, so the next tick would write
+    // the old mode's displacement onto whichever atoms now hold those indices.
+    // The playback ends before any index moves.
+    if(vibActive||vibPaused)stopVibration();
     // Atom indices become invalid after deletion — close any active rotate
     // group session or move session so stale state can't be reused.
     stopMoveSession();
@@ -19301,6 +19410,22 @@ function doSave(){
     for(var ci=0;ci<MD.atoms.length;ci++){var ca=MD.atoms[ci];if(isNaN(ca.x)||isNaN(ca.y)||isNaN(ca.z)){alert('Atom '+(ci+1)+' has invalid coordinates (NaN). Cannot save.');return}}
     if(CRY&&!CRY_INV){alert('Crystal lattice is degenerate (zero determinant). Cannot save crystal formats.');return}
     try{
+    // One PDB coordinate column (8 characters, 3 decimals). A value too large
+    // for the column loses decimals rather than shifting the columns after it:
+    // -9999.123 is nine characters and, written as-is, moved y into the gap
+    // between x and z. The format itself stops at 9999.999, so anything beyond
+    // that is clamped to the last representable value instead of producing a
+    // line no fixed-column reader can align.
+    function pdbCoordCol(v){
+        if(!isFinite(v))v=0;
+        var s=v.toFixed(3);
+        if(s.length>8){
+            for(var d=2;d>=0&&s.length>8;d--)s=v.toFixed(d);
+        }
+        if(s.length>8)s=(v>0?9999.999:-9999.999).toFixed(3);
+        while(s.length<8)s=' '+s;
+        return s;
+    }
     // The line every format below is titled with: where this structure came
     // from and what has been done to it since (see "Save provenance" above).
     // A GJF title section can hold several lines, so it takes the provenance
@@ -19411,18 +19536,34 @@ function doSave(){
         bondIdx++;
     });
 
-    var mol=saveTitle+'\\n '+MD.atoms.length+'  '+MD.bonds.length+'  0  0  0  0  0  0  0  0999 V2000\\n';
+    // MDL's V2000 counts line is fixed-width (three columns per count), so the
+    // atom and bond counts are padded rather than merely spaced: a strict
+    // reader takes the first six characters as the two counts.
+    var molCol=function(v){var s=''+v;while(s.length<3)s=' '+s;return s};
+    // V2000 owns three header lines - title, program/time, comment - before
+    // the counts line. The provenance lives in the title; the other two are
+    // present (and empty) so a reader that expects them finds the counts where
+    // the format says they are.
+    var mol=saveTitle+'\\n  MolecularViewer\\n\\n'+
+        molCol(MD.atoms.length)+molCol(MD.bonds.length)+'  0  0  0  0  0  0  0  0999 V2000\\n';
     MD.atoms.forEach(function(a){
         // MDL's dummy is the * wildcard atom (a ghost has no element to name
         // and no nuclear charge to write, which is exactly what * says).
         var sym=isGhostAtom(a)?'*':a.element;
-        var sx=(a.x*10).toFixed(4);
-        var sy=(a.y*10).toFixed(4);
-        var sz=(a.z*10).toFixed(4);
+        // V2000 coordinates are Angstrom; they were multiplied by ten here, so
+        // every structure re-opened ten times too large. Written as they are.
+        var sx=a.x.toFixed(4);
+        var sy=a.y.toFixed(4);
+        var sz=a.z.toFixed(4);
         while(sx.length<10)sx=' '+sx;
         while(sy.length<10)sy=' '+sy;
         while(sz.length<10)sz=' '+sz;
-        mol+=sx+sy+sz+' '+sym+' 0  0  0  0  0  0  0  0  0  0  0  0\\n';
+        // The symbol owns columns 32-34 and the fields that follow are fixed
+        // width, so a one-character symbol has to be padded into that field:
+        // writing it loose put the first zero (the mass difference) inside the
+        // symbol field and every number after it one column early.
+        var symField=(sym+'   ').slice(0,3);
+        mol+=sx+sy+sz+' '+symField+' 0  0  0  0  0  0  0  0  0  0  0  0\\n';
     });
     MD.bonds.forEach(function(b){
         var bt=1;
@@ -19443,33 +19584,65 @@ function doSave(){
     // A ghost is written with the element column X (the standard unknown/dummy
     // symbol) and the residue DUM, so a PDB reader shows a dummy instead of
     // reading a ghost as the atom it stands for.
+    //
+    // The columns follow the spec exactly: record 1-6, serial 7-11, blank 12,
+    // atom name 13-16, altLoc 17, resName 18-20, blank 21, chain 22, resSeq
+    // 23-26, iCode 27, blanks 28-30, x 31-38, y 39-46, z 47-54, occupancy
+    // 55-60, B-factor 61-66, blanks 67-76, element 77-78. The offsets here used
+    // to be two columns short (x at 29-36, resName at 16-18), which a strict
+    // reader takes as the end of the previous field and shifts every number.
     var pdb=provPdbTitle(saveTitle);
     MD.atoms.forEach(function(a,i){
         var gh=isGhostAtom(a);
         var serial=(i+1).toString();while(serial.length<5)serial=' '+serial;
         var sym=gh?'X':a.element;
         var name;
+        // Four columns (13-16). One-letter symbols take the leading blank the
+        // PDB convention asks for; anything longer is padded and, for a label
+        // that is not an element at all, cut to the field so the columns after
+        // it never move.
         if(sym.length===1){name=' '+sym+'  '}
-        else{name=sym+'  '}
-        var sx=a.x.toFixed(3);while(sx.length<8)sx=' '+sx;
-        var sy=a.y.toFixed(3);while(sy.length<8)sy=' '+sy;
-        var sz=a.z.toFixed(3);while(sz.length<8)sz=' '+sz;
+        else{name=(sym+'    ').slice(0,4)}
+        var resSeq='1';while(resSeq.length<4)resSeq=' '+resSeq;
         var el=sym.charAt(0).toUpperCase();
         if(sym.length>1)el+=sym.charAt(1).toLowerCase();
-        while(el.length<2)el=' '+el;
-        pdb+=(gh?'HETATM':'ATOM  ')+serial+name+(gh?'DUM':'UNK')+' A   1    '+sx+sy+sz+'  1.00  0.00          '+el+'\\n';
+        if(el.length<2)el=' '+el;
+        pdb+=(gh?'HETATM':'ATOM  ')+serial+' '+name+' '+(gh?'DUM':'UNK')+' A'+resSeq+'    '+
+            pdbCoordCol(a.x)+pdbCoordCol(a.y)+pdbCoordCol(a.z)+
+            saveCol(1.0,2,6)+saveCol(0.0,2,6)+'          '+el+'\\n';
     });
+    // CONECT is written in the (atom1 < atom2) direction the parser reads, so a
+    // stored reverse bond is the same edge after a save and a re-open instead of
+    // being dropped as "a2 < a1". Pairs are also sorted, which is what makes a
+    // strict PDB tool list them in serial order.
+    var conectPairs=[];
     MD.bonds.forEach(function(b){
-        var a1=(b.atom1+1).toString();while(a1.length<5)a1=' '+a1;
-        var a2=(b.atom2+1).toString();while(a2.length<5)a2=' '+a2;
+        if(typeof b.atom1!=='number'||typeof b.atom2!=='number')return;
+        if(b.atom1===b.atom2)return;
+        var lo=b.atom1<b.atom2?b.atom1:b.atom2;
+        var hi=b.atom1<b.atom2?b.atom2:b.atom1;
+        if(lo<0||hi>=MD.atoms.length)return;
+        conectPairs.push([lo+1,hi+1]);
+    });
+    conectPairs.sort(function(p,q){return p[0]-q[0]||p[1]-q[1]});
+    var lastPair='';
+    conectPairs.forEach(function(p){
+        var key=p[0]+'-'+p[1];
+        if(key===lastPair)return;
+        lastPair=key;
+        var a1=(''+p[0]);while(a1.length<5)a1=' '+a1;
+        var a2=(''+p[1]);while(a2.length<5)a2=' '+a2;
         pdb+='CONECT'+a1+a2+'\\n';
     });
     pdb+='END\\n';
 
-    var mopac=saveTitle+'\\n';
+    // MOPAC's first line is the keyword line and the second is the title -
+    // the same order the reader expects. Writing the title first made a re-read
+    // take the words of the title as keywords, so the structure's CHARGE and
+    // MS (multiplicity) were lost on the round trip.
     var chrgStr=chrg!==0?' CHARGE='+chrg:'';
     var multStr=mult!==1?' MS='+mult:'';
-    mopac+='PM7'+chrgStr+multStr+'\\n\\n';
+    var mopac='PM7'+chrgStr+multStr+'\\n'+saveTitle+'\\n\\n';
     // MOPAC's dummy atom is XX (X on newer versions); a ghost has no parameters
     // to run with, so it is only a geometry point there.
     MD.atoms.forEach(function(a){
@@ -20211,8 +20384,41 @@ function buildLammpsDataContent(){
     var base=crystalVisibleBaseAtoms();
     var g=crystalSaveGroups(base);
     var box=lammpsBoxOf(CRY.latticeVectors,base.map(function(a){return crystalSiteCart(a)}));
+    // Bonds among the sites the picture shows. A shift is not a LAMMPS column -
+    // the run applies the minimum image - so one row per site pair is written
+    // (two images of the same pair are one bond).
+    var visIdx={};
+    base.forEach(function(a,i){
+        var bi=a.baseIdx!=null?a.baseIdx:i;
+        visIdx[bi]=i;
+    });
+    var bondRows=[];
+    var seenBonds={};
+    (CRY.baseBonds||[]).forEach(function(b){
+        if(!b)return;
+        var v1=visIdx[b.atom1],v2=visIdx[b.atom2];
+        if(v1===undefined||v2===undefined||v1===v2)return;
+        var lo=v1<v2?v1:v2,hi=v1<v2?v2:v1;
+        var key=lo+'-'+hi;
+        if(seenBonds[key])return;
+        seenBonds[key]=true;
+        bondRows.push({a:lo,b:hi,order:b.order||1});
+    });
+    function bondTypeOf(order){
+        if(order>=2.5)return 3;
+        if(order>=1.75)return 2;
+        if(order>=1.25)return 4;
+        return 1;
+    }
+    var maxBondType=1;
+    bondRows.forEach(function(br){var t=bondTypeOf(br.order);if(t>maxBondType)maxBondType=t;});
     var out=provTitle(MD.title||'Modified structure',false)+'\\n\\n';
-    out+=base.length+' atoms\\n'+g.order.length+' atom types\\n\\n';
+    out+=base.length+' atoms\\n'+g.order.length+' atom types\\n';
+    // A data file that states bonds must declare them in the counts block, and
+    // its Atoms section must carry the molecule IDs read_data requires for
+    // bonded atoms (style full: id mol type q x y z).
+    if(bondRows.length>0)out+=bondRows.length+' bonds\\n'+maxBondType+' bond types\\n';
+    out+='\\n';
     out+=box.xlo.toFixed(10)+' '+(box.xlo+box.lx).toFixed(10)+' xlo xhi\\n';
     out+=box.ylo.toFixed(10)+' '+(box.ylo+box.ly).toFixed(10)+' ylo yhi\\n';
     out+=box.zlo.toFixed(10)+' '+(box.zlo+box.lz).toFixed(10)+' zlo zhi\\n';
@@ -20223,12 +20429,31 @@ function buildLammpsDataContent(){
     });
     var typeOf={};
     g.order.forEach(function(el,ti){typeOf[el]=ti+1});
-    out+='\\nAtoms # atomic\\n\\n';
-    base.forEach(function(a,i){
-        var p=box.points[i];
-        out+=(i+1)+' '+typeOf[crystalSaveElement(a)]+' '+
-            p[0].toFixed(10)+' '+p[1].toFixed(10)+' '+p[2].toFixed(10)+'\\n';
-    });
+    if(bondRows.length>0){
+        out+='\\nAtoms # full\\n\\n';
+        base.forEach(function(a,i){
+            var p=box.points[i];
+            // Molecule ID 1 for every atom: the cell is one periodic system.
+            out+=(i+1)+' 1 '+typeOf[crystalSaveElement(a)]+' 0.0 '+
+                p[0].toFixed(10)+' '+p[1].toFixed(10)+' '+p[2].toFixed(10)+'\\n';
+        });
+        // The bond type is the chemical order here; the label says so, because
+        // in a force-field data file a bond type is a coefficient index. No
+        // Bond Coeffs section is invented: connectivity is what the viewer
+        // states, and the run's own coefficients still have to be supplied.
+        out+='\\n# Bond order is stored in the bond type (1 single, 2 double, 3 triple, 4 aromatic).\\n'+
+            '\\nBonds # order\\n\\n';
+        bondRows.forEach(function(br,k){
+            out+=(k+1)+' '+bondTypeOf(br.order)+' '+(br.a+1)+' '+(br.b+1)+'\\n';
+        });
+    }else{
+        out+='\\nAtoms # atomic\\n\\n';
+        base.forEach(function(a,i){
+            var p=box.points[i];
+            out+=(i+1)+' '+typeOf[crystalSaveElement(a)]+' '+
+                p[0].toFixed(10)+' '+p[1].toFixed(10)+' '+p[2].toFixed(10)+'\\n';
+        });
+    }
     return out;
 }
 /**

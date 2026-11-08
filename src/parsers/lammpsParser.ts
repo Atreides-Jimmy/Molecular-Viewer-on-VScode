@@ -1,6 +1,6 @@
-import { MolecularData } from '../types';
+import { Atom, Bond, MolecularData } from '../types';
 import { elementFromMass, normalizeElementSymbol, typeElementLabel } from '../tools/periodicTable';
-import { fracToCart } from '../tools/crystalGeometry';
+import { cartToFrac, fracToCart } from '../tools/crystalGeometry';
 import { buildPeriodicStructure, isUsableLattice, oneLineTitle, Site } from './periodicUtils';
 import { chooseTrajectoryFrameIndexes } from './trajectoryParser';
 
@@ -325,6 +325,117 @@ function readDataAtoms(lines: string[], start: number, styleHint?: string, atomT
     return { rows, style, next: i };
 }
 
+/** The line index of the `Bonds` section, or -1. */
+function findBondSection(lines: string[]): number {
+    // The section header is the word alone (optionally followed by a `#`
+    // comment). A title line that merely starts with "Bonds" is not a section.
+    for (let i = 1; i < lines.length; i++) {
+        if (/^Bonds(?:\s*#.*)?\s*$/i.test(lines[i].trim())) return i;
+    }
+    return -1;
+}
+
+/** The bond count the file states (`N bonds`), or undefined when it states none. */
+function declaredBonds(lines: string[]): number | undefined {
+    for (const raw of lines) {
+        const line = lammpsDataLine(raw);
+        const m = /^(\d+)\s+bonds$/i.exec(line);
+        if (m) return parseInt(m[1], 10);
+    }
+    return undefined;
+}
+
+/**
+ * A data file's `Bonds` rows: `id type atom1 atom2` (the four leading columns
+ * are the same in the atomic/bond/molecular/full styles and in hybrid styles).
+ *
+ * LAMMPS states connectivity but not a chemical bond order: bond *types* are
+ * force-field parameter indices. A file that says nothing about order therefore
+ * carries order 0, which the crystal page reads as "the perceived order stands".
+ * The writer here labels its own table `Bonds # order`, and only that label
+ * makes the type an order (1 single, 2 double, 3 triple, 4 aromatic) — reading
+ * it on a force-field file would relabel every bond.
+ */
+function readDataBonds(
+    lines: string[], start: number, idToIndex: { [id: number]: number }
+): { atom1: number; atom2: number; order: number }[] {
+    const byOrder = /#\s*order\b/i.test(lines[start] || '');
+    const rows: { atom1: number; atom2: number; order: number }[] = [];
+    const seen = new Set<string>();
+    for (let i = start + 1; i < lines.length; i++) {
+        const line = lammpsDataLine(lines[i]);
+        if (line === '') continue;
+        if (SECTION_START.test(line)) break;
+        const parts = line.split(/\s+/);
+        if (parts.length < 4) continue;
+        const id1 = parseInt(parts[2], 10);
+        const id2 = parseInt(parts[3], 10);
+        const a1 = idToIndex[id1];
+        const a2 = idToIndex[id2];
+        if (a1 === undefined || a2 === undefined || a1 === a2) continue;
+        let order = 0;
+        if (byOrder) {
+            const type = parseInt(parts[1], 10);
+            order = type === 2 ? 2 : type === 3 ? 3 : type === 4 ? 1.5 : 1;
+        }
+        const key1 = a1 < a2 ? a1 : a2;
+        const key2 = a1 < a2 ? a2 : a1;
+        const key = key1 + '-' + key2;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        rows.push({ atom1: key1, atom2: key2, order });
+    }
+    return rows;
+}
+
+/**
+ * The lattice repeat that puts atom b nearest atom a — the shift a periodic
+ * bond stores (`atom1` in cell c bonds `atom2` in cell c+s`).
+ *
+ * A data file has no shift column: LAMMPS applies the minimum image itself, so
+ * the same convention is recovered here by enumerating the rounded offset and
+ * its neighbours (a skewed cell's nearest image can be one repeat off the
+ * rounding, which is why the 3×3×3 neighbourhood is scanned).
+ */
+function minimumImageShift(a: Atom, b: Atom, lattice: number[][]): [number, number, number] {
+    const fa = cartToFrac([a.x, a.y, a.z], lattice);
+    const fb = cartToFrac([b.x, b.y, b.z], lattice);
+    const df = [fb[0] - fa[0], fb[1] - fa[1], fb[2] - fa[2]];
+    const base = [-Math.round(df[0]), -Math.round(df[1]), -Math.round(df[2])];
+    let best: [number, number, number] = [0, 0, 0];
+    let bestD2 = Infinity;
+    for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+            for (let dz = -1; dz <= 1; dz++) {
+                const s: [number, number, number] = [base[0] + dx, base[1] + dy, base[2] + dz];
+                const p = fracToCart([df[0] + s[0], df[1] + s[1], df[2] + s[2]], lattice);
+                const d2 = p[0] * p[0] + p[1] * p[1] + p[2] * p[2];
+                if (d2 < bestD2 - 1e-12) {
+                    bestD2 = d2;
+                    best = s;
+                }
+            }
+        }
+    }
+    return best;
+}
+
+/** A data file's bonds as the cell's file bond table (`crystal.fileBonds`). */
+function dataBondsToFileBonds(
+    rows: { atom1: number; atom2: number; order: number }[],
+    atoms: Atom[], lattice: number[][]
+): Bond[] {
+    const bonds: Bond[] = [];
+    for (const row of rows) {
+        const a = atoms[row.atom1];
+        const b = atoms[row.atom2];
+        if (!a || !b) continue;
+        const shift = minimumImageShift(a, b, lattice);
+        bonds.push({ atom1: row.atom1, atom2: row.atom2, order: row.order, shift });
+    }
+    return bonds;
+}
+
 export function parseLammpsData(content: string, options?: LammpsParseOptions): MolecularData {
     const lines = content.split(/\r?\n/);
     const warnings: string[] = [];
@@ -394,7 +505,30 @@ export function parseLammpsData(content: string, options?: LammpsParseOptions): 
             warnings: ['the LAMMPS box is degenerate: no structure to show']
         };
     }
-    return buildPeriodicStructure(lattice, sites, title, warnings);
+    const structure = buildPeriodicStructure(lattice, sites, title, warnings);
+    // A data file states connectivity in its `Bonds` section; the format the
+    // cell is built in carries it as the file bond table, which the crystal page
+    // merges over its perceived list (and keeps the file's bond orders where the
+    // table states them). Without this a saved LAMMPS file re-opened with no
+    // bonds at all.
+    const bondSection = findBondSection(lines);
+    if (bondSection >= 0 && structure.crystal) {
+        const idToIndex: { [id: number]: number } = {};
+        data.rows.forEach((row, i) => { idToIndex[row.id] = i; });
+        const rows = readDataBonds(lines, bondSection, idToIndex);
+        const declared = declaredBonds(lines);
+        if (declared !== undefined && declared > rows.length) {
+            warnings.push('the file declares ' + declared + ' bonds but only ' + rows.length +
+                ' could be read: the rest name atoms the Atoms section does not contain');
+        }
+        if (rows.length > 0) {
+            structure.crystal.fileBonds = dataBondsToFileBonds(rows, structure.atoms, lattice);
+        }
+    }
+    // The reader can add to the warnings after the structure was built, so the
+    // list is attached here as well (it is the same array in either place).
+    if (warnings.length > 0) structure.warnings = warnings;
+    return structure;
 }
 
 interface DumpBox {

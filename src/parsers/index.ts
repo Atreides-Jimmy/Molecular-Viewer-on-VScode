@@ -2,6 +2,7 @@ import { MolecularData, AtomGroup, OptStep, NormalMode, OptThresholds } from '..
 import { parseGjf } from './gjfParser';
 import { parseXyz, parseXyzTrajectory, XyzFrame, XyzTrajectory } from './xyzParser';
 import { parseMol2 } from './mol2Parser';
+import { parseMol, isMdlMol } from './molParser';
 import { parseGaussianLog, LogFrame, GaussianLogResult, RouteSection, RouteKeyword } from './logParser';
 import { parseCoord } from './coordParser';
 import { parseOrcainp, scanOrcaXyzfile, OrcaExternalStructure, OrcaXyzReference } from './orcaInpParser';
@@ -31,6 +32,7 @@ export { parseOrcaOut, isOrcaOutput, OrcaFrame, OrcaLogResult };
 export { scanOrcaXyzfile, OrcaExternalStructure, OrcaXyzReference };
 export { parseXyzTrajectory, XyzFrame, XyzTrajectory };
 export { parseCif };
+export { parseMol, isMdlMol };
 export { parseVasp, parseXdatcar, parseOutcar, parseVasprunXml, isXdatcar, isOutcar, isVasprunXml };
 export { parseCube };
 export { parseVesta };
@@ -204,6 +206,11 @@ export function parseFile(content: string, fileName: string, options?: ParseFile
             return parseExtXyz(content);
         case 'mol2':
             return parseMol2(content);
+        case 'mol':
+            // Save As writes MDL Mol, so the same reader opens it back. A file
+            // whose header was damaged still gets the warning from `parseMol`
+            // rather than the empty XYZ structure the fallback produced.
+            return parseMol(content);
         case 'log':
         case 'out': {
             const structured = structuredOutput(content, options);
@@ -491,6 +498,13 @@ export function tryAutoParse(content: string, fileName: string = '', options?: P
                 multiplicity: result.multiplicity
             };
         }
+    }
+
+    // A molfile has no extension of its own in some toolchains; the CTfile
+    // counts line and `M  END` identify it before the first-line-is-a-count
+    // fallback can claim the title line.
+    if (isMdlMol(content)) {
+        return parseMol(content);
     }
 
     if (lines.length > 0) {
