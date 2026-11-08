@@ -11,7 +11,8 @@ const ATOMIC_NUMBER_MAP: { [key: number]: string } = {
     71: 'Lu', 72: 'Hf', 73: 'Ta', 74: 'W', 75: 'Re', 76: 'Os', 77: 'Ir', 78: 'Pt', 79: 'Au', 80: 'Hg',
     81: 'Tl', 82: 'Pb', 83: 'Bi', 84: 'Po', 85: 'At', 86: 'Rn', 87: 'Fr', 88: 'Ra', 89: 'Ac', 90: 'Th',
     91: 'Pa', 92: 'U', 93: 'Np', 94: 'Pu', 95: 'Am', 96: 'Cm', 97: 'Bk', 98: 'Cf', 99: 'Es', 100: 'Fm',
-    101: 'Md', 102: 'No', 103: 'Lr'
+    101: 'Md', 102: 'No', 103: 'Lr', 104: 'Rf', 105: 'Db', 106: 'Sg', 107: 'Bh', 108: 'Hs', 109: 'Mt', 110: 'Ds',
+    111: 'Rg', 112: 'Cn', 113: 'Nh', 114: 'Fl', 115: 'Mc', 116: 'Lv', 117: 'Ts', 118: 'Og'
 };
 
 export interface LogFrame {
@@ -22,6 +23,12 @@ export interface LogFrame {
     stepLabel: string;
     charge?: number;
     multiplicity?: number;
+    /** The cell vectors (rows a, b, c, in Angstrom) a trajectory frame states. */
+    cell?: number[][];
+    /** The time the trajectory states, in the format's own unit. */
+    time?: number;
+    /** The integration step the trajectory states. */
+    step?: number;
     /** Single-point energy (Hartree) of the optimization step this frame is the
      *  geometry of, filled by the parser for opt logs so the webview can both
      *  label the frame and highlight its point in the convergence charts.
@@ -38,13 +45,29 @@ export interface GaussianLogResult {
     routes?: RouteSection[];
 }
 
+/**
+ * How far a table header may be scanned for its dashed rules. Gaussian's
+ * orientation header is five lines; a limit keeps a damaged file whose dashes
+ * are missing from swallowing every later frame, convergence table and
+ * frequency section to EOF.
+ */
+const MAX_DASHED_HEADER_LINES = 24;
+
 function skipDashedLines(lines: string[], startIdx: number, count: number): number {
     let i = startIdx;
     let skipped = 0;
-    while (i < lines.length && skipped < count) {
-        if (lines[i].includes('---')) {
+    const limit = Math.min(lines.length, startIdx + MAX_DASHED_HEADER_LINES);
+    while (i < limit && skipped < count) {
+        const text = lines[i].trim();
+        if (text.includes('---')) {
             skipped++;
+            i++;
+            continue;
         }
+        // The header is over as soon as an atom row appears, even when one or
+        // both of its dashed rules is missing: counting dashes only would scan
+        // past the geometry and lose the frame (and everything after it).
+        if (/^\d/.test(text)) break;
         i++;
     }
     return i;
@@ -339,15 +362,14 @@ export function parseGaussianLog(content: string): GaussianLogResult {
         if (titleLines.length > 0) title = titleLines[titleLines.length - 1].trim();
     }
 
-    const chargeMultMatch = content.match(/Charge\s*=\s*(-?\d+)\s+Multiplicity\s*=\s*(\d+)/);
+    // The charge and multiplicity printed with the geometry (`Charge = 0
+    // Multiplicity = 1`). A `--Link1--` file can run several jobs with
+    // different values, so the scan updates them as it passes each job's line
+    // and every frame keeps its own job's values; the old single match at the
+    // top of the file stamped the first job onto all of them.
     let chargeMultLine = '';
     let logCharge: number | undefined;
     let logMultiplicity: number | undefined;
-    if (chargeMultMatch) {
-        chargeMultLine = `Charge=${chargeMultMatch[1]} Mult=${chargeMultMatch[2]}`;
-        logCharge = parseInt(chargeMultMatch[1], 10);
-        logMultiplicity = parseInt(chargeMultMatch[2], 10);
-    }
 
     // Single pass over the file: geometry frames, convergence-table steps and
     // harmonic-frequency sections are all detected in ONE traversal (these
@@ -374,6 +396,20 @@ export function parseGaussianLog(content: string): GaussianLogResult {
     let i = 0;
     while (i < lines.length) {
         const line = lines[i];
+
+        // --- Charge/multiplicity of the job this frame belongs to ---
+        // Gaussian prints the line once per job, before that job's geometries,
+        // so updating the state here gives each frame the values of its own job.
+        if (line.indexOf('Charge') >= 0 && line.indexOf('Multiplicity') >= 0) {
+            const cm = line.match(/Charge\s*=\s*(-?\d+)\s+Multiplicity\s*=\s*(\d+)/);
+            if (cm) {
+                logCharge = parseInt(cm[1], 10);
+                logMultiplicity = parseInt(cm[2], 10);
+                chargeMultLine = `Charge=${cm[1]} Mult=${cm[2]}`;
+                i++;
+                continue;
+            }
+        }
 
         // --- Route card (keywords line) at the start of each job section ---
         // Route cards are enclosed between two dashed separator lines (the

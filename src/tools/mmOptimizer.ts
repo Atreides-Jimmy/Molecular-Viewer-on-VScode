@@ -1845,7 +1845,11 @@ export function evaluateForceField(
     const input = readInput(rawAtoms, rawBonds, rawSelected);
     const n = input.n;
     const mobile: boolean[] = new Array(n);
-    if (!Array.isArray(rawSelected)) {
+    if (!Array.isArray(rawSelected) || rawSelected.length === 0) {
+        // An empty selection array is the same statement as no selection at all:
+        // everything is mobile. Treating it as "nothing is mobile" returned an
+        // energy of 0 and a zero gradient for a structure whose terms were
+        // never counted.
         for (let i = 0; i < n; i++) {
             mobile[i] = true;
         }
@@ -2034,6 +2038,15 @@ export class MmSession {
     private maxForce: number;
     private rmsForce: number;
     private plateau = 0;
+    /** The lowest-energy geometry the run has accepted: coordinates, energy and
+     *  the force reading taken there. `finish()` returns this, never the
+     *  transient geometry a pause happened to leave behind. */
+    private readonly bestX: Float64Array;
+    private readonly bestY: Float64Array;
+    private readonly bestZ: Float64Array;
+    private bestEnergy: number;
+    private bestMaxForce = 0.0;
+    private bestRmsForce = 0.0;
 
     constructor(input: MmInput, settings: MMResolvedOptions) {
         const n = input.n;
@@ -2054,6 +2067,10 @@ export class MmSession {
         this.inputX = new Float64Array(input.x);
         this.inputY = new Float64Array(input.y);
         this.inputZ = new Float64Array(input.z);
+        this.bestX = new Float64Array(input.x);
+        this.bestY = new Float64Array(input.y);
+        this.bestZ = new Float64Array(input.z);
+        this.bestEnergy = 0.0;
         const field = buildField(input.elements, input.x, input.y, input.z, input.bonds, mobile, n, settings);
         this.field = field;
         const precondition = new Float64Array(n);
@@ -2101,6 +2118,9 @@ export class MmSession {
         this.energyBefore = this.energy;
         this.lastEnergy = this.energy;
         this.readStats();
+        this.bestEnergy = this.energy;
+        this.bestMaxForce = this.maxForce;
+        this.bestRmsForce = this.rmsForce;
         this.pushPoint();
     }
 
@@ -2453,6 +2473,22 @@ export class MmSession {
         this.iterations++;
         this.pushPoint();
 
+        // Keep the best accepted geometry separately. A rebuilt pair list can
+        // make the committed geometry read slightly higher than the one it was
+        // accepted against, and a pause reports `finish()`; returning the
+        // transient coordinates while quoting another geometry's force would
+        // describe two different structures in one answer.
+        if (this.energy < this.bestEnergy) {
+            this.bestEnergy = this.energy;
+            this.bestMaxForce = this.maxForce;
+            this.bestRmsForce = this.rmsForce;
+            for (let i = 0; i < n; i++) {
+                this.bestX[i] = x[i];
+                this.bestY[i] = y[i];
+                this.bestZ[i] = z[i];
+            }
+        }
+
         // A converging run keeps gaining less and less; stop when the gain has
         // been flat for a while rather than burning the whole step budget.
         if (this.lastEnergy - this.energy < ENERGY_PLATEAU) {
@@ -2471,20 +2507,20 @@ export class MmSession {
     /**
      * The complete answer, valid at any time — after convergence, after a budget
      * ran out, or halfway through (which is what a pause reports). The geometry
-     * returned is never a worse one than the input: every accepted step lowered
-     * the energy, and the guard here enforces it even if that ever stopped
-     * being true.
+     * returned is the lowest-energy geometry the run accepted (the input when
+     * nothing improved on it), together with the force reading taken at that
+     * same geometry — so paused and completed answers can never describe two
+     * different structures.
      */
     finish(): MmOptimizeResult {
-        const useInitial = this.energy > this.energyBefore;
         const indices: number[] = [];
         const coords: number[][] = [];
         let maxMove = 0.0;
         for (let s = 0; s < this.indices.length; s++) {
             const i = this.indices[s];
-            const px = useInitial ? this.inputX[i] : this.work.x[i];
-            const py = useInitial ? this.inputY[i] : this.work.y[i];
-            const pz = useInitial ? this.inputZ[i] : this.work.z[i];
+            const px = this.bestX[i];
+            const py = this.bestY[i];
+            const pz = this.bestZ[i];
             indices.push(i);
             coords.push([px, py, pz]);
             const mx = px - this.inputX[i];
@@ -2495,7 +2531,7 @@ export class MmSession {
                 maxMove = d;
             }
         }
-        const energy = useInitial ? this.energyBefore : this.energy;
+        const energy = this.bestEnergy;
         const stopText: { [key: string]: string } = {
             gradient: 'converged',
             energy: 'energy converged',
@@ -2516,8 +2552,8 @@ export class MmSession {
             energyBefore: this.energyBefore,
             energyAfter: energy,
             iterations: this.iterations,
-            maxGrad: this.maxForce,
-            rmsGrad: this.rmsForce,
+            maxGrad: this.bestMaxForce,
+            rmsGrad: this.bestRmsForce,
             maxMove: maxMove,
             converged: this.converged,
             stopReason: this.stopReason,

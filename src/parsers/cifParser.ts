@@ -12,6 +12,7 @@ import {
     wrapFrac
 } from '../tools/crystalGeometry';
 import { lookupSpaceGroupOps, SpaceGroupOps } from '../tools/spaceGroupTable';
+import { isUsableLattice } from './periodicUtils';
 import { AnisoTensor, rotateAnisoTensor, symOpCartesianRotation } from '../tools/adp';
 
 /**
@@ -208,9 +209,22 @@ function tokenize(content: string): CifBlock[] {
         data = { name, items: {}, loops: [] };
     }
 
+    // A data name is meant to occur once per block, but symmetry operations
+    // are commonly written as repeated plain items instead of a loop. Storing
+    // only the last one expands the cell under a single operation — a wrong
+    // crystal with no warning — so a repeated symmetry tag keeps every value,
+    // one per line, and collectSymOps reads them as the list they are.
+    function putItem(key: string, value: string) {
+        const prev = data.items[key];
+        if (prev !== undefined && SYMOP_TAGS.indexOf(key) >= 0) {
+            data.items[key] = prev + '\n' + value;
+        } else {
+            data.items[key] = value;
+        }
+    }
     function flushSemicolon() {
         if (semicolonKey !== null) {
-            data.items[semicolonKey] = semicolonBuffer.join('\n').trim();
+            putItem(semicolonKey, semicolonBuffer.join('\n').trim());
         }
         inSemicolon = false;
         semicolonBuffer = [];
@@ -360,11 +374,16 @@ function tokenize(content: string): CifBlock[] {
                 } else {
                     value = value.split(/\s+/)[0];
                 }
-                data.items[match[1]] = value;
+                putItem(match[1], value);
                 pendingKey = null;
             } else {
                 const key = line.split(/\s+/)[0];
-                data.items[key] = '';
+                // A bare key is a placeholder for the semicolon block that
+                // follows. A repeated symmetry key must keep the operations
+                // already read, so only its first occurrence starts empty.
+                if (SYMOP_TAGS.indexOf(key) < 0 || data.items[key] === undefined) {
+                    data.items[key] = '';
+                }
                 pendingKey = key;
             }
             i++;
@@ -560,7 +579,7 @@ interface CifRawAtom {
 interface CifExpansion {
     baseAtoms: Atom[];
     asymAtoms: AsymAtom[];
-    nearMisses: { label: string; dist: number }[];
+    nearMisses: { label: string; dist: number; otherLabel?: string; crossSite?: boolean }[];
 }
 
 /**
@@ -578,8 +597,13 @@ function expandCifSites(rawAtoms: CifRawAtom[], parsedSymOps: SymOp[], lattice: 
 
     const baseAtoms: Atom[] = [];
     const asymAtoms: AsymAtom[] = [];
-    const nearMisses: { label: string; dist: number }[] = [];
+    const nearMisses: { label: string; dist: number; otherLabel?: string; crossSite?: boolean }[] = [];
     const index = createNearIndex();
+    // Which listed site each placed atom came from. It is what separates a
+    // special position folding an image onto itself (normal and silent) from
+    // two different sites occupying the same point (a row and its occupancy
+    // would otherwise vanish without a trace).
+    const siteOf: number[] = [];
 
     for (let siteIdx = 0; siteIdx < rawAtoms.length; siteIdx++) {
         const raw = rawAtoms[siteIdx];
@@ -591,18 +615,31 @@ function expandCifSites(rawAtoms: CifRawAtom[], parsedSymOps: SymOp[], lattice: 
 
             const near = index.find(cx, cy, cz);
             if (near) {
-                // An image that lands on an atom already there is what symmetry
-                // does to a site on a special position — normal, and not worth a
-                // line. An image that lands *near* one means two sites the file
-                // lists separately are being folded together, which is the case
-                // the tolerance exists for and the one the user must hear about.
-                if (near.dist > EXACT_MERGE) {
+                // An image that lands on an atom of the *same* site is what
+                // symmetry does to a site on a special position — normal, and
+                // not worth a line. An image that lands on another site means
+                // two rows the file lists separately are being folded together.
+                // The second row's occupancy and position would disappear from
+                // the unit-cell list, so it is reported whether the overlap is
+                // exact or merely close; only the message differs.
+                const otherSite = siteOf[near.index];
+                const crossSite = otherSite !== undefined && otherSite !== siteIdx;
+                if (crossSite) {
+                    const other = rawAtoms[otherSite];
+                    nearMisses.push({
+                        label: raw.label || raw.element + (siteIdx + 1),
+                        dist: near.dist,
+                        crossSite: true,
+                        otherLabel: other.label || other.element + (otherSite + 1)
+                    });
+                } else if (near.dist > EXACT_MERGE) {
                     nearMisses.push({ label: raw.label || raw.element + (siteIdx + 1), dist: near.dist });
                 }
                 continue;
             }
 
             index.add(cx, cy, cz);
+            siteOf.push(siteIdx);
             baseAtoms.push({
                 element: raw.element,
                 x: cx, y: cy, z: cz,
@@ -1125,9 +1162,19 @@ export function parseCif(content: string): MolecularData {
     const a = aVal !== null && aVal > 0 ? aVal : 1;
     const b = bVal !== null && bVal > 0 ? bVal : 1;
     const c = cVal !== null && cVal > 0 ? cVal : 1;
-    const alpha = alphaVal !== null && alphaVal > 0 ? alphaVal : 90;
-    const beta = betaVal !== null && betaVal > 0 ? betaVal : 90;
-    const gamma = gammaVal !== null && gammaVal > 0 ? gammaVal : 90;
+    // An angle outside (0, 180) cannot describe a cell. Zero and negative
+    // values were silently replaced by 90 just like a missing field; the
+    // substitution is still made, but it is now named in the warning.
+    const badAngles: string[] = [];
+    function angleOr90(v: number | null, name: string): number {
+        if (v === null) return 90;
+        if (v > 0 && v < 180) return v;
+        badAngles.push(name + ' = ' + v);
+        return 90;
+    }
+    const alpha = angleOr90(alphaVal, 'alpha');
+    const beta = angleOr90(betaVal, 'beta');
+    const gamma = angleOr90(gammaVal, 'gamma');
     const cell = { a, b, c, alpha, beta, gamma };
 
     const sgRaw = findItemAny(data, SPACE_GROUP_TAGS);
@@ -1157,6 +1204,10 @@ export function parseCif(content: string): MolecularData {
     if (alphaVal === null || betaVal === null || gammaVal === null) {
         warnings.push('cell angles missing: the missing ones read as 90 degrees');
     }
+    if (badAngles.length > 0) {
+        warnings.push('cell angle' + (badAngles.length === 1 ? ' ' : 's ') + badAngles.join(', ') +
+            ' outside 0-180 degrees: read as 90 degrees');
+    }
 
     if (scan.ops.length === 0) {
         if (scan.sawTag) {
@@ -1181,6 +1232,9 @@ export function parseCif(content: string): MolecularData {
     }
 
     const lattice = cellToLatticeVectors(a, b, c, alpha, beta, gamma);
+    if (!isUsableLattice(lattice)) {
+        warnings.push('unit cell is degenerate (zero volume): the cell cannot be built reliably');
+    }
 
     // ----- sites -----
     const site = atomSiteLoop(data);
@@ -1208,19 +1262,25 @@ export function parseCif(content: string): MolecularData {
     const cols = [labelCol, typeCol, xCol, yCol, zCol].filter(col => col >= 0);
     const minCols = cols.length > 0 ? Math.max(...cols) + 1 : 0;
     let skipped = 0;
+    let unknownElements = 0;
 
     for (const row of atomLoop.rows) {
         if (row.length < minCols) { skipped++; continue; }
         const label = labelCol >= 0 ? (row[labelCol] || '') : '';
         const typeSym = typeCol >= 0 ? row[typeCol] : '';
         // The label is the fallback the dictionary itself suggests (`C12` is a
-        // carbon), and it is also what a file with no type column has.
-        const element = normaliseElement(isMissingValue(typeSym) ? label : typeSym) ||
-            normaliseElement(label) || 'C';
+        // carbon), and it is also what a file with no type column has. A row
+        // that names no readable element is a dummy point, not a carbon: an
+        // invented C would take part in bonding, formula and valence checks as
+        // a real atom the file never stated.
+        const named = normaliseElement(isMissingValue(typeSym) ? label : typeSym) ||
+            normaliseElement(label);
+        const element = named || 'X';
         const xv = parseNumber(row[xCol]);
         const yv = parseNumber(row[yCol]);
         const zv = parseNumber(row[zCol]);
         if (xv === null || yv === null || zv === null) { skipped++; continue; }
+        if (named === '') unknownElements++;
         const occupancy = occCol >= 0 ? (parseNumber(row[occCol]) ?? 1) : 1;
         const groupRaw = disorderCol >= 0 ? (row[disorderCol] || '').trim() : '';
         // `?` and `.` both mean "no group": a file that marks none must not
@@ -1236,6 +1296,10 @@ export function parseCif(content: string): MolecularData {
     if (skipped > 0) {
         warnings.push(skipped + ' atom site' + (skipped === 1 ? '' : 's') +
             ' skipped: the row is short or its coordinates are not numbers');
+    }
+    if (unknownElements > 0) {
+        warnings.push(unknownElements + ' atom site' + (unknownElements === 1 ? '' : 's') +
+            ' name no readable element: read as X (dummy points, not bonded)');
     }
     const anisoLabels = Object.keys(aniso.byLabel);
     if (anisoLabels.length > 0) {
@@ -1262,8 +1326,14 @@ export function parseCif(content: string): MolecularData {
 
     for (let i = 0; i < nearMisses.length && i < MAX_MERGE_WARNINGS; i++) {
         const m = nearMisses[i];
-        warnings.push('site ' + m.label + ': an image ' + m.dist.toFixed(3) +
-            ' A from an existing atom was merged into it');
+        if (m.crossSite) {
+            warnings.push('site ' + m.label + ': its image ' + m.dist.toFixed(3) +
+                ' A from atom ' + m.otherLabel + ' of another site was merged into that atom; ' +
+                'the second site and its occupancy are not in the unit-cell list');
+        } else {
+            warnings.push('site ' + m.label + ': an image ' + m.dist.toFixed(3) +
+                ' A from an existing atom was merged into it');
+        }
     }
     if (nearMisses.length > MAX_MERGE_WARNINGS) {
         warnings.push('and ' + (nearMisses.length - MAX_MERGE_WARNINGS) +
