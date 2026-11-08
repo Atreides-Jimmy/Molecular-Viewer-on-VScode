@@ -13,12 +13,18 @@ export function parseCoord(content: string): MolecularData {
 
     let inCoord = false;
     let atomIndex = 0;
+    // Turbomole writes `$coord` in Bohr. A modified keyword line may state the
+    // unit (`$coord angs`); reading it as Bohr shrank the structure by 0.53.
+    let coordFactor = BOHR_TO_ANG;
 
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
+        const lower = line.toLowerCase();
 
-        if (line.toLowerCase() === '$coord' || line.toLowerCase() === '$coord ') {
+        if (/^\$coord(?:\s|$)/i.test(line)) {
             inCoord = true;
+            const tokens = lower.split(/\s+/).slice(1);
+            coordFactor = tokens.some(t => /^(?:ang|angs|angstrom|angstroms)$/.test(t)) ? 1.0 : BOHR_TO_ANG;
             continue;
         }
 
@@ -40,9 +46,9 @@ export function parseCoord(content: string): MolecularData {
                     const isDummy = elem.toLowerCase() === 'q' || elem.toLowerCase() === 'x';
                     const atom: Atom = {
                         element: isDummy ? 'X' : elem.charAt(0).toUpperCase() + elem.slice(1).toLowerCase(),
-                        x: x * BOHR_TO_ANG,
-                        y: y * BOHR_TO_ANG,
-                        z: z * BOHR_TO_ANG,
+                        x: x * coordFactor,
+                        y: y * coordFactor,
+                        z: z * coordFactor,
                         index: atomIndex
                     };
                     if (isDummy) atom.ghost = true;

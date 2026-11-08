@@ -188,7 +188,6 @@ export function parseGjf(content: string): MolecularData {
 
         if (allNumeric && lineCount > 0) {
             let connectEndLine = i;
-            let validBonds = 0;
             for (let li = i; li < lines.length; li++) {
                 const tl = lines[li].trim();
                 if (tl === '' || tl.startsWith('--')) { connectEndLine = li; break; }
@@ -199,10 +198,13 @@ export function parseGjf(content: string): MolecularData {
                     continue;
                 }
                 parseConnectLine(tl, atoms.length, bonds);
-                validBonds++;
                 connectEndLine = li + 1;
             }
-            if (validBonds > 0) hasExplicitBonds = true;
+            // `hasExplicitBonds` must state what the atom block actually got:
+            // a line whose every bond index is out of range adds nothing, and
+            // claiming an explicit table then makes the viewer skip its bond
+            // perception and show a structure with no bonds at all.
+            if (bonds.length > 0) hasExplicitBonds = true;
             let afterIdx = connectEndLine;
             while (afterIdx < lines.length && lines[afterIdx].trim() === '') {
                 afterIdx++;
@@ -223,7 +225,19 @@ export function parseGjf(content: string): MolecularData {
         afterConnectContent
     };
 
-    return { atoms, bonds, title, hasExplicitBonds, gjfMeta, charge, multiplicity };
+    // A GJF may hold several jobs joined by `--Link1--`. The atom block ends
+    // at the first separator, so only the first structure is drawn; saying so
+    // keeps the rest of the file from looking like a parsing failure.
+    let linkedJobs = 0;
+    for (let li = 0; li < lines.length; li++) {
+        if (/^\s*--Link1--\s*$/i.test(lines[li])) linkedJobs++;
+    }
+    const result: MolecularData = { atoms, bonds, title, hasExplicitBonds, gjfMeta, charge, multiplicity };
+    if (linkedJobs > 0) {
+        result.warnings = ['the file holds ' + (linkedJobs + 1) +
+            ' Gaussian jobs joined by --Link1--: only the first structure is shown (split the file to open another)'];
+    }
+    return result;
 }
 
 function parseConnectLine(line: string, totalAtoms: number, bonds: Bond[]): void {

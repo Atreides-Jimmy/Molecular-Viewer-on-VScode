@@ -251,14 +251,21 @@ export function resolveRep(rep: VmdRep): VmdRepKind {
         // The argument of Lines/Bonds is a pixel width, not a radius.
         return { atomic: true, sphereScale: 0, bondRadius: 0.03, probe: null };
     }
-    // CPK, and every style whose first two numbers are a sphere scale and a bond
-    // radius (the reference renderer's uniform representation arguments).
-    return {
-        atomic: true,
-        sphereScale: Math.max(0, arg(args, 0, 1.0)),
-        bondRadius: rebaseBondRadius(arg(args, 1, REFERENCE_BOND_RADIUS)),
-        probe: null
-    };
+    if (style === 'cpk' || style === 'ball-and-stick' || style === 'ballandstick' || style === '') {
+        // CPK's two numbers are a sphere scale and a bond radius (the
+        // reference renderer's uniform representation arguments).
+        return {
+            atomic: true,
+            sphereScale: Math.max(0, arg(args, 0, 1.0)),
+            bondRadius: rebaseBondRadius(arg(args, 1, REFERENCE_BOND_RADIUS)),
+            probe: null
+        };
+    }
+    // Every other style has arguments with meanings this viewer does not
+    // implement: `Tube 0.3 20 1` is a tube radius and a resolution, not a
+    // sphere scale and a bond radius. Reading those slots as CPK's produced an
+    // 8 Å cylinder; a fixed default ball-and-stick is the honest fallback.
+    return { atomic: true, sphereScale: 1.0, bondRadius: VIEWER_BOND_RADIUS, probe: null };
 }
 
 export interface SelectionResult {
@@ -351,8 +358,18 @@ export function resolveSelection(selection: string, atoms: { element: string }[]
     let picked: number[] | null;
     if (keyword === 'index') {
         picked = parseIndexList(list, atoms.length);
-    } else if (keyword === 'element' || keyword === 'name' || keyword === 'type') {
+    } else if (keyword === 'element') {
         picked = parseElementList(list, atoms);
+    } else if (keyword === 'name' || keyword === 'type') {
+        // `name CA` is a topology atom name, not the element calcium: resolving
+        // it through the element table gave an empty set (the representation
+        // silently drew nothing), while `name H1` widened to the whole molecule.
+        // The viewer keeps no atom names or types, so the honest answer is the
+        // same as any other metadata-dependent selection: widen it and say so.
+        const what = keyword === 'name' ? 'atom-name' : 'atom-type';
+        const missing = 'selection "' + raw + '" needs ' + what +
+            ' metadata the viewer does not keep — drawn as the whole molecule';
+        return { indices: null, warning: warning ? warning + '; ' + missing : missing };
     } else {
         picked = null;
     }
@@ -719,15 +736,27 @@ export function parseTcl(content: string): TclParseResult {
     let sourceFile = '';
     let sourceType = '';
     let current: VmdMolecule | null = null;
+    let currentIndex = -1;
     let pending: VmdRep | null = null;
     // `mol new` also creates one default representation, which scripts almost
     // always delete again with `mol delrep 0 top`. Keeping track of it is what
     // makes representation indices address the same representation as in the
     // reference renderer: with the default still present the first `addrep`
-    // is number 1, without it it is number 0.
-    let defaultRepExists = false;
-    const repIndex = function (vmdIndex: number): number {
-        return defaultRepExists ? vmdIndex - 1 : vmdIndex;
+    // is number 1, without it it is number 0. The flag is per molecule — a
+    // script that opens several structures creates (and may delete) a default
+    // rep for each of them, and one global flag shifted every later molecule's
+    // representation indices.
+    const hasDefaultRep: boolean[] = [];
+    const repIndex = function (molIndex: number, vmdIndex: number): number {
+        return hasDefaultRep[molIndex] ? vmdIndex - 1 : vmdIndex;
+    };
+    /** The molecule a `mol … <rep> <mol>` command addresses. */
+    const targetMolecule = function (token: string | undefined): number {
+        if (token && !/^top$/i.test(token)) {
+            const id = parseInt(token, 10);
+            if (!isNaN(id) && id >= 0 && id < scene.molecules.length) return id;
+        }
+        return currentIndex;
     };
 
     for (let li = 0; li < lines.length; li++) {
@@ -776,7 +805,8 @@ export function parseTcl(content: string): TclParseResult {
             }
             current = { sourceFile: file, sourceType: type, label: file, reps: [] };
             scene.molecules.push(current);
-            defaultRepExists = true;
+            currentIndex = scene.molecules.length - 1;
+            hasDefaultRep.push(true);
             if (!sourceFile) {
                 sourceFile = file;
                 sourceType = type;
@@ -793,12 +823,14 @@ export function parseTcl(content: string): TclParseResult {
 
         if (op === 'delrep') {
             const idx = parseInt(tokens[2], 10);
-            if (current && !isNaN(idx) && idx >= 0) {
-                if (defaultRepExists) {
-                    if (idx === 0) defaultRepExists = false;
-                    else if (idx - 1 < current.reps.length) current.reps.splice(idx - 1, 1);
-                } else if (idx < current.reps.length) {
-                    current.reps.splice(idx, 1);
+            const molIndex = targetMolecule(tokens[3]);
+            if (molIndex >= 0 && !isNaN(idx) && idx >= 0) {
+                const target = scene.molecules[molIndex];
+                if (hasDefaultRep[molIndex]) {
+                    if (idx === 0) hasDefaultRep[molIndex] = false;
+                    else if (idx - 1 < target.reps.length) target.reps.splice(idx - 1, 1);
+                } else if (idx < target.reps.length) {
+                    target.reps.splice(idx, 1);
                 }
             }
             continue;
@@ -841,7 +873,7 @@ export function parseTcl(content: string): TclParseResult {
                 let target = current.reps.length - 1;
                 if (tail.length >= 3) {
                     const written = parseInt(tail[tail.length - 3], 10);
-                    if (!isNaN(written)) target = repIndex(written);
+                    if (!isNaN(written)) target = repIndex(currentIndex, written);
                 }
                 if (!isNaN(min) && !isNaN(max) && target >= 0 && target < current.reps.length) {
                     current.reps[target].scaleMin = min;
@@ -858,7 +890,7 @@ export function parseTcl(content: string): TclParseResult {
             if (!current) continue;
             const written = parseInt(tokens[2], 10);
             if (isNaN(written)) continue;
-            const idx = repIndex(written);
+            const idx = repIndex(currentIndex, written);
             if (idx < 0 || idx >= current.reps.length) continue;
             const rep = current.reps[idx];
             if (op === 'modstyle' && tokens.length >= 5) {
@@ -951,11 +983,28 @@ const COORDINATE_ONLY_RECORDS: { [record: string]: boolean } = {
  */
 export function hasScalarChannel(content: string, atoms: { beta?: number }[]): boolean {
     const lines = content.split(/\r?\n/);
+    let sawAtom = false;
+    let chain: string | null = null;
     for (let i = 0; i < lines.length; i++) {
-        const record = lines[i].substring(0, 6).trim().toUpperCase();
+        const line = lines[i];
+        const record = line.substring(0, 6).trim().toUpperCase();
         if (record === '') continue;
         if (!COORDINATE_ONLY_RECORDS[record]) return false;
+        if (record !== 'ATOM' && record !== 'HETATM') continue;
+        // A stronger marker than "no header" is the toolchain's own numbering:
+        // its exports write the atom serial into the residue-number field
+        // (`resid` == `serial`) and use one chain. A PDB written by a structure
+        // tool or a converter keeps real residue numbering, so a bare file with
+        // genuine B-factors is not mistaken for a scalar channel.
+        const serial = parseInt(line.substring(6, 11).trim(), 10);
+        const resid = parseInt(line.substring(22, 26).trim(), 10);
+        if (!isFinite(serial) || !isFinite(resid) || resid !== serial) return false;
+        const rowChain = line.substring(21, 22);
+        if (chain === null) chain = rowChain;
+        else if (rowChain !== chain) return false;
+        sawAtom = true;
     }
+    if (!sawAtom) return false;
     let min = Infinity;
     let max = -Infinity;
     let count = 0;

@@ -3298,6 +3298,25 @@ export interface SmilesAnalysisResult {
 }
 
 /**
+ * 加氢后的原子总数（与 expandHydrogens 的产物一致）。校验阶段不需要真的生成
+ * 氢坐标，只要这个数，逐键调用的开销才保持很小。
+ */
+function atomCountAfterHydrogens(mol: Mol, addHydrogens: boolean): number {
+    if (!addHydrogens) return mol.atoms.length;
+    let total = mol.atoms.length;
+    for (let i = 0; i < mol.atoms.length; i++) {
+        const h = mol.atoms[i].hcount;
+        if (h > 0) total += h;
+    }
+    return total;
+}
+
+/** 规模上限判断；analyzeSmiles 与 validateSmiles 共用这一处。 */
+function atomLimitError(count: number, max: number): string | null {
+    return count > max ? '原子数 ' + count + ' 超过上限 ' + max : null;
+}
+
+/**
  * 完整流程: 解析 -> 验价 -> 环感知 -> 加氢 -> 生成坐标 -> 松弛。
  * 不做任何 I/O: 不打印、不写文件、不抛异常。
  */
@@ -3345,9 +3364,10 @@ export function analyzeSmiles(smiles: unknown, options?: Partial<SmilesOptions>)
         mol = heavy;
     }
 
-    if (mol.atoms.length > opts.max_atoms) {
+    const limitError = atomLimitError(atomCountAfterHydrogens(heavy, opts.add_hydrogens), opts.max_atoms);
+    if (limitError) {
         result.error = ERR_TOO_LARGE;
-        result.errorText = '原子数 ' + mol.atoms.length + ' 超过上限 ' + opts.max_atoms;
+        result.errorText = limitError;
         return result;
     }
 
@@ -3632,13 +3652,14 @@ export function smilesTo3dSafe(smiles: unknown, options?: Partial<SmilesOptions>
 }
 
 /**
- * 轻量校验 (不生成坐标): 解析 + 隐式氢 + 价态检查。
+ * 轻量校验 (不生成坐标): 解析 + 隐式氢 + 价态检查 + 规模上限。
  * 适合在输入框的 validateInput 回调里逐键调用。
  */
-export function validateSmiles(smiles: unknown): { ok: boolean; errorText: string } {
+export function validateSmiles(smiles: unknown, options?: Partial<SmilesOptions>): { ok: boolean; errorText: string } {
     if (typeof smiles !== 'string') {
         return { ok: false, errorText: ERROR_TEXT[ERR_EMPTY] };
     }
+    const opts = makeOptions(options);
     const parsed = parseSmiles(smiles);
     if (!parsed.ok) {
         return { ok: false, errorText: parsed.error_text };
@@ -3648,6 +3669,12 @@ export function validateSmiles(smiles: unknown): { ok: boolean; errorText: strin
     const problems = checkValence(mol);
     if (problems.length > 0) {
         return { ok: false, errorText: problems.join('; ') };
+    }
+    // 与 analyzeSmiles 使用同一上限和同一计数方式：这里的"合法"必须意味着
+    // 生成阶段不会因规模再拒绝一次。
+    const limitError = atomLimitError(atomCountAfterHydrogens(mol, opts.add_hydrogens), opts.max_atoms);
+    if (limitError) {
+        return { ok: false, errorText: limitError };
     }
     return { ok: true, errorText: '' };
 }

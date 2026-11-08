@@ -92,12 +92,12 @@ A clean, fully featured 3D molecular viewer and editor for VS Code / Trae — en
 Opening a `.tcl` file reproduces the script's display recipe instead of applying the viewer's defaults.
 
 - **Representations** — Every `mol new` becomes a selectable molecule. CPK, VDW, Licorice, Lines and Surf styles are reproduced with their sphere scales, bond radii and probe radii; `mol modstyle`, `mol modcolor`, `mol modselect`, `mol modmaterial` and `mol delrep` are honoured, including the default representation created by `mol new`.
-- **Selections** — `index`, `to` ranges, `element`/`name`/`type`, `not`, `all` and `none` are resolved against the loaded atoms. Selections that need residue metadata are widened to the whole molecule and reported.
+- **Selections** — `index`, `to` ranges, `element`, `not`, `all` and `none` are resolved against the loaded atoms. `name`/`type` and residue-dependent selections need metadata the viewer does not keep, so they are widened to the whole molecule and reported instead of silently drawing the wrong atoms.
 - **Sizing** — Script sizes are applied as ratios to the viewer's own ball-and-stick geometry, so `CPK 0.97` looks like an ordinary structure and `CPK 0.1` stays tiny; probe radii remain real Å values. Atoms not covered by any representation are hidden unless Display is Space-filling or Stick.
 - **Colours** — `Beta` maps per-atom scalars onto the reference red → green → blue ramp using the script's `mol scaleminmax` range or the data's own range. `ColorID` uses the 33-colour reference palette including `color change rgb` overrides; `Name`/`Element` uses the reference element colours.
 - **Surf surfaces** — `Surf` representations become real solvent-accessible isosurfaces of the selected atoms, drawn translucent and moving with the structure.
 - **Egg list** — With `eggFile*` and `unitfile` metadata present, an **Eggs** panel lists each egg with its colour and units and can hide or show individual eggs. If several metadata files exist, they are scored against the script's patches and the best match is offered.
-- **Bare PDB visualizations** — A header-less PDB whose column 61–66 is non-constant opens already coloured by that scalar, with the range on the status bar. **Color by Beta** toggles the colouring; constant columns are ignored.
+- **Bare PDB visualizations** — A header-less coordinate export that writes the atom serial into the residue-number field (one chain) and whose column 61–66 is non-constant opens already coloured by that scalar, with the range on the status bar. A PDB with real residue numbering — including a converter's output carrying genuine B-factors — keeps its element colours. **Color by Beta** toggles the colouring; constant columns are ignored.
 - **Background** — The script's white background is deliberately not applied; the viewer keeps its theme background. `color scale method` and `color change rgb` are applied.
 
 A script also works as the comparison side of **Structure Diff**, using the script's colours.
@@ -106,21 +106,21 @@ A script also works as the comparison side of **Structure Diff**, using the scri
 
 | Format | Extensions | What is read |
 |--------|------------|--------------|
-| Gaussian input | `.gjf` `.gjf03` `.gjf09` `.gjf16` `.com` | Link 0, route, title, charge/multiplicity, coordinates, connect section, fixed-atom notation |
-| XYZ | `.xyz` | Standard XYZ; multi-frame trajectories (including ORCA `_trj.xyz`) with frame navigation and convergence when every frame has an energy; a truncated final frame is dropped |
+| Gaussian input | `.gjf` `.gjf03` `.gjf09` `.gjf16` `.com` | Link 0, route, title, charge/multiplicity, coordinates, connect section, fixed-atom notation; a multi-job `--Link1--` file reports that only the first structure is shown |
+| XYZ | `.xyz` | Standard XYZ; multi-frame trajectories (including ORCA `_trj.xyz`) with frame navigation and convergence when every frame has an energy; a truncated final frame is dropped, and a block shorter than its declared count is reported |
 | MOL2 | `.mol2` | ATOM and BOND sections, aromatic `ar` bonds |
 | MDL Mol | `.mol` | V2000 and V3000 CTfiles: three header lines (a file written with only a title is accepted too), fixed-column or spaced atoms/bonds, aromatic bond type, `*`/`LP`/query atoms as dummy points |
 | Gaussian log | `.log` | Optimisation trajectories, SCF energies, convergence, harmonic frequencies; xtb trajectories are detected automatically |
 | ORCA input | `.inp` | `* xyz … *` and `* xyzfile` (opens the external XYZ it names), `%coords` blocks, Bohr/Å units |
 | ORCA output | `.out` | Cartesian coordinates in Å or a.u., cycles and final geometry, charge/multiplicity, convergence tolerances, frequencies/IR, route line; format detected by content |
-| Turbomole | `.coord` | `$coord` (Bohr → Å), `$chrg`, `$spin`/`$mult` |
-| PDB | `.pdb` `.ent` | ATOM/HETATM, element, occupancy, B-factor scalar, CONECT, duplicate serials |
+| Turbomole | `.coord` | `$coord` (Bohr → Å; `$coord angs` kept in Å), `$chrg`, `$spin`/`$mult` |
+| PDB | `.pdb` `.ent` | ATOM/HETATM, element (element column, or atom-name column alignment so a protein `CA` stays carbon), occupancy, B-factor scalar, CONECT, duplicate serials |
 | MOPAC | `.mop` `.mopac` `.dat` `.out` `.log` | Input: internal coordinates, Å/Bohr auto-detection, CHARGE and MS, Cartesian fallback. Output: the final `CARTESIAN COORDINATES` table, including serial-numbered rows; detected by content |
 | xtb | `.log` `.out` `.xyz` `.trj` | Optimisation trajectory (`xtbopt.log`/`xtb.trj`) with frame navigation and gradient norms; a run log's `final structure:` block is read as the final geometry |
 | VMD TCL | `.tcl` | Display recipe with molecules, representations, colours, selections, surfaces and egg metadata |
 | CIF | `.cif` | Cell, space group and symmetry operations, fractional/Cartesian sites, occupancy, asymmetric unit, `_geom_bond`; CIF 1.1, 1.2 and 2 tags |
 | VASP POSCAR | `.vasp` `POSCAR` `CONTCAR` | Scale (negative = target volume), lattice, element counts, selective dynamics, Direct/Cartesian |
-| Gaussian Cube | `.cube` | Voxel vectors and atoms, Bohr/Å auto-detection, robust lattice fallback |
+| Gaussian Cube | `.cube` | Voxel vectors and atoms, Bohr/Å auto-detection, robust lattice fallback; a truncated atom table is reported instead of being read as grid data |
 | VESTA | `.vesta` | CELLP, STRUC, GROUP and SYMOP; symmetry expansion and occupancy, with the same logic as CIF |
 | ABACUS | `.stru` `STRU` `STRU_MD_*` `.md_dump` `INPUT` | ATOMIC_SPECIES/MASS, LATTICE_CONSTANT (Bohr default), Direct/Cartesian positions, constraint flags; `INPUT` opens the `stru_file` it names (default `STRU`); SCF log and MD dump |
 | ABINIT | `.abi` `.abo` | `acell`/`rprim` (Bohr default or `angstrom`), `znucl`/`typat` with `N*value` repeats, `xred`/`xcart`/`xangst`, `xyzfile` (external XYZ) and `include` files; converged output geometry |
@@ -129,9 +129,9 @@ A script also works as the comparison side of **Structure Diff**, using the scri
 | LAMMPS | `.lmp` `.lammps` `.data` `.lammpstrj` `.dump` `data` | Data box and tilt, `Masses`/`mass`/`dump_modify element` type names, atomic/charge/full/molecular styles, and the `Bonds` section (the file's connectivity and, when the header says `# order`, its bond orders; the minimum-image shift is recovered from the cell); a multi-frame dump opens with frame navigation and a per-frame triclinic box (restricted or general `abc origin`), a single frame stays a periodic crystal; an input script (`read_data`, `include`, `variable`) opens the structure it names, and the bare `data` file opens by itself |
 | GROMACS trajectory | `.xtc` `.trr` | Binary XTC/TRR recognised by magic: XTC integer-compressed coordinates, TRR coordinate blocks, nm → Å, per-frame box; topology, elements and bonds from the same-name `.gro`/`.pdb` (or a unique atom-count match) |
 | DCD trajectory | `.dcd` | CHARMM/NAMD/LAMMPS DCD with 4- or 8-byte Fortran records, either byte order, fixed atoms and unit-cell records; per-frame coordinates and box, with `.gro`/`.pdb`/`.xyz`/`.data` topology |
-| GROMACS | `.gro` | nm → Å, nine-value triclinic box in GROMACS order, velocities ignored; a zero box is a molecule |
-| Extended XYZ / GPUMD | `.xyz` `.extxyz` | `Lattice=`, `Properties=` and `pbc=` on the comment line, property layout resolved by name, frame count reported |
-| DeepMD / DP-GEN | `coord.raw` `coord.npy` | `type.raw`/`type_map.raw` types, `box.raw`/`box.npy` cell, empty `nopbc`; first frame shown |
+| GROMACS | `.gro` | nm → Å, nine-value triclinic box in GROMACS order, velocities ignored; atom names resolved by residue/atom-name rules (protein `CA`/`HG` stay C/H, ion residues keep their metal); a zero box is a molecule |
+| Extended XYZ / GPUMD | `.xyz` `.extxyz` | `Lattice=`, `Properties=` and `pbc=` on the comment line, property layout resolved by name, frame count reported (blank separators and a cut-off tail are handled) |
+| DeepMD / DP-GEN | `coord.raw` `coord.npy` | `type.raw`/`type_map.raw` types, `box.raw`/`box.npy` cell, empty `nopbc`; first frame shown, and type indices a map does not list are reported |
 | PySCF | `.out` `.log` | `[INPUT]` and `New geometry` blocks, periodic cell vectors in Bohr, final geometry |
 | Molden | `.molden` | `[Atoms]` table with its AU/Å unit header |
 | VASP XDATCAR / OUTCAR / vasprun.xml | `.xdatcar` `.outcar` `vasprun.xml` | MD configurations (first shown), final geometry, cell and energies |
@@ -169,7 +169,7 @@ npx vsce package --no-dependencies
 #### Importing a Structure
 
 1. Click **Import Structure** in the toolbar (View mode; not available for crystals or in Diff).
-2. Enter the number of copies (1–50) and choose **From File** or **From SMILES**. SMILES input is validated as you type with the parser's error message; press Enter to build the 3D structure.
+2. Enter the number of copies (1–50) and choose **From File** or **From SMILES**. SMILES input is validated as you type with the parser's error message and the same atom-count limit the generator applies; press Enter to build the 3D structure.
 3. A request that would exceed 20,000 atoms is trimmed with a warning.
 4. Copies are placed beside the existing structure without overlap and spaced along +X. The whole import is one Undo step, and Save As exports everything together.
 
@@ -360,12 +360,12 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 打开 `.tcl` 文件时，会按脚本要求的方式渲染，而不是套用查看器的默认值。
 
 - **表示方式** — 每个 `mol new` 都会成为一个可切换的分子。CPK、VDW、Licorice、Lines 与 Surf 样式连同球缩放、键半径与探针半径都会被复现；`mol modstyle`、`mol color`、`mol selection`、`mol material` 与 `mol delrep` 都会生效，包括 `mol new` 创建的默认表示。
-- **选择** — `index`、`to` 区间、`element`/`name`/`type`、`not`、`all` 与 `none` 会针对已载入原子求解。需要残基信息的选择会被放宽为整个分子并明确报告。
+- **选择** — `index`、`to` 区间、`element`、`not`、`all` 与 `none` 会针对已载入原子求解。`name`/`type` 与需要残基信息的选择需要查看器不保存的元数据，因此会放宽为整个分子并明确报告，而不是静默画错原子。
 - **尺寸** — 脚本中的尺寸按比例套用到查看器自己的球棍几何上：`CPK 0.97` 看起来是普通结构，`CPK 0.1` 则很小；探针半径仍按真实 Å 值使用。未被任何表示覆盖的原子不会绘制，除非 Display 选择空间填充或 Stick。
 - **颜色** — `Beta` 把逐原子标量映射到参考渲染器的红 → 绿 → 蓝渐变，范围取自脚本的 `mol scaleminmax` 或数据自身范围。`ColorID` 使用 33 色参考调色板，并应用 `color change rgb` 覆盖；`Name`/`Element` 使用参考渲染器的元素颜色。
 - **Surf 曲面** — `Surf` 表示会变成所选原子的真实溶剂可及等值面，半透明绘制，并随结构一起旋转与平移。
 - **Egg 列表** — 当存在 `eggFile*` 与 `unitfile` 元数据时，**Eggs** 面板会列出每个蛋及其颜色和包含的单元，并可单独隐藏或显示。若存在多个元数据文件，会按与曲面片的匹配数评分并推荐最合适的一份。
-- **裸 PDB 可视化** — 没有头部记录且 61–66 列非常量的 PDB 会按该列标量自动上色，范围显示在状态栏。**Color by Beta** 可切换着色；常量列不着色。
+- **裸 PDB 可视化** — 没有头部记录、把原子序号写进残基号字段（单一链）且 61–66 列非常量的坐标文件，会按该列标量自动上色，范围显示在状态栏。保留真实残基编号的 PDB（包括转换工具写出、带真实 B 因子的文件）仍按元素上色。**Color by Beta** 可切换着色；常量列不着色。
 - **背景** — 脚本的白色背景有意不套用，查看器保留自己的主题背景；`color scale method` 与 `color change rgb` 会生效。
 
 脚本也可以作为**结构对比**的一侧，并按脚本的颜色显示。
@@ -374,21 +374,21 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 | 格式 | 扩展名 | 读取内容 |
 |------|--------|----------|
-| Gaussian 输入 | `.gjf` `.gjf03` `.gjf09` `.gjf16` `.com` | Link 0、route、标题、电荷/多重度、坐标、connect 段、固定原子写法 |
-| XYZ | `.xyz` | 标准 XYZ；多帧轨迹（含 ORCA `_trj.xyz`）支持帧导航，每帧都带能量时显示收敛信息；被截断的末帧会被丢弃 |
+| Gaussian 输入 | `.gjf` `.gjf03` `.gjf09` `.gjf16` `.com` | Link 0、route、标题、电荷/多重度、坐标、connect 段、固定原子写法；多任务 `--Link1--` 文件会提示只显示第一个结构 |
+| XYZ | `.xyz` | 标准 XYZ；多帧轨迹（含 ORCA `_trj.xyz`）支持帧导航，每帧都带能量时显示收敛信息；被截断的末帧会被丢弃，原子块少于声明数量时会警告 |
 | MOL2 | `.mol2` | ATOM 与 BOND 段、芳香 `ar` 键 |
 | MDL Mol | `.mol` | V2000 与 V3000 CTfile：三行头部（只写了标题的旧文件也能读）、定宽或空格分隔的原子/键表、芳香键类型、`*`/`LP`/查询原子按哑点处理 |
 | Gaussian 日志 | `.log` | 优化轨迹、SCF 能量、收敛、谐振频率；xtb 轨迹会自动识别 |
 | ORCA 输入 | `.inp` | `* xyz … *` 与 `* xyzfile`（打开其指向的外部 XYZ）、`%coords` 块、Bohr/Å 单位 |
 | ORCA 输出 | `.out` | Å 或 a.u. 的笛卡尔坐标、每个循环与最终几何、电荷/多重度、收敛容差、频率/IR、route 行；按内容识别格式 |
-| Turbomole | `.coord` | `$coord`（Bohr → Å）、`$chrg`、`$spin`/`$mult` |
-| PDB | `.pdb` `.ent` | ATOM/HETATM、元素、占据率、B 因子标量、CONECT、重复序号 |
+| Turbomole | `.coord` | `$coord`（Bohr → Å；`$coord angs` 保持 Å）、`$chrg`、`$spin`/`$mult` |
+| PDB | `.pdb` `.ent` | ATOM/HETATM、元素（元素列，或按原子名列位判定，蛋白 `CA` 不会被当成钙）、占据率、B 因子标量、CONECT、重复序号 |
 | MOPAC | `.mop` `.mopac` `.dat` `.out` `.log` | 输入：内坐标、Å/Bohr 自动识别、CHARGE 与 MS、笛卡尔坐标回退。输出：最后的 `CARTESIAN COORDINATES` 表（含序号列），按内容识别 |
 | xtb | `.log` `.out` `.xyz` `.trj` | 优化轨迹（`xtbopt.log`/`xtb.trj`）支持帧导航与梯度范数；运行日志中的 `final structure:` 块作为最终几何读取 |
 | VMD TCL | `.tcl` | 显示配方：分子、表示、颜色、选择、曲面与 egg 元数据 |
 | CIF | `.cif` | 晶胞、空间群与对称操作、分数/笛卡尔位点、占据率、不对称单元、`_geom_bond`；支持 CIF 1.1、1.2 与 2 标签 |
 | VASP POSCAR | `.vasp` `POSCAR` `CONTCAR` | 缩放因子（负值表示目标体积）、晶格、元素数量、选择性动力学、Direct/Cartesian |
-| Gaussian Cube | `.cube` | 体素矢量与原子、Bohr/Å 自动识别、晶格损坏时的稳健回退 |
+| Gaussian Cube | `.cube` | 体素矢量与原子、Bohr/Å 自动识别、晶格损坏时的稳健回退；截断的原子表会给出警告，不再把网格数据读成原子 |
 | VESTA | `.vesta` | CELLP、STRUC、GROUP 与 SYMOP；对称展开与占据率，逻辑与 CIF 一致 |
 | ABACUS | `.stru` `STRU` `STRU_MD_*` `.md_dump` `INPUT` | ATOMIC_SPECIES/MASS、LATTICE_CONSTANT（默认 Bohr）、Direct/Cartesian 坐标、约束标记；`INPUT` 打开其 `stru_file`（缺省 `STRU`）；SCF 日志与 MD dump |
 | ABINIT | `.abi` `.abo` | `acell`/`rprim`（默认 Bohr 或 `angstrom`）、`znucl`/`typat`（支持 `N*value` 重复）、`xred`/`xcart`/`xangst`、`xyzfile`（外部 XYZ）与 `include`；收敛后的输出几何 |
@@ -397,9 +397,9 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 | LAMMPS | `.lmp` `.lammps` `.data` `.lammpstrj` `.dump` `data` | 数据文件盒与倾斜、`Masses`/`mass`/`dump_modify element` 类型名、atomic/charge/full/molecular 样式，以及 `Bonds` 段（文件的连通性；头部写 `# order` 时还读入键级；最小镜像平移由晶胞反算）；多帧 dump 以帧浏览打开并携带每帧三斜盒（restricted 或 general `abc origin`），单帧仍按周期晶体显示；输入脚本（`read_data`、`include`、`variable`）会打开它指向的结构，裸 `data` 文件也可单独打开 |
 | GROMACS 轨迹 | `.xtc` `.trr` | 按魔数识别的二进制 XTC/TRR：XTC 整数压缩坐标、TRR 坐标块、nm → Å、每帧盒子；元素、颜色与键来自同名 `.gro`/`.pdb`（或唯一原子数匹配） |
 | DCD 轨迹 | `.dcd` | CHARMM/NAMD/LAMMPS DCD，支持 4/8 字节 Fortran 记录、两种字节序、固定原子与晶胞记录；逐帧坐标与盒子，拓扑取 `.gro`/`.pdb`/`.xyz`/`.data` |
-| GROMACS | `.gro` | nm → Å、按 GROMACS 顺序排列的九值三斜盒、忽略速度列；零盒按分子处理 |
-| Extended XYZ / GPUMD | `.xyz` `.extxyz` | 注释行的 `Lattice=`、`Properties=` 与 `pbc=`，按列名解析属性布局，并报告帧数 |
-| DeepMD / DP-GEN | `coord.raw` `coord.npy` | `type.raw`/`type_map.raw` 类型、`box.raw`/`box.npy` 晶胞、空 `nopbc`；显示第一帧 |
+| GROMACS | `.gro` | nm → Å、按 GROMACS 顺序排列的九值三斜盒、忽略速度列；原子名按残基/原子名规则判定（蛋白 `CA`/`HG` 保持 C/H，离子残基保留金属）；零盒按分子处理 |
+| Extended XYZ / GPUMD | `.xyz` `.extxyz` | 注释行的 `Lattice=`、`Properties=` 与 `pbc=`，按列名解析属性布局，并报告帧数（能处理帧间空行与被截断的尾部） |
+| DeepMD / DP-GEN | `coord.raw` `coord.npy` | `type.raw`/`type_map.raw` 类型、`box.raw`/`box.npy` 晶胞、空 `nopbc`；显示第一帧，并报告 type_map 未列出的类型索引 |
 | PySCF | `.out` `.log` | `[INPUT]` 与 `New geometry` 块、Bohr 单位的周期晶格矢量、最终几何 |
 | Molden | `.molden` | `[Atoms]` 表及其 AU/Å 单位头 |
 | VASP XDATCAR / OUTCAR / vasprun.xml | `.xdatcar` `.outcar` `vasprun.xml` | MD 构型（显示第一帧）、最终几何、晶胞与能量 |
@@ -437,7 +437,7 @@ npx vsce package --no-dependencies
 #### 导入结构
 
 1. 在工具栏点击 **Import Structure**（View 模式；晶体结构与 Diff 模式下不可用）。
-2. 输入副本数量（1–50），并选择 **From File** 或 **From SMILES**。SMILES 输入会边输入边校验，并显示解析器的错误信息；按 Enter 构建 3D 结构。
+2. 输入副本数量（1–50），并选择 **From File** 或 **From SMILES**。SMILES 输入会边输入边校验，显示解析器的错误信息，并使用与生成阶段相同的原子数上限；按 Enter 构建 3D 结构。
 3. 若请求会超过 20,000 原子，会自动裁剪并给出提示。
 4. 副本会放在已有结构旁边、互不重叠，并沿 +X 方向等距排开。整次导入是一步 Undo，Save As 会导出全部结构。
 

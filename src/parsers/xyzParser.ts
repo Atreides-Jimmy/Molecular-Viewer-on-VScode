@@ -34,18 +34,25 @@ export function parseXyz(content: string): MolecularData {
     const lines = content.split(/\r?\n/);
     const atoms: Atom[] = [];
     const bonds: Bond[] = [];
+    const warnings: string[] = [];
 
     let atomCount = 0;
+    const countLine = lines.length > 0 ? lines[0].trim() : '';
     if (lines.length > 0) {
-        atomCount = parseInt(lines[0].trim(), 10) || 0;
+        atomCount = parseInt(countLine, 10) || 0;
     }
 
     const title = lines.length > 1 ? lines[1].trim() : '';
 
+    // The declared count is what the block owns, not the number of lines a
+    // fixed window covers: a blank line inside the block must not cut the last
+    // atom off, and an unreadable row must not stop the rows after it.
     const startLine = 2;
     let atomIndex = 0;
-    for (let i = startLine; i < Math.min(startLine + atomCount, lines.length); i++) {
+    let i = startLine;
+    while (i < lines.length && atoms.length < atomCount) {
         const line = lines[i].trim();
+        i++;
         if (line === '') continue;
 
         const parts = line.split(/\s+/);
@@ -69,7 +76,17 @@ export function parseXyz(content: string): MolecularData {
         }
     }
 
-    return { atoms, bonds, title, hasExplicitBonds: false };
+    // A count is only a declaration when the count line is one number. A
+    // numeric data row (`box.raw`) has a leading number too, but reading it as
+    // an XYZ count would turn every such file into a false "declares N atoms".
+    if (/^\d+$/.test(countLine) && atomCount > 0 && atoms.length < atomCount) {
+        warnings.push('the .xyz file declares ' + atomCount + ' atom' + (atomCount === 1 ? '' : 's') +
+            ' but only ' + atoms.length + ' could be read');
+    }
+
+    const result: MolecularData = { atoms, bonds, title, hasExplicitBonds: false };
+    if (warnings.length > 0) result.warnings = warnings;
+    return result;
 }
 
 /** Frames a multi-frame XYZ may contribute before the rest is ignored.

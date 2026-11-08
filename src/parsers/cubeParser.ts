@@ -44,14 +44,30 @@ export function parseCube(content: string): MolecularData {
     }
 
     const title = lines[0].trim() || lines[1].trim() || 'Cube Structure';
+    const warnings: string[] = [];
 
     const parseLine3 = lines[2].trim().split(/\s+/).map(Number);
     // A negative NATOMS is part of the cube convention, not an error: it means
     // the coordinates are Angstrom and one extra "orbital records" line follows
     // the atoms. Reading it as a count would read nothing at all.
     const declaredNatoms = parseLine3[0];
+    const headerValid = parseLine3.length >= 4 &&
+        isValidNumber(declaredNatoms) && Math.trunc(declaredNatoms) === declaredNatoms &&
+        parseLine3.slice(1, 4).every(isValidNumber);
+    if (!headerValid) {
+        return {
+            atoms: [], bonds: [], title: 'Invalid cube file', hasExplicitBonds: false,
+            warnings: ['the cube header line 3 is unreadable (atom count or origin): no structure to show']
+        };
+    }
     const natoms = Math.abs(declaredNatoms);
-    const origin = [parseLine3[1] || 0, parseLine3[2] || 0, parseLine3[3] || 0];
+    if (natoms === 0) {
+        return {
+            atoms: [], bonds: [], title, hasExplicitBonds: false,
+            warnings: ['the cube declares zero atoms: no structure to show']
+        };
+    }
+    const origin = [parseLine3[1], parseLine3[2], parseLine3[3]];
 
     const voxelLines: number[][] = [];
     const voxelCounts: number[] = [];
@@ -86,23 +102,33 @@ export function parseCube(content: string): MolecularData {
     const atoms: Atom[] = [];
     let atomIndex = 0;
     const atomStartLine = 6;
-    let atomLinesRead = 0;
-    let lastAtomLine = atomStartLine - 1;
+    let rowsRead = 0;
+    let atomBlockEnd = atomStartLine;
 
-    for (let i = atomStartLine; i < lines.length && atomLinesRead < natoms; i++) {
+    for (let i = atomStartLine; i < lines.length && rowsRead < natoms; i++) {
         const line = lines[i].trim();
-        if (line === '') continue;
+        if (line === '') {
+            atomBlockEnd = i + 1;
+            continue;
+        }
 
-        const parts = line.split(/\s+/).map(Number);
-        if (parts.length < 5 || parts.some(isNaN)) continue;
+        const parts = line.split(/\s+/);
+        // An atom row is `Z charge x y z`; a grid-data row is a list of
+        // floating-point values. Requiring an integer Z keeps a truncated atom
+        // table from turning grid data into ghost atoms.
+        const atomicNumber = Number(parts[0]);
+        const isAtomRow = parts.length === 5 &&
+            Number.isInteger(atomicNumber) && Math.abs(atomicNumber) <= 118 &&
+            parts.slice(1).every(p => isValidNumber(Number(p)));
+        if (!isAtomRow) break; // grid data starts here: the atom table was cut short
 
-        const atomicNumber = parts[0];
-        const _charge = parts[1];
-        const x = parts[2] * lengthFactor;
-        const y = parts[3] * lengthFactor;
-        const z = parts[4] * lengthFactor;
-
+        rowsRead++;
+        atomBlockEnd = i + 1;
         if (atomicNumber <= 0) continue;
+
+        const x = Number(parts[2]) * lengthFactor;
+        const y = Number(parts[3]) * lengthFactor;
+        const z = Number(parts[4]) * lengthFactor;
 
         const element = ELEMENT_BY_NUMBER[atomicNumber] || 'X';
 
@@ -114,22 +140,25 @@ export function parseCube(content: string): MolecularData {
             baseIdx: atomIndex
         });
         atomIndex++;
-        atomLinesRead++;
-        lastAtomLine = i;
     }
 
-    const warnings: string[] = [];
-    if (declaredNatoms < 0) {
+    if (rowsRead < natoms) {
+        warnings.push('the cube declares ' + natoms + ' atom' + (natoms === 1 ? '' : 's') +
+            ' but only ' + rowsRead + ' atom row' + (rowsRead === 1 ? ' was' : 's were') +
+            ' readable: the file may be truncated');
+    }
+
+    if (declaredNatoms < 0 && rowsRead === natoms) {
         // The line after the atom block names how many data grids follow. Only
         // its count is used, and only for the warning; the grids are not read.
+        // It is the first non-empty line, not the first numeric line anywhere
+        // below the atoms: a truncated file has grid values there instead.
         let records = 1;
-        if (atoms.length > 0) {
-            for (let i = lastAtomLine + 1; i < lines.length; i++) {
-                const parts = lines[i].trim().split(/\s+/).map(Number);
-                if (parts.length === 0 || !isValidNumber(parts[0])) continue;
-                records = parts[0];
-                break;
-            }
+        for (let i = atomBlockEnd; i < lines.length; i++) {
+            const parts = lines[i].trim().split(/\s+/).map(Number);
+            if (parts.length === 0 || !isValidNumber(parts[0])) continue;
+            if (Math.trunc(parts[0]) === parts[0] && parts[0] > 0) records = parts[0];
+            break;
         }
         warnings.push(`${records} orbital record${records === 1 ? '' : 's'} present - geometry only`);
     }

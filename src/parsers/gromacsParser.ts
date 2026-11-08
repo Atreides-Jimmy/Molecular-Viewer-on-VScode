@@ -112,10 +112,28 @@ function readAtomLines(lines: string[], count: number): { atoms: GroAtom[]; next
 }
 
 function atomElement(atom: GroAtom): string {
-    // The atom name is the best hint (`OW`, `HW1`, `NA`, `CL`, `Mg`); the
-    // residue name is only a fallback because solvent residues are named `SOL`.
-    return elementFromAtomName(atom.label) ||
-        normalizeElementSymbol(atom.residueName) ||
+    const label = atom.label.trim();
+    const residue = atom.residueName.trim();
+
+    // A monoatomic ion's residue name is the element itself and its atom name
+    // repeats it (`CA` in `CA`, `CL` in `CL`, `NA` in `NA`). The residue name
+    // is the only place that can say so: `CA` is also a protein's C-alpha.
+    if (/^[A-Za-z]{1,2}$/.test(residue) && label.toUpperCase() === residue.toUpperCase()) {
+        const residueElement = normalizeElementSymbol(residue);
+        if (residueElement) return residueElement;
+    }
+
+    // Topology atom names are labels, not element spellings: CA is C-alpha,
+    // CD is C-delta, HG/HG1/HD11 is H-gamma. A name whose first letter is an
+    // organic element takes that element; CL, BR, FE and ZN do not match this
+    // shape and still resolve as their real symbols.
+    if (/^[HCNOSP](?:[ABDEGZ][0-9]*|[0-9]+|')?$/.test(label)) {
+        return label.charAt(0).toUpperCase();
+    }
+
+    // Everything else (OW, HW1, SIL, …) goes through the shared atom-name rules.
+    return elementFromAtomName(label) ||
+        normalizeElementSymbol(residue) ||
         'X';
 }
 

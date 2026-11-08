@@ -312,13 +312,32 @@ export function parseDeepmdDataset(content: string, fileName: string, options?: 
     }
 
     const sites: Site[] = [];
+    const unmappedTypes = new Set<number>();
     for (let i = 0; i < natom; i++) {
         const type = i < types.length ? types[i] : 0;
-        const element = typeMap[type] || typeElementLabel(type + 1);
+        const mapped = type >= 0 && type < typeMap.length ? (typeMap[type] || '') : '';
+        let element: string;
+        if (mapped.trim() !== '') {
+            element = mapped;
+        } else {
+            // A type index the map does not list cannot name an element. Naming
+            // it `T<index>` keeps the site visible, and the warning below says
+            // which indices the map could not resolve — the old code only
+            // reported a completely absent map and invented `T3` silently.
+            if (typeMap.length > 0) unmappedTypes.add(type);
+            element = typeElementLabel(type + 1);
+        }
         sites.push({ element, cart: [frame[3 * i], frame[3 * i + 1], frame[3 * i + 2]] });
     }
     if (typeMap.length === 0) {
         warnings.push('no type_map.raw next to the dataset: atoms are named by their type index');
+    } else if (unmappedTypes.size > 0) {
+        const listed = Array.from(unmappedTypes).sort((a, b) => a - b);
+        const shown = listed.slice(0, 6).map(t => String(t)).join(', ') +
+            (listed.length > 6 ? ', …' : '');
+        warnings.push('type.raw names type index(es) ' + shown + ' that type_map.raw does not list (' +
+            typeMap.length + ' entr' + (typeMap.length === 1 ? 'y' : 'ies') +
+            '): those atoms are shown as T<index>');
     }
 
     if (dataset.count > 1) warnings.push(dataset.count + ' frames in the dataset: showing the first');
