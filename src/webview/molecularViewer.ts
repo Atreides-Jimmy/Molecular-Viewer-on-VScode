@@ -9,6 +9,23 @@ import { beginOptimization, describeForceField, MmHistoryPoint, MmOptimizeResult
 import { smilesTo3dSafe, validateSmiles } from '../tools/smilesTo3d';
 import { MolecularData, Atom, Bond, AsymAtom, AtomGroup, OptStep, NormalMode, OptThresholds, VmdScene, VmdMolecule, TrajectoryInfo } from '../types';
 
+/**
+ * Decode a text file the way the writers on other machines wrote it.
+ *
+ * The readers here assume UTF-8, but a Windows job editor (and some
+ * crystallographic tools) save `.gjf`, `.inp` and `.data` as UTF-16LE with a
+ * BOM. Decoding those bytes as UTF-8 turns every character into a replacement
+ * or a NUL and no parser can read the file. The BOM decides the encoding;
+ * everything else keeps the previous UTF-8 default (TextDecoder strips a UTF-8
+ * BOM itself).
+ */
+function decodeText(bytes: Uint8Array): string {
+    if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+        return new TextDecoder('utf-16le').decode(bytes);
+    }
+    return new TextDecoder().decode(bytes);
+}
+
 const ATOM_COLORS: { [key: string]: string } = {
     H: '#FFFFFF', He: '#D9FFFF', Li: '#CC80FF', Be: '#C2FF00', B: '#FFB5B5',
     C: '#909090', N: '#3050F8', O: '#FF0D0D', F: '#90E050', Ne: '#B3E3F5',
@@ -272,12 +289,23 @@ async function resolveReferencedUri(
     if (/\$/.test(cleaned)) return undefined;
     if (/^@[A-Za-z_]/.test(cleaned)) return undefined;
     const normalized = cleaned.replace(/\\/g, '/');
-    if (path.isAbsolute(normalized) || /^[A-Za-z]:[\\/]/.test(cleaned)) {
-        return fileIfExists(vscode.Uri.file(normalized));
-    }
     const bases: string[] = [];
     for (const folder of [mainDir.fsPath, fromDir.fsPath]) {
         if (!bases.includes(folder)) bases.push(folder);
+    }
+    if (path.isAbsolute(normalized) || /^[A-Za-z]:[\\/]/.test(cleaned)) {
+        const direct = await fileIfExists(vscode.Uri.file(normalized));
+        if (direct) return direct;
+        // A path written on another machine (`/home/u/data.lmp`) is not on
+        // this disk, but the same file is often beside the job that names it:
+        // fall back to its bare name in the two folders searched below.
+        const absoluteBare = path.basename(normalized);
+        if (absoluteBare === '') return undefined;
+        for (const folder of bases) {
+            const hit = await fileIfExists(vscode.Uri.file(path.join(folder, absoluteBare)));
+            if (hit) return hit;
+        }
+        return undefined;
     }
     const names = [normalized];
     const bare = path.basename(normalized);
@@ -301,7 +329,7 @@ async function readReferencedFile(
     try {
         return {
             uri,
-            content: new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)),
+            content: decodeText(await vscode.workspace.fs.readFile(uri)),
             fileName: path.basename(uri.fsPath)
         };
     } catch {
@@ -412,7 +440,7 @@ async function scanLammpsChain(
             for (const uri of uris) {
                 let text: string;
                 try {
-                    text = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
+                    text = decodeText(await vscode.workspace.fs.readFile(uri));
                 } catch {
                     chain.warnings.push('the LAMMPS include "' + include + '" could not be read');
                     continue;
@@ -525,7 +553,7 @@ async function expandCp2kInput(
                 }
                 let includeText: string;
                 try {
-                    includeText = new TextDecoder().decode(await vscode.workspace.fs.readFile(target));
+                    includeText = decodeText(await vscode.workspace.fs.readFile(target));
                 } catch {
                     warnings.push('the CP2K include "' + wantedRaw + '" could not be read');
                     out.push('');
@@ -629,7 +657,7 @@ async function expandAbinitInput(
             }
             let includeText: string;
             try {
-                includeText = new TextDecoder().decode(await vscode.workspace.fs.readFile(target));
+                includeText = decodeText(await vscode.workspace.fs.readFile(target));
             } catch {
                 warnings.push('the ABINIT include "' + wanted + '" could not be read');
                 out.push('');
@@ -716,6 +744,18 @@ async function readDirectoryNames(dir: vscode.Uri): Promise<Map<string, string>>
     return index;
 }
 
+/**
+ * A file name that can hold a LAMMPS job script.
+ *
+ * `in.*` and `*.in` are the conventional names, but the same commands are
+ * routinely saved as `*.lmp`/`*.lammps` — the trajectory side has always
+ * accepted those, and the data/dump side must read the same scripts or a job
+ * named `run.lmp` loses its `units`, `atom_style` and type labels.
+ */
+function isLammpsScriptName(name: string): boolean {
+    return /^in\./i.test(name) || /\.in$/i.test(name) || /\.lmp$/i.test(name) || /\.lammps$/i.test(name);
+}
+
 async function collectTrajectoryCompanions(uri: vscode.Uri, fileName: string): Promise<TrajectoryCompanions> {
     const result: TrajectoryCompanions = { typeElements: {}, readData: [], scripts: 0, warnings: [] };
     const dir = vscode.Uri.file(path.dirname(uri.fsPath));
@@ -724,12 +764,13 @@ async function collectTrajectoryCompanions(uri: vscode.Uri, fileName: string): P
     // A folder may hold several LAMMPS scripts; reading them in a stable order
     // keeps the hints (units, type elements) the same from one open to the next.
     for (const name of Array.from(index.values()).sort((a, b) => a.localeCompare(b))) {
-        if (!/^in\./i.test(name) && !/\.in$/i.test(name) && !/\.lmp$/i.test(name) && !/\.lammps$/i.test(name)) continue;
+        if (name.toLowerCase() === fileName.toLowerCase()) continue;
+        if (!isLammpsScriptName(name)) continue;
         try {
             const scriptUri = vscode.Uri.joinPath(dir, name);
             scriptFiles.push({
                 uri: scriptUri,
-                text: new TextDecoder().decode(await vscode.workspace.fs.readFile(scriptUri))
+                text: decodeText(await vscode.workspace.fs.readFile(scriptUri))
             });
         } catch {
             // An unreadable script contributes no hints.
@@ -793,7 +834,7 @@ async function chooseTrajectoryTopology(
         const actual = index.get(name.toLowerCase());
         if (!actual) return undefined;
         try {
-            const text = new TextDecoder().decode(
+            const text = decodeText(
                 await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dir, actual))
             );
             const isData = /\.data$/i.test(actual) || /^data\b/i.test(actual);
@@ -876,7 +917,7 @@ async function chooseTrajectoryTopology(
             // topology is a small file, so an oversized candidate is skipped.
             const info = await vscode.workspace.fs.stat(candidateUri);
             if (info.size > MAX_FALLBACK_TOPOLOGY_BYTES) continue;
-            const text = new TextDecoder().decode(await vscode.workspace.fs.readFile(candidateUri));
+            const text = decodeText(await vscode.workspace.fs.readFile(candidateUri));
             const isData = /\.data$/i.test(actual) || /^data\b/i.test(actual);
             const options: ParseFileOptions = {};
             if (isData) options.lammps = { ...lammpsBase, orderById: true };
@@ -1301,7 +1342,7 @@ async function buildParseOptions(
             index = new Map<string, string>();
             try {
                 for (const [name, type] of await vscode.workspace.fs.readDirectory(folder)) {
-                    if (type === vscode.FileType.File) index.set(name.toLowerCase(), name);
+                    if ((type & vscode.FileType.File) !== 0) index.set(name.toLowerCase(), name);
                 }
             } catch {
                 // An unreadable folder simply has no companions.
@@ -1334,17 +1375,17 @@ async function buildParseOptions(
         const boxFile = await readCompanion(dir, 'box.raw') || await readCompanion(dir, 'box.npy');
         if (boxFile) {
             const np = boxFile.name.toLowerCase().endsWith('.npy');
-            const box = deepmdFirstBox(np ? '' : new TextDecoder().decode(boxFile.bytes), np ? boxFile.bytes : undefined);
+            const box = deepmdFirstBox(np ? '' : decodeText(boxFile.bytes), np ? boxFile.bytes : undefined);
             if (box) deepmd.box = box;
         }
         for (const root of roots) {
             if (!deepmd.types) {
                 const types = await readCompanion(root, 'type.raw');
-                if (types) deepmd.types = parseDeepmdTypes(new TextDecoder().decode(types.bytes));
+                if (types) deepmd.types = parseDeepmdTypes(decodeText(types.bytes));
             }
             if (!deepmd.typeMap) {
                 const map = await readCompanion(root, 'type_map.raw');
-                if (map) deepmd.typeMap = parseDeepmdTypeMap(new TextDecoder().decode(map.bytes));
+                if (map) deepmd.typeMap = parseDeepmdTypeMap(decodeText(map.bytes));
             }
             if (!deepmd.nopbc && await readCompanion(root, 'nopbc')) deepmd.nopbc = true;
         }
@@ -1375,12 +1416,13 @@ async function buildParseOptions(
         } else {
             const scriptFiles: { uri: vscode.Uri; text: string }[] = [];
             for (const name of index.values()) {
-                if (!/^in\./i.test(name) && !/\.in$/i.test(name)) continue;
+                if (name.toLowerCase() === lowerName) continue;
+                if (!isLammpsScriptName(name)) continue;
                 const file = await readCompanion(dir, name);
                 if (file) {
                     scriptFiles.push({
                         uri: vscode.Uri.joinPath(dir, file.name),
-                        text: new TextDecoder().decode(file.bytes)
+                        text: decodeText(file.bytes)
                     });
                 }
             }
@@ -1450,7 +1492,7 @@ async function buildParseOptions(
                 for (const name of index.values()) if (/^data\b/i.test(name)) candidates.push(name);
                 if (candidates.length === 1) {
                     const file = await readCompanion(dir, candidates[0]);
-                    if (file) dataText = new TextDecoder().decode(file.bytes);
+                    if (file) dataText = decodeText(file.bytes);
                 }
             }
         }
@@ -1565,7 +1607,7 @@ async function loadStructureFile(uri: vscode.Uri): Promise<LoadedStructure> {
         const loaded = await loadBinaryTrajectoryDocument(uri, fileName, content, binaryFormat);
         return { data: loaded.data, frames: [] };
     }
-    const text = new TextDecoder().decode(content);
+    const text = decodeText(content);
     const ext = fileName.toLowerCase().split('.').pop() || '';
     const setup = await buildParseOptions(uri, fileName, content, text);
     const options = setup && setup.options;
@@ -1660,14 +1702,14 @@ async function readEggMetadataFromDir(dirPath: string, matchContext?: EggMatchCo
         let unitName: string | undefined;
         const eggNames: string[] = [];
         for (const [name, type] of entries) {
-            if (type !== vscode.FileType.File) continue;
+            if ((type & vscode.FileType.File) === 0) continue;
             if (/^unitfile$/i.test(name)) unitName = name;
             else if (/^eggfile/i.test(name)) eggNames.push(name);
         }
         if (!unitName && eggNames.length === 0) return undefined;
         const readText = async (name: string): Promise<string | undefined> => {
             try {
-                return new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dir, name)));
+                return decodeText(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dir, name)));
             } catch {
                 return undefined;
             }
@@ -1830,9 +1872,13 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
     async openCustomDocument(
         uri: vscode.Uri,
         _openContext: vscode.CustomDocumentOpenContext,
-        _token: vscode.CancellationToken
+        token: vscode.CancellationToken
     ): Promise<MolecularDocument> {
+        if (token.isCancellationRequested) throw new vscode.CancellationError();
         const content = await vscode.workspace.fs.readFile(uri);
+        // The tab may have been closed while the file was being read; the
+        // parse below can be expensive and its result has nowhere to go.
+        if (token.isCancellationRequested) throw new vscode.CancellationError();
         const fileName = uri.path.split('/').pop() || 'unknown.xyz';
 
         const ext = fileName.toLowerCase().split('.').pop() || '';
@@ -1841,7 +1887,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         // the trajectory loader itself. Decoding first would also copy a
         // multi-megabyte binary file through a string only to discard it.
         const binaryFormat = detectBinaryTrajectory(content);
-        const textContent = binaryFormat ? '' : new TextDecoder().decode(content);
+        const textContent = binaryFormat ? '' : decodeText(content);
         const setup = binaryFormat ? undefined : await buildParseOptions(uri, fileName, content, textContent);
         const parseOptions = setup && setup.options;
         const parseText = setup && setup.text !== undefined ? setup.text : textContent;
@@ -2086,13 +2132,23 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
     async resolveCustomEditor(
         document: MolecularDocument,
         webviewPanel: vscode.WebviewPanel,
-        _token: vscode.CancellationToken
+        token: vscode.CancellationToken
     ): Promise<void> {
         webviewPanel.webview.options = {
             enableScripts: true,
         };
 
-        webviewPanel.webview.html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes, document.vmdPayload, document.autoBeta, document.optThresholds, document.trajectoryFrames);
+        if (token.isCancellationRequested) return;
+        const html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes, document.vmdPayload, document.autoBeta, document.optThresholds, document.trajectoryFrames);
+        // Reading the renderer is asynchronous; if the editor was closed in
+        // the meantime, assigning html throws "Webview is disposed" and the
+        // extension log fills with a failure the user never caused.
+        if (token.isCancellationRequested) return;
+        try {
+            webviewPanel.webview.html = html;
+        } catch {
+            return;
+        }
 
         // The panel's Molecular Mechanics run (at most one at a time). The pump
         // steps it in chunks and yields between them, so the panel keeps
@@ -2271,11 +2327,14 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         });
 
         webviewPanel.webview.onDidReceiveMessage(async (message) => {
+            // The page is the only sender, but a message it did not shape
+            // (null, a string) must not throw before its own case runs.
+            if (!message || typeof message !== 'object' || typeof message.command !== 'string') return;
             switch (message.command) {
                 case 'saveFile':
                     try {
                         const uri = await vscode.window.showSaveDialog({
-                            defaultUri: this.saveDialogUri(message.filePath, message.suggestedName, 'molecule.xyz'),
+                            defaultUri: this.saveDialogUri(message.filePath, message.suggestedName, 'molecule.xyz', document.uri),
                             filters: {
                                 'XYZ Files': ['xyz'],
                                 'Gaussian Input': ['gjf'],
@@ -2316,7 +2375,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                 // save dialog all live in savePng(), beside the Save As helper
                 // that decides where the dialog opens.
                 case 'savePng':
-                    await this.savePng(message);
+                    await this.savePng(message, document.uri);
                     break;
                 case 'diffFile':
                     try {
@@ -2337,7 +2396,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         // A binary trajectory is compared by a frame the user
                         // picks: decoding it as text would only yield mojibake.
                         const diffBinary = detectBinaryTrajectory(diffContent);
-                        const diffText = diffBinary ? '' : new TextDecoder().decode(diffContent);
+                        const diffText = diffBinary ? '' : decodeText(diffContent);
                         const diffFileName = diffUri.path.split('/').pop() || 'unknown.xyz';
                         const diffExt = diffFileName.toLowerCase().split('.').pop() || '';
                         const diffSetup = diffBinary ? undefined : await buildParseOptions(diffUri, diffFileName, diffContent, diffText);
@@ -2663,7 +2722,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         const impUri = result[0];
                         const impContent = await vscode.workspace.fs.readFile(impUri);
                         const impBinary = detectBinaryTrajectory(impContent);
-                        const impText = impBinary ? '' : new TextDecoder().decode(impContent);
+                        const impText = impBinary ? '' : decodeText(impContent);
                         const impFileName = impUri.path.split('/').pop() || 'unknown.xyz';
                         const impExt = impFileName.toLowerCase().split('.').pop() || '';
                         const impSetup = impBinary ? undefined : await buildParseOptions(impUri, impFileName, impContent, impText);
@@ -2946,11 +3005,21 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
     }
 
     /** Where a Save dialog starts: the folder the structure came from, with the suggested name. */
-    private saveDialogUri(filePath: unknown, suggestedName: unknown, fallbackName: string): vscode.Uri {
+    private saveDialogUri(filePath: unknown, suggestedName: unknown, fallbackName: string, documentUri?: vscode.Uri): vscode.Uri {
         const srcPath = typeof filePath === 'string' ? filePath : '';
         const srcDir = srcPath ? srcPath.substring(0, srcPath.replace(/\\/g, '/').lastIndexOf('/')) : '';
         const name = typeof suggestedName === 'string' && suggestedName ? suggestedName : fallbackName;
-        return srcDir ? vscode.Uri.file(srcDir + '/' + name) : vscode.Uri.file(name);
+        if (srcDir) return vscode.Uri.file(srcDir + '/' + name);
+        // A structure built in the page (a merged file, a pasted fragment) has
+        // no source path; a bare file name would put the dialog at the drive
+        // root (or the process's current directory). Start beside the document
+        // the panel was opened from, then in the workspace folder.
+        if (documentUri && documentUri.scheme === 'file' && documentUri.fsPath) {
+            return vscode.Uri.joinPath(vscode.Uri.file(path.dirname(documentUri.fsPath)), name);
+        }
+        const folder = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0];
+        if (folder) return vscode.Uri.joinPath(folder.uri, name);
+        return vscode.Uri.file(name);
     }
 
     /**
@@ -2963,7 +3032,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
      * read or a corrupted string must fail loudly instead of leaving a file the
      * user will find unopenable later.
      */
-    private async savePng(message: { data?: unknown; suggestedName?: unknown; filePath?: unknown }): Promise<void> {
+    private async savePng(message: { data?: unknown; suggestedName?: unknown; filePath?: unknown }, documentUri?: vscode.Uri): Promise<void> {
         const base64 = typeof message.data === 'string' ? message.data : '';
         if (!base64) {
             vscode.window.showErrorMessage('Snapshot failed: the page sent no image data.');
@@ -2982,7 +3051,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                 throw new Error('the captured data is not a PNG image');
             }
             const uri = await vscode.window.showSaveDialog({
-                defaultUri: this.saveDialogUri(message.filePath, message.suggestedName, 'structure-snapshot.png'),
+                defaultUri: this.saveDialogUri(message.filePath, message.suggestedName, 'structure-snapshot.png', documentUri),
                 filters: {
                     'PNG Image': ['png'],
                     'All Files': ['*']
@@ -3004,10 +3073,20 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
     private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[], logSource?: string, routes?: RouteSection[], vmdPayload?: VmdPayload, autoBeta: boolean = false, optThresholds?: OptThresholds, trajectoryFrames?: TrajectoryFramePayload[]): Promise<string> {
         const nonce = getNonce();
 
-        const threeJsBytes = await vscode.workspace.fs.readFile(
-            vscode.Uri.joinPath(this.context.extensionUri, 'media', 'three.min.js')
-        );
-        const threeJsContent = new TextDecoder().decode(threeJsBytes);
+        // The renderer is an extension asset, and an installation that lost
+        // media/ (a partial update, a copy of the folder without it) must say
+        // so on the page that opens rather than leave the generic "Unknown
+        // error" panel behind and nothing else.
+        let threeJsContent: string;
+        try {
+            const threeJsBytes = await vscode.workspace.fs.readFile(
+                vscode.Uri.joinPath(this.context.extensionUri, 'media', 'three.min.js')
+            );
+            threeJsContent = decodeText(threeJsBytes);
+        } catch (e: any) {
+            return webviewLoadErrorHtml(nonce,
+                'Could not read media/three.min.js: ' + (e && e.message ? e.message : e));
+        }
 
         const atomColors = ATOM_COLORS;
 
@@ -3144,7 +3223,16 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             truncated: data.trajectory.truncated
         } : null;
 
-        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, optThresholds: optThresholdsData, routes: routesData, vmd: vmdData, autoBeta: !!(autoBeta && !vmdData), hasExplicitBonds: !!data.hasExplicitBonds, warnings: data.warnings || [], mmParams: describeForceField(), trajectory: trajectoryData, trajectoryFrames: trajectoryFramesData });
+        // The payload is written into a <script> block, so a title or comment
+        // that contains `</script>` would close the block early and leave the
+        // page blank (and let the file inject markup). `<` is escaped to its
+        // JSON spelling, which is valid JSON and stops the HTML parser from
+        // seeing a tag; U+2028/U+2029 are escaped because they are line
+        // terminators to a JavaScript parser.
+        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, optThresholds: optThresholdsData, routes: routesData, vmd: vmdData, autoBeta: !!(autoBeta && !vmdData), hasExplicitBonds: !!data.hasExplicitBonds, warnings: data.warnings || [], mmParams: describeForceField(), trajectory: trajectoryData, trajectoryFrames: trajectoryFramesData })
+            .replace(/</g, '\\u003c')
+            .replace(/\u2028/g, '\\u2028')
+            .replace(/\u2029/g, '\\u2029');
 
         // The bond perception module, as source. Both sides run this text —
         // the host calls the compiled function directly, the webview evaluates
@@ -3436,6 +3524,13 @@ canvas{display:block}
 #mol-nav.show{display:flex}
 #mol-label{color:var(--vscode-statusBar-foreground,#fff);font-size:11px;padding:0 4px;white-space:nowrap;max-width:180px;overflow:hidden;text-overflow:ellipsis}
 #beta-btn.active{background:var(--vscode-button-background,#0e639c);border-color:var(--vscode-button-background,#0e639c)}
+/* The controls below start hidden. They are hidden by this rule, not by a
+   style attribute: the page's CSP allows style only through its nonce, so an
+   inline style="display:none" is discarded and the button would flash on
+   screen before the script that decides its visibility runs. A later
+   element.style.display assignment still wins over these rules. */
+#beta-btn,#egg-btn,#bnd-sym-note,#xrd-file,#rp-slider-wrap{display:none}
+#cav-panel .cv-unit{font-size:10px;opacity:.7}
 #diff-panel{display:none;position:absolute;bottom:40px;right:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.65);padding:8px 12px;border-radius:4px;z-index:25;max-width:40%;max-height:60%;overflow-y:auto;pointer-events:auto;line-height:1.5}
 #diff-panel.show{display:block}
 #diff-panel h4{font-size:12px;margin-bottom:4px;color:var(--vscode-textLink-foreground,#3794ff)}
@@ -3590,8 +3685,8 @@ canvas{display:block}
 <button class="tbtn" data-mode="selectAtoms">Select Atoms</button>
 <button class="tbtn" data-mode="boxSelect">Box Select</button>
 <div class="tsep"></div>
-<button class="tbtn" id="beta-btn" style="display:none">Color by Beta</button>
-<button class="tbtn" id="egg-btn" style="display:none">Eggs</button>
+<button class="tbtn" id="beta-btn">Color by Beta</button>
+<button class="tbtn" id="egg-btn">Eggs</button>
 <button class="tbtn" id="undo-btn" disabled>Undo</button>
 <button class="tbtn" id="save-btn">Save As</button>
 <button class="tbtn" id="snap-btn">PNG</button>
@@ -3613,7 +3708,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><div class="pn-head"><h4>Supercell Bounds</h4><button class="pn-close" id="crystal-close" type="button" title="Minimize the crystal panel">&times;</button></div><div class="bnd-row bnd-axis"><label for="bnd-a-min">a</label><input type="number" id="bnd-a-min" value="0" step="0.1" title="lower bound along a" aria-label="lower bound along a"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-a-max" value="1" step="0.1" title="upper bound along a" aria-label="upper bound along a"></div><div class="bnd-row bnd-axis"><label for="bnd-b-min">b</label><input type="number" id="bnd-b-min" value="0" step="0.1" title="lower bound along b" aria-label="lower bound along b"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-b-max" value="1" step="0.1" title="upper bound along b" aria-label="upper bound along b"></div><div class="bnd-row bnd-axis"><label for="bnd-c-min">c</label><input type="number" id="bnd-c-min" value="0" step="0.1" title="lower bound along c" aria-label="lower bound along c"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-c-max" value="1" step="0.1" title="upper bound along c" aria-label="upper bound along c"></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-p2" title="Eight unit cells, 0..2 along every axis">2×2×2</button><button class="bnd-mini" id="bnd-p3" title="Twenty-seven unit cells, 0..3 along every axis">3×3×3</button><button class="bnd-mini" id="bnd-p4" title="Sixty-four unit cells, 0..4 along every axis">4×4×4</button></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-reset" title="Back to the single unit cell, 0..1 along every axis">Reset</button><button class="bnd-mini" id="bnd-origin" title="Keep the spans, move the low corner onto the lattice origin">Align Origin</button></div><div class="bnd-cell" id="bnd-cell-line"></div><div class="bnd-sym" id="bnd-sym-note" style="display:none"></div><div class="bnd-row"><label>Disorder</label><select id="bnd-disorder" title="Show the ordered part plus one disorder group; All shows every alternative the cell lists"><option value="">All</option></select></div><label class="bnd-occ off" id="bnd-occ-label" for="bnd-occ-normalize" title="When one disorder group is selected, count its sites at occupancy 1 in the formula, density and saved files, so the cell describes the ordered variant on screen. All keeps every occupancy the file states."><input type="checkbox" id="bnd-occ-normalize" checked disabled>Selected group fully occupied</label><div class="hk-title">Lattice Planes (h k l)</div><div class="bnd-row hk-row"><label>(h k l)</label><input type="number" id="hk-h" value="0" step="1" title="h"><input type="number" id="hk-k" value="0" step="1" title="k"><input type="number" id="hk-l" value="1" step="1" title="l"></div><div class="hk-val" id="hk-d1"></div><div class="bnd-row hk-row"><label>2nd</label><input type="number" id="hk2-h" value="1" step="1" title="h of the second plane"><input type="number" id="hk2-k" value="0" step="1" title="k of the second plane"><input type="number" id="hk2-l" value="0" step="1" title="l of the second plane"></div><div class="hk-val" id="hk-d2"></div><button id="hk-show" class="bnd-btn" title="Draw the (hkl) plane through the centre of the box">Show Plane</button><button id="xrd-open" class="bnd-btn" title="Calculate the powder X-ray diffraction pattern of the unit cell">Powder XRD Pattern...</button><button id="bvs-open" class="bnd-btn" title="Bond-valence sums per site: how well the coordination around each cation and anion matches its formal valence (read-only)">Bond Valence (BVS)...</button><button id="cav-open" class="bnd-btn" title="Probe the unit cell for closed cavities and open channels and report their volume (read-only)">Cavities...</button><button id="bnd-edit-cell" class="bnd-btn" title="Change the cell parameters; every site keeps its fractional coordinates">Edit Cell...</button><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="pn-head"><span class="vp-title">Auto Rotate</span><button class="pn-close" id="view-close" type="button" title="Minimize the View controls">&times;</button></div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div><div class="vp-title vp-sub">Display</div><select id="style-select" title="How the structure is drawn: ball and stick (the default), van der Waals spheres, sticks without the atom spheres, or coordination polyhedra for a crystal"><option value="ball">Ball &amp; Stick</option><option value="spacefill">Space-filling</option><option value="stick">Stick</option>${(function(){try{return JSON.parse(jsonData).crystal?'<option value="polyhedra">Polyhedra</option>':'';}catch(e){return '';}}())}</select><label class="vp-check off" id="ortep-line" title="Draw atoms that carry anisotropic displacement parameters as 50% probability ellipsoids"><input type="checkbox" id="ortep-chk" disabled> Thermal ellipsoids (50%)</label></div><div id="bake-panel"><div class="pn-head"><span class="vp-title">Edit Coordinates</span><button class="pn-close" id="bake-close" type="button" title="Minimize the Edit Coordinates card">&times;</button></div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="pn-head"><span class="sp-title">Select Atoms</span><button class="pn-close" id="select-close" type="button" title="Minimize the selection panel">&times;</button></div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="neigh-panel"><div class="pn-head"><span class="ng-title">Neighbours</span><button class="pn-close" id="neigh-close" type="button" title="Minimize the neighbour list">&times;</button></div><div class="ng-line"><label for="ng-radius">Radius (A)</label><input type="number" id="ng-radius" value="3.5" min="0.1" max="12" step="0.1"><label class="ng-chk" for="ng-skip"><input type="checkbox" id="ng-skip" checked>skip bonded</label></div><div class="ng-line"><label>Anchor</label><span class="ng-anchor" id="ng-anchor">click an atom</span></div><div class="ng-summary" id="ng-summary"></div><div class="ng-list" id="ng-list"></div><div class="ng-btns"><button id="ng-select">Select listed</button></div><div class="ng-hint" id="ng-hint">Click a row to select that atom. Crystal images outside the drawn cell are listed with their cell offset.</div></div><div id="int-panel"><div class="pn-head"><span class="ng-title">Non-covalent Interactions</span><button class="pn-close" id="int-close" type="button" title="Minimize the interaction list">&times;</button></div><div class="ng-line ng-types"><label class="ng-chk" for="int-hb"><input type="checkbox" id="int-hb" checked>H-bond</label><label class="ng-chk" for="int-xb"><input type="checkbox" id="int-xb" checked>halogen</label><label class="ng-chk" for="int-cb"><input type="checkbox" id="int-cb" checked>chalcogen</label><label class="ng-chk" for="int-pn"><input type="checkbox" id="int-pn" checked>pnictogen</label><label class="ng-chk" for="int-pp"><input type="checkbox" id="int-pp" checked>&pi;-&pi;</label><label class="ng-chk" for="int-chpi"><input type="checkbox" id="int-chpi" checked>CH-&pi;</label></div><div class="ng-line"><label class="ng-chk" for="int-show"><input type="checkbox" id="int-show" checked>draw dashed lines</label></div><div class="ng-summary" id="int-summary"></div><div class="ng-list" id="int-list"></div><div class="ng-hint" id="int-hint">H-bond: d(H&middot;&middot;&middot;A) &lt; 2.5 &Aring; and D-H&middot;&middot;&middot;A &gt; 120&deg;. Halogen, chalcogen and pnictogen bonds: d(X&middot;&middot;&middot;A) &lt; vdW sum &minus; 0.1 &Aring; and D-X&middot;&middot;&middot;A &gt; 130&deg;; acceptors N, O, S, F, Cl, Br, I. &pi;-&pi;: aromatic 5&ndash;7 rings with a plane angle &le; 30&deg;, centroid distance &le; 4.5 &Aring; and a 2.8&ndash;3.8 &Aring; face gap (parallel/offset), or a &ge; 60&deg; T-shape with one ring edge 3.0&ndash;5.5 &Aring; over the other face. CH-&pi;: H&middot;&middot;&middot;centroid &lt; 3.0 &Aring;, C-H&middot;&middot;&middot;centroid &gt; 120&deg; and the H at least 1.0 &Aring; above the ring face.</div></div><div id="xrd-panel"><div class="xr-title"><span>Powder XRD</span><button class="xr-close" id="xrd-close" title="Close (Esc)">&times;</button></div><div class="xr-line"><label for="xrd-rad">Radiation</label><select id="xrd-rad" title="The X-ray wavelength the pattern is calculated for"></select><label for="xrd-2max">2&theta; max</label><select id="xrd-2max" class="xr-narrow" title="The highest diffraction angle in the pattern"></select></div><div class="xr-summary" id="xrd-summary"></div><canvas id="xrd-canvas" width="440" height="150"></canvas><div class="xr-note" id="xrd-peak-info"></div><div class="xr-note" id="xrd-exp-info"></div><div class="xr-note" id="xrd-note"></div><div class="xr-list" id="xrd-list"></div><div class="xr-btns"><button id="xrd-refresh" class="xr-secondary" title="Recalculate after the structure changed">Recalculate</button><button id="xrd-export" title="Save the drawn curve as a two-column text file">Export .xy</button></div><div class="xr-btns"><button id="xrd-import" class="xr-secondary" title="Overlay a measured two-column 2theta/intensity pattern">Import experimental .xy...</button><button id="xrd-clear-exp" class="xr-secondary" disabled title="Remove the experimental curve">Clear exp.</button></div><input type="file" id="xrd-file" accept=".xy,.txt,.csv,text/plain" style="display:none"><div class="xr-hint">Pattern of the unit cell on screen (the supercell bounds do not change it) with Cromer-Mann form factors, Lorenz-polarisation and a Caglioti Gaussian profile. Click a calculated peak to read its position against the experimental curve.</div></div><div id="cav-panel"><div class="cv-title"><span>Voids and Cavities</span><button class="cv-close" id="cav-close" title="Close (Esc)">&times;</button></div><div class="cv-line"><label for="cav-probe">Probe radius</label><input type="number" id="cav-probe" value="1.2" min="0" max="20" step="0.1" title="Radius of the spherical probe rolled through the cell"><span style="font-size:10px;opacity:.7">&Aring;</span><button id="cav-run" title="Scan the unit cell with this probe">Analyse</button><button id="cav-clear" class="cv-secondary" title="Remove the drawn surface">Clear</button></div><div class="cv-summary" id="cav-summary">Not analysed yet.</div><div class="cv-note" id="cav-note"></div><div class="cv-list" id="cav-list"></div><div class="cv-hint">A point is free when a probe of this radius fits there without touching an atom (van der Waals radii, periodic images included). The free space is split into components: one whose walk winds through a cell face is an open channel, otherwise it is a closed cavity. Click a row to draw that void as a translucent surface. Volumes are per unit cell, so a supercell shows the same numbers; pockets under 0.5 &Aring;&sup3; are ignored. r_free is the largest sphere that fits at the void's deepest point.</div></div><div id="rotate-panel"><div class="pn-head"><span class="rp-title">Rotate Group Around Axis</span><button class="pn-close" id="rotate-close" type="button" title="Minimize the rotate panel">&times;</button></div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap" style="display:none"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div><div id="crystal-reopen" class="pn-chip" title="Open the crystal panel">Crystal</div><div id="egg-reopen" class="pn-chip" title="Open the egg list">Eggs</div><div id="view-reopen" class="pn-chip" title="Open the View controls">View</div><div id="bake-reopen" class="pn-chip" title="Open the Edit Coordinates card">Coordinates</div><div id="select-reopen" class="pn-chip" title="Open the Select Atoms panel">Select Atoms</div><div id="neigh-reopen" class="pn-chip" title="Open the Neighbours panel">Neighbours</div><div id="int-reopen" class="pn-chip" title="Open the Non-covalent Interactions panel">Interactions</div><div id="rotate-reopen" class="pn-chip" title="Open the Rotate Group panel">Rotate Group</div><div id="xrd-reopen" class="pn-chip" title="Open the powder XRD panel">Powder XRD</div><div id="cav-reopen" class="pn-chip" title="Open the cavity and void analysis">Cavities</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><div class="pn-head"><h4>Supercell Bounds</h4><button class="pn-close" id="crystal-close" type="button" title="Minimize the crystal panel">&times;</button></div><div class="bnd-row bnd-axis"><label for="bnd-a-min">a</label><input type="number" id="bnd-a-min" value="0" step="0.1" title="lower bound along a" aria-label="lower bound along a"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-a-max" value="1" step="0.1" title="upper bound along a" aria-label="upper bound along a"></div><div class="bnd-row bnd-axis"><label for="bnd-b-min">b</label><input type="number" id="bnd-b-min" value="0" step="0.1" title="lower bound along b" aria-label="lower bound along b"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-b-max" value="1" step="0.1" title="upper bound along b" aria-label="upper bound along b"></div><div class="bnd-row bnd-axis"><label for="bnd-c-min">c</label><input type="number" id="bnd-c-min" value="0" step="0.1" title="lower bound along c" aria-label="lower bound along c"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-c-max" value="1" step="0.1" title="upper bound along c" aria-label="upper bound along c"></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-p2" title="Eight unit cells, 0..2 along every axis">2×2×2</button><button class="bnd-mini" id="bnd-p3" title="Twenty-seven unit cells, 0..3 along every axis">3×3×3</button><button class="bnd-mini" id="bnd-p4" title="Sixty-four unit cells, 0..4 along every axis">4×4×4</button></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-reset" title="Back to the single unit cell, 0..1 along every axis">Reset</button><button class="bnd-mini" id="bnd-origin" title="Keep the spans, move the low corner onto the lattice origin">Align Origin</button></div><div class="bnd-cell" id="bnd-cell-line"></div><div class="bnd-sym" id="bnd-sym-note"></div><div class="bnd-row"><label>Disorder</label><select id="bnd-disorder" title="Show the ordered part plus one disorder group; All shows every alternative the cell lists"><option value="">All</option></select></div><label class="bnd-occ off" id="bnd-occ-label" for="bnd-occ-normalize" title="When one disorder group is selected, count its sites at occupancy 1 in the formula, density and saved files, so the cell describes the ordered variant on screen. All keeps every occupancy the file states."><input type="checkbox" id="bnd-occ-normalize" checked disabled>Selected group fully occupied</label><div class="hk-title">Lattice Planes (h k l)</div><div class="bnd-row hk-row"><label>(h k l)</label><input type="number" id="hk-h" value="0" step="1" title="h"><input type="number" id="hk-k" value="0" step="1" title="k"><input type="number" id="hk-l" value="1" step="1" title="l"></div><div class="hk-val" id="hk-d1"></div><div class="bnd-row hk-row"><label>2nd</label><input type="number" id="hk2-h" value="1" step="1" title="h of the second plane"><input type="number" id="hk2-k" value="0" step="1" title="k of the second plane"><input type="number" id="hk2-l" value="0" step="1" title="l of the second plane"></div><div class="hk-val" id="hk-d2"></div><button id="hk-show" class="bnd-btn" title="Draw the (hkl) plane through the centre of the box">Show Plane</button><button id="xrd-open" class="bnd-btn" title="Calculate the powder X-ray diffraction pattern of the unit cell">Powder XRD Pattern...</button><button id="bvs-open" class="bnd-btn" title="Bond-valence sums per site: how well the coordination around each cation and anion matches its formal valence (read-only)">Bond Valence (BVS)...</button><button id="cav-open" class="bnd-btn" title="Probe the unit cell for closed cavities and open channels and report their volume (read-only)">Cavities...</button><button id="bnd-edit-cell" class="bnd-btn" title="Change the cell parameters; every site keeps its fractional coordinates">Edit Cell...</button><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="pn-head"><span class="vp-title">Auto Rotate</span><button class="pn-close" id="view-close" type="button" title="Minimize the View controls">&times;</button></div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div><div class="vp-title vp-sub">Display</div><select id="style-select" title="How the structure is drawn: ball and stick (the default), van der Waals spheres, sticks without the atom spheres, or coordination polyhedra for a crystal"><option value="ball">Ball &amp; Stick</option><option value="spacefill">Space-filling</option><option value="stick">Stick</option>${(function(){try{return JSON.parse(jsonData).crystal?'<option value="polyhedra">Polyhedra</option>':'';}catch(e){return '';}}())}</select><label class="vp-check off" id="ortep-line" title="Draw atoms that carry anisotropic displacement parameters as 50% probability ellipsoids"><input type="checkbox" id="ortep-chk" disabled> Thermal ellipsoids (50%)</label></div><div id="bake-panel"><div class="pn-head"><span class="vp-title">Edit Coordinates</span><button class="pn-close" id="bake-close" type="button" title="Minimize the Edit Coordinates card">&times;</button></div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="pn-head"><span class="sp-title">Select Atoms</span><button class="pn-close" id="select-close" type="button" title="Minimize the selection panel">&times;</button></div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="neigh-panel"><div class="pn-head"><span class="ng-title">Neighbours</span><button class="pn-close" id="neigh-close" type="button" title="Minimize the neighbour list">&times;</button></div><div class="ng-line"><label for="ng-radius">Radius (A)</label><input type="number" id="ng-radius" value="3.5" min="0.1" max="12" step="0.1"><label class="ng-chk" for="ng-skip"><input type="checkbox" id="ng-skip" checked>skip bonded</label></div><div class="ng-line"><label>Anchor</label><span class="ng-anchor" id="ng-anchor">click an atom</span></div><div class="ng-summary" id="ng-summary"></div><div class="ng-list" id="ng-list"></div><div class="ng-btns"><button id="ng-select">Select listed</button></div><div class="ng-hint" id="ng-hint">Click a row to select that atom. Crystal images outside the drawn cell are listed with their cell offset.</div></div><div id="int-panel"><div class="pn-head"><span class="ng-title">Non-covalent Interactions</span><button class="pn-close" id="int-close" type="button" title="Minimize the interaction list">&times;</button></div><div class="ng-line ng-types"><label class="ng-chk" for="int-hb"><input type="checkbox" id="int-hb" checked>H-bond</label><label class="ng-chk" for="int-xb"><input type="checkbox" id="int-xb" checked>halogen</label><label class="ng-chk" for="int-cb"><input type="checkbox" id="int-cb" checked>chalcogen</label><label class="ng-chk" for="int-pn"><input type="checkbox" id="int-pn" checked>pnictogen</label><label class="ng-chk" for="int-pp"><input type="checkbox" id="int-pp" checked>&pi;-&pi;</label><label class="ng-chk" for="int-chpi"><input type="checkbox" id="int-chpi" checked>CH-&pi;</label></div><div class="ng-line"><label class="ng-chk" for="int-show"><input type="checkbox" id="int-show" checked>draw dashed lines</label></div><div class="ng-summary" id="int-summary"></div><div class="ng-list" id="int-list"></div><div class="ng-hint" id="int-hint">H-bond: d(H&middot;&middot;&middot;A) &lt; 2.5 &Aring; and D-H&middot;&middot;&middot;A &gt; 120&deg;. Halogen, chalcogen and pnictogen bonds: d(X&middot;&middot;&middot;A) &lt; vdW sum &minus; 0.1 &Aring; and D-X&middot;&middot;&middot;A &gt; 130&deg;; acceptors N, O, S, F, Cl, Br, I. &pi;-&pi;: aromatic 5&ndash;7 rings with a plane angle &le; 30&deg;, centroid distance &le; 4.5 &Aring; and a 2.8&ndash;3.8 &Aring; face gap (parallel/offset), or a &ge; 60&deg; T-shape with one ring edge 3.0&ndash;5.5 &Aring; over the other face. CH-&pi;: H&middot;&middot;&middot;centroid &lt; 3.0 &Aring;, C-H&middot;&middot;&middot;centroid &gt; 120&deg; and the H at least 1.0 &Aring; above the ring face.</div></div><div id="xrd-panel"><div class="xr-title"><span>Powder XRD</span><button class="xr-close" id="xrd-close" title="Close (Esc)">&times;</button></div><div class="xr-line"><label for="xrd-rad">Radiation</label><select id="xrd-rad" title="The X-ray wavelength the pattern is calculated for"></select><label for="xrd-2max">2&theta; max</label><select id="xrd-2max" class="xr-narrow" title="The highest diffraction angle in the pattern"></select></div><div class="xr-summary" id="xrd-summary"></div><canvas id="xrd-canvas" width="440" height="150"></canvas><div class="xr-note" id="xrd-peak-info"></div><div class="xr-note" id="xrd-exp-info"></div><div class="xr-note" id="xrd-note"></div><div class="xr-list" id="xrd-list"></div><div class="xr-btns"><button id="xrd-refresh" class="xr-secondary" title="Recalculate after the structure changed">Recalculate</button><button id="xrd-export" title="Save the drawn curve as a two-column text file">Export .xy</button></div><div class="xr-btns"><button id="xrd-import" class="xr-secondary" title="Overlay a measured two-column 2theta/intensity pattern">Import experimental .xy...</button><button id="xrd-clear-exp" class="xr-secondary" disabled title="Remove the experimental curve">Clear exp.</button></div><input type="file" id="xrd-file" accept=".xy,.txt,.csv,text/plain"><div class="xr-hint">Pattern of the unit cell on screen (the supercell bounds do not change it) with Cromer-Mann form factors, Lorenz-polarisation and a Caglioti Gaussian profile. Click a calculated peak to read its position against the experimental curve.</div></div><div id="cav-panel"><div class="cv-title"><span>Voids and Cavities</span><button class="cv-close" id="cav-close" title="Close (Esc)">&times;</button></div><div class="cv-line"><label for="cav-probe">Probe radius</label><input type="number" id="cav-probe" value="1.2" min="0" max="20" step="0.1" title="Radius of the spherical probe rolled through the cell"><span class="cv-unit">&Aring;</span><button id="cav-run" title="Scan the unit cell with this probe">Analyse</button><button id="cav-clear" class="cv-secondary" title="Remove the drawn surface">Clear</button></div><div class="cv-summary" id="cav-summary">Not analysed yet.</div><div class="cv-note" id="cav-note"></div><div class="cv-list" id="cav-list"></div><div class="cv-hint">A point is free when a probe of this radius fits there without touching an atom (van der Waals radii, periodic images included). The free space is split into components: one whose walk winds through a cell face is an open channel, otherwise it is a closed cavity. Click a row to draw that void as a translucent surface. Volumes are per unit cell, so a supercell shows the same numbers; pockets under 0.5 &Aring;&sup3; are ignored. r_free is the largest sphere that fits at the void's deepest point.</div></div><div id="rotate-panel"><div class="pn-head"><span class="rp-title">Rotate Group Around Axis</span><button class="pn-close" id="rotate-close" type="button" title="Minimize the rotate panel">&times;</button></div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div><div id="crystal-reopen" class="pn-chip" title="Open the crystal panel">Crystal</div><div id="egg-reopen" class="pn-chip" title="Open the egg list">Eggs</div><div id="view-reopen" class="pn-chip" title="Open the View controls">View</div><div id="bake-reopen" class="pn-chip" title="Open the Edit Coordinates card">Coordinates</div><div id="select-reopen" class="pn-chip" title="Open the Select Atoms panel">Select Atoms</div><div id="neigh-reopen" class="pn-chip" title="Open the Neighbours panel">Neighbours</div><div id="int-reopen" class="pn-chip" title="Open the Non-covalent Interactions panel">Interactions</div><div id="rotate-reopen" class="pn-chip" title="Open the Rotate Group panel">Rotate Group</div><div id="xrd-reopen" class="pn-chip" title="Open the powder XRD panel">Powder XRD</div><div id="cav-reopen" class="pn-chip" title="Open the cavity and void analysis">Cavities</div></div>
 <div id="error-msg"></div>
 <div id="empty-msg"></div>
 <div id="atom-tooltip"></div>
@@ -6891,7 +6986,7 @@ function updateEggButton(){
     var btn=document.getElementById('egg-btn');
     if(!btn)return;
     wireEggPanelButton();
-    btn.style.display=eggSegments().length>0?'':'none';
+    btn.style.display=eggSegments().length>0?'inline-block':'none';
 }
 function updateEggPanelState(list){
     var panel=document.getElementById('egg-panel');
@@ -7017,12 +7112,10 @@ function rebuildScene(keepCenter){
     // Recomputing the centre is the default (the structure changed, the centre
     // follows it). keepCenter is passed by the one caller that deliberately
     // holds the picture still: a trajectory frame switch, where the box is the
-    // reference the motion is read against. The bounds door deliberately does
-    // not pass it — each set of bounds is a view of its own and gets its own
-    // centre (recomputeRotationCentre reads the atoms this build just placed),
-    // and the rebuild is deterministic, so returning to earlier bounds
-    // reproduces that view exactly.
-    if(!keepCenter&&!TRAJ_FRAMES)recomputeRotationCentre();
+    // reference the motion is read against. Every other rebuild — an edit, a
+    // deletion, an undo on a trajectory document — follows the geometry it
+    // just built rather than turning about the old frame's centre.
+    if(!keepCenter)recomputeRotationCentre();
     var segs=sphereSegs();
     // The pools are caches: an entry outlives the meshes that drew with it, so
     // a rebuild after an edit or a colour toggle does not re-create every
@@ -9412,8 +9505,10 @@ function setMode(m){
     if(oldMode==='mmOpt'&&m!=='mmOpt')mmCancelRun();
     // Auto Rotate is a View-mode control: leaving the mode takes its panel away,
     // so the spin it started ends with it rather than running on with no way
-    // back to the switch.
-    if(oldMode==='view'&&m!=='view')stopSpin();
+    // back to the switch. The toggle itself goes off too: its button is hidden
+    // with the panel, so a still-on state would keep driving the arrow keys
+    // with no control left to turn it off.
+    if(oldMode==='view'&&m!=='view'){stopSpin();spinOn=false;updateSpinButton();}
     // The contact lines belong to the Neighbours panel: leaving the mode takes
     // both away, and the panel starts empty the next time it is opened.
     if(oldMode==='neighbours'&&m!=='neighbours')neighEndSession();
@@ -9421,7 +9516,7 @@ function setMode(m){
     if(!preserveSel){
         selectedAtoms=[];diffSelectedAtoms=[];originalCoords=null;
     }
-    hideModal();highlightSelected();
+    dismissModal();highlightSelected();
     modeInfoEl.textContent=MODE_INFO[m]||m;
     if(!preserveSel)selInfoEl.textContent='';
     document.querySelectorAll('.tbtn[data-mode]').forEach(function(b){b.classList.toggle('active',b.dataset.mode===m)});
@@ -9931,6 +10026,9 @@ function pushUndo(symmetryState){
 function updateUndoBtn(){var b=document.getElementById('undo-btn');if(b)b.disabled=undoStack.length===0}
 function doUndo(){
     if(undoStack.length===0)return;
+    // Auto-play replaces the structure on every tick; an undo restored here
+    // would be overwritten by the next switchFrame before the user sees it.
+    stopFrameAutoPlay();
     // The restore replaces the geometry, so every computed-from-older answer
     // (an Add H request in flight) is stale from here on.
     MD.structureRevision=(MD.structureRevision||0)+1;
@@ -10122,9 +10220,12 @@ var diffLabelRight=document.getElementById('diff-label-right');
 
 window.addEventListener('message',function(event){
     var msg=event.data;
+    // A message the host did not shape must not throw here and take the rest
+    // of the listener down with it.
+    if(!msg||typeof msg!=='object'||typeof msg.command!=='string')return;
     if(msg.command==='diffResult'){
         if(msg.cancelled){
-            modeInfoEl.textContent='View Mode';
+            modeInfoEl.textContent=MODE_INFO[currentMode]||currentMode;
             return;
         }
         startDiff(msg);
@@ -12175,7 +12276,7 @@ function updateBetaButton(){
     var btn=document.getElementById('beta-btn');
     if(!btn)return;
     var ok=!VMD&&!CRY&&betaRange()!==null;
-    btn.style.display=ok?'':'none';
+    btn.style.display=ok?'inline-block':'none';
 }
 // 开启配色时某个原子的标量颜色; 不带标量的原子返回 null (保留元素颜色)。
 // 在重建场景时读取, 而不是把颜色写进 a.color —— a.color 始终是元素颜色。
@@ -12193,7 +12294,9 @@ function applyBetaColoring(on){
     betaColorOn=on&&!!betaRangeUsed;
     var btn=document.getElementById('beta-btn');
     if(btn)btn.classList.toggle('active',betaColorOn);
-    rebuildScene();
+    // Colour is a view state, not a structure change: a trajectory keeps the
+    // box it was framed with, exactly as a frame switch does.
+    rebuildScene(!!TRAJ_FRAMES);
     modeInfoEl.textContent=betaColorOn
         ?('Beta colouring: '+betaRangeUsed.lo.toFixed(3)+' – '+betaRangeUsed.hi.toFixed(3))
         :(MODE_INFO[currentMode]||currentMode);
@@ -14047,6 +14150,8 @@ function panelRestore(name){
     panelMinState[name]=false;
     syncPanelChips();
     layoutPanels();
+    // A panel restored at a new window size owns a bitmap drawn at the old one.
+    if(name==='xrd')xrdRedraw();
 }
 // The powder pattern, the cavity report and the BVS table each read one unit
 // cell; a comparison shows two structures, so starting Diff folds them away
@@ -16683,6 +16788,9 @@ var xrdResult=null;
 var xrdExp=null;
 var xrdSelection=null;   // the clicked calculated peak, and its experimental match
 var xrdPlot=null;        // geometry of the last draw, so a click can be mapped back
+var xrdDrawnWidth=0;     // CSS width the bitmap was drawn at, so a resize can be noticed
+var xrdLastPat=null;     // the pattern and message of the last draw
+var xrdLastMessage='';
 var XRD_EXP_MATCH_WINDOW=1.0;   // deg: an experimental peak further away is not a match
 var XRD_CLICK_WINDOW=1.0;       // deg: clicking between peaks selects nothing
 
@@ -17274,10 +17382,25 @@ function xrdDrawMarkers(g,plot){
     }
     g.restore();
 }
+// The canvas is sized from its CSS width at draw time; a resized panel would
+// otherwise leave the old bitmap stretched by CSS, and a click would map 2theta
+// through a width the picture was not drawn at. Redraw at the new width, from
+// the pattern the last draw used, so Resize keeps the picture and its hit
+// mapping in step without recalculating the pattern.
+function xrdRedraw(){
+    if(!xrdOpen||panelMinState.xrd)return;
+    var cv=document.getElementById('xrd-canvas');
+    if(!cv||!cv.clientWidth)return;
+    if(Math.round(cv.clientWidth)===xrdDrawnWidth&&cv.width>0)return;
+    xrdDraw(xrdLastPat,xrdLastMessage);
+}
 function xrdDraw(pat,message){
+    xrdLastPat=pat||null;
+    xrdLastMessage=message||'';
     var cv=document.getElementById('xrd-canvas');
     if(!cv)return;
     var cw=Math.max(220,Math.round(cv.clientWidth||440));
+    xrdDrawnWidth=Math.round(cv.clientWidth||0);
     var ch=150;
     var dpr=Math.min(2,window.devicePixelRatio||1);
     cv.width=Math.round(cw*dpr);cv.height=Math.round(ch*dpr);
@@ -18663,10 +18786,37 @@ function applyDihedral(targetDeg,fixFirstThree,moveMode){
     updateScenePositions(true);
 }
 
-function showModal(html,cb,wide){if(vibActive||vibPaused)stopVibration();stopMoveSession();modalEl.className=wide?'modal-wide':'';modalEl.innerHTML=html;modalOverlay.classList.add('show');modalCallback=cb}
+// Dismiss whatever dialog is open the way its own Cancel button would: several
+// dialogs (bond length/angle/dihedral) preview geometry and their Cancel is the
+// only path that puts it back and drops the snapshot the preview opened. A
+// dialog without a Cancel is simply hidden.
+function dismissModal(){
+    if(!modalOpen())return;
+    var cancel=modalEl.querySelector('.mbtn-cancel');
+    if(cancel){cancel.click();return}
+    hideModal();
+}
+function showModal(html,cb,wide){
+    // A new dialog replaces the old one; leaving the old one open would turn
+    // its preview into a committed edit behind the new dialog's back.
+    dismissModal();
+    if(vibActive||vibPaused)stopVibration();
+    stopMoveSession();
+    modalEl.className=wide?'modal-wide':'';
+    modalEl.innerHTML=html;
+    modalOverlay.classList.add('show');
+    modalCallback=cb;
+}
 function hideModal(){modalOverlay.classList.remove('show');modalCallback=null;modalEl.className=''}
 
 function showBondLengthModal(){
+    // Close any dialog still open *before* this one takes its baseline
+    // snapshot: the old dialog's Cancel pops its own snapshot, which must not
+    // be the one this dialog is about to push.
+    dismissModal();
+    // The old cancel may have cleared the selection it was previewing; a
+    // dialog with no atoms to measure must not be opened (or dereferenced).
+    if(!MD.atoms[selectedAtoms[0]]||!MD.atoms[selectedAtoms[1]])return;
     // A bond drawn as a stub across a cell face has its two atoms a whole cell
     // apart on purpose: the distance on screen is not the bond's length, and
     // writing that distance "back" would move the cell by a displacement the
@@ -18778,6 +18928,10 @@ function showBondLengthModal(){
 }
 
 function showBondAngleModal(){
+    // Same ordering as the bond length: the old dialog's Cancel must pop the
+    // snapshot it opened, before this dialog pushes its own.
+    dismissModal();
+    if(!MD.atoms[selectedAtoms[0]]||!MD.atoms[selectedAtoms[1]]||!MD.atoms[selectedAtoms[2]])return;
     // Same rule as the bond length: an angle read off a bond drawn across a
     // face is an angle between two different images, not the angle in the cell.
     if(crystalCrossFaceBondBetween(selectedAtoms[0],selectedAtoms[1])||crystalCrossFaceBondBetween(selectedAtoms[1],selectedAtoms[2])){
@@ -18805,6 +18959,10 @@ function showBondAngleModal(){
 }
 
 function showDihedralModal(){
+    // Same ordering as the other measurement dialogs: close the old preview
+    // and let its Cancel drop its own snapshot first.
+    dismissModal();
+    if(!MD.atoms[selectedAtoms[0]]||!MD.atoms[selectedAtoms[1]]||!MD.atoms[selectedAtoms[2]]||!MD.atoms[selectedAtoms[3]])return;
     // And the dihedral: any of its three bonds crossing a face makes the
     // measured angle one between images rather than the cell's own.
     if(crystalCrossFaceBondBetween(selectedAtoms[0],selectedAtoms[1])||crystalCrossFaceBondBetween(selectedAtoms[1],selectedAtoms[2])||crystalCrossFaceBondBetween(selectedAtoms[2],selectedAtoms[3])){
@@ -20106,7 +20264,16 @@ function doSave(){
     document.getElementById('m-ok').addEventListener('click',function(){
         var fmt=document.getElementById('m-fmt').value;
         var content,ext;
-        var suggestName='molecule_modified';
+        // The suggestion keeps the source file's identity: a water.xyz file
+        // saved as a Gaussian input is offered as water.gjf, not as a fixed
+        // molecule_modified name that loses which structure this is. The
+        // separator is built once so this stays readable inside the page.
+        var srcPath=String(MD.filePath||'');
+        var fsSlash=String.fromCharCode(47),bsSlash=String.fromCharCode(92);
+        var srcCut=Math.max(srcPath.lastIndexOf(fsSlash),srcPath.lastIndexOf(bsSlash));
+        var srcFile=srcPath.substring(srcCut+1);
+        var srcDot=srcFile.lastIndexOf('.');
+        var suggestName=(srcDot>0?srcFile.substring(0,srcDot):srcFile)||'molecule';
         try{
         switch(fmt){
             case 'gjf':content=gjf;ext='.gjf';break;
@@ -21004,7 +21171,9 @@ function setDisplayStyle(style){
     }
     displayStyle=style;
     syncStyleSelect();
-    rebuildScene();
+    // The display style is a view state: a trajectory keeps the centre its
+    // frames are read against, while a structure edit re-derives it.
+    rebuildScene(!!TRAJ_FRAMES);
     // In Diff mode the right-hand structure is a model of its own, built by
     // buildDiffModel rather than by rebuildScene, so it is restyled here — with
     // the marks it is already wearing, so the comparison does not lose them.
@@ -21054,7 +21223,9 @@ var ortepChkEl=document.getElementById('ortep-chk');
 if(ortepChkEl){
     ortepChkEl.addEventListener('change',function(){
         ortepEnabled=!!this.checked;
-        rebuildScene();
+        // A drawing switch does not move the structure: keep a trajectory's
+        // fixed centre.
+        rebuildScene(!!TRAJ_FRAMES);
         layoutPanels();
         modeInfoEl.textContent=ortepEnabled?
             'Thermal ellipsoids: 50% probability surfaces':
@@ -21355,6 +21526,48 @@ function getClickedAtom(e){
     return stickPick(MD.atoms,atomMeshes,CX,CY,CZ,moleculeGroup);
 }
 
+/**
+ * Apply a finished selection rectangle in one pass.
+ *
+ * A rectangle can cover thousands of atoms, and calling selectAtom() per hit
+ * re-highlights every atom of the structure each time — O(k·n) for k hits in
+ * an n-atom structure, which is what made a large box freeze. The hits are
+ * collected first and applied here, with the highlight (and the Diff mapping
+ * between the two halves) updated once.
+ */
+function applyBoxSelection(leftHits,rightHits){
+    var changed=false,i;
+    function addUnique(list,idx){
+        if(idx<0||list.indexOf(idx)>=0)return;
+        list.push(idx);changed=true;
+    }
+    if(diffMode){
+        for(i=0;i<leftHits.length;i++)addUnique(selectedAtoms,leftHits[i]);
+        // The two halves describe one selection, exactly as a click does.
+        if(diffMapping){
+            for(i=0;i<selectedAtoms.length;i++){
+                var ri=diffMapping[selectedAtoms[i]];
+                if(ri>=0&&diffSelectedAtoms.indexOf(ri)<0){diffSelectedAtoms.push(ri);changed=true}
+            }
+        }
+        for(i=0;i<rightHits.length;i++)addUnique(diffSelectedAtoms,rightHits[i]);
+        if(diffReverseMapping){
+            for(i=0;i<diffSelectedAtoms.length;i++){
+                var li=diffReverseMapping[diffSelectedAtoms[i]];
+                if(li>=0&&selectedAtoms.indexOf(li)<0){selectedAtoms.push(li);changed=true}
+            }
+        }
+        if(changed){highlightSelected();updateDiffSelInfo()}
+        return;
+    }
+    for(i=0;i<leftHits.length;i++)addUnique(selectedAtoms,leftHits[i]);
+    if(changed){
+        highlightSelected();
+        selInfoEl.textContent='Selected: '+formatAtomList(selectedAtoms);
+        mmSelectionChanged();
+    }
+}
+
 canvas.addEventListener('mousedown',function(e){
     // Any left press ends a free spin; a right/middle press pans and leaves it
     // running. This is the only mouse path that stops the spin.
@@ -21369,6 +21582,13 @@ canvas.addEventListener('mousedown',function(e){
         e.preventDefault();return;
     }
     if(currentMode==='moveAtoms'&&!diffMode&&selectedAtoms.length>0&&e.ctrlKey&&(e.button===0||e.button===2)){
+        // The optimizer owns the coordinates of the atoms it is moving; a
+        // manual drag now would be overwritten by the next progress chunk and
+        // its undo snapshot would no longer describe the run's geometry.
+        if(mmRunActive()){
+            modeInfoEl.textContent='Molecular Mechanics is running - wait for it to finish or cancel it before moving atoms';
+            e.preventDefault();return;
+        }
         // Ctrl+left-drag: rotate the selected fragment around its center.
         // Ctrl+right-drag: translate the fragment, cursor-locked onto the
         // grabbed atom (or the fragment-center plane when clicking space).
@@ -21605,6 +21825,7 @@ canvas.addEventListener('mouseup',function(e){
         var bw=Math.abs(e.clientX-boxStart.x),bh=Math.abs(e.clientY-boxStart.y);
         if(bw<3&&bh<3){boxStart=null;layoutPanels();return;}
         var v=new THREE.Vector3();
+        var leftHits=[],rightHits=[];
         // The atom handles are records, not scene children, so a box test takes
         // the same local position the instance matrices carry and applies the
         // group's world matrix itself — the number a Mesh.getWorldPosition()
@@ -21621,7 +21842,7 @@ canvas.addEventListener('mouseup',function(e){
                 v.project(camera);
                 var sx=(v.x*0.5+0.5)*dhalfW+rect.left;
                 var sy=(-v.y*0.5+0.5)*dh+rect.top;
-                if(sx>=bx&&sx<=bx+bw&&sy>=by&&sy<=by+bh){selectAtom(m.userData.index);}
+                if(sx>=bx&&sx<=bx+bw&&sy>=by&&sy<=by+bh)leftHits.push(m.userData.index);
             });
             if(diffAtomMeshes&&diffAtomMeshes.length>0){
                 diffActiveSide='right';
@@ -21634,7 +21855,7 @@ canvas.addEventListener('mouseup',function(e){
                     v.project(camera);
                     var sx=(v.x*0.5+0.5)*(dw-dhalfW)+rect.left+dhalfW;
                     var sy=(-v.y*0.5+0.5)*dh+rect.top;
-                    if(sx>=bx&&sx<=bx+bw&&sy>=by&&sy<=by+bh){selectAtom(m.userData.index);}
+                    if(sx>=bx&&sx<=bx+bw&&sy>=by&&sy<=by+bh)rightHits.push(m.userData.index);
                 });
             }
         }else{
@@ -21645,9 +21866,10 @@ canvas.addEventListener('mouseup',function(e){
                 v.project(camera);
                 var sx=(v.x*0.5+0.5)*rect.width+rect.left;
                 var sy=(-v.y*0.5+0.5)*rect.height+rect.top;
-                if(sx>=bx&&sx<=bx+bw&&sy>=by&&sy<=by+bh){selectAtom(m.userData.index);}
+                if(sx>=bx&&sx<=bx+bw&&sy>=by&&sy<=by+bh)leftHits.push(m.userData.index);
             });
         }
+        applyBoxSelection(leftHits,rightHits);
         boxStart=null;needsRender=true;layoutPanels();return;
     }
     if(e.button===0&&isRot&&!bakedThisRelease)spinLaunch();
@@ -21784,6 +22006,10 @@ document.addEventListener('keydown',function(e){
                 // button, keeping the format already chosen.
                 var fmtEl=document.getElementById('m-fmt'),okEl=document.getElementById('m-ok');
                 if(fmtEl&&okEl){e.preventDefault();okEl.click();return}
+                // Any other dialog is replaced: doSave's showModal dismisses
+                // it through its own Cancel first, so a measurement preview
+                // is put back instead of being committed by the Save.
+                if(!editable){e.preventDefault();doSave();return}
             }else if(!editable){
                 e.preventDefault();doSave();return;
             }
@@ -21813,6 +22039,10 @@ document.addEventListener('keydown',function(e){
         }
     }
     if(editable)return;
+    // While a dialog is open, every key but the shortcuts handled above and
+    // Esc belongs to it. Delete must not open a second delete confirmation and
+    // the arrows must not rotate a selection behind the dialog's preview.
+    if(modalOpen())return;
     ctrlDown=e.ctrlKey;
     // The first arrow key of a hold-session stops whatever spin is running, so
     // the key takes over; keys pressed while another is already held (and the
@@ -21843,12 +22073,22 @@ window.addEventListener('blur',function(){
     ctrlDown=false;
     keyState.ArrowLeft=keyState.ArrowRight=keyState.ArrowUp=keyState.ArrowDown=false;
     keySpinActive=false;keySpinHold=0;
-    // The mouse-up may never arrive after focus is lost: commit what the drag
-    // already wrote rather than leaving the session (and its snapshot) open.
-    if(bakeActive)endBakeSession();
+    // A button released while another window has focus never sends its mouseup,
+    // so the drag latches would survive the Alt-Tab and keep rotating or
+    // panning as soon as the mouse moves again without a button held. Every
+    // pointer session ends here, committing the geometry it already wrote
+    // exactly as its mouseup would.
+    isRot=false;isPan=false;panGrabActive=false;spinSamples.length=0;
+    if(isBoxSelecting){isBoxSelecting=false;boxRectEl.style.display='none';boxStart=null}
+    stopMoveSession();
+    // No keyup follows a release made in another window; a latch left on would
+    // swallow the first fresh arrow-key session after focus returns.
+    keyRotLatch=false;moveKeyLatch=false;
+    tooltipEl.style.display='none';
+    needsRender=true;
 });
 
-window.addEventListener('resize',function(){var rw=container.clientWidth||window.innerWidth;var rh=container.clientHeight||(window.innerHeight-60);if(rw<1)rw=window.innerWidth;if(rh<1)rh=window.innerHeight-60;camera.aspect=rw/rh;camera.updateProjectionMatrix();renderer.setSize(rw,rh);needsRender=true;layoutPanels()});
+window.addEventListener('resize',function(){var rw=container.clientWidth||window.innerWidth;var rh=container.clientHeight||(window.innerHeight-60);if(rw<1)rw=window.innerWidth;if(rh<1)rh=window.innerHeight-60;camera.aspect=rw/rh;camera.updateProjectionMatrix();renderer.setSize(rw,rh);needsRender=true;layoutPanels();xrdRedraw()});
 
 // Hand the context back when the page is really going away. Editors keep their
 // webviews (and their contexts) alive while hidden, and the window has a hard
@@ -21886,6 +22126,11 @@ function animate(){
             if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
         }
         if(currentMode==='moveAtoms'&&selectedAtoms.length>0&&!diffMode&&!moveKeyLatch&&ctrlDown){
+            // The optimizer owns the atoms it is moving; rotating them here
+            // would be overwritten by the next progress chunk.
+            if(mmRunActive()){
+                modeInfoEl.textContent='Molecular Mechanics is running - wait for it to finish or cancel it before rotating atoms';
+            }else{
             // Ctrl+arrow keys rotate the selected fragment instead of the
             // view. One undo snapshot per key-hold session; releasing all
             // arrow keys (or Ctrl) ends the session.
@@ -21911,6 +22156,7 @@ function animate(){
                 moveKeyActive=false;
                 refreshMovedBondsAndMeshes();
                 if(currentMode==='moveAtoms')modeInfoEl.textContent=MODE_INFO.moveAtoms;
+            }
             }
         }else if(!diffMode&&!keyRotLatch){
             if(spinOn){
@@ -22213,6 +22459,40 @@ function getNonce(): string {
         text += possible.charAt(Math.floor(Math.random() * possible.length));
     }
     return text;
+}
+
+/**
+ * A page for a webview whose renderer could not be read.
+ *
+ * It is static HTML: no script, no data payload, nothing that could fail a
+ * second time. The message names the missing asset and the reason, so a broken
+ * installation can be diagnosed from the panel itself.
+ */
+function webviewLoadErrorHtml(nonce: string, message: string): string {
+    const safe = message.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}';">
+<title>Molecular Viewer</title>
+<style nonce="${nonce}">
+html,body{width:100%;height:100%;margin:0}
+body{display:flex;align-items:center;justify-content:center;background:var(--vscode-editor-background,#1e1e1e);color:var(--vscode-editor-foreground,#ccc);font-family:var(--vscode-font-family,sans-serif)}
+.box{max-width:640px;padding:20px 24px;border:1px solid var(--vscode-panel-border,#444);border-radius:4px;background:var(--vscode-editor-background,#1e1e1e)}
+h2{font-size:15px;margin:0 0 10px}
+p{font-size:12px;line-height:1.6;margin:0 0 10px;color:var(--vscode-descriptionForeground,#a9a9a9)}
+pre{font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word;margin:0;padding:8px;border-radius:3px;background:rgba(128,128,128,0.12);user-select:text}
+</style>
+</head>
+<body>
+<div class="box">
+<h2>The 3D viewer could not start</h2>
+<p>The extension could not load the renderer it needs. Reinstall the extension (or restore its <b>media</b> folder), then reopen this file.</p>
+<pre>${safe}</pre>
+</div>
+</body>
+</html>`;
 }
 
 // ---------------------------------------------------------------------------
