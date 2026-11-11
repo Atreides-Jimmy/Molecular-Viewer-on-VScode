@@ -108,17 +108,48 @@ export interface ParseFileOptions {
 }
 
 /**
+ * Whether the text is a frame log this reader parses as geometry frames
+ * (an xTB trajectory, a Gaussian log or an ORCA output).
+ *
+ * These are the three outputs that share `.log`/`.out` with the structured
+ * programs below. Their markers are found with `indexOf` or the first two
+ * lines, so the test is cheap enough to run before a 60 MB scan.
+ */
+export function isFrameLogOutput(content: string): boolean {
+    return isXtbLog(content) ||
+        content.indexOf('Standard orientation:') >= 0 ||
+        content.indexOf('Input orientation:') >= 0 ||
+        content.indexOf('Gaussian, Inc.') >= 0 ||
+        isOrcaOutput(content);
+}
+
+/**
  * Whether a `.log`/`.out` file is structured output of a program this reader
  * understands, rather than a Gaussian/ORCA/xTB trajectory log. The host uses
  * this to choose between the frame pipeline and `parseFile`.
  */
-export function isStructuredProgramOutput(content: string): boolean {
-    return isQeOutput(content) || isCp2kOutput(content) || isPyscfOutput(content) ||
-        isAbinitOutput(content) || isVasprunXml(content) || isOutcar(content) ||
-        isLammpsDump(content) || isAbacusMdDump(content) || isAbacusLog(content) ||
-        isXdatcar(content) || isMopacOutput(content) || isXtbOutput(content) ||
-        isGromacsLog(content) || isLammpsLog(content) ||
-        isDpgenModelDevi(content) || isGpumdInput(content);
+export function isStructuredProgramOutput(content: string, onProgress?: (fraction: number) => void): boolean {
+    // A frame log is not structured output. Its markers are cheap, so checking
+    // them first keeps a 60 MB file from being scanned by every detector below.
+    if (isFrameLogOutput(content)) {
+        onProgress?.(1);
+        return false;
+    }
+    // Each detector is a full pass over the text, so one step per detector is
+    // the only progress a caller can honestly be shown before the result is
+    // known. The short-circuit is unchanged: the first match wins.
+    const detectors: ((text: string) => boolean)[] = [
+        isQeOutput, isCp2kOutput, isPyscfOutput, isAbinitOutput, isVasprunXml,
+        isOutcar, isLammpsDump, isAbacusMdDump, isAbacusLog, isXdatcar,
+        isMopacOutput, isXtbOutput, isGromacsLog, isLammpsLog,
+        isDpgenModelDevi, isGpumdInput
+    ];
+    for (let i = 0; i < detectors.length; i++) {
+        const matched = detectors[i](content);
+        onProgress?.((i + 1) / detectors.length);
+        if (matched) return true;
+    }
+    return false;
 }
 
 /** A recognised program output that carries no coordinates. */
@@ -373,9 +404,9 @@ export function parseFile(content: string, fileName: string, options?: ParseFile
  * means a mis-named file (an ORCA run saved as `.log`, a Gaussian log saved as
  * `.out`) still opens correctly.
  */
-export function parseLogFile(content: string, fileName?: string): LogFileResult {
+export function parseLogFile(content: string, fileName?: string, onProgress?: (fraction: number) => void): LogFileResult {
     if (isOrcaOutput(content)) {
-        const result = parseOrcaOut(content);
+        const result = parseOrcaOut(content, onProgress);
         return {
             frames: result.frames,
             title: result.title,
@@ -387,7 +418,7 @@ export function parseLogFile(content: string, fileName?: string): LogFileResult 
         };
     }
     if (isXtbLog(content)) {
-        const xResult = parseXtbLog(content);
+        const xResult = parseXtbLog(content, onProgress);
         return {
             frames: xResult.frames,
             title: xResult.title,
@@ -396,7 +427,7 @@ export function parseLogFile(content: string, fileName?: string): LogFileResult 
             source: 'xtb'
         };
     }
-    const gResult = parseGaussianLog(content);
+    const gResult = parseGaussianLog(content, onProgress);
     return {
         frames: gResult.frames,
         title: gResult.title,

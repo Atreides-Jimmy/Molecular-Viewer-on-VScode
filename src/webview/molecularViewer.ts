@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { parseFile, parseLogFile, parseXyzTrajectory, LogFrame, OrcaFrame, RouteSection, LogChargeSet, LogSummary, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg, ParseFileOptions, DeepmdParseOptions, LammpsParseOptions, LammpsHints, isStructuredProgramOutput, isExtXyz, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox, parseLammpsInputHints, lammpsTypeElements, isLammpsInput, isLammpsData, isLammpsDump, scanLammpsInput, scanOrcaXyzfile, scanAbinitXyzfile, scanAbacusInput, isAbacusInput, isAbinitInput, isCp2kInput, detectBinaryTrajectory, readBinaryTrajectory, lammpsLengthFactor, parseLammpsDumpTrajectory, BinaryTrajectory, TrajectoryFormat, LammpsDumpTrajectory, parseFchk, readFchkColumn, FchkOrbitals } from '../parsers/index';
+import { parseFile, parseLogFile, parseXyzTrajectory, LogFrame, OrcaFrame, RouteSection, LogChargeSet, LogSummary, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg, ParseFileOptions, DeepmdParseOptions, LammpsParseOptions, LammpsHints, isStructuredProgramOutput, isFrameLogOutput, isExtXyz, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox, parseLammpsInputHints, lammpsTypeElements, isLammpsInput, isLammpsData, isLammpsDump, scanLammpsInput, scanOrcaXyzfile, scanAbinitXyzfile, scanAbacusInput, isAbacusInput, isAbinitInput, isCp2kInput, detectBinaryTrajectory, readBinaryTrajectory, lammpsLengthFactor, parseLammpsDumpTrajectory, BinaryTrajectory, TrajectoryFormat, LammpsDumpTrajectory, parseFchk, readFchkColumn, FchkOrbitals } from '../parsers/index';
 import { ensureBonds } from '../tools/bondDetector';
 import { BOND_PERCEPTION_SOURCE } from '../tools/bondPerception';
 import { BVS_SOURCE } from '../tools/bvs';
@@ -26,6 +26,268 @@ function decodeText(bytes: Uint8Array): string {
         return new TextDecoder('utf-16le').decode(bytes);
     }
     return new TextDecoder().decode(bytes);
+}
+
+/** The progress bar a file load uses while it reads and parses. */
+type LoadProgress = vscode.Progress<{ message?: string; increment?: number }>;
+
+/**
+ * A file this large is slow enough to read and parse that its own progress
+ * notification is worth showing. Smaller structures open instantly, and a
+ * notification that flashes for every one of them is worse than none.
+ */
+const LOAD_PROGRESS_MIN_BYTES = 4 * 1024 * 1024;
+/**
+ * A log is watched at a much smaller size: its single pass builds a frame per
+ * optimization step, and a 1 MB optimisation log is already a visible wait.
+ * The threshold only exists to keep a 5 KB output from flashing a notification.
+ */
+const LOAD_PROGRESS_MIN_LOG_BYTES = 256 * 1024;
+/** Bytes per read, so a cancel is felt and the percentage can move. */
+const LOAD_PROGRESS_READ_CHUNK = 1 << 20;
+/** Atoms a page payload needs before building it is slow enough to report. */
+const VIEW_PROGRESS_MIN_ATOMS = 250000;
+/** A reporter for the paths that chose not to open a notification. */
+const NO_PROGRESS: LoadProgress = { report: () => { /* not shown */ } };
+
+function formatBytes(bytes: number): string {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+}
+
+/** A file's size, or 0 when the file system cannot state one. */
+async function fileSize(uri: vscode.Uri): Promise<number> {
+    try {
+        return (await vscode.workspace.fs.stat(uri)).size || 0;
+    } catch {
+        return 0;
+    }
+}
+
+/**
+ * Whether opening this file is expected to take long enough to report.
+ *
+ * A log is checked at half the size because its single pass costs more per
+ * byte. A VMD script is not decided here: the script itself is tiny, so its
+ * own branch measures the structures it names before loading them.
+ */
+function wantsLoadProgress(size: number, ext: string): boolean {
+    if (ext === 'log' || ext === 'out') return size >= LOAD_PROGRESS_MIN_LOG_BYTES;
+    return size >= LOAD_PROGRESS_MIN_BYTES;
+}
+
+/** One turn of the host message loop, so a progress message is painted first. */
+function yieldToHost(): Promise<void> {
+    return new Promise<void>(resolve => setTimeout(resolve, 0));
+}
+
+/**
+ * Map a 0..1 fraction onto the [from, to] slice of one progress bar.
+ *
+ * The workbench draws a determinate bar from integer percentages: a fractional
+ * increment such as 0.3 is invisible, and a first report of 0 can leave the
+ * notification indeterminate. Each step is therefore a whole percentage point,
+ * and the first report of a slice carries one point of its own so the bar is
+ * determinate from the start. A phase label with no point left to spend is
+ * still sent as a message; the bar is determinate by then.
+ */
+function progressRange(
+    progress: LoadProgress,
+    from: number,
+    to: number
+): (fraction: number, message?: string) => void {
+    const start = Math.round(from);
+    const end = Math.round(to);
+    let last = start;
+    let announced = false;
+    let lastMessage: string | undefined;
+    const emit = (increment: number, message?: string): void => {
+        if (increment === 0) {
+            // A label that has not changed is not news; repeating it once per
+            // parser line would flood the notification for no visible gain.
+            if (message === undefined || message === lastMessage) return;
+            progress.report({ message });
+        } else {
+            progress.report(message === undefined ? { increment } : { increment, message });
+        }
+        if (message !== undefined) lastMessage = message;
+    };
+    return (fraction, message) => {
+        const clamped = Math.max(0, Math.min(1, isFinite(fraction) ? fraction : 0));
+        const target = Math.min(end, start + Math.floor((end - start) * clamped));
+        if (!announced && message !== undefined) {
+            announced = true;
+            if (last < end) {
+                last += 1;
+                emit(1, message);
+            } else {
+                emit(0, message);
+            }
+            if (target <= last) return;
+        }
+        if (target <= last) {
+            if (message !== undefined && target === last) emit(0, message);
+            return;
+        }
+        emit(target - last, message);
+        last = target;
+    };
+}
+
+/**
+ * Run a long load under a cancellable progress notification.
+ *
+ * The editor's own cancellation token and the notification's Cancel button are
+ * folded into one flag: closing the tab and pressing Cancel both stop the load
+ * at its next check. A synchronous parse cannot be interrupted line by line, so
+ * the result is discarded at the next check rather than written into a document
+ * nobody is waiting for.
+ */
+async function withLoadProgress<T>(
+    title: string,
+    token: vscode.CancellationToken | undefined,
+    work: (progress: LoadProgress, isCancelled: () => boolean) => Promise<T>
+): Promise<T> {
+    let cancelled = !!token && token.isCancellationRequested;
+    return vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title,
+        cancellable: true
+    }, async (progress, progressToken) => {
+        const subscriptions: vscode.Disposable[] = [];
+        if (token) {
+            subscriptions.push(token.onCancellationRequested(() => { cancelled = true; }));
+        }
+        subscriptions.push(progressToken.onCancellationRequested(() => { cancelled = true; }));
+        // A cancelled notification no longer accepts reports; the work may still
+        // be finishing its current pass, and a late report must not throw.
+        const guarded: LoadProgress = {
+            report: value => {
+                if (!cancelled) progress.report(value);
+            }
+        };
+        try {
+            const result = await work(guarded, () => cancelled);
+            if (cancelled) throw new vscode.CancellationError();
+            return result;
+        } finally {
+            for (const subscription of subscriptions) subscription.dispose();
+        }
+    });
+}
+
+/**
+ * Run one heavy parse (or read) behind the same notification when the file is
+ * large enough; a small file takes the plain path with no notification.
+ */
+function withToolProgress<T>(
+    title: string,
+    heavy: boolean,
+    work: (progress: LoadProgress, isCancelled: () => boolean) => Promise<T>
+): Promise<T> {
+    return heavy ? withLoadProgress(title, undefined, work) : work(NO_PROGRESS, () => false);
+}
+
+/**
+ * Read a local file in chunks, reporting how much of it is in.
+ *
+ * `workspace.fs.readFile` returns one buffer with no interim feedback, so a
+ * 500 MB log sits there for seconds with nothing to show. The bytes still end
+ * up in one buffer — that is what the parsers need — but they are read in
+ * chunks so the notification can name a percentage and a Cancel is felt
+ * between them. Anything that is not a local file keeps the workspace API: a
+ * virtual scheme has no path `fs` could open.
+ */
+async function readFileWithProgress(
+    uri: vscode.Uri,
+    size: number,
+    report: (fraction: number, message: string) => void,
+    isCancelled: () => boolean
+): Promise<Uint8Array> {
+    report(0, size > 0 ? 'Reading ' + formatBytes(size) + ' · 0%' : 'Reading the file');
+    if (uri.scheme !== 'file' || size <= 0) {
+        const bytes = await vscode.workspace.fs.readFile(uri);
+        if (isCancelled()) throw new vscode.CancellationError();
+        report(1, 'Reading ' + formatBytes(bytes.length) + ' · 100%');
+        return bytes;
+    }
+    const handle = await fs.promises.open(uri.fsPath, 'r');
+    try {
+        let capacity = Math.max(size, 1);
+        let buffer = Buffer.allocUnsafe(capacity);
+        let read = 0;
+        let lastPercent = -1;
+        for (;;) {
+            if (isCancelled()) throw new vscode.CancellationError();
+            if (read === capacity) {
+                // The file grew after its stat: probe one byte before paying for
+                // a second buffer, so an exactly-sized file allocates only once.
+                const probe = Buffer.allocUnsafe(1);
+                const { bytesRead } = await handle.read(probe, 0, 1, read);
+                if (bytesRead <= 0) break;
+                const grown = Buffer.allocUnsafe(Math.max(capacity * 2, read + LOAD_PROGRESS_READ_CHUNK));
+                buffer.copy(grown, 0, 0, read);
+                grown[read] = probe[0];
+                read += 1;
+                buffer = grown;
+                capacity = grown.length;
+            }
+            const { bytesRead } = await handle.read(
+                buffer, read, Math.min(capacity - read, LOAD_PROGRESS_READ_CHUNK), read
+            );
+            if (bytesRead <= 0) break;
+            read += bytesRead;
+            const percent = Math.min(99, Math.floor((read / size) * 100));
+            // One message per whole percent, not per chunk: a 1 GB file is 100
+            // updates in total, and a 52 MB one still fills its bar step by step.
+            if (percent !== lastPercent) {
+                report(percent / 100, 'Reading ' + formatBytes(size) + ' · ' + percent + '%');
+                lastPercent = percent;
+            }
+        }
+        if (isCancelled()) throw new vscode.CancellationError();
+        report(1, 'Reading ' + formatBytes(read) + ' · 100%');
+        return read === buffer.length ? buffer : buffer.subarray(0, read);
+    } finally {
+        await handle.close();
+    }
+}
+
+/** A file Diff or Import reads: its bytes, its text (unless binary) and its companion options. */
+interface ToolFileLoad {
+    content: Uint8Array;
+    binary: TrajectoryFormat | null;
+    text: string;
+    setup: ParseSetup | undefined;
+}
+
+/**
+ * Read, decode and prepare one file for Diff or Import.
+ *
+ * The read is the only part that can be reported byte by byte; decoding and
+ * `buildParseOptions` follow inside the same notification, so the bar does not
+ * close and leave a silent gap before the parser's own notification starts.
+ */
+async function readToolFile(
+    uri: vscode.Uri,
+    fileName: string,
+    size: number,
+    report?: (fraction: number, message: string) => void,
+    isCancelled?: () => boolean
+): Promise<ToolFileLoad> {
+    const content = report
+        ? await readFileWithProgress(uri, size, (fraction, message) => report(fraction * 0.8, message),
+            isCancelled || (() => false))
+        : await vscode.workspace.fs.readFile(uri);
+    if (report) report(0.85, 'Decoding the text');
+    const binary = detectBinaryTrajectory(content);
+    const text = binary ? '' : decodeText(content);
+    if (report) report(0.9, 'Preparing the parse');
+    const setup = binary ? undefined : await buildParseOptions(uri, fileName, content, text);
+    if (report) report(1, 'Prepared');
+    return { content, binary, text, setup };
 }
 
 const ATOM_COLORS: { [key: string]: string } = {
@@ -1211,24 +1473,23 @@ interface PickedTextFrame {
 }
 
 /**
- * The frame a multi-frame text trajectory contributes to Diff or Import.
+ * Every frame a text trajectory states, for Diff or Import to choose from.
  *
  * Opening such a file gives frame navigation, so silently using its first
  * frame would compare or import a geometry the user never chose. A file that
- * is not a multi-frame trajectory returns null and the caller keeps its
- * ordinary single-structure path; 'cancelled' means the picker was dismissed.
+ * is not a multi-frame trajectory yields an empty list and the caller keeps
+ * its ordinary single-structure path.
  */
-async function pickTextTrajectoryFrame(
+function parseTextTrajectoryFrames(
     content: string,
     fileName: string,
     ext: string,
-    options: ParseFileOptions | undefined,
-    action: 'compare' | 'import'
-): Promise<PickedTextFrame | null | 'cancelled'> {
+    options: ParseFileOptions | undefined
+): PickedTextFrame[] {
     const frames: PickedTextFrame[] = [];
     if ((ext === 'xyz' || ext === 'trj') && !isExtXyz(content)) {
         const trajectory = parseXyzTrajectory(content);
-        if (trajectory.frames.length < 2) return null;
+        if (trajectory.frames.length < 2) return [];
         for (let k = 0; k < trajectory.frames.length; k++) {
             const frame = trajectory.frames[k];
             frames.push({
@@ -1239,7 +1500,7 @@ async function pickTextTrajectoryFrame(
         }
     } else if (isLammpsDump(content)) {
         const trajectory = parseLammpsDumpTrajectory(content, options && options.lammps);
-        if (trajectory.frames.length < 2) return null;
+        if (trajectory.frames.length < 2) return [];
         for (const frame of trajectory.frames) {
             const atoms: Atom[] = frame.sites.map((site, i) => {
                 const cart = site.cart || [0, 0, 0];
@@ -1252,10 +1513,21 @@ async function pickTextTrajectoryFrame(
                 lattice: frame.lattice
             });
         }
-    } else {
-        return null;
     }
+    return frames;
+}
 
+/**
+ * Ask which frame of a text trajectory to use.
+ *
+ * The picker is deliberately outside the parse's progress notification: a
+ * spinner that keeps running while the user decides is not a status, it is a
+ * stuck notification. 'cancelled' means the picker was dismissed.
+ */
+async function pickTextTrajectoryFrame(
+    frames: PickedTextFrame[],
+    action: 'compare' | 'import'
+): Promise<PickedTextFrame | 'cancelled'> {
     const picked = await vscode.window.showQuickPick(
         frames.map((frame, i) => ({
             label: frame.label,
@@ -1309,6 +1581,17 @@ async function buildParseOptions(
     const parent = vscode.Uri.file(path.dirname(dir.fsPath));
     const lowerName = fileName.toLowerCase();
     const coordArray = /^coord\.(raw|npy)$/i.test(fileName);
+    // A program output or a plain coordinate file names no companion input of
+    // the kinds below. Testing every family against a 60 MB text cost seconds
+    // before the parser started; the names that can actually carry companions
+    // are the LAMMPS inputs/data/dumps, the DeepMD arrays and the program
+    // inputs, all excluded here. A `.xyz` that is really a LAMMPS dump is kept
+    // by its own name or its first header line.
+    const lammpsNamed = /^(dump|data)\b/i.test(fileName) ||
+        /^ITEM:\s*TIMESTEP/m.test(text.slice(0, 4096));
+    const noCompanion = /\.(log|out|xyz|extxyz|trj|gro|pdb|ent|mol|mol2|cif|vasp|poscar|contcar|vesta|cube|gjf|gjf03|gjf09|gjf16|com|mop|mopac|fchk|fch|tcl|md_dump|xdatcar|outcar|pwi|pwo|abo|molden|coord|xml)$/i.test(lowerName) ||
+        /^(POSCAR|CONTCAR|OUTCAR|XDATCAR|STRU|MD_dump)$/i.test(fileName);
+    if (noCompanion && !lammpsNamed && !coordArray && !lowerName.endsWith('.npy')) return undefined;
     const lammpsLog = /^LAMMPS\s*\(/im.test(text);
     // A `.lammps`/`.lmp` file that is neither data nor a dump is the job's
     // input even when it holds only one command (a lone `include`).
@@ -1893,10 +2176,40 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         if (ext0 === 'fchk' || ext0 === 'fch') {
             return this.openFchkDocument(uri, fileName, token);
         }
-        const content = await vscode.workspace.fs.readFile(uri);
+        const size = await fileSize(uri);
+        if (!wantsLoadProgress(size, ext0)) {
+            return this.readDocument(uri, fileName, size, token);
+        }
+        return withLoadProgress('Molecular Viewer: opening ' + fileName, token, (progress, isCancelled) =>
+            this.readDocument(uri, fileName, size, token, progress, isCancelled));
+    }
+
+    /**
+     * Read and parse one document, optionally behind a progress notification.
+     *
+     * Everything below the checkpoint branch lives here so the plain path and
+     * the reported path run the same code: a small file takes the first with no
+     * notification, and a large one gets the reading percentage and the phase
+     * it is in without a second copy of the parse.
+     */
+    private async readDocument(
+        uri: vscode.Uri,
+        fileName: string,
+        size: number,
+        token: vscode.CancellationToken,
+        progress?: LoadProgress,
+        isCancelled?: () => boolean
+    ): Promise<MolecularDocument> {
+        const wasCancelled = (): boolean => token.isCancellationRequested || (!!isCancelled && isCancelled());
+        // Reading owns the first 30% of the bar (in whole points, so a bar
+        // really fills), decoding/preparing the next 5, and the parser the rest.
+        const readRange = progress ? progressRange(progress, 0, 30) : undefined;
+        const content = readRange
+            ? await readFileWithProgress(uri, size, readRange, wasCancelled)
+            : await vscode.workspace.fs.readFile(uri);
         // The tab may have been closed while the file was being read; the
         // parse below can be expensive and its result has nowhere to go.
-        if (token.isCancellationRequested) throw new vscode.CancellationError();
+        if (wasCancelled()) throw new vscode.CancellationError();
 
         const ext = fileName.toLowerCase().split('.').pop() || '';
         // A binary trajectory is detected by its magic before anything decodes
@@ -1905,9 +2218,29 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         // multi-megabyte binary file through a string only to discard it.
         const binaryFormat = detectBinaryTrajectory(content);
         const textContent = binaryFormat ? '' : decodeText(content);
+        if (progress) {
+            progress.report({
+                increment: 5,
+                message: binaryFormat ? 'Reading the trajectory' : 'Preparing the parse'
+            });
+        }
         const setup = binaryFormat ? undefined : await buildParseOptions(uri, fileName, content, textContent);
         const parseOptions = setup && setup.options;
         const parseText = setup && setup.text !== undefined ? setup.text : textContent;
+        if (wasCancelled()) throw new vscode.CancellationError();
+        const parseRange = progress ? progressRange(progress, 35, 100) : undefined;
+        if (parseRange) {
+            // The parse is a synchronous pass, so the phase is named and the
+            // message loop gets one turn to paint it before the host is busy.
+            parseRange(0, binaryFormat ? 'Reading the trajectory'
+                : ext === 'tcl' ? 'Loading the script'
+                : (ext === 'log' || ext === 'out') ? 'Reading the output'
+                : 'Parsing the structure');
+            await yieldToHost();
+            // Cancel may have been pressed during that turn; do not start a
+            // synchronous parse whose answer nobody wants.
+            if (wasCancelled()) throw new vscode.CancellationError();
+        }
         let data: MolecularData;
         let frames: (LogFrame | OrcaFrame)[] = [];
         let trajectoryFrames: TrajectoryFramePayload[] | undefined;
@@ -1928,6 +2261,20 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         let autoBeta = false;
 
         try {
+        // Structured-output detection is a full pass per detector, so it owns
+        // the first half of the parser's slice; a frame log is recognised by
+        // cheap markers and leaves the whole slice to its parser.
+        let logStructured = false;
+        let logDetected = false;
+        if (ext === 'log' || ext === 'out') {
+            if (isFrameLogOutput(textContent)) {
+                logStructured = false;
+            } else {
+                logDetected = true;
+                logStructured = isStructuredProgramOutput(textContent,
+                    parseRange ? (fraction) => parseRange(fraction * 0.5) : undefined);
+            }
+        }
         if (binaryFormat) {
             const loaded = await loadBinaryTrajectoryDocument(uri, fileName, content, binaryFormat);
             data = loaded.data;
@@ -1939,7 +2286,21 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             // loads is also the document's structure so Save As, Diff and the
             // editing tools keep working on a real coordinate file.
             const tclResult = parseTcl(textContent);
-            const loaded = await this.loadTclScene(tclResult.scene, uri);
+            // The script is a few kilobytes; the structures it names are the
+            // work. One large source (or several that add up) gets the same
+            // notification an opened structure does, while a small scene still
+            // opens without a notification flashing up.
+            let sceneBytes = 0;
+            for (const molecule of tclResult.scene.molecules) {
+                const sourceUri = resolveVmdSource(uri, molecule.sourceFile);
+                if (sourceUri) sceneBytes += await fileSize(sourceUri);
+            }
+            const loaded = parseRange
+                ? await this.loadTclScene(tclResult.scene, uri, parseRange)
+                : sceneBytes >= LOAD_PROGRESS_MIN_BYTES
+                    ? await withLoadProgress('Molecular Viewer: opening ' + fileName, token, (sceneProgress) =>
+                        this.loadTclScene(tclResult.scene, uri, progressRange(sceneProgress, 0, 100)))
+                    : await this.loadTclScene(tclResult.scene, uri);
             vmdPayload = loaded.payload && loaded.payload.molecules.length > 0 ? loaded.payload : undefined;
             data = loaded.data;
             frames = loaded.frames;
@@ -1953,8 +2314,11 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                 atomGroups = tclResult.groups.length > 0 ? tclResult.groups : undefined;
                 data.atomGroups = atomGroups;
             }
-        } else if ((ext === 'log' || ext === 'out') && !isStructuredProgramOutput(textContent)) {
-            const logResult = parseLogFile(textContent, fileName);
+        } else if ((ext === 'log' || ext === 'out') && !logStructured) {
+            const logBase = logDetected ? 0.5 : 0;
+            const logResult = parseLogFile(textContent, fileName,
+                parseRange ? (fraction) => parseRange(logBase + fraction * (1 - logBase),
+                    'Reading the output · ' + Math.round(fraction * 100) + '%') : undefined);
             frames = logResult.frames;
             optSteps = logResult.optSteps;
             normalModes = logResult.normalModes;
@@ -2056,6 +2420,10 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             }
         }
         } catch (err) {
+            // A Cancel on a scene load is not a parse error: it must abort the
+            // open rather than leave a tab showing "the file could not be
+            // parsed".
+            if (err instanceof vscode.CancellationError) throw err;
             const msg = err instanceof Error ? err.message : String(err);
             data = { atoms: [], bonds: [], title: 'Parse error: ' + msg, hasExplicitBonds: false,
                      warnings: ['the file could not be parsed: ' + msg] };
@@ -2069,6 +2437,10 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             cavity = undefined;
         }
 
+        // The parse is synchronous, so a Cancel pressed while it ran could only
+        // be seen here: the whole result is dropped rather than written into a
+        // document whose tab is gone.
+        if (wasCancelled()) throw new vscode.CancellationError();
         applySetupWarnings(data, setup);
         if (trajectoryDocument) {
             // A trajectory is its own file: a read_data an accompanying script
@@ -2077,6 +2449,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         } else if (ext !== 'tcl') {
             data.filePath = setup && setup.reference ? setup.reference.uri.fsPath : uri.fsPath;
         }
+        // Formats whose parser has no line callback still finish the bar.
+        parseRange?.(1, 'Preparing the document');
 
         return new MolecularDocument(uri, data, frames, optSteps, normalModes, logSource, routes, vmdPayload, autoBeta, optThresholds, trajectoryFrames, charges, summary, undefined, cavity, orbitalLevels);
     }
@@ -2218,7 +2592,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
      * are skipped with a warning instead of failing the whole script, and the
      * first one that does load becomes the document's structure.
      */
-    private async loadTclScene(scene: VmdScene, scriptUri: vscode.Uri): Promise<{
+    private async loadTclScene(scene: VmdScene, scriptUri: vscode.Uri, reportFraction?: (fraction: number, message?: string) => void): Promise<{
         payload: VmdPayload;
         data: MolecularData;
         frames: (LogFrame | OrcaFrame)[];
@@ -2243,6 +2617,11 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
 
         for (let i = 0; i < scene.molecules.length; i++) {
             const molecule = scene.molecules[i];
+            if (reportFraction) {
+                reportFraction(i / scene.molecules.length,
+                    'Loading molecule ' + (i + 1) + ' of ' + scene.molecules.length +
+                    (molecule.sourceFile ? ': ' + molecule.sourceFile : ''));
+            }
             const sourceUri = resolveVmdSource(scriptUri, molecule.sourceFile);
             if (!sourceUri) {
                 payload.warnings.push('mol new without a structure file was skipped');
@@ -2275,6 +2654,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         }
 
         if (!first) {
+            reportFraction?.(1);
             const reference = scene.molecules.length > 0 ? scene.molecules[0].sourceFile : '';
             const title = reference
                 ? 'Failed to load source file: ' + reference
@@ -2282,6 +2662,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             return { payload: payload, data: { atoms: [], bonds: [], title: title, hasExplicitBonds: false }, frames: [] };
         }
 
+        reportFraction?.(1);
         return {
             payload: payload,
             data: first.data,
@@ -2305,7 +2686,29 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         };
 
         if (token.isCancellationRequested) return;
-        const html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes, document.vmdPayload, document.autoBeta, document.optThresholds, document.trajectoryFrames, document.charges, document.summary, document.orbitalLevels, document.orbitals, document.cavity);
+        const buildHtml = (report?: (fraction: number, message?: string) => void) => this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes, document.vmdPayload, document.autoBeta, document.optThresholds, document.trajectoryFrames, document.charges, document.summary, document.orbitalLevels, document.orbitals, document.cavity, report);
+        // A large trajectory is serialised into the page's payload atom by atom;
+        // that can take a moment after the document itself is ready, and the
+        // page's own loading line only appears once the HTML is assigned.
+        let viewAtoms = document.data.atoms.length;
+        for (const frame of document.frames) viewAtoms += frame.atoms.length;
+        if (document.trajectoryFrames) {
+            for (const frame of document.trajectoryFrames) viewAtoms += Math.floor(frame.xyz.length / 3);
+        }
+        const html = viewAtoms >= VIEW_PROGRESS_MIN_ATOMS
+            ? await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: 'Molecular Viewer: preparing the 3D view',
+                cancellable: false
+            }, async (progress) => {
+                const report = progressRange(progress, 0, 100);
+                report(0, 'Building the scene (' + viewAtoms + ' atoms)');
+                await yieldToHost();
+                const page = await buildHtml(report);
+                report(1, 'Ready');
+                return page;
+            })
+            : await buildHtml();
         // Reading the renderer is asynchronous; if the editor was closed in
         // the meantime, assigning html throws "Webview is disposed" and the
         // extension log fills with a failure the user never caused.
@@ -2730,11 +3133,6 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             break;
                         }
                         const diffUri = result[0];
-                        const diffContent = await vscode.workspace.fs.readFile(diffUri);
-                        // A binary trajectory is compared by a frame the user
-                        // picks: decoding it as text would only yield mojibake.
-                        const diffBinary = detectBinaryTrajectory(diffContent);
-                        const diffText = diffBinary ? '' : decodeText(diffContent);
                         const diffFileName = diffUri.path.split('/').pop() || 'unknown.xyz';
                         const diffExt = diffFileName.toLowerCase().split('.').pop() || '';
                         // A formatted checkpoint is streamed by the viewer's own
@@ -2746,9 +3144,44 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             webviewPanel.webview.postMessage({ command: 'diffResult', cancelled: true });
                             break;
                         }
-                        const diffSetup = diffBinary ? undefined : await buildParseOptions(diffUri, diffFileName, diffContent, diffText);
+                        const diffSize = await fileSize(diffUri);
+                        const diffHeavy = wantsLoadProgress(diffSize, diffExt);
+                        const diffLoad = diffHeavy
+                            ? await withLoadProgress('Molecular Viewer: reading ' + diffFileName, undefined,
+                                (progress, cancelled) => readToolFile(
+                                    diffUri, diffFileName, diffSize, progressRange(progress, 0, 100), cancelled))
+                            : await readToolFile(diffUri, diffFileName, diffSize);
+                        const diffContent = diffLoad.content;
+                        // A binary trajectory is compared by a frame the user
+                        // picks: decoding it as text would only yield mojibake.
+                        const diffBinary = diffLoad.binary;
+                        const diffText = diffLoad.text;
+                        const diffSetup = diffLoad.setup;
                         const diffOptions = diffSetup && diffSetup.options;
                         const diffParseText = diffSetup && diffSetup.text !== undefined ? diffSetup.text : diffText;
+                        // Detecting structured output is a full pass per detector;
+                        // a large log would otherwise sit silent between the read
+                        // and the parse.
+                        let diffStructured = false;
+                        if ((diffExt === 'log' || diffExt === 'out') && diffText !== '') {
+                            if (isFrameLogOutput(diffText)) {
+                                // A frame log is known without a scan; do not open a
+                                // notification that would live for a few milliseconds.
+                                diffStructured = false;
+                            } else {
+                                diffStructured = diffHeavy
+                                    ? await withToolProgress('Molecular Viewer: reading ' + diffFileName, true, async (progress, isCancelled) => {
+                                        const range = progressRange(progress, 0, 100);
+                                        range(0, 'Reading the output');
+                                        await yieldToHost();
+                                        if (isCancelled()) throw new vscode.CancellationError();
+                                        const structured = isStructuredProgramOutput(diffText, (fraction) => range(fraction));
+                                        range(1);
+                                        return structured;
+                                    })
+                                    : isStructuredProgramOutput(diffText);
+                            }
+                        }
 
                         let diffData: MolecularData;
                         let diffFrames: (LogFrame | OrcaFrame)[] = [];
@@ -2775,7 +3208,15 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         } | null = null;
 
                         if (diffBinary) {
-                            const loaded = await loadBinaryTrajectoryDocument(diffUri, diffFileName, diffContent, diffBinary);
+                            const loaded = await withToolProgress('Molecular Viewer: reading ' + diffFileName, diffHeavy, async (progress, isCancelled) => {
+                                const range = progressRange(progress, 0, 100);
+                                range(0, 'Decoding the trajectory');
+                                await yieldToHost();
+                                if (isCancelled()) throw new vscode.CancellationError();
+                                const decoded = await loadBinaryTrajectoryDocument(diffUri, diffFileName, diffContent, diffBinary);
+                                range(1);
+                                return decoded;
+                            });
                             if (loaded.trajectoryFrames.length === 0 || loaded.data.atoms.length === 0) {
                                 vscode.window.showErrorMessage('Diff: no structure found in ' + diffFileName);
                                 webviewPanel.webview.postMessage({ command: 'diffResult', cancelled: true });
@@ -2808,7 +3249,21 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             };
                         } else if (diffExt === 'tcl') {
                             const tclResult = parseTcl(diffText);
-                            const loaded = await this.loadTclScene(tclResult.scene, diffUri);
+                            // The script is tiny; the structures it names decide
+                            // whether loading them is worth a notification.
+                            let tclBytes = 0;
+                            for (const molecule of tclResult.scene.molecules) {
+                                const sourceUri = resolveVmdSource(diffUri, molecule.sourceFile);
+                                if (sourceUri) tclBytes += await fileSize(sourceUri);
+                            }
+                            const tclHeavy = diffHeavy || tclBytes >= LOAD_PROGRESS_MIN_BYTES;
+                            const loaded = await withToolProgress('Molecular Viewer: loading ' + diffFileName, tclHeavy, async (progress, isCancelled) => {
+                                const range = progressRange(progress, 0, 100);
+                                range(0, 'Loading the script');
+                                await yieldToHost();
+                                if (isCancelled()) throw new vscode.CancellationError();
+                                return this.loadTclScene(tclResult.scene, diffUri, range);
+                            });
                             diffData = loaded.data;
                             diffFrames = loaded.frames;
                             if (loaded.payload.molecules.length > 0) {
@@ -2831,8 +3286,16 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             } else {
                                 diffData = { atoms: [], bonds: [], title: 'No source', hasExplicitBonds: false };
                             }
-                        } else if ((diffExt === 'log' || diffExt === 'out') && !isStructuredProgramOutput(diffText)) {
-                            const logResult = parseLogFile(diffText, diffFileName);
+                        } else if ((diffExt === 'log' || diffExt === 'out') && !diffStructured) {
+                            const logResult = await withToolProgress('Molecular Viewer: reading ' + diffFileName, diffHeavy, async (progress, isCancelled) => {
+                                const range = progressRange(progress, 0, 100);
+                                range(0, 'Reading the optimization steps');
+                                await yieldToHost();
+                                if (isCancelled()) throw new vscode.CancellationError();
+                                return parseLogFile(diffText, diffFileName,
+                                    (fraction) => range(fraction,
+                                        'Reading the optimization steps · ' + Math.round(fraction * 100) + '%'));
+                            });
                             diffFrames = logResult.frames;
                             if (diffFrames.length > 0) {
                                 diffData = ensureBonds({
@@ -2848,12 +3311,23 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             // a trajectory when it is opened; comparing its first
                             // frame behind the user's back would compare a
                             // geometry they never picked.
-                            const pickedFrame = await pickTextTrajectoryFrame(
-                                diffParseText, diffFileName, diffExt, diffOptions, 'compare'
-                            );
-                            if (pickedFrame === 'cancelled') {
-                                webviewPanel.webview.postMessage({ command: 'diffResult', cancelled: true });
-                                break;
+                            const frameChoices = await withToolProgress('Molecular Viewer: reading ' + diffFileName, diffHeavy, async (progress, isCancelled) => {
+                                const range = progressRange(progress, 0, 100);
+                                range(0, 'Reading the trajectory frames');
+                                await yieldToHost();
+                                if (isCancelled()) throw new vscode.CancellationError();
+                                const frames = parseTextTrajectoryFrames(diffParseText, diffFileName, diffExt, diffOptions);
+                                range(1);
+                                return frames;
+                            });
+                            let pickedFrame: PickedTextFrame | null = null;
+                            if (frameChoices.length > 1) {
+                                const picked = await pickTextTrajectoryFrame(frameChoices, 'compare');
+                                if (picked === 'cancelled') {
+                                    webviewPanel.webview.postMessage({ command: 'diffResult', cancelled: true });
+                                    break;
+                                }
+                                pickedFrame = picked;
                             }
                             if (pickedFrame) {
                                 diffData = ensureBonds({
@@ -2877,7 +3351,19 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                     };
                                 }
                             } else {
-                                diffData = parseFile(diffParseText, diffFileName, diffOptions);
+                                diffData = await withToolProgress('Molecular Viewer: reading ' + diffFileName, diffHeavy, async (progress, isCancelled) => {
+                                    const range = progressRange(progress, 0, 100);
+                                    range(0, 'Parsing the structure');
+                                    await yieldToHost();
+                                    if (isCancelled()) throw new vscode.CancellationError();
+                                    const parsed = parseFile(diffParseText, diffFileName, diffOptions);
+                                    // A crystal is drawn through its own cell and
+                                    // states no perceived bonds here; a molecule's
+                                    // bonds are part of what the comparison reads.
+                                    const result = parsed.crystal ? parsed : ensureBonds(parsed);
+                                    range(1);
+                                    return result;
+                                });
                                 if (diffData.crystal) {
                                     const c = diffData.crystal;
                                     diffCrystalPayload = {
@@ -2898,8 +3384,6 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                     };
                                     diffData.bonds = [];
                                     diffData.crystal.baseBonds = [];
-                                } else {
-                                    diffData = ensureBonds(diffData);
                                 }
                             }
                             diffData.filePath = diffUri.fsPath;
@@ -2977,6 +3461,13 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             crystal: diffCrystalPayload
                         });
                     } catch (e: any) {
+                        // A Cancel pressed on the read/parse notification is not
+                        // a failed comparison: it posts the same dismissal the
+                        // page already understands.
+                        if (e instanceof vscode.CancellationError) {
+                            webviewPanel.webview.postMessage({ command: 'diffResult', cancelled: true });
+                            break;
+                        }
                         vscode.window.showErrorMessage('Diff failed: ' + (e.message || e));
                         webviewPanel.webview.postMessage({ command: 'diffResult', cancelled: true });
                     }
@@ -3067,24 +3558,58 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             break;
                         }
                         const impUri = result[0];
-                        const impContent = await vscode.workspace.fs.readFile(impUri);
-                        const impBinary = detectBinaryTrajectory(impContent);
-                        const impText = impBinary ? '' : decodeText(impContent);
                         const impFileName = impUri.path.split('/').pop() || 'unknown.xyz';
                         const impExt = impFileName.toLowerCase().split('.').pop() || '';
-                        const impSetup = impBinary ? undefined : await buildParseOptions(impUri, impFileName, impContent, impText);
-                        const impOptions = impSetup && impSetup.options;
-                        const impParseText = impSetup && impSetup.text !== undefined ? impSetup.text : impText;
-
                         if (impExt === 'tcl') {
                             vscode.window.showErrorMessage('Import: TCL scripts are not supported (use Diff for TCL).');
                             webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
                             break;
                         }
+                        const impSize = await fileSize(impUri);
+                        const impHeavy = wantsLoadProgress(impSize, impExt);
+                        const impLoad = impHeavy
+                            ? await withLoadProgress('Molecular Viewer: reading ' + impFileName, undefined,
+                                (progress, cancelled) => readToolFile(
+                                    impUri, impFileName, impSize, progressRange(progress, 0, 100), cancelled))
+                            : await readToolFile(impUri, impFileName, impSize);
+                        const impContent = impLoad.content;
+                        const impBinary = impLoad.binary;
+                        const impText = impLoad.text;
+                        const impSetup = impLoad.setup;
+                        const impOptions = impSetup && impSetup.options;
+                        const impParseText = impSetup && impSetup.text !== undefined ? impSetup.text : impText;
+                        // Same structured-output pass as Diff: it must not run
+                        // between two notifications without one of its own.
+                        let impStructured = false;
+                        if ((impExt === 'log' || impExt === 'out') && impText !== '') {
+                            if (isFrameLogOutput(impText)) {
+                                impStructured = false;
+                            } else {
+                                impStructured = impHeavy
+                                    ? await withToolProgress('Molecular Viewer: reading ' + impFileName, true, async (progress, isCancelled) => {
+                                        const range = progressRange(progress, 0, 100);
+                                        range(0, 'Reading the output');
+                                        await yieldToHost();
+                                        if (isCancelled()) throw new vscode.CancellationError();
+                                        const structured = isStructuredProgramOutput(impText, (fraction) => range(fraction));
+                                        range(1);
+                                        return structured;
+                                    })
+                                    : isStructuredProgramOutput(impText);
+                            }
+                        }
 
                         let impData: MolecularData | undefined;
                         if (impBinary) {
-                            const loaded = await loadBinaryTrajectoryDocument(impUri, impFileName, impContent, impBinary);
+                            const loaded = await withToolProgress('Molecular Viewer: reading ' + impFileName, impHeavy, async (progress, isCancelled) => {
+                                const range = progressRange(progress, 0, 100);
+                                range(0, 'Decoding the trajectory');
+                                await yieldToHost();
+                                if (isCancelled()) throw new vscode.CancellationError();
+                                const decoded = await loadBinaryTrajectoryDocument(impUri, impFileName, impContent, impBinary);
+                                range(1);
+                                return decoded;
+                            });
                             if (loaded.trajectoryFrames.length === 0 || loaded.data.atoms.length === 0) {
                                 vscode.window.showErrorMessage('Import: no structure found in ' + impFileName);
                                 webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
@@ -3115,8 +3640,16 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                 hasExplicitBonds: loaded.data.hasExplicitBonds,
                                 warnings: loaded.data.warnings
                             };
-                        } else if ((impExt === 'log' || impExt === 'out') && !isStructuredProgramOutput(impText)) {
-                            const logResult = parseLogFile(impText, impFileName);
+                        } else if ((impExt === 'log' || impExt === 'out') && !impStructured) {
+                            const logResult = await withToolProgress('Molecular Viewer: reading ' + impFileName, impHeavy, async (progress, isCancelled) => {
+                                const range = progressRange(progress, 0, 100);
+                                range(0, 'Reading the optimization steps');
+                                await yieldToHost();
+                                if (isCancelled()) throw new vscode.CancellationError();
+                                return parseLogFile(impText, impFileName,
+                                    (fraction) => range(fraction,
+                                        'Reading the optimization steps · ' + Math.round(fraction * 100) + '%'));
+                            });
                             if (logResult.frames.length === 0) {
                                 vscode.window.showErrorMessage('Import: no structure found in ' + impFileName);
                                 webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
@@ -3148,12 +3681,23 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             // A multi-frame XYZ/xTB trajectory or LAMMPS dump is
                             // opened as a trajectory, so importing it asks which
                             // frame to bring in rather than taking the first.
-                            const pickedFrame = await pickTextTrajectoryFrame(
-                                impParseText, impFileName, impExt, impOptions, 'import'
-                            );
-                            if (pickedFrame === 'cancelled') {
-                                webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
-                                break;
+                            const frameChoices = await withToolProgress('Molecular Viewer: reading ' + impFileName, impHeavy, async (progress, isCancelled) => {
+                                const range = progressRange(progress, 0, 100);
+                                range(0, 'Reading the trajectory frames');
+                                await yieldToHost();
+                                if (isCancelled()) throw new vscode.CancellationError();
+                                const frames = parseTextTrajectoryFrames(impParseText, impFileName, impExt, impOptions);
+                                range(1);
+                                return frames;
+                            });
+                            let pickedFrame: PickedTextFrame | null = null;
+                            if (frameChoices.length > 1) {
+                                const picked = await pickTextTrajectoryFrame(frameChoices, 'import');
+                                if (picked === 'cancelled') {
+                                    webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                                    break;
+                                }
+                                pickedFrame = picked;
                             }
                             if (pickedFrame) {
                                 impData = ensureBonds({
@@ -3163,17 +3707,26 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                     hasExplicitBonds: false
                                 });
                             } else {
-                                impData = parseFile(impParseText, impFileName, impOptions);
-                                // Crystal files (CIF/VASP/VESTA/Cube): import the
-                                // unit-cell content as a molecule; periodicity is
-                                // dropped (the current structure stays molecular).
-                                if (impData.crystal) {
-                                    const cellAtoms = (impData.atoms.length > 0 ? impData.atoms : impData.crystal.baseAtoms)
-                                        .map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, index: 0 }));
-                                    impData = ensureBonds({ atoms: cellAtoms, bonds: [], title: impData.title, hasExplicitBonds: false });
-                                } else {
-                                    impData = ensureBonds(impData);
-                                }
+                                impData = await withToolProgress('Molecular Viewer: reading ' + impFileName, impHeavy, async (progress, isCancelled) => {
+                                    const range = progressRange(progress, 0, 100);
+                                    range(0, 'Parsing the structure');
+                                    await yieldToHost();
+                                    if (isCancelled()) throw new vscode.CancellationError();
+                                    const parsed = parseFile(impParseText, impFileName, impOptions);
+                                    // Crystal files (CIF/VASP/VESTA/Cube): import the
+                                    // unit-cell content as a molecule; periodicity is
+                                    // dropped (the current structure stays molecular).
+                                    let result: MolecularData;
+                                    if (parsed.crystal) {
+                                        const cellAtoms = (parsed.atoms.length > 0 ? parsed.atoms : parsed.crystal.baseAtoms)
+                                            .map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, index: 0 }));
+                                        result = ensureBonds({ atoms: cellAtoms, bonds: [], title: parsed.title, hasExplicitBonds: false });
+                                    } else {
+                                        result = ensureBonds(parsed);
+                                    }
+                                    range(1);
+                                    return result;
+                                });
                             }
                         }
                         applySetupWarnings(impData, impSetup);
@@ -3188,6 +3741,13 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         postImportCopies(webviewPanel.webview, impFileName,
                                          impAtoms, impBonds, !!impData.hasExplicitBonds, choice.copies);
                     } catch (e: any) {
+                        // A Cancel pressed on the read/parse notification is not
+                        // a failed import: it posts the same dismissal the page
+                        // already understands.
+                        if (e instanceof vscode.CancellationError) {
+                            webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                            break;
+                        }
                         vscode.window.showErrorMessage('Import failed: ' + (e.message || e));
                         webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
                     }
@@ -3454,8 +4014,9 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         }
     }
 
-    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[], logSource?: string, routes?: RouteSection[], vmdPayload?: VmdPayload, autoBeta: boolean = false, optThresholds?: OptThresholds, trajectoryFrames?: TrajectoryFramePayload[], charges?: LogChargeSet[], summary?: LogSummary[], orbitalLevels?: OrbitalLevels, orbitals?: FchkOrbitals, cavity?: SolventCavity): Promise<string> {
+    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[], logSource?: string, routes?: RouteSection[], vmdPayload?: VmdPayload, autoBeta: boolean = false, optThresholds?: OptThresholds, trajectoryFrames?: TrajectoryFramePayload[], charges?: LogChargeSet[], summary?: LogSummary[], orbitalLevels?: OrbitalLevels, orbitals?: FchkOrbitals, cavity?: SolventCavity, onProgress?: (fraction: number, message?: string) => void): Promise<string> {
         const nonce = getNonce();
+        onProgress?.(0, 'Reading the renderer');
 
         // The renderer is an extension asset, and an installation that lost
         // media/ (a partial update, a copy of the folder without it) must say
@@ -3471,6 +4032,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             return webviewLoadErrorHtml(nonce,
                 'Could not read media/three.min.js: ' + (e && e.message ? e.message : e));
         }
+        onProgress?.(0.05, 'Preparing the structure');
 
         const atomColors = ATOM_COLORS;
 
@@ -3506,21 +4068,42 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             atom1: b.atom1, atom2: b.atom2, order: b.order
         }));
 
-        const framesData = frames.map(f => ({
-            atoms: f.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: atomColors[a.element] || '#FF1493', ghost: a.ghost === true ? true : undefined })),
-            bonds: f.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order })),
-            stepLabel: f.stepLabel,
-            // The electronic state the geometry was computed at. A log can run
-            // several jobs with different values (`--Link1--`, an ORCA file
-            // with more than one `* xyz` block), so every frame keeps its own;
-            // the page adopts them on a switch and a save writes them out.
-            charge: f.charge,
-            multiplicity: f.multiplicity,
-            // Single-point energy of this frame's structure (opt logs only), used
-            // by the convergence charts to highlight the selected step and to
-            // report its exact value. [2026-09-12 | Atreides-Jimmy]
-            energy: (f as { energy?: number }).energy
-        }));
+        type FramePayloadData = {
+            atoms: { element: string; x: number; y: number; z: number; color: string; ghost?: boolean }[];
+            bonds: { atom1: number; atom2: number; order: number }[];
+            stepLabel: string;
+            charge?: number;
+            multiplicity?: number;
+            energy?: number;
+        };
+        const framesData: FramePayloadData[] = [];
+        for (let fi = 0; fi < frames.length; fi++) {
+            const f = frames[fi];
+            framesData.push({
+                atoms: f.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: atomColors[a.element] || '#FF1493', ghost: a.ghost === true ? true : undefined })),
+                bonds: f.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order })),
+                stepLabel: f.stepLabel,
+                // The electronic state the geometry was computed at. A log can run
+                // several jobs with different values (`--Link1--`, an ORCA file
+                // with more than one `* xyz` block), so every frame keeps its own;
+                // the page adopts them on a switch and a save writes them out.
+                charge: f.charge,
+                multiplicity: f.multiplicity,
+                // Single-point energy of this frame's structure (opt logs only), used
+                // by the convergence charts to highlight the selected step and to
+                // report its exact value. [2026-09-12 | Atreides-Jimmy]
+                energy: (f as { energy?: number }).energy
+            });
+            // A 647-frame log is 650 000 atom objects; serialising them in one
+            // synchronous loop holds the host for seconds. Only the view that
+            // asked for a notification yields here, so a small page keeps the
+            // old single-pass speed.
+            if (onProgress && ((fi & 15) === 0 || fi === frames.length - 1)) {
+                onProgress(0.05 + 0.45 * ((fi + 1) / frames.length),
+                    'Building frame ' + (fi + 1) + ' of ' + frames.length);
+                await yieldToHost();
+            }
+        }
 
         const atomGroupsData = data.atomGroups ? data.atomGroups.map(g => ({
             colorId: g.colorId, color: g.color, indices: g.indices
@@ -3693,6 +4276,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             truncated: data.trajectory.truncated
         } : null;
 
+        onProgress?.(0.55, 'Building the page payload');
         // The payload is written into a <script> block, so a title or comment
         // that contains `</script>` would close the block early and leave the
         // page blank (and let the file inject markup). `<` is escaped to its
@@ -3703,6 +4287,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             .replace(/</g, '\\u003c')
             .replace(/\u2028/g, '\\u2028')
             .replace(/\u2029/g, '\\u2029');
+        onProgress?.(0.90, 'Assembling the page');
 
         // The bond perception module, as source. Both sides run this text —
         // the host calls the compiled function directly, the webview evaluates
@@ -3716,6 +4301,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         // only — nothing it returns is written back to the structure.
         const bvsSource = BVS_SOURCE;
 
+        onProgress?.(0.95, 'Assembling the page');
         return `<!DOCTYPE html>
 <html lang="en">
 <head>

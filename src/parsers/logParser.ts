@@ -812,8 +812,10 @@ export function scrfModelOf(content: string): string | undefined {
     return last;
 }
 
-export function parseGaussianLog(content: string): GaussianLogResult {
+export function parseGaussianLog(content: string, onProgress?: (fraction: number) => void): GaussianLogResult {
     const lines = content.split(/\r?\n/);
+    const lineTotal = lines.length || 1;
+    let lastProgress = 0;
     const frames: LogFrame[] = [];
     let title = '';
 
@@ -873,6 +875,13 @@ export function parseGaussianLog(content: string): GaussianLogResult {
 
     let i = 0;
     while (i < lines.length) {
+        // A whole log is one synchronous pass, so the only honest progress is
+        // how far into its lines the scan is. Reporting every 2048 lines keeps
+        // the callback (and its IPC) off the per-line path.
+        if (onProgress && i - lastProgress >= 2048) {
+            onProgress(i / lineTotal);
+            lastProgress = i;
+        }
         const line = lines[i];
 
         // --- Charge/multiplicity of the job this frame belongs to ---
@@ -1323,6 +1332,7 @@ export function parseGaussianLog(content: string): GaussianLogResult {
         if (routeModel) cavity.model = routeModel;
     }
 
+    onProgress?.(1);
     return {
         frames,
         title,

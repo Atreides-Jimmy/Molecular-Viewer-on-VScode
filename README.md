@@ -28,7 +28,7 @@ A clean, fully featured 3D molecular viewer and editor for VS Code / Trae — en
 - **Remote-SSH** — Parsing and saving run on the remote host while the 3D view runs locally, so the extension works unchanged on a remote Linux server.
 - **VMD TCL scripts** — Opening a VMD script reproduces its representations, colours, selections and surfaces, including multiple molecules and optional egg metadata. See [VMD TCL scripts](#vmd-tcl-scripts).
 - **Main input files** — Opening a computational-chemistry input shows the structure it names instead of the script text. **LAMMPS** follows `read_data` and `include` (wildcards included) and applies `units`, `atom_style`, `mass` and `dump_modify element`; **ORCA** reads `* xyzfile <charge> <mult> <file>`; **ABINIT** reads `xyzfile` and `include`; **ABACUS** `INPUT` opens the `STRU` named by `stru_file` (default `STRU`); **CP2K** reads `COORD_FILE_NAME` (XYZ/PDB/CP2K) and expands `@INCLUDE`, `@SET`/`$VAR` and `@IF`/`@IFDEF` branches first. Quoted and relative/absolute paths are resolved, and a bare `data` file opens on its own. A reference that cannot be read is reported as a warning and no atoms are drawn (a CP2K inline `&COORD` is kept when its `COORD_FILE_NAME` is missing); Save As starts in the referenced file's folder.
-- **Performance with large structures** — The scene redraws only on interaction or change, and GPU resources are released on rebuild. Detail adapts to structure size, and spheres and bonds are drawn with instancing, so structures with thousands of atoms stay responsive. Move Atoms rebuilds only the bonds touching the selection, and long logs are parsed in a single pass.
+- **Performance with large structures** — The scene redraws only on interaction or change, and GPU resources are released on rebuild. Detail adapts to structure size, and spheres and bonds are drawn with instancing, so structures with thousands of atoms stay responsive. Move Atoms rebuilds only the bonds touching the selection, and long logs are parsed in a single pass. Opening a large file — a long optimisation log, a binary trajectory or a VMD scene — shows a cancellable percentage bar in whole points (bytes while reading, lines while parsing, with the number also in the message), and the same feedback covers the file Diff and Import read; an optimisation log is watched from 256 KiB, other structures from 4 MiB.
 
 #### Molecular Editing
 
@@ -177,6 +177,8 @@ npx vsce package --no-dependencies
 2. Or open the Command Palette (`Ctrl+Shift+P`) and run `Molecular Viewer: Open 3D Viewer`.
 3. Or double-click a supported file and choose **Molecular 3D Viewer** as the editor.
 
+A large file shows a progress notification with a percentage bar in whole points — reading reports its bytes, parsing reports its lines, and the number is also in the message; press **Cancel** in it or close the tab to stop. An optimisation log is watched from 256 KiB and other structures from 4 MiB.
+
 #### Importing a Structure
 
 1. Click **Import Structure** in the toolbar (View mode; not available for crystals or in Diff).
@@ -307,7 +309,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 - **远程 SSH** — 解析与保存运行在远程主机，3D 视图在本地渲染，因此在远程 Linux 服务器上编辑文件也能直接使用。
 - **VMD TCL 脚本** — 打开 VMD 脚本会复现它的表示、颜色、选择与曲面，并支持多分子与可选的 egg 元数据。详见 [VMD TCL 脚本](#vmd-tcl-脚本)。
 - **主输入文件** — 打开计算化学的主输入文件时显示它指向的结构，而不是脚本文字。**LAMMPS** 会跟随 `read_data` 与 `include`（含通配符），并用 `units`、`atom_style`、`mass` 与 `dump_modify element` 描述结构；**ORCA** 读取 `* xyzfile <charge> <mult> <file>`；**ABINIT** 读取 `xyzfile` 与 `include`；**ABACUS** 的 `INPUT` 打开 `stru_file` 指定的 `STRU`（缺省为 `STRU`）；**CP2K** 读取 `COORD_FILE_NAME`（XYZ/PDB/CP2K），并先展开 `@INCLUDE`、`@SET`/`$VAR` 与 `@IF`/`@IFDEF` 分支。引号路径与相对/绝对路径都会解析，裸 `data` 文件也可单独打开。引用文件读不到时给出警告且不画原子（CP2K 的 `COORD_FILE_NAME` 缺失时保留内联 `&COORD`）；另存为默认落在被引用文件所在目录。
-- **大结构性能** — 场景只在交互或变化时重绘，空闲时不占用 GPU；重建时释放显存。细节层次随结构规模调整，球与键采用实例化绘制，数千原子的结构仍可流畅操作。Move Atoms 只重建受影响的键，长日志单趟解析。
+- **大结构性能** — 场景只在交互或变化时重绘，空闲时不占用 GPU；重建时释放显存。细节层次随结构规模调整，球与键采用实例化绘制，数千原子的结构仍可流畅操作。Move Atoms 只重建受影响的键，长日志单趟解析。打开较大的文件（长优化日志、二进制轨迹或 VMD 场景）时会显示可取消的整数百分比进度条（读取按字节、解析按行，消息里也带百分比）；Diff 与 Import 读取的文件同样如此；优化日志从 256 KiB 起显示，其它结构从 4 MiB 起显示。
 
 #### 分子编辑
 
@@ -455,6 +457,8 @@ npx vsce package --no-dependencies
 1. 在资源管理器中右键点击受支持的文件，选择 **Molecular Viewer: Open 3D Viewer**。
 2. 或按 `Ctrl+Shift+P` 打开命令面板，运行 `Molecular Viewer: Open 3D Viewer`。
 3. 或双击受支持的文件，选择 **Molecular 3D Viewer** 作为编辑器。
+
+打开较大的文件时会显示整数百分比的可取消进度条（读取按字节、解析按行，消息里也带百分比）；点通知里的 **Cancel** 或关闭标签即可停止。优化日志从 256 KiB 起显示，其它结构从 4 MiB 起显示。
 
 #### 导入结构
 

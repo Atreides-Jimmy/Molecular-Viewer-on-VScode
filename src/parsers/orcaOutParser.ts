@@ -543,8 +543,10 @@ function buildModes(
     return modes.length > 0 ? modes : undefined;
 }
 
-export function parseOrcaOut(content: string): OrcaLogResult {
+export function parseOrcaOut(content: string, onProgress?: (fraction: number) => void): OrcaLogResult {
     const lines = content.split(/\r?\n/);
+    const lineTotal = lines.length || 1;
+    let lastProgress = 0;
 
     const frames: OrcaFrame[] = [];
     /** The Ångström blocks are the primary geometry source; the A.U. blocks are
@@ -580,6 +582,10 @@ export function parseOrcaOut(content: string): OrcaLogResult {
 
     let i = 0;
     while (i < lines.length) {
+        if (onProgress && i - lastProgress >= 2048) {
+            onProgress(i / lineTotal);
+            lastProgress = i;
+        }
         const line = lines[i];
 
         // --- Echoed input file (keywords, charge, multiplicity) --------------
@@ -838,6 +844,7 @@ export function parseOrcaOut(content: string): OrcaLogResult {
     const hasThresholds = thresholds.maxForce !== undefined || thresholds.rmsForce !== undefined ||
         thresholds.maxDisplacement !== undefined || thresholds.rmsDisplacement !== undefined;
 
+    onProgress?.(1);
     return {
         frames: source,
         title: echo.raw,

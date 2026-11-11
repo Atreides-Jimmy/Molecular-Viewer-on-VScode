@@ -46,14 +46,20 @@ export function isXtbLog(content: string): boolean {
  *   gnorm=0 as placeholders; it is labeled "Final" and excluded from optSteps.
  * - gnorm is mapped to rmsForce so the convergence panel renders a force curve.
  */
-export function parseXtbLog(content: string): XtbLogResult {
+export function parseXtbLog(content: string, onProgress?: (fraction: number) => void): XtbLogResult {
     const lines = content.split(/\r?\n/);
+    const lineTotal = lines.length || 1;
+    let lastProgress = 0;
     const frames: LogFrame[] = [];
     const optSteps: OptStep[] = [];
     let stepCounter = 0;
 
     let i = 0;
     while (i < lines.length) {
+        if (onProgress && i - lastProgress >= 2048) {
+            onProgress(i / lineTotal);
+            lastProgress = i;
+        }
         const atomCount = parseInt(lines[i].trim(), 10);
         if (isNaN(atomCount) || atomCount <= 0) { i++; continue; }
 
@@ -125,6 +131,7 @@ export function parseXtbLog(content: string): XtbLogResult {
         i = atomEnd;
     }
 
+    onProgress?.(1);
     return {
         frames,
         title: 'xtb optimization',
