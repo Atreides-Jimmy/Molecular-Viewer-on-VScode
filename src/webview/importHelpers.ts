@@ -133,7 +133,12 @@ export function buildImportBlock(atoms: ImportAtomPayload[], bonds: ImportBondPa
         const base = c * atoms.length;
         for (let i = 0; i < atoms.length; i++) {
             const a = atoms[i];
-            outAtoms.push({ element: a.element, x: a.x + shift, y: a.y, z: a.z, color: a.color });
+            const copy: ImportAtomPayload = { element: a.element, x: a.x + shift, y: a.y, z: a.z, color: a.color };
+            // A ghost stays a ghost in every copy: dropping the flag here would
+            // turn a `C-Bq` into a real carbon, which then bonds, draws at the
+            // carbon radius and counts in the formula.
+            if (a.ghost === true) copy.ghost = true;
+            outAtoms.push(copy);
         }
         for (let k = 0; k < bonds.length; k++) {
             const b = bonds[k];
@@ -155,7 +160,8 @@ export function buildImportBlock(atoms: ImportAtomPayload[], bonds: ImportBondPa
  */
 export function postImportCopies(webview: vscode.Webview, fileName: string,
                           atoms: ImportAtomPayload[], bonds: ImportBondPayload[],
-                          hasExplicitBonds: boolean, copies: number): void {
+                          hasExplicitBonds: boolean, copies: number,
+                          charge?: number, multiplicity?: number): void {
     const affordable = Math.max(1, Math.floor(IMPORT_ATOM_LIMIT / Math.max(1, atoms.length)));
     let count = copies;
     if (count > affordable) {
@@ -171,6 +177,13 @@ export function postImportCopies(webview: vscode.Webview, fileName: string,
         fileName: count > 1 ? fileName + ' x ' + count : fileName,
         atoms: block.atoms,
         bonds: block.bonds,
-        hasExplicitBonds: hasExplicitBonds
+        hasExplicitBonds: hasExplicitBonds,
+        // The imported file's own electronic state. The page keeps the host's
+        // bonds (computed against this charge) instead of re-perceiving the
+        // combined system with the charge of whatever was already open. Every
+        // copy carries the fragment's charge, so the block's total is that
+        // charge times the number of copies.
+        charge: typeof charge === 'number' ? charge * count : undefined,
+        multiplicity: multiplicity
     });
 }

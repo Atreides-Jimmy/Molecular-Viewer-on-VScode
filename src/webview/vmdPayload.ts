@@ -196,6 +196,14 @@ export function buildVmdMoleculePayload(
         bonds: bonds,
         segments: segments,
         reps: reps,
-        warnings: resolved.warnings
+        warnings: resolved.warnings,
+        // The structure's own state travels with the molecule: a script can
+        // load structures of different charge, and switching to one must not
+        // leave the previous molecule's state on screen or in a saved file.
+        charge: data.charge,
+        multiplicity: data.multiplicity,
+        hasExplicitBonds: !!data.hasExplicitBonds,
+        gjfMeta: data.gjfMeta,
+        parseWarnings: data.warnings && data.warnings.length > 0 ? data.warnings.slice() : undefined
     };
 }

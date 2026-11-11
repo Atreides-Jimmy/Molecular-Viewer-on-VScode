@@ -774,14 +774,31 @@ export async function readFchkColumn(
         length = (lastLine - firstLine) * layout.lineBytes + lastLineValues * layout.fieldWidth + layout.terminator;
     }
     const bytes = await read(layout.start + firstLine * layout.lineBytes, length);
+    // The final line of the array may be the last line of the file, where a
+    // writer can omit the line terminator; the values themselves must still be
+    // present. Anything shorter is a short read (or a truncated file), and it
+    // used to be filled with zeros here — the orbital was then drawn from a
+    // column that was mostly invented. Refusing it is the only honest answer.
+    const needed = length - (lastLine === lineCount - 1 ? layout.terminator : 0);
+    if (bytes.length < needed) {
+        throw new Error('the coefficient block of this checkpoint ended after ' + bytes.length +
+            ' of the ' + needed + ' bytes orbital ' + (orbital + 1) + ' needs; the file is truncated');
+    }
     const out = new Float64Array(nBasis);
     for (let k = 0; k < nBasis; k++) {
         const global = first + k;
         const line = Math.floor(global / layout.perLine) - firstLine;
         const field = global % layout.perLine;
         const at = line * layout.lineBytes + field * layout.fieldWidth;
-        const v = parseFloat(bytes.toString('latin1', at, at + layout.fieldWidth).replace(/[Dd]/, 'E'));
-        out[k] = Number.isFinite(v) ? v : 0;
+        const text = bytes.toString('latin1', at, at + layout.fieldWidth).replace(/[Dd]/, 'E');
+        const v = parseFloat(text);
+        if (!Number.isFinite(v)) {
+            // A field that is not a number (damage, a shifted layout) is not a
+            // zero coefficient: refusing it keeps a wrong orbital off the screen.
+            throw new Error('coefficient ' + (k + 1) + ' of orbital ' + (orbital + 1) +
+                ' is not a number ("' + text.trim() + '"); the checkpoint may be damaged');
+        }
+        out[k] = v;
     }
     return out;
 }

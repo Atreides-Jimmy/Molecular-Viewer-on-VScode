@@ -711,8 +711,18 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             try {
                 return await readFchkColumn(spin.layout, document.orbitals.nBasis, orbital, async (start, length) => {
                     const buffer = Buffer.alloc(length);
-                    const { bytesRead } = await handle.read(buffer, 0, length, start);
-                    return buffer.subarray(0, bytesRead);
+                    let filled = 0;
+                    // A read may legally return fewer bytes than asked for, so a
+                    // short read is retried at the offset it stopped at rather
+                    // than handed on to be parsed (it used to become zeros). A
+                    // file that ends inside the column returns what it had, and
+                    // readFchkColumn reports the truncation.
+                    while (filled < length) {
+                        const { bytesRead } = await handle.read(buffer, filled, length - filled, start + filled);
+                        if (bytesRead <= 0) break;
+                        filled += bytesRead;
+                    }
+                    return buffer.subarray(0, filled);
                 });
             } finally {
                 await handle.close();
@@ -1488,7 +1498,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             }));
                             const shown = trimmed.length > 48 ? trimmed.substring(0, 45) + '...' : trimmed;
                             postImportCopies(webviewPanel.webview, 'SMILES: ' + shown,
-                                             impAtoms, impBonds, true, choice.copies);
+                                             impAtoms, impBonds, true, choice.copies, info.totalCharge);
                             break;
                         }
 
@@ -1686,7 +1696,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         const impAtoms = impData.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: ATOM_COLORS[a.element] || '#FF1493', ghost: a.ghost === true ? true : undefined }));
                         const impBonds = impData.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order }));
                         postImportCopies(webviewPanel.webview, impFileName,
-                                         impAtoms, impBonds, !!impData.hasExplicitBonds, choice.copies);
+                                         impAtoms, impBonds, !!impData.hasExplicitBonds, choice.copies,
+                                         impData.charge, impData.multiplicity);
                     } catch (e: any) {
                         // A Cancel pressed on the read/parse notification is not
                         // a failed import: it posts the same dismissal the page

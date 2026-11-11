@@ -138,12 +138,27 @@ var vmdSurfaceMeshes=[];
 // index (the patch order of the script). Declared here, above the first
 // rebuildScene: a var further down would still be undefined there.
 var vmdHiddenSegments={};
+// Fresh records of a molecule's atoms or bonds. A VMD payload is the script's
+// resolved cache, and editing works on the records the page draws: handing the
+// cache itself to `MD.atoms` would write every coordinate edit back into it, so
+// switching away and back would show an edited molecule the file never stated.
+// Copies make a molecule switch read the structure from the file again, exactly
+// as a frame switch rebuilds its frame from the template.
+function vmdCopyRecords(list){
+    var out=[];
+    if(!list)return out;
+    for(var i=0;i<list.length;i++){
+        var src=list[i],copy={};
+        for(var k in src)copy[k]=src[k];
+        copy.index=i;
+        out.push(copy);
+    }
+    return out;
+}
 if(VMD){
     VMD.activeSegments=(VMD.molecules[0]&&VMD.molecules[0].segments)||[];
-    MD.atoms=VMD.molecules[0].atoms;
-    MD.bonds=VMD.molecules[0].bonds;
-    MD.atoms.forEach(function(a,i){a.index=i});
-    MD.bonds.forEach(function(b,i){b.index=i});
+    MD.atoms=vmdCopyRecords(VMD.molecules[0]&&VMD.molecules[0].atoms);
+    MD.bonds=vmdCopyRecords(VMD.molecules[0]&&VMD.molecules[0].bonds);
 }
 var boundary={aMin:0,aMax:1,bMin:0,bMax:1,cMin:0,cMax:1};
 // The most atoms a supercell may build. The bounds inputs alone can ask for
@@ -6616,32 +6631,31 @@ function importStructure(msg){
         if(a.ghost===true||a.element==='X')item.ghost=true;
         MD.atoms.push(item);
     }
-    // --- Bonds ---
-    if(!MD.hasExplicitBonds&&!msg.hasExplicitBonds){
-        // Fully automatic bond detection for the combined system (regular
-        // behavior for auto-detected files).
-        MD.bonds=detectBondsFromAtoms(MD.atoms,MD.charge);
-    }else{
-        // At least one side has authored bonds: keep them and connect the
-        // imported part explicitly instead of re-detecting everything
-        // (re-detection could alter authored bond orders).
-        MD.hasExplicitBonds=true;
-        if(msg.hasExplicitBonds){
-            newBonds.forEach(function(b){
-                // A ghost can carry no bond: an authored bond naming one in the
-                // imported file is dropped here as it is on load.
-                if(newAtoms[b.atom1]&&isGhostAtom(newAtoms[b.atom1]))return;
-                if(newAtoms[b.atom2]&&isGhostAtom(newAtoms[b.atom2]))return;
-                if(b.atom1<newAtoms.length&&b.atom2<newAtoms.length)
-                    MD.bonds.push({atom1:N0+b.atom1,atom2:N0+b.atom2,order:b.order==null?1:b.order});
-            });
-        }else{
-            // Imported file had no authored bonds: auto-detect, keeping only
-            // bonds that touch a new atom (existing bonds stay as authored).
-            var det=detectBondsFromAtoms(MD.atoms,MD.charge);
-            det.forEach(function(b){if(b.atom1>=N0||b.atom2>=N0)MD.bonds.push(b)});
-        }
+    // Importing onto an empty canvas is not combining two structures: what is on
+    // screen is the imported file, so its own electronic state is adopted. An
+    // import beside an existing structure leaves the state alone — the combined
+    // system's total is not something either file stated.
+    if(N0===0){
+        if(typeof msg.charge==='number')MD.charge=msg.charge;
+        if(typeof msg.multiplicity==='number')MD.multiplicity=msg.multiplicity;
     }
+    // --- Bonds ---
+    // The imported part's bonds are the host's answer: it perceived them
+    // against the imported file's own charge and its own atoms. Re-perceiving
+    // the combined system with the current structure's charge (what this path
+    // used to do) discarded that answer, and perception hands the total charge
+    // only to a component that covers the whole structure — so an ion imported
+    // beside a neutral molecule was perceived as neutral. The two blocks are
+    // placed apart, so there is no junction bond to perceive either.
+    if(msg.hasExplicitBonds)MD.hasExplicitBonds=true;
+    newBonds.forEach(function(b){
+        // A ghost can carry no bond: an authored bond naming one in the
+        // imported file is dropped here as it is on load.
+        if(newAtoms[b.atom1]&&isGhostAtom(newAtoms[b.atom1]))return;
+        if(newAtoms[b.atom2]&&isGhostAtom(newAtoms[b.atom2]))return;
+        if(b.atom1<newAtoms.length&&b.atom2<newAtoms.length)
+            MD.bonds.push({atom1:N0+b.atom1,atom2:N0+b.atom2,order:b.order==null?1:b.order});
+    });
     rebuildScene();
     // Zoom out if the combined structure no longer fits the current view.
     var maxD=0;
@@ -8876,6 +8890,55 @@ function updateFrameInfo(){
     if(el)el.textContent='/'+totalFrames+(MD.frames[currentFrame]?' - '+MD.frames[currentFrame].stepLabel:'');
     if(numEl)numEl.value=currentFrame+1;
 }
+// A trajectory frame states only its coordinates: the atoms and bonds on screen
+// are rebuilt from the document template on every visit. An edit made while a
+// frame is shown therefore had nowhere to live and was dropped by the next frame
+// switch, while an edited log frame keeps its geometry in `f.atoms`. The
+// trajectory frame gets the same persistence: when it is left in a state the
+// template cannot reproduce, it keeps its own records, and a later return shows
+// them instead of rebuilding the pristine frame. An untouched frame is still
+// rebuilt from the template, so simply playing a trajectory stores nothing.
+function trajFrameEdited(idx){
+    var tpl=MD.trajectoryTemplate||[];
+    if(MD.atoms.length!==tpl.length)return true;
+    var xyz=(TRAJ_FRAMES[idx]&&TRAJ_FRAMES[idx].xyz)||null;
+    var haveXyz=!!xyz&&xyz.length>=tpl.length*3;
+    for(var i=0;i<MD.atoms.length;i++){
+        var a=MD.atoms[i],base=tpl[i];
+        if(!a||!base)return true;
+        if(a.element!==base.element||(a.ghost===true)!==(base.ghost===true))return true;
+        if(haveXyz){
+            if(a.x!==xyz[i*3]||a.y!==xyz[i*3+1]||a.z!==xyz[i*3+2])return true;
+        }else if(a.x!==base.x||a.y!==base.y||a.z!==base.z){
+            return true;
+        }
+    }
+    var tplBonds=MD.trajectoryBonds||[];
+    if(MD.bonds.length!==tplBonds.length)return true;
+    for(var j=0;j<MD.bonds.length;j++){
+        var b=MD.bonds[j],o=tplBonds[j];
+        if(!o||b.atom1!==o.atom1||b.atom2!==o.atom2||b.order!==o.order)return true;
+    }
+    return false;
+}
+function keepTrajectoryFrame(idx){
+    if(!TRAJ_FRAMES||!TRAJ_FRAMES[idx])return;
+    if(!trajFrameEdited(idx)){
+        // Back to the frame the file states (an undo can do that): the kept
+        // records are dropped so the next visit rebuilds the pristine frame
+        // instead of bringing an older edit back.
+        if(TRAJ_FRAMES[idx].atoms){
+            delete TRAJ_FRAMES[idx].atoms;
+            delete TRAJ_FRAMES[idx].bonds;
+        }
+        return;
+    }
+    // The records on screen become the frame's own, exactly as a log frame's
+    // atoms are the records its edits write into. They are not shared with the
+    // template, so the next frame still starts from the pristine structure.
+    TRAJ_FRAMES[idx].atoms=MD.atoms;
+    TRAJ_FRAMES[idx].bonds=MD.bonds;
+}
 function switchFrame(idx){
     if(idx<0||idx>=totalFrames)return;
     // A trajectory is one system over time, and its frames are read against
@@ -8906,30 +8969,40 @@ function switchFrame(idx){
     // about to be replaced wholesale, so the centre that was on screen is put
     // back and the new frame is built against it.
     if(keepTrajCenter){CX=keepX;CY=keepY;CZ=keepZ}
+    // An edited trajectory frame keeps its geometry across a switch, exactly as
+    // a log frame's edits do (see keepTrajectoryFrame).
+    if(TRAJ_FRAMES)keepTrajectoryFrame(currentFrame);
     currentFrame=idx;
     var f=MD.frames[idx];
     if(TRAJ_FRAMES){
         // A trajectory keeps the template's elements, colours and bonds; only
         // the coordinates (and the cell) belong to the frame. Fresh records are
         // made every time so an edit of the frame on screen never reaches the
-        // template the next frame is built from.
-        var xyz=TRAJ_FRAMES[idx]?TRAJ_FRAMES[idx].xyz:null;
-        var tpl=MD.trajectoryTemplate||[];
-        var haveXyz=!!xyz&&xyz.length>=tpl.length*3;
-        MD.atoms=tpl.map(function(a,i){
-            var copy={};
-            for(var k in a)copy[k]=a[k];
-            copy.index=i;
-            if(haveXyz){
-                copy.x=xyz[i*3];
-                copy.y=xyz[i*3+1];
-                copy.z=xyz[i*3+2];
-            }
-            return copy;
-        });
-        MD.bonds=(MD.trajectoryBonds||[]).map(function(b){
-            var copy={};for(var k in b)copy[k]=b[k];return copy;
-        });
+        // template the next frame is built from — unless this frame was edited,
+        // in which case it kept its own records when it was left.
+        var kept=(TRAJ_FRAMES[idx]&&TRAJ_FRAMES[idx].atoms)?TRAJ_FRAMES[idx]:null;
+        if(kept){
+            MD.atoms=kept.atoms;
+            MD.bonds=kept.bonds||[];
+        }else{
+            var xyz=TRAJ_FRAMES[idx]?TRAJ_FRAMES[idx].xyz:null;
+            var tpl=MD.trajectoryTemplate||[];
+            var haveXyz=!!xyz&&xyz.length>=tpl.length*3;
+            MD.atoms=tpl.map(function(a,i){
+                var copy={};
+                for(var k in a)copy[k]=a[k];
+                copy.index=i;
+                if(haveXyz){
+                    copy.x=xyz[i*3];
+                    copy.y=xyz[i*3+1];
+                    copy.z=xyz[i*3+2];
+                }
+                return copy;
+            });
+            MD.bonds=(MD.trajectoryBonds||[]).map(function(b){
+                var copy={};for(var k in b)copy[k]=b[k];return copy;
+            });
+        }
         TRAJ_CELL=(TRAJ_FRAMES[idx]&&TRAJ_FRAMES[idx].cell)?TRAJ_FRAMES[idx].cell:null;
     }else{
         // Every frame states the electronic state it was computed at. Adopting
@@ -9022,14 +9095,27 @@ function switchMolecule(idx){
     MD.structureRevision=(MD.structureRevision||0)+1;
     vmdMolIdx=idx;
     var m=VMD.molecules[idx];
-    MD.atoms=m.atoms;
-    MD.bonds=m.bonds;
-    MD.atoms.forEach(function(a,i){a.index=i});
-    MD.bonds.forEach(function(b,i){b.index=i});
+    // A molecule is a structure of its own, and everything the file stated
+    // about it travels with it: its atoms and bonds (copied, so an edit never
+    // reaches the script's resolved cache) and the electronic state, route and
+    // parser warnings the file carried. Replacing only the coordinates left the
+    // info panel, Save As and the bond perception of a later import describing
+    // the molecule that was on screen before.
+    MD.atoms=vmdCopyRecords(m.atoms);
+    MD.bonds=vmdCopyRecords(m.bonds);
+    MD.charge=m.charge;
+    MD.multiplicity=m.multiplicity;
+    MD.gjfMeta=m.gjfMeta||null;
+    MD.warnings=(m.parseWarnings||[]).slice();
+    MD.hasExplicitBonds=!!m.hasExplicitBonds;
     VMD.activeSegments=m.segments||[];
     // 新分子的新补丁列表: 面板选择全部复位 (初始时所有 egg 都显示)。
     vmdHiddenSegments={};
     vmdSurfaceSignature='';
+    // A selection names atoms of the molecule being left; the same indices in
+    // the new molecule would stay highlighted and Delete / Select / Rotate
+    // would act on atoms nobody picked.
+    resetSelection();
     undoStack.length=0;updateUndoBtn();
     resetRotAxisState();
     if(currentMode==='mmOpt'){mmLastResult=null;refreshMmPanel()}
@@ -18638,7 +18724,7 @@ function parseSelectInput(input){
             }
             return;
         }
-        var elNumMatch=tok.match(/^([A-Za-z]+)(d+)$/);
+        var elNumMatch=tok.match(/^([A-Za-z]+)(\d+)$/);
         if(elNumMatch){
             var elName=elNumMatch[1].charAt(0).toUpperCase()+elNumMatch[1].slice(1).toLowerCase();
             var en=parseInt(elNumMatch[2],10);

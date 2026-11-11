@@ -35,6 +35,8 @@ export interface ImportAtomPayload {
     y: number;
     z: number;
     color: string;
+    /** 该原子是 ghost/哑点 (见 Atom.ghost); 多份拷贝时也必须保留。 */
+    ghost?: boolean;
 }
 
 /** 导入消息里的键载荷 (索引相对本次导入的原子数组)。 */
@@ -104,6 +106,15 @@ export interface VmdMoleculePayload {
     segments: VmdSegmentPayload[];
     reps: VmdRepPayload[];
     warnings: string[];
+    /** The molecule's own electronic state, as its file states it. */
+    charge?: number;
+    multiplicity?: number;
+    /** Whether the molecule's bonds were authored rather than perceived. */
+    hasExplicitBonds: boolean;
+    /** The route and title card of a Gaussian input, for a later Save As. */
+    gjfMeta?: MolecularData['gjfMeta'];
+    /** Parser warnings of the molecule's file (distinct from `warnings`). */
+    parseWarnings?: string[];
 }
 
 export interface VmdPayload {
