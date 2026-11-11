@@ -14679,6 +14679,39 @@ function chargeSetAt(idx){
     return CHARGES[idx];
 }
 function chargeSet(){return chargeSetAt(chargeSel)}
+/**
+ * Move the view to the geometry the selected charge table belongs to.
+ *
+ * A charge table is a property of one optimisation step, and asking to see it
+ * on another step can only paint somebody else's numbers — so the same thing a
+ * played normal mode does happens here: the frame switches to the one the table
+ * was computed for. The undo history is carried across when both frames
+ * describe the same atom list, because a frame switch clears it and choosing a
+ * charge scheme must not throw away the user's edits.
+ */
+function chargeJumpToFrame(){
+    var set=chargeSet();
+    if(!set||typeof set.frame!=='number')return false;
+    if(set.frame===currentFrame)return false;
+    if(set.frame<0||set.frame>=totalFrames)return false;
+    // A different atom list cannot be fixed by any frame.
+    if(chargeMatch()==='atoms')return false;
+    var fromAtoms=MD.frames[currentFrame]&&MD.frames[currentFrame].atoms;
+    var toAtoms=MD.frames[set.frame]&&MD.frames[set.frame].atoms;
+    var keep=!!(fromAtoms&&toAtoms&&fromAtoms.length===toAtoms.length);
+    if(keep){
+        for(var i=0;i<fromAtoms.length;i++){
+            if(fromAtoms[i].element!==toAtoms[i].element){keep=false;break}
+        }
+    }
+    var keptUndo=keep?undoStack.slice():null;
+    switchFrame(set.frame);
+    if(keptUndo){
+        undoStack=keptUndo;
+        updateUndoBtn();
+    }
+    return true;
+}
 // The values of the selected scheme, or null when they do not describe the
 // atoms on screen. Two numbers decide that: the count, and the element of every
 // atom - an edited structure or another molecule changes one of them.
@@ -14837,6 +14870,10 @@ function chargeStatusLine(){
     }
 }
 function applyChargeColoring(on){
+    // Asking to display a table that was computed at another step takes the
+    // view there first, exactly as playing a normal mode does. Only a table of
+    // a different atom list can never be shown, and that still refuses.
+    if(on&&chargeMatch()==='frame')chargeJumpToFrame();
     if(on&&chargeMatch()==='atoms')on=false;
     chargeColorOn=!!on;
     // One colour map at a time: the two switches would otherwise both claim the
@@ -14852,6 +14889,7 @@ function applyChargeColoring(on){
     chargeStatusLine();
 }
 function applyChargeLabels(on){
+    if(on&&chargeMatch()==='frame')chargeJumpToFrame();
     if(on&&chargeMatch()==='atoms')on=false;
     chargeLabelsOn=!!on;
     chargeSyncPanel();
@@ -15103,7 +15141,10 @@ function bindPropsCharges(){
         if(isNaN(idx)||idx<0||idx>=CHARGES.length)return;
         chargeSel=idx;
         // Another scheme is another set of numbers: the cache, the labels and -
-        // when the colour map is on - the scene all follow it.
+        // when the colour map is on - the scene all follow it. A scheme that was
+        // computed at another step takes the view there first, the way playing a
+        // normal mode does, so the numbers are never offered on the wrong atoms.
+        chargeJumpToFrame();
         chargeRefreshCache();
         chargeSyncPanel();
         if(chargeColorOn)rebuildScene(!!TRAJ_FRAMES);
