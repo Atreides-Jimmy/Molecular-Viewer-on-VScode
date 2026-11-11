@@ -97,6 +97,31 @@ function parseAtomLine(parts: string[]): { element: string; x: number; y: number
     return null;
 }
 
+/**
+ * Whether a line is the charge/multiplicity line rather than the first atom row.
+ *
+ * Gaussian writes the pair (or one pair per fragment) as plain integers, and
+ * the atom block follows it. A file that omits the pair therefore used to lose
+ * its first atom: the row was read as the pair, failed to parse as two
+ * integers, and was consumed anyway. A line only counts here when every field
+ * is a plain integer, the count is even, and every multiplicity field (the
+ * odd-indexed one of each pair) is plausible. That rejects an atomic-number
+ * atom row with integral coordinates such as `6 0 0 0` (multiplicity 0 and 0)
+ * while still accepting a multi-fragment list such as `1 1 0 1`.
+ */
+function looksLikeChargeMultLine(line: string): boolean {
+    const tokens = line.trim().split(/\s+/);
+    if (tokens.length < 2 || tokens.length % 2 !== 0) return false;
+    if (!tokens.every(t => /^[+-]?\d+$/.test(t))) return false;
+    const values = tokens.map(t => parseInt(t, 10));
+    if (values.some(v => !isFinite(v))) return false;
+    for (let i = 0; i < values.length; i += 2) {
+        if (Math.abs(values[i]) > 20) return false;
+        if (values[i + 1] < 1 || values[i + 1] > 10) return false;
+    }
+    return true;
+}
+
 export function parseGjf(content: string): MolecularData {
     const lines = content.split(/\r?\n/);
     const atoms: Atom[] = [];
@@ -105,9 +130,10 @@ export function parseGjf(content: string): MolecularData {
     let hasExplicitBonds = false;
     let charge: number | undefined;
     let multiplicity: number | undefined;
+    const warnings: string[] = [];
 
     const link0Lines: string[] = [];
-    let routeLine = '';
+    const routeLines: string[] = [];
     const titleLines: string[] = [];
     let chargeMultLine = '';
     let afterConnectContent = '';
@@ -118,7 +144,10 @@ export function parseGjf(content: string): MolecularData {
         if (lines[i].trim().startsWith('%')) {
             link0Lines.push(lines[i]);
         } else {
-            routeLine = lines[i].trim();
+            // A Gaussian route section may span several lines. Every one of
+            // them is kept (not only the last), so saving the file back does
+            // not drop the keywords an earlier line stated.
+            routeLines.push(lines[i].trim());
         }
         i++;
     }
@@ -136,13 +165,19 @@ export function parseGjf(content: string): MolecularData {
     }
 
     if (i < lines.length) {
-        chargeMultLine = lines[i];
-        const cmParts = lines[i].trim().split(/\s+/);
-        const chrg = parseInt(cmParts[0], 10);
-        const mult = parseInt(cmParts[1], 10);
-        if (!isNaN(chrg)) charge = chrg;
-        if (!isNaN(mult)) multiplicity = mult;
-        i++;
+        if (looksLikeChargeMultLine(lines[i])) {
+            chargeMultLine = lines[i];
+            const cmParts = lines[i].trim().split(/\s+/);
+            const chrg = parseInt(cmParts[0], 10);
+            const mult = parseInt(cmParts[1], 10);
+            if (!isNaN(chrg)) charge = chrg;
+            if (!isNaN(mult)) multiplicity = mult;
+            i++;
+        } else {
+            // The atom block starts here; keeping the line for the loop below
+            // is what preserves the first atom.
+            warnings.push('the charge/multiplicity line is missing: the atom block was read from line ' + (i + 1));
+        }
     }
 
     let atomIndex = 0;
@@ -219,7 +254,7 @@ export function parseGjf(content: string): MolecularData {
 
     const gjfMeta: GjfMeta = {
         link0Lines,
-        routeLine,
+        routeLine: routeLines.join('\n'),
         titleLines,
         chargeMultLine,
         afterConnectContent
@@ -232,11 +267,12 @@ export function parseGjf(content: string): MolecularData {
     for (let li = 0; li < lines.length; li++) {
         if (/^\s*--Link1--\s*$/i.test(lines[li])) linkedJobs++;
     }
-    const result: MolecularData = { atoms, bonds, title, hasExplicitBonds, gjfMeta, charge, multiplicity };
     if (linkedJobs > 0) {
-        result.warnings = ['the file holds ' + (linkedJobs + 1) +
-            ' Gaussian jobs joined by --Link1--: only the first structure is shown (split the file to open another)'];
+        warnings.push('the file holds ' + (linkedJobs + 1) +
+            ' Gaussian jobs joined by --Link1--: only the first structure is shown (split the file to open another)');
     }
+    const result: MolecularData = { atoms, bonds, title, hasExplicitBonds, gjfMeta, charge, multiplicity };
+    if (warnings.length > 0) result.warnings = warnings;
     return result;
 }
 

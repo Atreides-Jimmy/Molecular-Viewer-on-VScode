@@ -24,8 +24,8 @@ import { parseGro, isGro, isGromacsLog } from './gromacsParser';
 import { parseExtXyz, isExtXyz, isGpumdInput } from './extXyzParser';
 import { parseDeepmdDataset, isDeepmdDatasetFile, isDpgenModelDevi, DeepmdParseOptions, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox } from './deepmdParser';
 import { parsePyscfOutput, parseMolden, isPyscfOutput, isMolden } from './pyscfParser';
-import { parseFchk, readFchkColumn, FchkResult, FchkOrbitals, FchkArrayLayout, FchkOrbitalSpin, FchkBasis } from './fchkParser';
-import { detectBinaryTrajectory, readBinaryTrajectory, isTrajectoryFileName, BinaryTrajectory, TrajectoryFrame, TrajectoryFormat, TrajectoryReadOptions } from './trajectoryParser';
+import { parseFchk, parseFchkText, readFchkColumn, FchkResult, FchkOrbitals, FchkArrayLayout, FchkOrbitalSpin, FchkBasis } from './fchkParser';
+import { detectBinaryTrajectory, readBinaryTrajectory, isTrajectoryFileName, looksLikeBinaryTrajectory, BinaryTrajectory, TrajectoryFrame, TrajectoryFormat, TrajectoryReadOptions } from './trajectoryParser';
 
 export { parseGaussianLog, LogFrame, GaussianLogResult };
 export { RouteSection, RouteKeyword };
@@ -49,8 +49,8 @@ export { parseGro, isGro, isGromacsLog };
 export { parseExtXyz, isExtXyz, isGpumdInput };
 export { parseDeepmdDataset, isDeepmdDatasetFile, isDpgenModelDevi, DeepmdParseOptions, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox };
 export { parsePyscfOutput, parseMolden, isPyscfOutput, isMolden };
-export { parseFchk, readFchkColumn, FchkResult, FchkOrbitals, FchkArrayLayout, FchkOrbitalSpin, FchkBasis };
-export { detectBinaryTrajectory, readBinaryTrajectory, isTrajectoryFileName, BinaryTrajectory, TrajectoryFrame, TrajectoryFormat, TrajectoryReadOptions };
+export { parseFchk, parseFchkText, readFchkColumn, FchkResult, FchkOrbitals, FchkArrayLayout, FchkOrbitalSpin, FchkBasis };
+export { detectBinaryTrajectory, readBinaryTrajectory, isTrajectoryFileName, looksLikeBinaryTrajectory, BinaryTrajectory, TrajectoryFrame, TrajectoryFormat, TrajectoryReadOptions };
 // Visualization files: the VMD scripts and the bare scalar-carrying coordinate
 // files they describe (see src/parsers/vmdVisualization.ts).
 export { parseTcl, TclParseResult };
@@ -105,6 +105,13 @@ export interface ParseFileOptions {
     deepmd?: DeepmdParseOptions;
     /** Raw bytes when the primary file is binary (`.npy`). */
     binary?: Uint8Array;
+    /**
+     * Internal: the caller has already run the structured-output detectors and
+     * they found nothing. `tryAutoParse` then skips its own copy of that scan,
+     * which is what keeps a large non-structured output from being walked a
+     * second time per `parseFile` call.
+     */
+    structuredProbed?: boolean;
 }
 
 /**
@@ -124,6 +131,66 @@ export function isFrameLogOutput(content: string): boolean {
 }
 
 /**
+ * The program outputs this reader understands, in detection order. One list
+ * feeds both the cheap "is this structured output?" test and the parser, so a
+ * caller that probes and then parses cannot check a different set of formats
+ * from the one it ends up reading.
+ */
+interface StructuredReader {
+    test: (content: string) => boolean;
+    read: (content: string, options?: ParseFileOptions) => MolecularData;
+}
+
+/** A recognised program output that carries no coordinates. */
+function noStructureOutput(title: string, warning: string): MolecularData {
+    return { atoms: [], bonds: [], title, hasExplicitBonds: false, warnings: [warning] };
+}
+
+const STRUCTURED_READERS: StructuredReader[] = [
+    { test: isQeOutput, read: content => parseQeOutput(content) },
+    { test: isCp2kOutput, read: content => parseCp2kOutput(content) },
+    { test: isPyscfOutput, read: content => parsePyscfOutput(content) },
+    { test: isAbinitOutput, read: content => parseAbinitOutput(content) },
+    { test: isVasprunXml, read: content => parseVasprunXml(content) },
+    { test: isOutcar, read: content => parseOutcar(content) },
+    { test: isLammpsDump, read: (content, options) => parseLammpsDump(content, options && options.lammps) },
+    { test: isAbacusMdDump, read: content => parseAbacusMdDump(content) },
+    { test: isAbacusLog, read: content => parseAbacusLog(content) },
+    { test: isXdatcar, read: content => parseXdatcar(content) },
+    // MOPAC and xTB print their final geometry in output that shares `.out`
+    // and `.log` with Gaussian, ORCA and the trajectory formats.
+    { test: isMopacOutput, read: content => parseMopacOutput(content) },
+    { test: isXtbOutput, read: content => parseXtbOutput(content) },
+    // Outputs that share `.log`/`.out` with the structure-bearing programs.
+    // Naming them here keeps the Gaussian/ORCA/xTB readers from claiming them
+    // and replaces an empty canvas with the file that does hold the geometry.
+    {
+        test: isGromacsLog,
+        read: () => noStructureOutput('GROMACS log',
+            'a GROMACS log records energies, temperatures and performance, not coordinates: ' +
+            'open the .gro file mdrun wrote (the -deffnm output, e.g. water.gro)')
+    },
+    {
+        test: isLammpsLog,
+        read: () => noStructureOutput('LAMMPS log',
+            'a LAMMPS log records the run and its thermo output, not coordinates: ' +
+            'open the data file or a dump file')
+    },
+    {
+        test: isDpgenModelDevi,
+        read: () => noStructureOutput('DP-GEN model deviation',
+            'model_devi.out is a model-deviation table, not a structure: ' +
+            'open the corresponding POSCAR/XYZ frames or the LAMMPS dump')
+    },
+    {
+        test: isGpumdInput,
+        read: () => noStructureOutput('GPUMD input',
+            'a GPUMD run.in selects the potential and the files to dump, not a structure: ' +
+            'open model.xyz or the dump.xyz it writes')
+    }
+];
+
+/**
  * Whether a `.log`/`.out` file is structured output of a program this reader
  * understands, rather than a Gaussian/ORCA/xTB trajectory log. The host uses
  * this to choose between the frame pipeline and `parseFile`.
@@ -138,63 +205,48 @@ export function isStructuredProgramOutput(content: string, onProgress?: (fractio
     // Each detector is a full pass over the text, so one step per detector is
     // the only progress a caller can honestly be shown before the result is
     // known. The short-circuit is unchanged: the first match wins.
-    const detectors: ((text: string) => boolean)[] = [
-        isQeOutput, isCp2kOutput, isPyscfOutput, isAbinitOutput, isVasprunXml,
-        isOutcar, isLammpsDump, isAbacusMdDump, isAbacusLog, isXdatcar,
-        isMopacOutput, isXtbOutput, isGromacsLog, isLammpsLog,
-        isDpgenModelDevi, isGpumdInput
-    ];
-    for (let i = 0; i < detectors.length; i++) {
-        const matched = detectors[i](content);
-        onProgress?.((i + 1) / detectors.length);
+    for (let i = 0; i < STRUCTURED_READERS.length; i++) {
+        const matched = STRUCTURED_READERS[i].test(content);
+        onProgress?.((i + 1) / STRUCTURED_READERS.length);
         if (matched) return true;
     }
     return false;
 }
 
-/** A recognised program output that carries no coordinates. */
-function noStructureOutput(title: string, warning: string): MolecularData {
-    return { atoms: [], bonds: [], title, hasExplicitBonds: false, warnings: [warning] };
+/**
+ * Detect and read structured program output in one pass.
+ *
+ * A caller that needs the structure (the open path, Diff and Import) used to
+ * ask `isStructuredProgramOutput` and then hand the same text to `parseFile`,
+ * whose `.log` branch ran the detector list a second time. This runs the
+ * detectors once and returns the parsed result, so a large QE/CP2K/LAMMPS
+ * output is scanned once rather than twice.
+ */
+export function parseStructuredProgramOutput(
+    content: string,
+    options?: ParseFileOptions,
+    onProgress?: (fraction: number) => void
+): MolecularData | null {
+    if (isFrameLogOutput(content)) {
+        onProgress?.(1);
+        return null;
+    }
+    for (let i = 0; i < STRUCTURED_READERS.length; i++) {
+        const reader = STRUCTURED_READERS[i];
+        if (reader.test(content)) {
+            const data = reader.read(content, options);
+            onProgress?.(1);
+            return data;
+        }
+        onProgress?.((i + 1) / STRUCTURED_READERS.length);
+    }
+    return null;
 }
 
 /** Recognise structured program output before falling back to a Gaussian/ORCA log. */
 function structuredOutput(content: string, options?: ParseFileOptions): MolecularData | null {
-    if (isQeOutput(content)) return parseQeOutput(content);
-    if (isCp2kOutput(content)) return parseCp2kOutput(content);
-    if (isPyscfOutput(content)) return parsePyscfOutput(content);
-    if (isAbinitOutput(content)) return parseAbinitOutput(content);
-    if (isVasprunXml(content)) return parseVasprunXml(content);
-    if (isOutcar(content)) return parseOutcar(content);
-    if (isLammpsDump(content)) return parseLammpsDump(content, options && options.lammps);
-    if (isAbacusMdDump(content)) return parseAbacusMdDump(content);
-    if (isAbacusLog(content)) return parseAbacusLog(content);
-    if (isXdatcar(content)) return parseXdatcar(content);
-    // MOPAC and xTB print their final geometry in output that shares `.out`
-    // and `.log` with Gaussian, ORCA and the trajectory formats.
-    if (isMopacOutput(content)) return parseMopacOutput(content);
-    if (isXtbOutput(content)) return parseXtbOutput(content);
-    // Outputs that share `.log`/`.out` with the structure-bearing programs.
-    // Naming them here keeps the Gaussian/ORCA/xTB readers from claiming them
-    // and replaces an empty canvas with the file that does hold the geometry.
-    if (isGromacsLog(content)) {
-        return noStructureOutput('GROMACS log',
-            'a GROMACS log records energies, temperatures and performance, not coordinates: ' +
-            'open the .gro file mdrun wrote (the -deffnm output, e.g. water.gro)');
-    }
-    if (isLammpsLog(content)) {
-        return noStructureOutput('LAMMPS log',
-            'a LAMMPS log records the run and its thermo output, not coordinates: ' +
-            'open the data file or a dump file');
-    }
-    if (isDpgenModelDevi(content)) {
-        return noStructureOutput('DP-GEN model deviation',
-            'model_devi.out is a model-deviation table, not a structure: ' +
-            'open the corresponding POSCAR/XYZ frames or the LAMMPS dump');
-    }
-    if (isGpumdInput(content)) {
-        return noStructureOutput('GPUMD input',
-            'a GPUMD run.in selects the potential and the files to dump, not a structure: ' +
-            'open model.xyz or the dump.xyz it writes');
+    for (const reader of STRUCTURED_READERS) {
+        if (reader.test(content)) return reader.read(content, options);
     }
     return null;
 }
@@ -247,6 +299,19 @@ export function parseFile(content: string, fileName: string, options?: ParseFile
             // A GPUMD/ASE file carries its cell on the comment line; the plain
             // XYZ reader would throw that cell away. xTB writes its trajectory
             // as `xtb.trj`, which is the same back-to-back XYZ layout.
+            if (ext === 'trj') {
+                // CHARMM/NAMD also write binary trajectories with this suffix.
+                // When the bytes are not one of the formats `readBinaryTrajectory`
+                // recognises, the host has already avoided decoding them; this
+                // guard is for a caller that handed over the decoded text anyway.
+                const head = content.slice(0, 8192);
+                const replacements = (head.match(/\uFFFD/g) || []).length;
+                if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(head) || replacements > 8) {
+                    return noStructureOutput('Binary trajectory',
+                        'this .trj file is binary and is not an XTC, TRR or DCD trajectory: ' +
+                        'export it as DCD/XTC/TRR or as a text trajectory (e.g. .xyz)');
+                }
+            }
             return isExtXyz(content) ? parseExtXyz(content) : parseXyz(content);
         case 'extxyz':
             return parseExtXyz(content);
@@ -259,19 +324,23 @@ export function parseFile(content: string, fileName: string, options?: ParseFile
             return parseMol(content);
         case 'log':
         case 'out': {
-            const structured = structuredOutput(content, options);
+            // The caller may already have probed the structured detectors. When
+            // it has not, run them here; when it has, do not scan the text a
+            // second time.
+            const structured = options && options.structuredProbed ? null : structuredOutput(content, options);
             if (structured) return structured;
             // An xTB trajectory log has an XYZ block per frame and would
             // otherwise be read by the plain XYZ fallback below, losing the
             // frame's charge/multiplicity. Keep its own frame reader first.
             if (isXtbLog(content)) return parseLogAsSingleFrame(content);
+            const probed: ParseFileOptions = options ? { ...options, structuredProbed: true } : { structuredProbed: true };
             // Old MOPAC outputs state no version banner, so the detector that
             // knows their Cartesian table lives in the content sniffers. A
             // Gaussian/ORCA/xTB frame log reaches its own reader there as well;
             // `tryAutoParse` only says nothing (no atoms, no warning) when no
             // reader recognised the file at all, which is when this branch
             // reports the frame reader's own explanation.
-            const guessed = tryAutoParse(content, fileName, options);
+            const guessed = tryAutoParse(content, fileName, probed);
             if (guessed.atoms.length > 0 || (guessed.warnings && guessed.warnings.length > 0)) {
                 return guessed;
             }
@@ -286,7 +355,7 @@ export function parseFile(content: string, fileName: string, options?: ParseFile
             // like a namelist, so what wrote the file has to win before the
             // input syntax it repeats does. MOPAC and xTB outputs share these
             // extensions too when a job renamed them.
-            const structured = structuredOutput(content, options);
+            const structured = options && options.structuredProbed ? null : structuredOutput(content, options);
             if (structured) return structured;
             const logOutput = singleFrameLogOutput(content);
             if (logOutput) return logOutput;
@@ -312,7 +381,8 @@ export function parseFile(content: string, fileName: string, options?: ParseFile
             // sniffers get the file before the route-card fallback. A renamed
             // `.inp` gets the same treatment: QE, PySCF and ABINIT inputs and
             // outputs are not ORCA inputs merely because ORCA uses the suffix.
-            const guessed = tryAutoParse(content, fileName, options);
+            const probed: ParseFileOptions = options ? { ...options, structuredProbed: true } : { structuredProbed: true };
+            const guessed = tryAutoParse(content, fileName, probed);
             if (guessed.atoms.length === 0 && (!guessed.warnings || guessed.warnings.length === 0)) {
                 guessed.warnings = ['no structure was found in this input file: ' +
                     'check that it contains coordinates or names the file that does'];
@@ -341,6 +411,24 @@ export function parseFile(content: string, fileName: string, options?: ParseFile
             return parseVasp(content);
         case 'cube':
             return parseCube(content);
+        case 'fchk':
+        case 'fch': {
+            // The streaming reader is used by every path that can open a large
+            // checkpoint; this branch exists for a checkpoint that reached
+            // `parseFile` as text (a renamed file, a small one). Only the
+            // structure travels here — the orbitals, charges and cavity need
+            // the dedicated document loader.
+            const result = parseFchkText(content);
+            return {
+                atoms: result.atoms,
+                bonds: [],
+                title: /^molecule name$/i.test(result.title.trim()) ? fileName : result.title,
+                hasExplicitBonds: false,
+                charge: result.charge,
+                multiplicity: result.multiplicity,
+                warnings: result.warnings.length > 0 ? result.warnings.slice() : undefined
+            };
+        }
         case 'vesta':
             return parseVesta(content);
         case 'abi':
@@ -468,9 +556,13 @@ export function tryAutoParse(content: string, fileName: string = '', options?: P
     // Program outputs echo their own inputs, so what wrote the file has to win
     // over the input syntax it repeats. An ORCA output contains its `* xyz`
     // block; reading that echo as an ORCA input returned no atoms and no
-    // warning, so structured output is detected first.
-    const structured = structuredOutput(content, options);
-    if (structured) return structured;
+    // warning, so structured output is detected first. A caller that already
+    // ran the detectors (`structuredProbed`) must not pay for them again: this
+    // is the second scan a `.log`/`.out` used to make inside one `parseFile`.
+    if (!options || !options.structuredProbed) {
+        const structured = structuredOutput(content, options);
+        if (structured) return structured;
+    }
 
     // ORCA output is recognised by ORCA-only markers, not by its echoed input.
     // A renamed output (a `.txt` or an extensionless file) therefore opens

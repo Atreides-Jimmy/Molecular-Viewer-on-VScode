@@ -169,6 +169,21 @@ export async function parseFchk(input: AsyncIterable<Uint8Array>, options: FchkR
     return scan.finish();
 }
 
+/**
+ * Parse a checkpoint that is already in memory.
+ *
+ * The streaming reader is the one every caller should use — it is what keeps a
+ * 900 MB checkpoint from becoming a string — but `parseFile` only ever receives
+ * text, so a short checkpoint opened under a generic extension still gets the
+ * same reader rather than the XYZ fallback. The bytes are taken as latin1,
+ * which is what the line-oriented scan expects.
+ */
+export function parseFchkText(content: string): FchkResult {
+    const scan = new FchkScan({});
+    scan.feed(Buffer.from(content, 'latin1'));
+    return scan.finish();
+}
+
 /** One wanted array being collected while its value lines stream past. */
 interface Collector {
     name: string;
@@ -608,18 +623,31 @@ class FchkScan {
     private chargesOf(atoms: Atom[]): LogChargeSet[] {
         const out: LogChargeSet[] = [];
         for (const table of this.chargeTables) {
-            if (table.values.length !== atoms.length) continue;
             const values: (number | null)[] = [];
             for (let i = 0; i < atoms.length; i++) {
-                const q = table.values[i];
+                const q = i < table.values.length ? table.values[i] : NaN;
                 values.push(Number.isFinite(q) ? q : null);
             }
+            // A table whose value line was truncated or held a field that is
+            // not a number is still a table the file printed; its unreadable
+            // slots stay null so the panel can show "(n/total)" and let the
+            // user see which atoms have no value. Skipping the table silently
+            // made the analysis disappear instead.
+            if (table.values.length !== atoms.length) {
+                this.warnings.push('the "' + table.label + '" charge table states ' + table.values.length +
+                    ' values for ' + atoms.length + ' atoms: the missing values are left blank');
+            }
+            const covered = values.filter(q => q !== null).length;
             out.push({
                 label: table.label,
                 values,
                 elements: atoms.map(a => a.element),
-                covered: values.filter(q => q !== null).length,
-                complete: true,
+                covered,
+                // The file can state a table that is shorter than the atom list
+                // or whose unparsable fields were left as null. That is a partial
+                // table, and the panel's `(n/total)` suffix is what tells the
+                // user so; claiming completeness would hide the missing values.
+                complete: covered === atoms.length,
                 frame: 0
             });
         }
@@ -655,14 +683,24 @@ class FchkScan {
             });
         }
         if (this.betaLayout && !closed) {
-            const energies = this.betaEnergies.length > 0 ? this.betaEnergies : this.alphaEnergies;
-            spins.push({
-                label: 'Beta',
-                energies,
-                occupations: occupationsOf(energies.length, this.nBeta, this.nBeta, false, true, this.irohf !== 0),
-                occupied: this.nBeta,
-                layout: this.betaLayout
-            });
+            // The beta coefficient block can exist while the file states no
+            // beta orbital energies. Reusing the alpha list there put alpha
+            // numbers under the Beta heading, and an isosurface chosen by that
+            // list could be a different orbital than the one the user read.
+            // A channel whose levels the file does not state is not shown;
+            // the missing block is named instead of invented.
+            if (this.betaEnergies.length === 0) {
+                this.warnings.push('the checkpoint stores beta MO coefficients but no beta orbital energies: ' +
+                    'the beta channel is not shown, because its levels would be guessed');
+            } else {
+                spins.push({
+                    label: 'Beta',
+                    energies: this.betaEnergies,
+                    occupations: occupationsOf(this.betaEnergies.length, this.nBeta, this.nBeta, false, true, this.irohf !== 0),
+                    occupied: this.nBeta,
+                    layout: this.betaLayout
+                });
+            }
         }
         if (spins.length === 0) return undefined;
         return { nBasis, spins, basis, path: this.options.path || '', model: this.model };

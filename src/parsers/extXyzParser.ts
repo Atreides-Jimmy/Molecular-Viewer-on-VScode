@@ -240,13 +240,26 @@ export function parseExtXyz(content: string): MolecularData {
     const frames = countFrames(lines);
     if (frames > 1) warnings.push(frames + ' frames in the file: showing the first');
 
-    const periodic = comment.lattice !== null &&
-        (comment.pbc === null || comment.pbc.some(v => v));
+    // A cell is drawn only when every direction is periodic, because the
+    // viewer's crystal model is three-dimensional: it wraps atoms into the
+    // cell and searches periodic images in all three vectors. Treating a
+    // partially periodic cell (`pbc="T F F"`, a slab or a polymer) as a full
+    // one invented bonds and a density in the directions the file said were
+    // not periodic. Such a file is shown as the molecule it is, and the
+    // warning names the directions that were dropped.
+    const pbc = comment.pbc;
+    const periodic = comment.lattice !== null && (pbc === null || pbc.every(v => v));
     if (periodic && comment.lattice) {
         return buildPeriodicStructure(comment.lattice, sites, title, warnings);
     }
-    if (comment.lattice && comment.pbc && !comment.pbc.some(v => v)) {
+    if (comment.lattice && pbc && !pbc.some(v => v)) {
         warnings.push('pbc is F F F: the Lattice is a box around a molecule and is not drawn');
+    } else if (comment.lattice && pbc) {
+        const axes = ['x', 'y', 'z'].filter((_, i) => pbc[i]).join(', ');
+        warnings.push('pbc is ' + pbc.map(v => (v ? 'T' : 'F')).join(' ') +
+            ': only the ' + axes + ' direction' + (axes.indexOf(',') >= 0 ? 's are' : ' is') +
+            ' periodic, and this viewer draws a full 3D cell. The cell is not applied and the ' +
+            'atoms are shown as written, without periodic bonds');
     }
     return buildMolecularStructure(sites, title, warnings);
 }

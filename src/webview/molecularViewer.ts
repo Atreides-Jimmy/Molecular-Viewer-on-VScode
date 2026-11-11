@@ -5,9 +5,10 @@ import * as path from 'path';
 import * as fs from 'fs';
 import {
     parseFile, parseLogFile, parseXyzTrajectory, LogFrame, OrcaFrame, RouteSection,
-    LogChargeSet, LogSummary, parseTcl, hasScalarChannel, isStructuredProgramOutput,
+    LogChargeSet, LogSummary, parseTcl, hasScalarChannel,
     isFrameLogOutput, isExtXyz, isLammpsDump, parseLammpsDumpTrajectory, parseFchk,
-    readFchkColumn, FchkOrbitals, detectBinaryTrajectory
+    readFchkColumn, FchkOrbitals, detectBinaryTrajectory, isTrajectoryFileName,
+    looksLikeBinaryTrajectory, parseStructuredProgramOutput
 } from '../parsers/index';
 import { ensureBonds } from '../tools/bondDetector';
 import { addHydrogens } from '../tools/addHydrogens';
@@ -28,7 +29,7 @@ import {
     loadBinaryTrajectoryDocument, loadDumpTrajectoryDocument, parseTextTrajectoryFrames,
     pickTextTrajectoryFrame, latticeCellParameters, PickedTextFrame
 } from './trajectoryDocuments';
-import { loadStructureFile } from './structureLoader';
+import { loadStructureFile, loadFchkStructure } from './structureLoader';
 import { buildVmdMoleculePayload, resolveVmdSource, readEggMetadata, EggMeta } from './vmdPayload';
 import { askImportChoice, postImportCopies } from './importHelpers';
 import { renderViewerPage } from './page';
@@ -144,14 +145,23 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         // the trajectory loader itself. Decoding first would also copy a
         // multi-megabyte binary file through a string only to discard it.
         const binaryFormat = detectBinaryTrajectory(content);
-        const textContent = binaryFormat ? '' : decodeText(content);
+        // `.trj` is text for xTB and binary for CHARMM/NAMD. A binary file of a
+        // format this reader does not know (no XTC/TRR/DCD magic) must not be
+        // decoded into mojibake and reported as a parse failure: it gets a
+        // warning that names the real reason instead.
+        const binaryUnsupported = !binaryFormat &&
+            (isTrajectoryFileName(fileName) || ext === 'trj') &&
+            looksLikeBinaryTrajectory(content);
+        const textContent = binaryFormat || binaryUnsupported ? '' : decodeText(content);
         if (progress) {
             progress.report({
                 increment: 5,
-                message: binaryFormat ? 'Reading the trajectory' : 'Preparing the parse'
+                message: binaryFormat ? 'Reading the trajectory'
+                    : binaryUnsupported ? 'Checking the trajectory'
+                    : 'Preparing the parse'
             });
         }
-        const setup = binaryFormat ? undefined : await buildParseOptions(uri, fileName, content, textContent);
+        const setup = binaryFormat || binaryUnsupported ? undefined : await buildParseOptions(uri, fileName, content, textContent);
         const parseOptions = setup && setup.options;
         const parseText = setup && setup.text !== undefined ? setup.text : textContent;
         if (wasCancelled()) throw new vscode.CancellationError();
@@ -190,19 +200,30 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         try {
         // Structured-output detection is a full pass per detector, so it owns
         // the first half of the parser's slice; a frame log is recognised by
-        // cheap markers and leaves the whole slice to its parser.
+        // cheap markers and leaves the whole slice to its parser. The detector
+        // returns the parsed structure, not only a boolean: `parseFile` would
+        // otherwise run the same full passes again to find the reader.
         let logStructured = false;
         let logDetected = false;
+        let structuredData: MolecularData | undefined;
         if (ext === 'log' || ext === 'out') {
             if (isFrameLogOutput(textContent)) {
                 logStructured = false;
             } else {
                 logDetected = true;
-                logStructured = isStructuredProgramOutput(textContent,
-                    parseRange ? (fraction) => parseRange(fraction * 0.5) : undefined);
+                structuredData = parseStructuredProgramOutput(textContent, parseOptions,
+                    parseRange ? (fraction) => parseRange(fraction * 0.5) : undefined) || undefined;
+                logStructured = !!structuredData;
             }
         }
-        if (binaryFormat) {
+        if (binaryUnsupported) {
+            data = {
+                atoms: [], bonds: [], title: fileName, hasExplicitBonds: false,
+                warnings: ['this trajectory file is binary but is not an XTC, TRR or DCD file: ' +
+                    'it cannot be read as coordinates. Export it as DCD/XTC/TRR, or as a text ' +
+                    'trajectory (e.g. .xyz) that this viewer can open']
+            };
+        } else if (binaryFormat) {
             const loaded = await loadBinaryTrajectoryDocument(uri, fileName, content, binaryFormat);
             data = loaded.data;
             trajectoryFrames = loaded.trajectoryFrames;
@@ -330,6 +351,17 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                 });
             } else {
                 data = ensureBonds(parseFile(parseText, fileName, parseOptions));
+            }
+        } else if (structuredData) {
+            // The structured reader's own result, already parsed during the
+            // single detection pass above. Re-parsing through `parseFile`
+            // would scan the text for the same detectors a second time.
+            data = structuredData;
+            if (data.crystal) {
+                data.bonds = [];
+                data.crystal.baseBonds = [];
+            } else {
+                data = ensureBonds(data);
             }
         } else {
             data = parseFile(parseText, fileName, parseOptions);
@@ -1081,7 +1113,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             canSelectMany: false,
                             openLabel: 'Select File to Compare',
                             filters: {
-                                'Molecular Files': ['gjf', 'xyz', 'extxyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta', 'abi', 'abo', 'stru', 'gro', 'xtc', 'trr', 'dcd', 'trj', 'molden', 'pwi', 'pwo', 'lammpstrj', 'dump', 'lmp', 'lammps', 'data', 'md_dump', 'xdatcar', 'outcar', 'xml'],
+                                'Molecular Files': ['gjf', 'xyz', 'extxyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol', 'mol2', 'log', 'out', 'fchk', 'fch', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta', 'abi', 'abo', 'stru', 'gro', 'xtc', 'trr', 'dcd', 'trj', 'molden', 'pwi', 'pwo', 'lammpstrj', 'dump', 'lmp', 'lammps', 'data', 'md_dump', 'xdatcar', 'outcar', 'xml'],
                                 'All Files': ['*']
                             }
                         });
@@ -1092,51 +1124,65 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         const diffUri = result[0];
                         const diffFileName = diffUri.path.split('/').pop() || 'unknown.xyz';
                         const diffExt = diffFileName.toLowerCase().split('.').pop() || '';
-                        // A formatted checkpoint is streamed by the viewer's own
-                        // loader and can be a gigabyte; reading it as text here to
-                        // compare it would cost gigabytes of heap for a structure
-                        // the comparison cannot carry anyway (no orbitals, no cavity).
-                        if (diffExt === 'fchk' || diffExt === 'fch') {
-                            vscode.window.showWarningMessage('A formatted checkpoint cannot be compared here: its log holds the same geometries.');
+                        // A formatted checkpoint is compared by its structure,
+                        // but it is never read as text: a checkpoint can be a
+                        // gigabyte, and the streaming reader already produces
+                        // the atoms the comparison needs.
+                        const diffFchk = diffExt === 'fchk' || diffExt === 'fch';
+                        const diffSize = await fileSize(diffUri);
+                        const diffHeavy = wantsLoadProgress(diffSize, diffExt);
+                        const diffFchkData = diffFchk
+                            ? await withToolProgress('Molecular Viewer: reading ' + diffFileName, diffHeavy,
+                                async (progress, isCancelled) => {
+                                    const range = progressRange(progress, 0, 100);
+                                    range(0, 'Reading the checkpoint');
+                                    await yieldToHost();
+                                    if (isCancelled()) throw new vscode.CancellationError();
+                                    const fchk = await loadFchkStructure(diffUri, diffFileName, range);
+                                    range(1);
+                                    return fchk;
+                                })
+                            : undefined;
+                        const diffLoad = diffFchk ? undefined
+                            : diffHeavy
+                                ? await withLoadProgress('Molecular Viewer: reading ' + diffFileName, undefined,
+                                    (progress, cancelled) => readToolFile(
+                                        diffUri, diffFileName, diffSize, progressRange(progress, 0, 100), cancelled))
+                                : await readToolFile(diffUri, diffFileName, diffSize);
+                        if (diffLoad && diffLoad.binaryUnsupported) {
+                            vscode.window.showWarningMessage('Diff: this trajectory file is binary but is not an ' +
+                                'XTC, TRR or DCD file, so it cannot be read as coordinates.');
                             webviewPanel.webview.postMessage({ command: 'diffResult', cancelled: true });
                             break;
                         }
-                        const diffSize = await fileSize(diffUri);
-                        const diffHeavy = wantsLoadProgress(diffSize, diffExt);
-                        const diffLoad = diffHeavy
-                            ? await withLoadProgress('Molecular Viewer: reading ' + diffFileName, undefined,
-                                (progress, cancelled) => readToolFile(
-                                    diffUri, diffFileName, diffSize, progressRange(progress, 0, 100), cancelled))
-                            : await readToolFile(diffUri, diffFileName, diffSize);
-                        const diffContent = diffLoad.content;
+                        const diffContent = diffLoad ? diffLoad.content : new Uint8Array(0);
                         // A binary trajectory is compared by a frame the user
                         // picks: decoding it as text would only yield mojibake.
-                        const diffBinary = diffLoad.binary;
-                        const diffText = diffLoad.text;
-                        const diffSetup = diffLoad.setup;
+                        const diffBinary = diffLoad ? diffLoad.binary : null;
+                        const diffText = diffLoad ? diffLoad.text : '';
+                        const diffSetup = diffLoad ? diffLoad.setup : undefined;
                         const diffOptions = diffSetup && diffSetup.options;
                         const diffParseText = diffSetup && diffSetup.text !== undefined ? diffSetup.text : diffText;
                         // Detecting structured output is a full pass per detector;
                         // a large log would otherwise sit silent between the read
-                        // and the parse.
-                        let diffStructured = false;
-                        if ((diffExt === 'log' || diffExt === 'out') && diffText !== '') {
-                            if (isFrameLogOutput(diffText)) {
-                                // A frame log is known without a scan; do not open a
-                                // notification that would live for a few milliseconds.
-                                diffStructured = false;
-                            } else {
-                                diffStructured = diffHeavy
+                        // and the parse. The parsed result is kept: probing and
+                        // then letting `parseFile` detect again would scan the
+                        // same text twice.
+                        let diffStructuredData: MolecularData | undefined;
+                        if (diffLoad && (diffExt === 'log' || diffExt === 'out') && diffText !== '') {
+                            if (!isFrameLogOutput(diffText)) {
+                                diffStructuredData = diffHeavy
                                     ? await withToolProgress('Molecular Viewer: reading ' + diffFileName, true, async (progress, isCancelled) => {
                                         const range = progressRange(progress, 0, 100);
                                         range(0, 'Reading the output');
                                         await yieldToHost();
                                         if (isCancelled()) throw new vscode.CancellationError();
-                                        const structured = isStructuredProgramOutput(diffText, (fraction) => range(fraction));
+                                        const structured = parseStructuredProgramOutput(diffText, diffOptions,
+                                            (fraction) => range(fraction));
                                         range(1);
-                                        return structured;
+                                        return structured || undefined;
                                     })
-                                    : isStructuredProgramOutput(diffText);
+                                    : parseStructuredProgramOutput(diffText, diffOptions) || undefined;
                             }
                         }
 
@@ -1164,7 +1210,11 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             trajectory?: boolean;
                         } | null = null;
 
-                        if (diffBinary) {
+                        if (diffFchkData) {
+                            // Parsed by the streaming checkpoint reader above;
+                            // the comparison only needs its atoms and bonds.
+                            diffData = diffFchkData;
+                        } else if (diffBinary) {
                             const loaded = await withToolProgress('Molecular Viewer: reading ' + diffFileName, diffHeavy, async (progress, isCancelled) => {
                                 const range = progressRange(progress, 0, 100);
                                 range(0, 'Decoding the trajectory');
@@ -1243,7 +1293,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             } else {
                                 diffData = { atoms: [], bonds: [], title: 'No source', hasExplicitBonds: false };
                             }
-                        } else if ((diffExt === 'log' || diffExt === 'out') && !diffStructured) {
+                        } else if ((diffExt === 'log' || diffExt === 'out') && !diffStructuredData) {
                             const logResult = await withToolProgress('Molecular Viewer: reading ' + diffFileName, diffHeavy, async (progress, isCancelled) => {
                                 const range = progressRange(progress, 0, 100);
                                 range(0, 'Reading the optimization steps');
@@ -1313,7 +1363,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                     range(0, 'Parsing the structure');
                                     await yieldToHost();
                                     if (isCancelled()) throw new vscode.CancellationError();
-                                    const parsed = parseFile(diffParseText, diffFileName, diffOptions);
+                                    const parsed = diffStructuredData || parseFile(diffParseText, diffFileName, diffOptions);
                                     // A crystal is drawn through its own cell and
                                     // states no perceived bonds here; a molecule's
                                     // bonds are part of what the comparison reads.
@@ -1506,7 +1556,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             canSelectMany: false,
                             openLabel: 'Select Structure to Import',
                             filters: {
-                                'Molecular Files': ['gjf', 'xyz', 'extxyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta', 'abi', 'abo', 'stru', 'gro', 'xtc', 'trr', 'dcd', 'trj', 'molden', 'pwi', 'pwo', 'lammpstrj', 'dump', 'lmp', 'lammps', 'data', 'md_dump', 'xdatcar', 'outcar', 'xml'],
+                                'Molecular Files': ['gjf', 'xyz', 'extxyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol', 'mol2', 'log', 'out', 'fchk', 'fch', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta', 'abi', 'abo', 'stru', 'gro', 'xtc', 'trr', 'dcd', 'trj', 'molden', 'pwi', 'pwo', 'lammpstrj', 'dump', 'lmp', 'lammps', 'data', 'md_dump', 'xdatcar', 'outcar', 'xml'],
                                 'All Files': ['*']
                             }
                         });
@@ -1522,42 +1572,69 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
                             break;
                         }
+                        // A formatted checkpoint is imported through the same
+                        // streaming reader the direct-open path uses. Reading
+                        // it as text first would allocate the whole file and
+                        // then fail to parse it.
+                        const impFchk = impExt === 'fchk' || impExt === 'fch';
                         const impSize = await fileSize(impUri);
                         const impHeavy = wantsLoadProgress(impSize, impExt);
-                        const impLoad = impHeavy
-                            ? await withLoadProgress('Molecular Viewer: reading ' + impFileName, undefined,
-                                (progress, cancelled) => readToolFile(
-                                    impUri, impFileName, impSize, progressRange(progress, 0, 100), cancelled))
-                            : await readToolFile(impUri, impFileName, impSize);
-                        const impContent = impLoad.content;
-                        const impBinary = impLoad.binary;
-                        const impText = impLoad.text;
-                        const impSetup = impLoad.setup;
+                        const impFchkData = impFchk
+                            ? await withToolProgress('Molecular Viewer: reading ' + impFileName, impHeavy,
+                                async (progress, isCancelled) => {
+                                    const range = progressRange(progress, 0, 100);
+                                    range(0, 'Reading the checkpoint');
+                                    await yieldToHost();
+                                    if (isCancelled()) throw new vscode.CancellationError();
+                                    const fchk = await loadFchkStructure(impUri, impFileName, range);
+                                    range(1);
+                                    return fchk;
+                                })
+                            : undefined;
+                        const impLoad = impFchk ? undefined
+                            : impHeavy
+                                ? await withLoadProgress('Molecular Viewer: reading ' + impFileName, undefined,
+                                    (progress, cancelled) => readToolFile(
+                                        impUri, impFileName, impSize, progressRange(progress, 0, 100), cancelled))
+                                : await readToolFile(impUri, impFileName, impSize);
+                        if (impLoad && impLoad.binaryUnsupported) {
+                            vscode.window.showWarningMessage('Import: this trajectory file is binary but is not an ' +
+                                'XTC, TRR or DCD file, so it cannot be read as coordinates.');
+                            webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
+                            break;
+                        }
+                        const impContent = impLoad ? impLoad.content : new Uint8Array(0);
+                        const impBinary = impLoad ? impLoad.binary : null;
+                        const impText = impLoad ? impLoad.text : '';
+                        const impSetup = impLoad ? impLoad.setup : undefined;
                         const impOptions = impSetup && impSetup.options;
                         const impParseText = impSetup && impSetup.text !== undefined ? impSetup.text : impText;
                         // Same structured-output pass as Diff: it must not run
-                        // between two notifications without one of its own.
-                        let impStructured = false;
-                        if ((impExt === 'log' || impExt === 'out') && impText !== '') {
-                            if (isFrameLogOutput(impText)) {
-                                impStructured = false;
-                            } else {
-                                impStructured = impHeavy
+                        // between two notifications without one of its own. The
+                        // parsed result is reused below so the same text is not
+                        // scanned a second time by `parseFile`.
+                        let impStructuredData: MolecularData | undefined;
+                        if (impLoad && (impExt === 'log' || impExt === 'out') && impText !== '') {
+                            if (!isFrameLogOutput(impText)) {
+                                impStructuredData = impHeavy
                                     ? await withToolProgress('Molecular Viewer: reading ' + impFileName, true, async (progress, isCancelled) => {
                                         const range = progressRange(progress, 0, 100);
                                         range(0, 'Reading the output');
                                         await yieldToHost();
                                         if (isCancelled()) throw new vscode.CancellationError();
-                                        const structured = isStructuredProgramOutput(impText, (fraction) => range(fraction));
+                                        const structured = parseStructuredProgramOutput(impText, impOptions,
+                                            (fraction) => range(fraction));
                                         range(1);
-                                        return structured;
+                                        return structured || undefined;
                                     })
-                                    : isStructuredProgramOutput(impText);
+                                    : parseStructuredProgramOutput(impText, impOptions) || undefined;
                             }
                         }
 
-                        let impData: MolecularData | undefined;
-                        if (impBinary) {
+                        let impData: MolecularData | undefined = impFchkData;
+                        if (impFchkData) {
+                            // Already parsed above; nothing left to read.
+                        } else if (impBinary) {
                             const loaded = await withToolProgress('Molecular Viewer: reading ' + impFileName, impHeavy, async (progress, isCancelled) => {
                                 const range = progressRange(progress, 0, 100);
                                 range(0, 'Decoding the trajectory');
@@ -1597,7 +1674,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                 hasExplicitBonds: loaded.data.hasExplicitBonds,
                                 warnings: loaded.data.warnings
                             };
-                        } else if ((impExt === 'log' || impExt === 'out') && !impStructured) {
+                        } else if ((impExt === 'log' || impExt === 'out') && !impStructuredData) {
                             const logResult = await withToolProgress('Molecular Viewer: reading ' + impFileName, impHeavy, async (progress, isCancelled) => {
                                 const range = progressRange(progress, 0, 100);
                                 range(0, 'Reading the optimization steps');
@@ -1669,7 +1746,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                     range(0, 'Parsing the structure');
                                     await yieldToHost();
                                     if (isCancelled()) throw new vscode.CancellationError();
-                                    const parsed = parseFile(impParseText, impFileName, impOptions);
+                                    const parsed = impStructuredData || parseFile(impParseText, impFileName, impOptions);
                                     // Crystal files (CIF/VASP/VESTA/Cube): import the
                                     // unit-cell content as a molecule; periodicity is
                                     // dropped (the current structure stays molecular).
@@ -1686,12 +1763,12 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                                 });
                             }
                         }
-                        applySetupWarnings(impData, impSetup);
                         if (!impData || impData.atoms.length === 0) {
                             vscode.window.showErrorMessage('Import: no atoms found in ' + impFileName);
                             webviewPanel.webview.postMessage({ command: 'importResult', cancelled: true });
                             break;
                         }
+                        applySetupWarnings(impData, impSetup);
 
                         const impAtoms = impData.atoms.map(a => ({ element: a.element, x: a.x, y: a.y, z: a.z, color: ATOM_COLORS[a.element] || '#FF1493', ghost: a.ghost === true ? true : undefined }));
                         const impBonds = impData.bonds.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order }));

@@ -1035,3 +1035,33 @@ export function readBinaryTrajectory(bytes: Uint8Array, options: TrajectoryReadO
 export function isTrajectoryFileName(fileName: string): boolean {
     return /\.(xtc|trr|dcd)$/i.test(fileName);
 }
+
+/**
+ * Whether a trajectory file is binary but not a format this reader knows.
+ *
+ * `.trj` is used by CHARMM and NAMD for their binary trajectories, and also by
+ * xTB for a text trajectory. A file of the first kind that `detectBinaryTrajectory`
+ * does not recognise used to be decoded as UTF-8 and parsed as text, which
+ * produced mojibake and an "unable to parse" error naming the wrong cause.
+ * A NUL byte, or a noticeable share of other control bytes, identifies the
+ * binary case; UTF-16 text keeps its NULs too, but it has a BOM and is decoded
+ * before this is asked (the callers only test `.trj` content).
+ */
+export function looksLikeBinaryTrajectory(bytes: Uint8Array): boolean {
+    // A UTF-16 text file is full of NUL bytes but is still text; the loader's
+    // BOM-aware decoder is the one that should see it.
+    if (bytes.length >= 2 &&
+        ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff))) {
+        return false;
+    }
+    const limit = Math.min(bytes.length, 8192);
+    if (limit === 0) return false;
+    let control = 0;
+    for (let i = 0; i < limit; i++) {
+        const b = bytes[i];
+        if (b === 0) return true;
+        if (b === 9 || b === 10 || b === 11 || b === 12 || b === 13) continue;
+        if (b < 32) control++;
+    }
+    return control / limit > 0.02;
+}

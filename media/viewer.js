@@ -10789,7 +10789,8 @@ function chargeSyncPanel(){
             text='The analysis belongs to frame '+(set.frame+1)+' of '+totalFrames+
                 '; frame '+(currentFrame+1)+' is on screen, so nothing is drawn on it.';
         }else if(set&&set.complete===false){
-            text='This scheme sums hydrogens into heavy atoms: '+(set.covered)+' of '+(set.values?set.values.length:0)+' atoms carry a value.';
+            text='This scheme carries a value for '+(set.covered)+' of '+(set.values?set.values.length:0)+
+                ' atoms; the others are left blank.';
         }
         // A very large structure draws the values for a bounded number of atoms
         // (the layer is one span per atom); saying so is better than a picture

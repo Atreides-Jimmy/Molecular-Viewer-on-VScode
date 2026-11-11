@@ -39,7 +39,7 @@ A clean, fully featured 3D molecular viewer and editor for VS Code / Trae — en
 - **Delete atom** — Click an atom and confirm; indices are updated automatically. To delete several atoms, select them first and press Delete.
 - **Replace atom** — Click **Replace Atom**, click one or more atoms (click again to deselect), then click the button again to pick a new element from 70+. Coordinates are preserved, and crystal base atoms can be replaced too: the bonds touching a replaced site are re-perceived for the new element's radius and valence, while bonds between untouched atoms keep their order.
 - **Ghost atoms** — Mark a position with no nucleus, electrons or bonds — the counterpoise (BSSE) marker. Add one with the Add Atom dialog's Ghost switch or the `X (dummy point)` element; the Replace Atom dialog's Ghost switch turns a whole selection into ghosts of their own elements. Ghosts are excluded from bonding, formula, electron count, Add H and MM, are drawn as faint markers, and round-trip through every format that can express them (Gaussian `C-Bq`, ORCA `C:`, XYZ/PDB dummy markers and others). Crystal structures cannot contain ghosts.
-- **Add H** — **Add H** fills the selected atoms' missing valences with hydrogens, using element-specific bond lengths, angles and the centre's hybridization. Existing atoms never move, re-running adds nothing, hydrogens that would clash are skipped and reported, and the whole addition is one undo step. Not available for crystals or in Diff.
+- **Add H** — **Add H** fills the selected atoms' missing valences with hydrogens, using element-specific bond lengths, angles and the centre's hybridization. Aromatic and partial bond orders are resolved to whole hydrogens (carbon by its σ-bond count), so a 1.5 bond neither overfills nor underfills a centre. Existing atoms never move, re-running adds nothing, hydrogens that would clash are skipped and reported, and the whole addition is one undo step. Not available for crystals or in Diff.
 - **MM Optimize** — The **MM Optimize** panel runs the built-in, dependency-free force field. Set every parameter yourself or use **Low / Medium / High** presets, choose the atoms to relax and start. Only the selected atoms move, but fixed atoms still exert bonded and non-bonded forces. The run streams live coordinates with energy and force plots, reports the energy change, steps, stop reason and final forces, and offers **Pause/Resume** and **Restore initial**. A run is one undo step and is interrupted when you switch tool, frame or molecule; limits are 3000 atoms, 500 steps or 5 s. Not available for crystals or in Diff.
 - **Import structure** — Bring in a second structure from a file or a SMILES string, optionally as multiple copies; see [Importing a structure](#importing-a-structure).
 - **Select Atoms** — Type atom numbers (1-based), ranges (`3-10`), elements (`C H`) or an element with an atom number (`C1 O2`, meaning atom 1 if it is a carbon, atom 2 if it is an oxygen) in the floating panel, or click atoms directly; selected atoms glow yellow. Clicking a selected atom deselects it, and selections accumulate.
@@ -116,12 +116,12 @@ A script also works as the comparison side of **Structure Diff**, using the scri
 
 | Format | Extensions | What is read |
 |--------|------------|--------------|
-| Gaussian input | `.gjf` `.gjf03` `.gjf09` `.gjf16` `.com` | Link 0, route, title, charge/multiplicity, coordinates, connect section, fixed-atom notation; a multi-job `--Link1--` file reports that only the first structure is shown |
+| Gaussian input | `.gjf` `.gjf03` `.gjf09` `.gjf16` `.com` | Link 0, route, title, charge/multiplicity, coordinates, connect section, fixed-atom notation; a multi-line route section is preserved on save, a missing charge/multiplicity line is reported instead of consuming the first atom, and a multi-job `--Link1--` file reports that only the first structure is shown |
 | XYZ | `.xyz` | Standard XYZ; multi-frame trajectories (including ORCA `_trj.xyz`) with frame navigation and convergence when every frame has an energy; a truncated final frame is dropped, and a block shorter than its declared count is reported |
 | MOL2 | `.mol2` | ATOM and BOND sections, aromatic `ar` bonds |
 | MDL Mol | `.mol` | V2000 and V3000 CTfiles: three header lines (a file written with only a title is accepted too), fixed-column or spaced atoms/bonds, aromatic bond type, `*`/`LP`/query atoms as dummy points |
 | Gaussian log | `.log` | Optimisation trajectories, SCF energies, convergence, harmonic frequencies, per-atom charges from the population analysis, the orbital eigenvalues of the last SCF, the solvation cavity the model describes, and a job summary; xtb trajectories are detected automatically |
-| Gaussian formatted checkpoint | `.fchk` `.fch` | Atoms, every per-atom population whose name ends in *charges*, orbital energies and occupations, the contraction basis, the PCM cavity spheres, the energies and the RMS force. The file is streamed, so an 850 MB checkpoint opens without ever becoming a string: the MO coefficient block is skipped by line count and one orbital is read back as a contiguous run when it is drawn |
+| Gaussian formatted checkpoint | `.fchk` `.fch` | Atoms, every per-atom population whose name ends in *charges*, orbital energies and occupations, the contraction basis, the PCM cavity spheres, the energies and the RMS force. The file is streamed, so an 850 MB checkpoint opens without ever becoming a string: the MO coefficient block is skipped by line count and one orbital is read back as a contiguous run when it is drawn. The same streaming reader serves direct open, Import, Structure Diff and VMD scenes, and a charge table with unreadable slots is shown as partial (`n/total`) instead of being dropped |
 | ORCA input | `.inp` | `* xyz … *` and `* xyzfile` (opens the external XYZ it names), `%coords` blocks, Bohr/Å units |
 | ORCA output | `.out` | Cartesian coordinates in Å or a.u., cycles and final geometry, charge/multiplicity, convergence tolerances, frequencies/IR, route line; format detected by content |
 | Turbomole | `.coord` | `$coord` (Bohr → Å; `$coord angs` kept in Å), `$chrg`, `$spin`/`$mult` |
@@ -139,9 +139,9 @@ A script also works as the comparison side of **Structure Diff**, using the scri
 | Quantum ESPRESSO | `.in` `.pwi` `.pwo` | `ibrav` + `celldm` or `CELL_PARAMETERS`, `ATOMIC_POSITIONS` crystal/alat/bohr/angstrom; final output cell and geometry |
 | LAMMPS | `.lmp` `.lammps` `.data` `.lammpstrj` `.dump` `data` | Data box and tilt, `Masses`/`mass`/`dump_modify element` type names, atomic/charge/full/molecular styles, and the `Bonds` section (the file's connectivity and, when the header says `# order`, its bond orders; the minimum-image shift is recovered from the cell); a multi-frame dump opens with frame navigation and a per-frame triclinic box (restricted or general `abc origin`), a single frame stays a periodic crystal; an input script (`read_data`, `include`, `variable`) opens the structure it names, and the bare `data` file opens by itself |
 | GROMACS trajectory | `.xtc` `.trr` | Binary XTC/TRR recognised by magic: XTC integer-compressed coordinates, TRR coordinate blocks, nm → Å, per-frame box; topology, elements and bonds from the same-name `.gro`/`.pdb` (or a unique atom-count match) |
-| DCD trajectory | `.dcd` | CHARMM/NAMD/LAMMPS DCD with 4- or 8-byte Fortran records, either byte order, fixed atoms and unit-cell records; per-frame coordinates and box, with `.gro`/`.pdb`/`.xyz`/`.data` topology |
+| DCD trajectory | `.dcd` | CHARMM/NAMD/LAMMPS DCD with 4- or 8-byte Fortran records, either byte order, fixed atoms and unit-cell records; per-frame coordinates and box, with `.gro`/`.pdb`/`.xyz`/`.data` topology. A binary `.trj` that is not XTC/TRR/DCD is reported as an unsupported binary trajectory instead of being decoded as text |
 | GROMACS | `.gro` | nm → Å, nine-value triclinic box in GROMACS order, velocities ignored; atom names resolved by residue/atom-name rules (protein `CA`/`HG` stay C/H, ion residues keep their metal); a zero box is a molecule |
-| Extended XYZ / GPUMD | `.xyz` `.extxyz` | `Lattice=`, `Properties=` and `pbc=` on the comment line, property layout resolved by name, frame count reported (blank separators and a cut-off tail are handled) |
+| Extended XYZ / GPUMD | `.xyz` `.extxyz` | `Lattice=`, `Properties=` and `pbc=` on the comment line, property layout resolved by name, frame count reported (blank separators and a cut-off tail are handled); a partially periodic `pbc` (e.g. `T F F`) is reported and shown as the molecule it is rather than as a full 3D cell |
 | DeepMD / DP-GEN | `coord.raw` `coord.npy` | `type.raw`/`type_map.raw` types, `box.raw`/`box.npy` cell, empty `nopbc`; first frame shown, and type indices a map does not list are reported |
 | PySCF | `.out` `.log` | `[INPUT]` and `New geometry` blocks, periodic cell vectors in Bohr, final geometry |
 | Molden | `.molden` | `[Atoms]` table with its AU/Å unit header |
@@ -322,7 +322,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 - **删除原子** — 点击原子并确认，原子与键会自动重新编号。要一次删除多个原子，先选中它们再按 Delete。
 - **替换原子** — 点击 **Replace Atom**，在 3D 视图中点击一个或多个原子（再次点击取消选中），然后再次点击按钮，从 70+ 种元素中选择新元素。坐标保持不变，晶体的基础原子也可以替换：与被替换位点相连的键会按新元素的半径与价重新感知，未受影响原子之间的键保持原有键级。
 - **幽灵原子** — 一个只有位置、没有原子核、电子和化学键的标记，用于 counterpoise（BSSE）计算。可在添加原子弹窗中打开 Ghost 开关或选择 `X (dummy point)` 元素；替换原子弹窗的 Ghost 开关可以把整个选区变成各自元素的幽灵原子。幽灵原子不参与成键、分子式、电子数、补氢与 MM，绘制为淡色小标记，并能在各格式中往返（Gaussian `C-Bq`、ORCA `C:`、XYZ/PDB 占位标记等）。晶体结构中不允许幽灵原子。
-- **补氢** — **Add H** 为所选原子补齐缺失的价，采用元素专属的键长、键角与中心杂化态。已有原子绝不会移动，重复运行不会新增，放不下（会与别的原子重叠）的氢会被跳过并报告，整次添加是一步 Undo。晶体结构与 Diff 模式下不可用。
+- **补氢** — **Add H** 为所选原子补齐缺失的价，采用元素专属的键长、键角与中心杂化态。芳香键与部分键级会折算为整数个氢（碳按 σ 键数计算），因此 1.5 的键不会让中心多补或少补一个氢。已有原子绝不会移动，重复运行不会新增，放不下（会与别的原子重叠）的氢会被跳过并报告，整次添加是一步 Undo。晶体结构与 Diff 模式下不可用。
 - **MM 优化** — **MM Optimize** 面板运行内置、零依赖的力场。可以逐项设置参数，或一键选择 **Low / Medium / High** 三档预设，再选择要松弛的原子并开始。只有选中的原子会移动，但固定原子仍通过键、角、二面角与非键作用施力。运行中实时更新坐标，并绘制能量与受力曲线；结束后报告能量变化、步数、停止原因与最终受力，支持 **Pause/Resume** 与 **Restore initial**。整次运行是一步 Undo，切换工具、帧或分子会中断运行；上限为 3000 原子、500 步或 5 秒。晶体结构与 Diff 模式下不可用。
 - **导入结构** — 从文件或 SMILES 字符串导入第二个结构，可选择副本数量；详见 [导入结构](#导入结构)。
 - **选择原子** — 在浮动面板中输入原子编号（从 1 开始）、范围（如 `3-10`）、元素（如 `C H`）或「元素+编号」（如 `C1 O2`，表示第 1 个原子且为碳、第 2 个原子且为氧），也可以直接在 3D 视图中点击原子；选中的原子显示为黄色。再次点击已选原子会取消选中，选择会累积。
@@ -399,12 +399,12 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 | 格式 | 扩展名 | 读取内容 |
 |------|--------|----------|
-| Gaussian 输入 | `.gjf` `.gjf03` `.gjf09` `.gjf16` `.com` | Link 0、route、标题、电荷/多重度、坐标、connect 段、固定原子写法；多任务 `--Link1--` 文件会提示只显示第一个结构 |
+| Gaussian 输入 | `.gjf` `.gjf03` `.gjf09` `.gjf16` `.com` | Link 0、route、标题、电荷/多重度、坐标、connect 段、固定原子写法；多行 route 在另存时完整保留，缺少电荷/多重度行时会提示而不是吞掉第一个原子；多任务 `--Link1--` 文件会提示只显示第一个结构 |
 | XYZ | `.xyz` | 标准 XYZ；多帧轨迹（含 ORCA `_trj.xyz`）支持帧导航，每帧都带能量时显示收敛信息；被截断的末帧会被丢弃，原子块少于声明数量时会警告 |
 | MOL2 | `.mol2` | ATOM 与 BOND 段、芳香 `ar` 键 |
 | MDL Mol | `.mol` | V2000 与 V3000 CTfile：三行头部（只写了标题的旧文件也能读）、定宽或空格分隔的原子/键表、芳香键类型、`*`/`LP`/查询原子按哑点处理 |
 | Gaussian 日志 | `.log` | 优化轨迹、SCF 能量、收敛、谐振频率、布居分析给出的逐原子电荷、最后一个 SCF 的轨道本征值、溶剂化模型描述的空腔，以及任务摘要；xtb 轨迹会自动识别 |
-| Gaussian 格式化检查点 | `.fchk` `.fch` | 原子、名称以 *charges* 结尾的逐原子布居、轨道能量与占据、收缩基组、PCM 空腔球、能量与 RMS 力。文件是流式读取的，850 MB 也不会先变成一个字符串：轨道系数块按行数跳过，画某个轨道时再按连续区间读回 |
+| Gaussian 格式化检查点 | `.fchk` `.fch` | 原子、名称以 *charges* 结尾的逐原子布居、轨道能量与占据、收缩基组、PCM 空腔球、能量与 RMS 力。文件是流式读取的，850 MB 也不会先变成一个字符串：轨道系数块按行数跳过，画某个轨道时再按连续区间读回。直接打开、Import、结构 Diff 与 VMD 场景共用这一流式读取；有不可读槽位的电荷表按部分数据（`n/total`）显示，而不是整张丢弃 |
 | ORCA 输入 | `.inp` | `* xyz … *` 与 `* xyzfile`（打开其指向的外部 XYZ）、`%coords` 块、Bohr/Å 单位 |
 | ORCA 输出 | `.out` | Å 或 a.u. 的笛卡尔坐标、每个循环与最终几何、电荷/多重度、收敛容差、频率/IR、route 行；按内容识别格式 |
 | Turbomole | `.coord` | `$coord`（Bohr → Å；`$coord angs` 保持 Å）、`$chrg`、`$spin`/`$mult` |
@@ -422,9 +422,9 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 | Quantum ESPRESSO | `.in` `.pwi` `.pwo` | `ibrav` + `celldm` 或 `CELL_PARAMETERS`、`ATOMIC_POSITIONS` 的 crystal/alat/bohr/angstrom；输出中的最终晶胞与几何 |
 | LAMMPS | `.lmp` `.lammps` `.data` `.lammpstrj` `.dump` `data` | 数据文件盒与倾斜、`Masses`/`mass`/`dump_modify element` 类型名、atomic/charge/full/molecular 样式，以及 `Bonds` 段（文件的连通性；头部写 `# order` 时还读入键级；最小镜像平移由晶胞反算）；多帧 dump 以帧浏览打开并携带每帧三斜盒（restricted 或 general `abc origin`），单帧仍按周期晶体显示；输入脚本（`read_data`、`include`、`variable`）会打开它指向的结构，裸 `data` 文件也可单独打开 |
 | GROMACS 轨迹 | `.xtc` `.trr` | 按魔数识别的二进制 XTC/TRR：XTC 整数压缩坐标、TRR 坐标块、nm → Å、每帧盒子；元素、颜色与键来自同名 `.gro`/`.pdb`（或唯一原子数匹配） |
-| DCD 轨迹 | `.dcd` | CHARMM/NAMD/LAMMPS DCD，支持 4/8 字节 Fortran 记录、两种字节序、固定原子与晶胞记录；逐帧坐标与盒子，拓扑取 `.gro`/`.pdb`/`.xyz`/`.data` |
+| DCD 轨迹 | `.dcd` | CHARMM/NAMD/LAMMPS DCD，支持 4/8 字节 Fortran 记录、两种字节序、固定原子与晶胞记录；逐帧坐标与盒子，拓扑取 `.gro`/`.pdb`/`.xyz`/`.data`。不是 XTC/TRR/DCD 的二进制 `.trj` 会明确提示为不支持的二进制轨迹，而不再被当成文本解码 |
 | GROMACS | `.gro` | nm → Å、按 GROMACS 顺序排列的九值三斜盒、忽略速度列；原子名按残基/原子名规则判定（蛋白 `CA`/`HG` 保持 C/H，离子残基保留金属）；零盒按分子处理 |
-| Extended XYZ / GPUMD | `.xyz` `.extxyz` | 注释行的 `Lattice=`、`Properties=` 与 `pbc=`，按列名解析属性布局，并报告帧数（能处理帧间空行与被截断的尾部） |
+| Extended XYZ / GPUMD | `.xyz` `.extxyz` | 注释行的 `Lattice=`、`Properties=` 与 `pbc=`，按列名解析属性布局，并报告帧数（能处理帧间空行与被截断的尾部）；部分周期 `pbc`（如 `T F F`）会给出提示并按分子显示，而不是当成完整三维晶胞 |
 | DeepMD / DP-GEN | `coord.raw` `coord.npy` | `type.raw`/`type_map.raw` 类型、`box.raw`/`box.npy` 晶胞、空 `nopbc`；显示第一帧，并报告 type_map 未列出的类型索引 |
 | PySCF | `.out` `.log` | `[INPUT]` 与 `New geometry` 块、Bohr 单位的周期晶格矢量、最终几何 |
 | Molden | `.molden` | `[Atoms]` 表及其 AU/Å 单位头 |

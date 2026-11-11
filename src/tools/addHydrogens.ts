@@ -231,7 +231,11 @@ function placeHydrogens(rawAtoms: unknown, rawBonds: unknown, rawSelected: unkno
             continue;
         }
         const v = valence[idx];
-        const count = Math.min(Math.round(target - v), MAX_PER_CENTRE);
+        const hybrid = hybridizationOf(adjOrders[idx], neighbourConjugated(idx, adj, adjOrders), el);
+        // A hydrogen is a whole atom, so the deficit cannot simply be rounded:
+        // an aromatic bond is 1.5 in this model and a partially charged centre
+        // can leave a half unit. See `hydrogenDeficit`.
+        const count = Math.min(hydrogenDeficit(el, target, adjOrders[idx], hybrid), MAX_PER_CENTRE);
         if (count < 1) {
             // Nothing is added when the valence is already at (or above) the
             // empirical value — hydrogens cannot take a bond away.
@@ -259,7 +263,6 @@ function placeHydrogens(rawAtoms: unknown, rawBonds: unknown, rawSelected: unkno
                 fixed.push(dir);
             }
         }
-        const hybrid = hybridizationOf(adjOrders[idx], neighbourConjugated(idx, adj, adjOrders), el);
         const angle = empiricalBondAngle(el, hybrid);
         const length = clampLength(empiricalBondLength(el, 'H', 1));
         const dirs = initialDirections(fixed, count);
@@ -365,6 +368,61 @@ function neighbourConjugated(centre: number, adj: number[][], adjOrders: number[
         }
     }
     return false;
+}
+
+/**
+ * How many whole hydrogens a centre is missing.
+ *
+ * Carbon is read from its σ bonds: every bond, whatever its order, contributes
+ * one σ bond, and the hybridization states how many σ bonds fill carbon's
+ * valence (sp 2, sp² 3, sp³ 4). Aromatic carbon is the case that makes a plain
+ * rounding wrong — two aromatic bonds are 1.5 + 1.5 = 3 in the bond-order sum,
+ * which is correct for a CH, but one aromatic bond beside a single bond is
+ * 2.5 and `Math.round(4 − 2.5)` would add two hydrogens to a centre that has
+ * only three σ directions. The σ count gives one, which is the chemistry.
+ *
+ * Other elements keep their bond orders, but a fractional order is resolved to
+ * a whole one first: an aromatic bond is treated as whichever of 1 or 2 the
+ * rest of the centre makes more consistent, and a tie prefers the higher order
+ * (fewer hydrogens), so a half bond can no longer overfill a valence.
+ */
+function hydrogenDeficit(element: string, target: number, orders: number[], hybrid: number): number {
+    if (element === 'C') {
+        const sigmaTarget = Math.max(0, target - (hybrid === SP ? 2 : hybrid === SP2 ? 1 : 0));
+        return sigmaTarget - orders.length;
+    }
+    let fixed = 0;
+    const fractional: number[] = [];
+    for (let i = 0; i < orders.length; i++) {
+        const order = orders[i];
+        const nearest = Math.round(order);
+        if (Math.abs(order - nearest) < 1e-6) fixed += nearest;
+        else fractional.push(order);
+    }
+    if (fractional.length === 0) return Math.round(target - fixed);
+    let model = fixed;
+    for (let i = 0; i < fractional.length; i++) model += fractional[i];
+    // A pathological centre with many fractional bonds is not enumerated; the
+    // documented rounding is still better than inventing a Kekulé structure.
+    if (fractional.length > 10) return Math.round(target - model);
+    let best = Math.round(target - model);
+    let bestDistance = Infinity;
+    let bestSum = model;
+    const combinations = 1 << fractional.length;
+    for (let mask = 0; mask < combinations; mask++) {
+        let sum = fixed;
+        for (let i = 0; i < fractional.length; i++) {
+            sum += (mask & (1 << i)) ? Math.ceil(fractional[i]) : Math.floor(fractional[i]);
+        }
+        const distance = Math.abs(sum - model);
+        if (distance < bestDistance - 1e-9 ||
+            (Math.abs(distance - bestDistance) <= 1e-9 && sum > bestSum)) {
+            bestDistance = distance;
+            bestSum = sum;
+            best = Math.round(target - sum);
+        }
+    }
+    return best;
 }
 
 /** X–H length inside a band that keeps a corrupt table entry from breaking the view. */
