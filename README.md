@@ -267,6 +267,8 @@ npm run lint      # Type-check without emitting
 npm run package   # Package as .vsix
 ```
 
+The extension host lives in `src/` (`extension.ts`, `parsers/`, `tools/`). The 3D page is built by `src/webview/page.ts`, which inlines `media/viewer.css` and `media/viewer.js` beside `media/three.min.js`; the document payload reaches the page as `window.__MV_HOST__`. `src/webview/molecularViewer.ts` keeps the editor provider and its document only, with the companion readers, trajectory loaders and payload builders in the sibling modules.
+
 ### Contributing
 
 Fork the repository, create a feature branch, commit your changes, push the branch and open a Pull Request. Please keep changes focused and describe what they change.
@@ -547,6 +549,8 @@ npm run watch     # 监听改动并编译
 npm run lint      # 只做类型检查
 npm run package   # 打包为 .vsix
 ```
+
+扩展宿主代码在 `src/`（`extension.ts`、`parsers/`、`tools/`）。3D 页面由 `src/webview/page.ts` 组装，它把 `media/viewer.css`、`media/viewer.js` 与 `media/three.min.js` 内联到同一个 HTML 页面，文档数据通过 `window.__MV_HOST__` 传入；`src/webview/molecularViewer.ts` 只保留编辑器 provider 与文档处理，配套读取、轨迹加载与载荷构建分别在相邻模块中。
 
 ### 贡献
 

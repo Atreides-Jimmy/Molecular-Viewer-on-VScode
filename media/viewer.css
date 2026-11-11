@@ -1,0 +1,498 @@
+*{margin:0;padding:0;box-sizing:border-box}
+html{width:100%;height:100%;overflow:hidden}
+body{width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;background:var(--vscode-editor-background,#1e1e1e);font-family:var(--vscode-font-family,sans-serif);color:var(--vscode-editor-foreground,#ccc)}
+/* The viewer is not a document: nothing on the page is text to be selected, so
+   Ctrl+A can only mean Select All of the *structure*, and a drag that starts on
+   the canvas and ends over a panel never paints the toolbar blue on the way.
+   This is a structural guarantee — it holds even where the key never reaches the
+   page's own handler. user-select inherits, so one rule covers every panel;
+   form fields get their text behaviour back, and the load-error block is
+   deliberately selectable so a failure can be copied into a bug report. */
+body{-webkit-user-select:none;user-select:none}
+input,textarea{-webkit-user-select:text;user-select:text}
+#error-msg{-webkit-user-select:text;user-select:text}
+#toolbar{flex-shrink:0;background:var(--vscode-editor-background,#1e1e1e);border-bottom:1px solid var(--vscode-panel-border,#444);display:flex;flex-direction:column;padding:2px 0;z-index:20}
+#toolbar .trow{display:flex;align-items:center;gap:2px;min-height:34px;padding:0 8px;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
+#toolbar .trow::-webkit-scrollbar{height:3px}
+#toolbar .trow::-webkit-scrollbar-track{background:transparent}
+#toolbar .trow::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.15);border-radius:2px}
+.tbtn{background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#fff);border:1px solid var(--vscode-panel-border,#444);padding:3px 10px;border-radius:3px;cursor:pointer;font-size:11px;white-space:nowrap;flex-shrink:0}
+.tbtn:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e)}
+.tbtn.active{background:var(--vscode-button-background,#0e639c);border-color:var(--vscode-button-background,#0e639c)}
+.tsep{width:1px;height:20px;background:var(--vscode-panel-border,#444);margin:0 4px;flex-shrink:0}
+#status-bar{height:24px;flex-shrink:0;background:var(--vscode-statusBar-background,#007acc);color:var(--vscode-statusBar-foreground,#fff);display:flex;align-items:center;padding:0 10px;font-size:11px;z-index:20;gap:12px;overflow:hidden}
+#selection-info{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+#mode-info{white-space:nowrap;flex-shrink:0}
+#container{flex:1;position:relative;overflow:hidden;min-height:0;outline:none}
+#mol-info{position:absolute;top:8px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.55);padding:6px 10px;border-radius:4px;z-index:25;pointer-events:none;line-height:1.6;max-width:min(300px,calc(100% - 16px));overflow:hidden}
+#mm-panel{display:none;position:absolute;top:8px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.62);border:1px solid var(--vscode-panel-border,#444);border-radius:4px;padding:8px 10px;z-index:26;line-height:1.5;width:340px;max-width:calc(100% - 16px);max-height:calc(100% - 60px);overflow-y:auto;pointer-events:auto}
+#mm-panel.show{display:block}
+#mm-panel .mm-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:5px;font-weight:600}
+#mm-panel .mm-close{cursor:pointer;opacity:0.7;padding:0 2px}
+#mm-panel .mm-close:hover{opacity:1}
+#mm-panel .mm-param{color:var(--vscode-descriptionForeground,#a9a9a9);font-size:10px;line-height:1.45;margin:1px 0}
+#mm-panel .mm-sec{margin:7px 0 3px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.15);font-size:10px;color:var(--vscode-descriptionForeground,#999);text-transform:uppercase;letter-spacing:0.4px}
+#mm-panel .mm-ctl{display:flex;align-items:center;gap:6px;margin:3px 0}
+#mm-panel .mm-ctl-label{flex:0 0 96px;color:var(--vscode-descriptionForeground,#a9a9a9)}
+#mm-panel .mm-ctl-sel{flex:1 1 auto;min-width:0;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;font-size:11px;padding:1px 2px}
+#mm-panel .mm-sel{margin-top:6px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.15);word-break:break-word}
+#mm-panel .mm-run{margin-top:6px;width:100%;background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff);border:none;border-radius:3px;padding:4px 6px;font-size:11px;cursor:pointer}
+#mm-panel .mm-run:hover:not(:disabled){background:var(--vscode-button-hoverBackground,#1177bb)}
+#mm-panel .mm-run:disabled{opacity:0.5;cursor:default}
+#mm-panel .mm-res{margin-top:6px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.15);font-size:10px;line-height:1.45}
+#mm-panel .mm-res-head{color:var(--vscode-textLink-foreground,#3794ff);font-weight:600}
+#mm-panel .mm-err{color:var(--vscode-errorForeground,#f66);margin-top:5px;font-size:10px;line-height:1.4}
+#mm-panel .mm-btns{display:flex;gap:6px;margin-top:6px}
+#mm-panel .mm-btns button{flex:1 1 0;min-width:0;background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#ccc);border:1px solid var(--vscode-button-border,#555);border-radius:3px;padding:4px 6px;font-size:11px;cursor:pointer}
+#mm-panel .mm-btns button:hover:not(:disabled){background:var(--vscode-button-secondaryHoverBackground,#45494e)}
+#mm-panel .mm-btns button:disabled{opacity:0.5;cursor:default}
+#mm-panel .mm-prog{margin-top:6px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.15);font-size:10px;line-height:1.45;white-space:pre-wrap}
+#mm-panel .mm-curve-title{color:var(--vscode-descriptionForeground,#999);font-size:10px;margin:5px 0 1px}
+#mm-panel .mm-curve{width:100%;height:78px;display:block}
+#mm-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
+#mm-reopen.show{display:block}
+#mm-reopen:hover{background:var(--vscode-button-background,#0e639c)}
+#mm-reopen.busy{border-color:var(--vscode-textLink-foreground,#3794ff);color:var(--vscode-textLink-foreground,#3794ff)}
+#axes-indicator{position:absolute;bottom:12px;left:12px;width:90px;height:90px;z-index:25;pointer-events:none}
+#axes-indicator svg{width:100%;height:100%}
+/* The crystal card is a fixed 210 px column, the same width as the View and
+   Edit Coordinates cards below it. Its width used to be shrink-to-fit, and its
+   six action buttons are inline-level with width:100%, so intrinsic sizing
+   measured all six side by side and stretched the card to their sum (about
+   600 px) even though it renders them stacked. A fixed column keeps the card
+   over its own controls, not over the structure. */
+#crystal-panel{position:absolute;top:8px;right:8px;background:rgba(0,0,0,0.6);border:1px solid var(--vscode-panel-border,#444);border-radius:4px;padding:8px 10px 5px;font-size:11px;color:var(--vscode-editor-foreground,#ccc);z-index:25;display:none;width:210px;max-width:calc(100% - 16px);max-height:calc(100% - 16px);overflow-y:auto}
+#crystal-panel h4{margin:0 0 6px 0;font-size:11px;font-weight:600}
+#crystal-panel .bnd-row{display:flex;align-items:center;gap:4px;margin:2px 0}
+#crystal-panel .bnd-row label{width:52px;text-align:right}
+#crystal-panel .bnd-row input{width:48px;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;padding:1px 3px;font-size:11px;text-align:center}
+/* a/b/c each carry their lower and upper bound on one line: two inputs fill
+   the row around a dash, so the three axes cost three rows instead of six. */
+#crystal-panel .bnd-axis label{width:14px;text-align:center;font-weight:600}
+#crystal-panel .bnd-axis input{flex:1 1 0;width:auto;min-width:0}
+#crystal-panel .bnd-dash{flex:0 0 auto;font-size:10px;color:var(--vscode-descriptionForeground,#999)}
+#crystal-panel .bnd-row select{flex:1;min-width:0;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;padding:1px 2px;font-size:11px}
+#crystal-panel .bnd-row select:disabled{opacity:.5;cursor:default}
+#crystal-panel .bnd-occ{display:flex;align-items:center;gap:4px;margin:3px 0 3px 2px;font-size:10px;line-height:1.3;color:var(--vscode-descriptionForeground,#999);cursor:pointer;white-space:normal}
+#crystal-panel .bnd-occ input{width:auto;margin:0;flex:none}
+#crystal-panel .bnd-occ.off{opacity:.5;cursor:default}
+#crystal-panel .bnd-btn{display:block;margin-top:4px;width:100%;background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff);border:none;border-radius:3px;padding:3px 6px;font-size:11px;cursor:pointer}
+#crystal-panel .bnd-btn:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
+#crystal-panel .bnd-presets{display:flex;gap:4px;margin-top:4px}
+#crystal-panel .bnd-mini{flex:1;background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#fff);border:1px solid var(--vscode-panel-border,#444);border-radius:3px;padding:3px 4px;font-size:11px;cursor:pointer;white-space:nowrap;min-width:0}
+#crystal-panel .bnd-mini:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e)}
+#crystal-panel .bnd-cell{margin-top:4px;font-size:10px;line-height:1.4;color:var(--vscode-descriptionForeground,#999);white-space:pre-line}
+#crystal-panel .bnd-sym{margin-top:6px;font-size:10px;line-height:1.4;color:#e8a33d;white-space:normal}
+#crystal-panel .bnd-sym .bnd-btn{margin-top:4px;background:var(--vscode-button-secondaryBackground,#3a3d41)}
+#crystal-panel .bnd-sym .bnd-btn:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e)}
+#crystal-panel .hk-title{margin:6px 0 2px;font-weight:600;font-size:11px}
+#crystal-panel .hk-row label{width:34px}
+#crystal-panel .hk-row input{flex:1 1 0;width:auto;min-width:0;padding:1px 2px}
+#crystal-panel .hk-val{margin:1px 0 0 34px;font-size:10px;line-height:1.35;color:var(--vscode-descriptionForeground,#999);white-space:normal}
+#egg-panel{position:absolute;top:8px;right:8px;background:rgba(0,0,0,0.6);border:1px solid var(--vscode-panel-border,#444);border-radius:4px;padding:8px 10px;font-size:11px;color:var(--vscode-editor-foreground,#ccc);z-index:25;display:none;min-width:200px;max-width:calc(100% - 16px);max-height:calc(100% - 70px);overflow-y:auto}
+#egg-panel.show{display:block}
+#egg-panel .ep-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:5px;font-weight:600}
+#egg-panel .ep-head .ep-actions{display:flex;gap:4px;align-items:center}
+#egg-panel .ep-head button{background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#fff);border:1px solid var(--vscode-panel-border,#444);border-radius:3px;padding:1px 6px;font-size:10px;cursor:pointer}
+#egg-panel .ep-head button:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
+#egg-panel .ep-close{cursor:pointer;opacity:0.7;padding:0 2px}
+#egg-panel .ep-close:hover{opacity:1}
+#egg-panel .ep-row{display:flex;align-items:center;gap:6px;margin:3px 0;padding:3px 6px 3px 5px;cursor:pointer;white-space:nowrap;border-left:3px solid var(--vscode-descriptionForeground,#888);border-radius:2px}
+#egg-panel .ep-row:hover{background:rgba(255,255,255,0.06)}
+#egg-panel .ep-row input{margin:0;cursor:pointer}
+#egg-panel .ep-row.ep-hidden .ep-name,#egg-panel .ep-row.ep-hidden .ep-units{opacity:0.45;text-decoration:line-through}
+#egg-panel .ep-name{font-weight:600}
+#egg-panel .ep-units{color:var(--vscode-descriptionForeground,#999)}
+#select-panel{display:none;position:absolute;bottom:40px;left:8px;z-index:50;background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:4px;padding:8px;width:280px;max-width:calc(100% - 16px);box-shadow:0 2px 8px rgba(0,0,0,0.3)}
+#select-panel .sp-title{font-size:12px;font-weight:bold;margin-bottom:4px}
+#select-panel input[type=text]{width:100%;padding:6px 8px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:12px;box-sizing:border-box}
+#select-panel .sp-btns{display:flex;gap:4px;margin-top:4px}
+#select-panel .sp-btns button{flex:1}
+#rotate-panel{display:none;position:absolute;bottom:40px;left:8px;z-index:50;background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:4px;padding:8px;width:320px;max-width:calc(100% - 16px);box-shadow:0 2px 8px rgba(0,0,0,0.3)}
+#rotate-panel .rp-title{font-size:12px;font-weight:bold;margin-bottom:6px}
+#rotate-panel .rp-field{margin:4px 0}
+#rotate-panel .rp-field label{display:block;font-size:11px;color:var(--vscode-descriptionForeground,#999);margin-bottom:2px}
+#rotate-panel input[type=text]{width:100%;padding:6px 8px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:12px;box-sizing:border-box}
+#rotate-panel .rp-btns{display:flex;gap:4px;margin-top:6px}
+#rotate-panel .rp-btns button{flex:1}
+#rotate-panel .rp-slider-row{display:flex;align-items:center;gap:6px;margin:4px 0}
+#rotate-panel .rp-slider-row label{font-size:11px;white-space:nowrap}
+#rotate-panel .rp-slider-row input[type=range]{flex:1}
+#rotate-panel .rp-angle-val{font-size:12px;font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff);min-width:46px;text-align:right}
+#rotate-panel .rp-slider-row input[type=number]{width:58px;flex-shrink:0;padding:3px 4px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:11px;box-sizing:border-box}
+#rotate-panel .rp-error{color:var(--vscode-errorForeground,#f66);font-size:11px;margin-top:4px;line-height:1.4}
+#rotate-panel .rp-hint{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:4px;line-height:1.4}
+#neigh-panel,#int-panel{display:none;position:absolute;bottom:40px;left:8px;z-index:50;background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:4px;padding:8px;width:330px;max-width:calc(100% - 16px);box-shadow:0 2px 8px rgba(0,0,0,0.3)}
+#neigh-panel .ng-title,#int-panel .ng-title{font-size:12px;font-weight:bold;margin-bottom:4px}
+#neigh-panel .ng-line,#int-panel .ng-line{display:flex;align-items:center;gap:6px;margin:4px 0;font-size:11px;min-height:20px}
+#neigh-panel .ng-line label,#int-panel .ng-line label{white-space:nowrap;color:var(--vscode-descriptionForeground,#999)}
+#neigh-panel .ng-line .ng-chk,#int-panel .ng-line .ng-chk{display:flex;align-items:center;gap:3px;color:var(--vscode-editor-foreground,#ccc)}
+#neigh-panel input[type=number],#int-panel input[type=number]{width:64px;padding:3px 5px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:11px;box-sizing:border-box}
+#neigh-panel .ng-anchor{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#neigh-panel .ng-summary,#int-panel .ng-summary{font-size:11px;color:var(--vscode-descriptionForeground,#999);margin:4px 0;min-height:14px}
+#neigh-panel .ng-list,#int-panel .ng-list{max-height:220px;overflow-y:auto;border-top:1px solid rgba(128,128,128,0.25);margin-top:4px}
+#neigh-panel .ng-item,#int-panel .ng-item{display:flex;align-items:baseline;gap:8px;padding:2px 3px;font-size:11px;cursor:pointer;white-space:nowrap}
+#neigh-panel .ng-item:hover,#int-panel .ng-item:hover{background:rgba(255,255,255,0.08)}
+#neigh-panel .ng-item.ng-off,#int-panel .ng-item.ng-off{opacity:0.6;cursor:default}
+#neigh-panel .ng-name,#int-panel .ng-name{flex:1;overflow:hidden;text-overflow:ellipsis}
+#neigh-panel .ng-d,#int-panel .ng-d{color:var(--vscode-descriptionForeground,#999);font-variant-numeric:tabular-nums}
+#neigh-panel .ng-cell,#int-panel .ng-cell{color:#e8a33d;font-size:10px}
+#neigh-panel .ng-empty,#int-panel .ng-empty{font-size:11px;color:var(--vscode-descriptionForeground,#999);padding:4px 3px}
+#neigh-panel .ng-btns{display:flex;gap:4px;margin-top:6px}
+#neigh-panel .ng-btns button{flex:1;padding:4px 6px;border-radius:3px;cursor:pointer;font-size:11px;border:1px solid var(--vscode-button-background,#0e639c);background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff)}
+#neigh-panel .ng-btns button:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
+#neigh-panel .ng-hint,#int-panel .ng-hint{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:4px;line-height:1.4}
+#int-panel .ng-types{flex-wrap:wrap;gap:4px 8px}
+#int-panel .ng-type{flex:none;font-size:9px;font-weight:600;padding:0 3px;border-radius:2px;color:#111}
+#int-panel .ng-type-hb{background:#4fc3f7}
+#int-panel .ng-type-xb{background:#ffb74d}
+#int-panel .ng-type-cb{background:#ffd54f}
+#int-panel .ng-type-pn{background:#ce93d8}
+#int-panel .ng-type-pp{background:#81c784}
+#int-panel .ng-type-chpi{background:#f06292}
+#int-panel .ng-a{color:var(--vscode-descriptionForeground,#999);font-variant-numeric:tabular-nums}
+#xrd-panel{display:none;position:absolute;bottom:40px;left:8px;z-index:50;background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:4px;padding:8px;width:456px;max-width:calc(100% - 16px);max-height:calc(100% - 16px);overflow-y:auto;box-shadow:0 2px 8px rgba(0,0,0,0.3)}
+#xrd-panel .xr-title{display:flex;align-items:center;justify-content:space-between;font-size:12px;font-weight:bold;margin-bottom:4px}
+#xrd-panel .xr-close{background:none;border:none;color:var(--vscode-editor-foreground,#ccc);font-size:15px;line-height:1;cursor:pointer;padding:0 2px}
+#xrd-panel .xr-close:hover{color:#fff}
+#xrd-panel .xr-line{display:flex;align-items:center;gap:6px;margin:4px 0;font-size:11px;min-height:20px}
+#xrd-panel .xr-line label{white-space:nowrap;color:var(--vscode-descriptionForeground,#999)}
+#xrd-panel select{flex:1;min-width:0;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;padding:1px 2px;font-size:11px}
+#xrd-panel select.xr-narrow{flex:0 0 62px}
+#xrd-panel .xr-summary{font-size:11px;color:var(--vscode-descriptionForeground,#999);margin:2px 0;min-height:14px}
+#xrd-panel .xr-summary.xr-running{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#xrd-panel canvas{display:block;width:100%;height:150px;border:1px solid rgba(128,128,128,0.25);border-radius:3px;background:#0d1117;cursor:crosshair}
+#xrd-panel .xr-note{font-size:10px;color:var(--vscode-descriptionForeground,#999);line-height:1.4;margin:3px 0}
+#xrd-panel .xr-list{max-height:132px;overflow-y:auto;border-top:1px solid rgba(128,128,128,0.25);margin-top:3px;font-variant-numeric:tabular-nums}
+#xrd-panel .xr-head,#xrd-panel .xr-row{display:flex;gap:6px;font-size:10px;padding:1px 2px;white-space:nowrap}
+#xrd-panel .xr-head{color:var(--vscode-descriptionForeground,#999);border-bottom:1px solid rgba(128,128,128,0.18);margin-bottom:1px}
+#xrd-panel .xr-c1{width:62px;text-align:right}
+#xrd-panel .xr-c2{width:58px;text-align:right}
+#xrd-panel .xr-c3{flex:1;text-align:right}
+#xrd-panel .xr-c4{width:40px;text-align:right}
+#xrd-panel .xr-c5{width:24px;text-align:right;color:#e8a33d}
+#xrd-panel .xr-row{color:var(--vscode-editor-foreground,#ccc);cursor:pointer}
+#xrd-panel .xr-row:hover{background:rgba(128,128,128,0.12)}
+#xrd-panel .xr-row.sel{background:rgba(78,201,176,0.16)}
+#xrd-panel .xr-empty{font-size:11px;color:var(--vscode-descriptionForeground,#999);padding:4px 2px}
+#xrd-panel .xr-btns{display:flex;gap:4px;margin-top:6px}
+#xrd-panel .xr-btns button{flex:1;padding:4px 6px;border-radius:3px;cursor:pointer;font-size:11px;border:1px solid var(--vscode-button-background,#0e639c);background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff)}
+#xrd-panel .xr-btns button:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
+#xrd-panel .xr-btns button.xr-secondary{background:var(--vscode-button-secondaryBackground,#3a3d41);border-color:var(--vscode-panel-border,#444);color:var(--vscode-button-secondaryForeground,#fff)}
+#xrd-panel .xr-btns button.xr-secondary:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e)}
+#xrd-panel .xr-btns button:disabled{opacity:.5;cursor:default}
+#xrd-panel .xr-hint{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:4px;line-height:1.4}
+/* The cavity report sits in the same floating slot as the powder panel and
+   follows its list idiom: a scrollable body with clickable rows. */
+#cav-panel{display:none;position:absolute;bottom:40px;left:8px;z-index:50;background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:4px;padding:8px;width:392px;max-width:calc(100% - 16px);max-height:calc(100% - 16px);overflow-y:auto;box-shadow:0 2px 8px rgba(0,0,0,0.3)}
+#cav-panel .cv-title{display:flex;align-items:center;justify-content:space-between;font-size:12px;font-weight:bold;margin-bottom:4px}
+#cav-panel .cv-close{background:none;border:none;color:var(--vscode-editor-foreground,#ccc);font-size:15px;line-height:1;cursor:pointer;padding:0 2px}
+#cav-panel .cv-close:hover{color:#fff}
+#cav-panel .cv-line{display:flex;align-items:center;gap:6px;margin:4px 0;font-size:11px}
+#cav-panel .cv-line label{white-space:nowrap;color:var(--vscode-descriptionForeground,#999)}
+#cav-panel .cv-line input{width:58px;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;padding:1px 3px;font-size:11px}
+#cav-panel .cv-line button{padding:3px 8px;border-radius:3px;cursor:pointer;font-size:11px;border:1px solid var(--vscode-button-background,#0e639c);background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff)}
+#cav-panel .cv-line button:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
+#cav-panel .cv-line button.cv-secondary{background:var(--vscode-button-secondaryBackground,#3a3d41);border-color:var(--vscode-panel-border,#444);color:var(--vscode-button-secondaryForeground,#fff);margin-left:auto}
+#cav-panel .cv-line button.cv-secondary:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e)}
+#cav-panel .cv-summary{font-size:11px;color:var(--vscode-editor-foreground,#ccc);line-height:1.5;margin:3px 0}
+#cav-panel .cv-sub{font-size:10px;color:var(--vscode-descriptionForeground,#999)}
+#cav-panel .cv-note{font-size:10px;color:#e8a33d;margin-top:2px;line-height:1.4;min-height:0}
+#cav-panel .cv-list{max-height:176px;overflow-y:auto;border-top:1px solid rgba(128,128,128,0.25);margin-top:4px;font-variant-numeric:tabular-nums}
+#cav-panel .cv-head,#cav-panel .cv-row{display:flex;gap:6px;font-size:10px;padding:1px 2px;white-space:nowrap}
+#cav-panel .cv-head{color:var(--vscode-descriptionForeground,#999);border-bottom:1px solid rgba(128,128,128,0.18);margin-bottom:1px}
+#cav-panel .cv-name{width:64px}
+#cav-panel .cv-vol{width:64px;text-align:right}
+#cav-panel .cv-c{flex:1;text-align:right}
+#cav-panel .cv-r{width:62px;text-align:right}
+#cav-panel .cv-row{color:var(--vscode-editor-foreground,#ccc);cursor:pointer}
+#cav-panel .cv-row:hover{background:rgba(128,128,128,0.12)}
+#cav-panel .cv-row.sel{background:rgba(177,140,255,0.18)}
+#cav-panel .cv-empty{font-size:11px;color:var(--vscode-descriptionForeground,#999);padding:4px 2px}
+#cav-panel .cv-hint{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:4px;line-height:1.4}
+/* The View-mode controls are two cards, not one: Auto Rotate and Edit
+   Coordinates each carry their own collision box in layoutPanels(), so a tall
+   neighbour (the Diff results panel above all) can push them apart instead of
+   one of them ending up underneath something else. */
+#view-panel,#bake-panel{display:block;position:absolute;bottom:40px;right:8px;z-index:50;background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:4px;padding:8px;width:210px;max-width:calc(100% - 16px);box-shadow:0 2px 8px rgba(0,0,0,0.3)}
+#view-panel .vp-title,#bake-panel .vp-title{font-size:12px;font-weight:bold;margin-bottom:6px}
+#view-panel .tbtn,#bake-panel .tbtn{width:100%;text-align:center}
+#view-panel .vp-hint,#bake-panel .vp-hint{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:6px;line-height:1.4}
+/* The drawing style is the second section of the View card, under Auto Rotate;
+   its own title needs the top margin the shared .vp-title does not carry. */
+#view-panel .vp-sub{margin-top:10px}
+#view-panel select{width:100%;padding:3px 4px;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#3c3c3c);border-radius:3px;font-size:11px;box-sizing:border-box;cursor:pointer}
+#view-panel .vp-check{display:flex;align-items:center;gap:4px;margin-top:6px;font-size:11px;color:var(--vscode-editor-foreground,#ccc);cursor:pointer}
+#view-panel .vp-check input{margin:0}
+#view-panel .vp-check.off{opacity:.45;cursor:default}
+canvas{display:block}
+#atom-tooltip{position:absolute;display:none;color:var(--vscode-editor-foreground,#ccc);font-size:12px;background:var(--vscode-editor-background,#1e1e1e);padding:4px 8px;border-radius:3px;border:1px solid var(--vscode-panel-border,#444);pointer-events:none;z-index:30}
+#box-select-rect{position:fixed;display:none;border:1px dashed #ffeb3b;background:rgba(255,235,59,0.12);pointer-events:none;z-index:40}
+#modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:100;display:none;align-items:center;justify-content:center}
+#modal-overlay.show{display:flex}
+#modal{background:var(--vscode-editor-background,#1e1e1e);border:1px solid var(--vscode-panel-border,#444);border-radius:6px;padding:16px 20px;min-width:min(320px,calc(100vw - 32px));max-width:min(420px,calc(100vw - 32px));box-shadow:0 8px 30px rgba(0,0,0,0.5)}
+#modal h3{font-size:14px;margin-bottom:10px;color:var(--vscode-editor-foreground,#ccc)}
+#modal label{font-size:12px;display:block;margin:6px 0 2px}
+#modal input[type=number],#modal select{width:100%;padding:4px 8px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:12px}
+#modal input[type=range]{width:100%;margin:4px 0}
+#modal .modal-row{display:flex;gap:8px;align-items:center;margin:4px 0}
+#modal .modal-row label{margin:0;white-space:nowrap;min-width:60px}
+#modal .modal-row input,#modal .modal-row select{flex:1}
+#modal .modal-btns{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
+#modal .mbtn{padding:5px 16px;border-radius:3px;cursor:pointer;font-size:12px;border:1px solid var(--vscode-panel-border,#444)}
+#modal .mbtn-ok{background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff);border-color:var(--vscode-button-background,#0e639c)}
+#modal .mbtn-ok:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
+#modal .mbtn-cancel{background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#fff)}
+#modal .mbtn-cancel:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e)}
+#modal .mbtn-danger{background:#c33;border-color:#c33;color:#fff}
+#modal .current-val{font-size:13px;color:var(--vscode-descriptionForeground,#999);margin-bottom:6px}
+#modal.modal-wide{max-width:min(760px,calc(100vw - 24px))}
+#modal .bvs-scroll{max-height:min(46vh,420px);overflow:auto;margin-top:4px}
+#modal .bvs-table{width:100%;border-collapse:collapse;font-size:11px}
+#modal .bvs-table th{text-align:left;font-weight:600;opacity:.75;padding:3px 6px;border-bottom:1px solid var(--vscode-panel-border,#444);position:sticky;top:0;background:var(--vscode-editor-background,#1e1e1e);white-space:nowrap}
+#modal .bvs-table td{padding:2px 6px;border-bottom:1px solid rgba(255,255,255,0.06);white-space:nowrap}
+#modal .bvs-table td.num{text-align:right;font-variant-numeric:tabular-nums}
+#modal .bvs-note{font-size:11px;color:var(--vscode-descriptionForeground,#999);margin-top:8px;line-height:1.45}
+#modal .bvs-warn{font-size:11px;color:#e8a33d;margin-top:4px;line-height:1.45}
+#modal .bvs-meh{color:#e8a33d}
+#loading{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:var(--vscode-editor-foreground,#ccc);font-size:14px}
+#error-msg{display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#f66;padding:20px;font-size:13px;text-align:center;max-width:80%;z-index:50}
+#empty-msg{display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#e8a33d;padding:20px;font-size:13px;text-align:center;max-width:80%;z-index:49;line-height:1.5;white-space:pre-wrap}
+.hidden{display:none!important}
+#frame-nav{display:none;align-items:center;gap:2px;flex-shrink:0}
+#frame-nav.show{display:flex}
+#frame-num{width:40px;padding:2px 4px;background:var(--vscode-input-background,#3c3c3c);border:1px solid var(--vscode-input-border,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border-radius:3px;font-size:11px;text-align:center}
+#frame-info{color:var(--vscode-statusBar-foreground,#fff);font-size:11px;padding:0 4px;white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis}
+#auto-play.playing{background:var(--vscode-button-background,#0e639c);border-color:var(--vscode-button-background,#0e639c)}
+#mol-nav{display:none;align-items:center;gap:2px;flex-shrink:0}
+#mol-nav.show{display:flex}
+#mol-label{color:var(--vscode-statusBar-foreground,#fff);font-size:11px;padding:0 4px;white-space:nowrap;max-width:180px;overflow:hidden;text-overflow:ellipsis}
+#beta-btn.active{background:var(--vscode-button-background,#0e639c);border-color:var(--vscode-button-background,#0e639c)}
+/* The controls below start hidden. They are hidden by this rule, not by a
+   style attribute: the page's CSP allows style only through its nonce, so an
+   inline style="display:none" is discarded and the button would flash on
+   screen before the script that decides its visibility runs. A later
+   element.style.display assignment still wins over these rules. */
+#beta-btn,#egg-btn,#bnd-sym-note,#xrd-file,#rp-slider-wrap{display:none}
+#cav-panel .cv-unit{font-size:10px;opacity:.7}
+#diff-panel{display:none;position:absolute;bottom:40px;right:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.65);padding:8px 12px;border-radius:4px;z-index:25;max-width:40%;max-height:60%;overflow-y:auto;pointer-events:auto;line-height:1.5}
+#diff-panel.show{display:block}
+#diff-panel h4{font-size:12px;margin-bottom:4px;color:var(--vscode-textLink-foreground,#3794ff)}
+#diff-panel .diff-row{margin:2px 0}
+#diff-panel .diff-close{position:absolute;top:4px;right:8px;cursor:pointer;color:var(--vscode-descriptionForeground,#999);font-size:14px}
+#diff-panel .diff-close:hover{color:var(--vscode-errorForeground,#f66)}
+#diff-reopen{display:none;position:absolute;bottom:40px;right:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
+#diff-reopen.show{display:block}
+#diff-reopen:hover{background:var(--vscode-button-background,#0e639c)}
+#diff-label,#diff-label-right{display:none;position:absolute;top:8px;color:var(--vscode-editor-foreground,#ccc);font-size:13px;font-weight:bold;background:rgba(0,0,0,0.55);padding:4px 10px;border-radius:4px;z-index:25;pointer-events:none;max-width:40%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#diff-label.show,#diff-label-right.show{display:block}
+#diff-label{left:25%;transform:translateX(-50%)}
+#diff-label-right{left:75%;transform:translateX(-50%)}
+#diff-panel .diff-stats{margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.18)}
+#diff-panel .diff-stats-head{cursor:pointer;font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff);user-select:none;-webkit-user-select:none}
+#diff-panel .diff-stats-head:hover{text-decoration:underline}
+#diff-panel .diff-stats-arrow{display:inline-block;width:11px}
+#diff-panel .diff-stats-body{margin-top:5px}
+#diff-panel .diff-stats.collapsed .diff-stats-body{display:none}
+#diff-panel .diff-stat-note{font-size:10px;line-height:1.35;color:var(--vscode-descriptionForeground,#999);margin-bottom:5px}
+#diff-panel .diff-stat-title{font-size:11px;color:#f0c674;margin:7px 0 2px}
+#diff-panel .diff-stat-scroll{overflow-x:auto;overflow-y:hidden}
+#diff-panel .diff-stat-table{border-collapse:collapse;font-size:10px;white-space:nowrap;min-width:100%}
+#diff-panel .diff-stat-table th,#diff-panel .diff-stat-table td{padding:1px 7px;text-align:right;font-weight:normal}
+#diff-panel .diff-stat-table th:first-child,#diff-panel .diff-stat-table td:first-child{text-align:left}
+#diff-panel .diff-stat-table th{color:var(--vscode-descriptionForeground,#999);border-bottom:1px solid rgba(255,255,255,0.18)}
+#diff-panel .diff-stat-table tr.diff-stat-total td{border-top:1px solid rgba(255,255,255,0.18);font-weight:bold}
+#opt-panel{display:none;position:absolute;top:36px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.78);padding:8px 10px;border-radius:4px;z-index:25;width:340px;max-width:calc(100% - 16px);max-height:70%;overflow:hidden;pointer-events:auto;line-height:1.4}
+#opt-panel.show{display:flex;flex-direction:column}
+#opt-panel .opt-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.15)}
+#opt-panel .opt-title{font-size:12px;font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff)}
+#opt-panel .opt-close{cursor:pointer;color:var(--vscode-descriptionForeground,#999);font-size:14px;padding:0 4px}
+#opt-panel .opt-close:hover{color:var(--vscode-errorForeground,#f66)}
+#opt-panel .opt-resize{height:6px;cursor:ns-resize;background:rgba(255,255,255,0.1);border-radius:3px;margin:4px 0}
+#opt-panel .opt-resize:hover{background:rgba(255,255,255,0.25)}
+#opt-panel .opt-body{overflow-y:scroll;overflow-x:hidden;flex:1 1 auto;min-height:0;width:100%;box-sizing:border-box}
+#opt-panel canvas{display:block;width:100%;max-width:100%;margin:2px 0 6px}
+#opt-panel .opt-chart-title{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:4px}
+#opt-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
+#opt-reopen.show{display:block}
+#opt-reopen:hover{background:var(--vscode-button-background,#0e639c)}
+#freq-panel{display:none;position:absolute;top:36px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.78);padding:8px 10px;border-radius:4px;z-index:25;width:300px;max-width:calc(100% - 16px);max-height:70%;overflow:hidden;pointer-events:auto;line-height:1.4}
+#freq-panel.show{display:flex;flex-direction:column}
+#freq-panel .freq-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.15)}
+#freq-panel .freq-title{font-size:12px;font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff)}
+#freq-panel .freq-close{cursor:pointer;color:var(--vscode-descriptionForeground,#999);font-size:14px;padding:0 4px}
+#freq-panel .freq-close:hover{color:var(--vscode-errorForeground,#f66)}
+#freq-panel .freq-body{overflow-y:scroll;overflow-x:hidden;flex:1 1 auto;min-height:0;width:100%;box-sizing:border-box}
+#freq-panel .freq-row{display:flex;justify-content:space-between;align-items:center;padding:3px 4px;cursor:pointer;border-radius:3px}
+#freq-panel .freq-row:hover{background:rgba(255,255,255,0.1)}
+#freq-panel .freq-row.playing{background:rgba(255,200,0,0.25);color:#ffd700}
+#freq-panel .freq-idx{width:28px;color:var(--vscode-descriptionForeground,#999)}
+#freq-panel .freq-val{flex:1;font-family:monospace}
+#freq-panel .freq-sym{width:30px;text-align:right;color:var(--vscode-descriptionForeground,#999)}
+/* A mode has two independent affordances: the circle selects it for the
+   manual-displacement slider, the ▶ plays it. They are separate controls on
+   purpose — watching a mode must never arm the slider, and picking one must
+   never start a playback. */
+#freq-panel .freq-pick{width:11px;height:11px;flex:0 0 11px;margin:0 6px 0 2px;border-radius:50%;border:1px solid #767676;cursor:pointer;box-sizing:border-box;align-self:center}
+#freq-panel .freq-pick:hover{border-color:#ffb86b;box-shadow:0 0 0 2px rgba(255,159,67,0.18)}
+#freq-panel .freq-pick.on{border-color:#ff9f43;background:#ff9f43;box-shadow:inset 0 0 0 2px rgba(18,18,18,0.85)}
+#freq-panel .freq-play{width:18px;text-align:center}
+#freq-panel .freq-stop{margin-top:6px;width:100%;padding:4px;border-radius:3px;border:1px solid var(--vscode-button-border,#555);background:var(--vscode-button-background,#0e639c);color:#fff;cursor:pointer;font-size:11px}
+#freq-panel .freq-stop:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
+/* Manual displacement: one mode written into the coordinates. The block is a
+   fixed-height footer of the panel (the mode list scrolls above it), so moving
+   the slider cannot resize the panel and make it fight the layout. */
+#freq-panel .freq-dis{margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.15);flex:0 0 auto}
+#freq-panel .vd-head{display:flex;justify-content:space-between;align-items:baseline;gap:6px;font-size:10px;letter-spacing:0.4px;text-transform:uppercase;color:var(--vscode-descriptionForeground,#999)}
+#freq-panel .vd-mode{font-family:monospace;text-transform:none;letter-spacing:0;color:#ffb86b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:168px}
+/* The traceability line: every mode that is in the distortion, and the largest
+   displacement of the whole combination. */
+#freq-panel .vd-comps{margin-top:2px;font-family:monospace;font-size:10px;color:#c99a5b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#freq-panel .vd-slider{width:100%;margin:5px 0 3px;accent-color:#ff9f43}
+#freq-panel .vd-slider:disabled{opacity:0.35}
+#freq-panel .vd-row{display:flex;align-items:baseline;gap:6px}
+#freq-panel .vd-val{flex:0 0 auto;font-family:monospace;font-size:11px;color:#ffb86b}
+#freq-panel .vd-max{flex:1 1 auto;font-size:10px;color:var(--vscode-descriptionForeground,#999);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#freq-panel .vd-reset{flex:0 0 auto;padding:2px 9px;border-radius:3px;border:1px solid var(--vscode-button-border,#555);background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#ccc);font-size:10px;cursor:pointer}
+#freq-panel .vd-reset:hover:not(:disabled){background:var(--vscode-button-secondaryHoverBackground,#45494e)}
+#freq-panel .vd-reset:disabled{opacity:0.4;cursor:default}
+#freq-panel .vd-hint{margin-top:3px;font-size:10px;line-height:1.35;color:var(--vscode-descriptionForeground,#999);min-height:27px}
+/* A mode row carries a second, independent state: playing (the animation that
+   borrows the geometry) and displaced (the session that writes it). */
+#freq-panel .freq-row.displaced{box-shadow:inset 2px 0 0 #ff9f43}
+#freq-panel .freq-row.displaced .freq-idx{color:#ffb86b}
+#freq-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
+#freq-reopen.show{display:block}
+#freq-reopen:hover{background:var(--vscode-button-background,#0e639c)}
+#route-panel{display:none;position:absolute;top:36px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.78);padding:8px 10px;border-radius:4px;z-index:25;width:360px;max-width:calc(100% - 16px);max-height:70%;overflow:hidden;pointer-events:auto;line-height:1.4}
+#route-panel.show{display:flex;flex-direction:column}
+#route-panel .rt-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.15)}
+#route-panel .rt-title{font-size:12px;font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff)}
+#route-panel .rt-close{cursor:pointer;color:var(--vscode-descriptionForeground,#999);font-size:14px;padding:0 4px}
+#route-panel .rt-close:hover{color:var(--vscode-errorForeground,#f66)}
+#route-panel .rt-body{overflow-y:scroll;overflow-x:hidden;flex:1 1 auto;min-height:0;width:100%;box-sizing:border-box}
+#route-panel .rt-job{font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff);margin:6px 0 3px}
+#route-panel .rt-badge{display:inline-block;background:rgba(80,200,120,0.25);color:#69db7c;border-radius:3px;padding:0 5px;font-size:10px;font-weight:normal;margin-left:5px}
+#route-panel .rt-raw{font-family:monospace;font-size:10px;background:rgba(255,255,255,0.06);border-radius:3px;padding:4px 6px;margin:3px 0 6px;word-break:break-all;color:var(--vscode-descriptionForeground,#aaa)}
+#route-panel .rt-kw{display:flex;align-items:baseline;padding:1px 2px}
+#route-panel .rt-kname{font-family:monospace;font-weight:bold;color:#ffd700;min-width:60px;flex:none}
+#route-panel .rt-kopts{font-family:monospace;color:var(--vscode-descriptionForeground,#aaa);word-break:break-all}
+#route-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
+#route-reopen.show{display:block}
+#route-reopen:hover{background:var(--vscode-button-background,#0e639c)}
+/* Atomic charges and the job summary: two reading aids for a log that states a
+   population analysis and a set of results. Both are cards of the same shape as
+   the route panel — a header with a close control, a body that scrolls inside a
+   capped height — so they stack with it instead of inventing a third look. */
+#charge-panel{display:none;position:absolute;top:36px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.78);padding:8px 10px;border-radius:4px;z-index:25;width:300px;max-width:calc(100% - 16px);max-height:70%;overflow:hidden;pointer-events:auto;line-height:1.4}
+#charge-panel.show{display:flex;flex-direction:column}
+#charge-panel .chg-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.15)}
+#charge-panel .chg-title{font-size:12px;font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff)}
+#charge-panel .chg-close{cursor:pointer;color:var(--vscode-descriptionForeground,#999);font-size:14px;padding:0 4px}
+#charge-panel .chg-close:hover{color:var(--vscode-errorForeground,#f66)}
+/* The scrollbar is reserved, not added when it is needed: the panels that
+   came before this one do the same, and a body whose width changes under its
+   own content re-wraps a value at the moment the bar appears. */
+#charge-panel .chg-body{overflow-y:scroll;overflow-x:hidden;flex:1 1 auto;min-height:0;width:100%;box-sizing:border-box;padding-right:8px}
+#charge-panel .chg-row{display:flex;align-items:center;gap:6px;margin:2px 0 6px}
+#charge-panel .chg-lab{flex:0 0 auto;color:var(--vscode-descriptionForeground,#999)}
+#charge-panel .chg-sel{flex:1 1 auto;min-width:0;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;font-size:11px;padding:1px 2px}
+#charge-panel .chg-check{display:flex;align-items:center;gap:6px;margin:4px 0;cursor:pointer}
+#charge-panel .chg-check input{margin:0;cursor:pointer}
+#charge-panel .chg-check.off{opacity:0.5;cursor:default}
+#charge-panel .chg-check.off input{cursor:default}
+#charge-panel .chg-legend{margin:7px 0 2px}
+#charge-panel .chg-bar{height:8px;border-radius:2px;border:1px solid rgba(255,255,255,0.18);background:linear-gradient(90deg,#ff331a,#cccccc,#1a33ff)}
+#charge-panel .chg-scale{display:flex;justify-content:space-between;font-family:monospace;font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:2px}
+#charge-panel .chg-stat{margin-top:5px;font-family:monospace;font-size:10px;color:#ffb86b;word-break:break-word}
+#charge-panel .chg-note{margin-top:3px;font-size:10px;line-height:1.35;color:var(--vscode-descriptionForeground,#999)}
+#charge-panel .chg-note:empty{display:none}
+#charge-panel .chg-hint{margin-top:2px;font-size:10px;line-height:1.35;color:var(--vscode-descriptionForeground,#888)}
+#charge-panel .chg-go{display:none;margin-top:5px;padding:2px 9px;border-radius:3px;border:1px solid var(--vscode-button-border,#555);background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#ccc);font-size:10px;cursor:pointer}
+#charge-panel .chg-go:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e)}
+/* The card's three tabs: charges, cavity, orbitals. One row, equal widths, the
+   open one in the button colour so the card never leaves a doubt about which
+   reading is on screen. */
+#charge-panel .chg-tabs{display:flex;gap:3px;margin:0 0 6px}
+#charge-panel .chg-tab{flex:1 1 0;min-width:0;background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#ccc);border:1px solid var(--vscode-panel-border,#444);border-radius:3px;padding:2px 0;font-size:10px;cursor:pointer}
+#charge-panel .chg-tab:hover:not(:disabled){background:var(--vscode-button-secondaryHoverBackground,#45494e)}
+#charge-panel .chg-tab.on{background:var(--vscode-button-background,#0e639c);border-color:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff)}
+#charge-panel .chg-tab:disabled{opacity:0.4;cursor:default}
+#charge-panel .chg-kv{gap:8px;margin:1px 0}
+#charge-panel .chg-val{margin-left:auto;font-family:monospace;text-align:right;word-break:break-word}
+#charge-panel .chg-btns{display:flex;gap:6px;margin-top:6px}
+#charge-panel .chg-btns .chg-go{display:inline-block;margin-top:0;flex:1 1 0;text-align:center}
+/* The level diagram and the orbital list. Monospace throughout: the numbers
+   sit in columns and a proportional font would not line them up. */
+#charge-panel .orb-canvas{display:block;margin:2px auto 4px;max-width:100%}
+#charge-panel .orb-head,#charge-panel .orb-row{display:flex;align-items:center;gap:4px;font-family:monospace;font-size:10px;line-height:1.5}
+#charge-panel .orb-head{color:var(--vscode-descriptionForeground,#888);border-bottom:1px solid rgba(255,255,255,0.12);margin-bottom:2px}
+#charge-panel .orb-list{max-height:132px;overflow-y:auto}
+#charge-panel .orb-row{cursor:pointer}
+#charge-panel .orb-row:hover{background:rgba(255,255,255,0.06)}
+#charge-panel .orb-row.jump{background:rgba(55,148,255,0.20)}
+#charge-panel .orb-row.homo .orb-e{color:#e05555}
+#charge-panel .orb-row.lumo .orb-e{color:#3fae6a}
+#charge-panel .orb-pick,#charge-panel .orb-spacer{width:12px;height:12px;margin:0;flex:0 0 12px}
+#charge-panel .orb-n{flex:0 0 38px;text-align:right;color:var(--vscode-descriptionForeground,#999)}
+#charge-panel .orb-e{flex:1 1 auto;text-align:right}
+#charge-panel .orb-occ{flex:0 0 22px;text-align:right;color:var(--vscode-descriptionForeground,#999)}
+#charge-panel .orb-nav{display:flex;align-items:center;gap:6px;margin:3px 0}
+#charge-panel .orb-nav button{background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#ccc);border:1px solid var(--vscode-panel-border,#444);border-radius:2px;font-size:9px;padding:0 6px;cursor:pointer}
+#charge-panel .orb-nav span{flex:1 1 auto;text-align:center;font-size:10px;color:var(--vscode-descriptionForeground,#999)}
+#charge-panel .orb-jump .orb-num{flex:1 1 auto;min-width:0}
+#charge-panel .orb-ctl{display:flex;align-items:center;gap:5px;margin:4px 0 0}
+#charge-panel .orb-num{flex:0 0 58px;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;font-size:11px;padding:1px 3px}
+#charge-panel .orb-q{flex:0 0 66px}
+#charge-panel .orb-prog{display:none;height:4px;margin:6px 0 0;border-radius:2px;background:rgba(255,255,255,0.12);overflow:hidden}
+#charge-panel .orb-prog.on{display:block}
+#charge-panel .orb-prog .bar{height:100%;width:0;background:var(--vscode-progressBar-background,#0e70c0)}
+#charge-panel .orb-leg{display:flex;align-items:center;gap:4px;font-size:10px;line-height:1.5}
+#charge-panel .orb-sw{width:9px;height:9px;border-radius:2px;flex:0 0 9px}
+#charge-panel .orb-grid{margin-left:auto;color:var(--vscode-descriptionForeground,#777);font-size:9px}
+/* The values are page furniture drawn over the canvas, one absolutely placed
+   span per atom, so they follow every rotation without a texture per atom and
+   stay out of the PNG (a snapshot captures the WebGL canvas, not the page). */
+#charge-labels{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:24;overflow:hidden}
+#charge-labels span{position:absolute;left:0;top:0;display:none;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10px;line-height:1;color:#fff;text-shadow:0 0 2px #000,0 0 3px #000;white-space:nowrap}
+#summary-panel{display:none;position:absolute;top:36px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.78);padding:8px 10px;border-radius:4px;z-index:25;width:320px;max-width:calc(100% - 16px);max-height:70%;overflow:hidden;pointer-events:auto;line-height:1.4}
+#summary-panel.show{display:flex;flex-direction:column}
+#summary-panel .sm-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.15)}
+#summary-panel .sm-title{font-size:12px;font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff)}
+#summary-panel .sm-close{cursor:pointer;color:var(--vscode-descriptionForeground,#999);font-size:14px;padding:0 4px}
+#summary-panel .sm-close:hover{color:var(--vscode-errorForeground,#f66)}
+#summary-panel .sm-body{overflow-y:scroll;overflow-x:hidden;flex:1 1 auto;min-height:0;width:100%;box-sizing:border-box;padding-right:8px}
+#summary-panel .sm-job{font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff);margin:7px 0 3px}
+#summary-panel .sm-row{display:flex;align-items:baseline;gap:8px;padding:1px 0}
+#summary-panel .sm-k{flex:0 0 42%;color:var(--vscode-descriptionForeground,#a9a9a9);word-break:break-word}
+#summary-panel .sm-v{flex:1 1 auto;min-width:0;font-family:monospace;text-align:right;word-break:break-word}
+#summary-panel .sm-v.sm-bad{color:var(--vscode-errorForeground,#f66)}
+/* A value the file only printed for an earlier SCF than the energy, and the
+   line that says which geometry the block describes. */
+#summary-panel .sm-late{margin-left:4px;padding:0 3px;border-radius:2px;background:rgba(232,163,61,0.18);color:#e8a33d;font-family:var(--vscode-font-family,sans-serif);font-size:9px;white-space:nowrap}
+#summary-panel .sm-note{margin-top:5px;padding-top:4px;border-top:1px solid rgba(255,255,255,0.12);font-size:10px;line-height:1.35;color:var(--vscode-descriptionForeground,#999)}
+#summary-panel .sm-note.sm-warn{color:#e8a33d;border-top:none;padding-top:1px}
+#summary-panel .sm-sub{margin:-1px 0 3px;font-family:monospace;font-size:10px;color:var(--vscode-descriptionForeground,#999);text-align:right;word-break:break-word}
+#charge-reopen,#summary-reopen{top:36px;left:8px}
+/* One header row, one close control and one chip for the panels that used to
+   have neither: the x folds the panel into its chip, the chip puts it back,
+   and layoutPanels() gives both a collision box, so a panel can never cover
+   another panel or the chip that belongs to it. */
+.pn-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+#crystal-panel .pn-head h4{margin:0;font-size:11px;font-weight:600}
+#view-panel .pn-head .vp-title,#bake-panel .pn-head .vp-title,
+#select-panel .pn-head .sp-title,#neigh-panel .pn-head .ng-title,
+#int-panel .pn-head .ng-title,
+#rotate-panel .pn-head .rp-title{margin-bottom:0}
+.pn-close{background:none;border:none;color:inherit;font:inherit;font-size:15px;line-height:1;cursor:pointer;opacity:0.7;padding:0 2px}
+.pn-close:hover{opacity:1;color:var(--vscode-errorForeground,#f66)}
+.pn-chip{display:none;position:absolute;z-index:52;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto;white-space:nowrap;max-width:calc(100% - 16px);overflow:hidden;text-overflow:ellipsis}
+.pn-chip.show{display:block}
+.pn-chip:hover{background:var(--vscode-button-background,#0e639c)}
+#crystal-reopen,#egg-reopen{top:8px;right:8px}
+#view-reopen,#bake-reopen{right:8px;bottom:40px}
+#select-reopen,#neigh-reopen,#int-reopen,#rotate-reopen,#xrd-reopen,#cav-reopen{left:8px;bottom:40px}
+/* A panel whose height the layout had to cap scrolls inside itself instead of
+   spilling over its neighbours. */
+#view-panel,#bake-panel,#select-panel,#neigh-panel,#int-panel,#rotate-panel{overflow:auto}
+@media (max-width:600px){.tbtn{padding:3px 6px;font-size:10px}#frame-info{font-size:10px}#toolbar .trow{gap:1px}}
