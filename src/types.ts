@@ -338,6 +338,76 @@ export interface NormalMode {
     displacements: number[][];
 }
 
+/**
+ * One sphere of a solvation cavity, in Angstrom: the centre the program placed
+ * it at and the radius it gave it.
+ */
+export interface CavitySphere {
+    x: number;
+    y: number;
+    z: number;
+    r: number;
+}
+
+/**
+ * The solvent cavity a file states.
+ *
+ * A formatted checkpoint lists the spheres themselves (`PCM-SphereRadii` and
+ * `PCM-SphereLoc`), which is what the viewer draws. A log states the *cavity*,
+ * not its spheres: the type, the solvent, how many spheres the algorithm used
+ * and the area and volume it measured. Both are kept in this one shape so the
+ * panel can describe either without asking which file it came from, and
+ * `spheres` absent is what tells it that nothing can be drawn.
+ */
+export interface SolventCavity {
+    spheres?: CavitySphere[];
+    /**
+     * The solvation model the job ran: `SMD`, `PCM`, `CPCM`, `IEFPCM`, … — from
+     * the route's `SCRF=(…)` or, when the route names none, the model named by
+     * the continuum banner the file prints.
+     */
+    model?: string;
+    /** `Scaled VdW (van der Waals Surface) (Alpha=1.100)` — the file's own words. */
+    type?: string;
+    solvent?: string;
+    /** The scaling factor the cavity type states, when it states one. */
+    alpha?: number;
+    /** Surface area in Angstrom squared, when the file states it. */
+    area?: number;
+    /** Volume in Angstrom cubed, when the file states it. */
+    volume?: number;
+    /** How many spheres the file says the cavity has. */
+    sphereCount?: number;
+    /** Where the numbers came from — a checkpoint lists the spheres, a log does not. */
+    source: 'fchk' | 'log';
+}
+
+/**
+ * A set of orbital energies with the occupation the file implies.
+ *
+ * A log prints an eigenvalue dump per SCF and never the coefficients; a
+ * formatted checkpoint prints the coefficients and no occupations. Both arrive
+ * in this shape so the level diagram can be drawn from either, and only the
+ * checkpoint's orbitals can become a surface.
+ */
+export interface OrbitalSpinLevels {
+    /** `Alpha` or `Beta`, as the file names it. */
+    label: string;
+    /** Orbital energies in Hartree, in the file's own order. */
+    energies: number[];
+    /** Per-orbital occupation (2, 1 or 0). */
+    occupations: number[];
+    /** How many of the orbitals are occupied. */
+    occupied: number;
+}
+
+/** What a file says about its orbitals, without the coefficients. */
+export interface OrbitalLevels {
+    spins: OrbitalSpinLevels[];
+    /** True when the file printed no beta block. */
+    closedShell: boolean;
+}
+
 export interface MolecularData {
     atoms: Atom[];
     bonds: Bond[];

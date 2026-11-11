@@ -1,4 +1,4 @@
-import { MolecularData, AtomGroup, OptStep, NormalMode, OptThresholds } from '../types';
+import { MolecularData, AtomGroup, OptStep, NormalMode, OptThresholds, OrbitalLevels, SolventCavity } from '../types';
 import { parseGjf } from './gjfParser';
 import { parseXyz, parseXyzTrajectory, XyzFrame, XyzTrajectory } from './xyzParser';
 import { parseMol2 } from './mol2Parser';
@@ -24,6 +24,7 @@ import { parseGro, isGro, isGromacsLog } from './gromacsParser';
 import { parseExtXyz, isExtXyz, isGpumdInput } from './extXyzParser';
 import { parseDeepmdDataset, isDeepmdDatasetFile, isDpgenModelDevi, DeepmdParseOptions, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox } from './deepmdParser';
 import { parsePyscfOutput, parseMolden, isPyscfOutput, isMolden } from './pyscfParser';
+import { parseFchk, readFchkColumn, FchkResult, FchkOrbitals, FchkArrayLayout, FchkOrbitalSpin, FchkBasis } from './fchkParser';
 import { detectBinaryTrajectory, readBinaryTrajectory, isTrajectoryFileName, BinaryTrajectory, TrajectoryFrame, TrajectoryFormat, TrajectoryReadOptions } from './trajectoryParser';
 
 export { parseGaussianLog, LogFrame, GaussianLogResult };
@@ -48,6 +49,7 @@ export { parseGro, isGro, isGromacsLog };
 export { parseExtXyz, isExtXyz, isGpumdInput };
 export { parseDeepmdDataset, isDeepmdDatasetFile, isDpgenModelDevi, DeepmdParseOptions, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox };
 export { parsePyscfOutput, parseMolden, isPyscfOutput, isMolden };
+export { parseFchk, readFchkColumn, FchkResult, FchkOrbitals, FchkArrayLayout, FchkOrbitalSpin, FchkBasis };
 export { detectBinaryTrajectory, readBinaryTrajectory, isTrajectoryFileName, BinaryTrajectory, TrajectoryFrame, TrajectoryFormat, TrajectoryReadOptions };
 // Visualization files: the VMD scripts and the bare scalar-carrying coordinate
 // files they describe (see src/parsers/vmdVisualization.ts).
@@ -80,6 +82,11 @@ export interface LogFileResult {
     // log that has no such data.
     charges?: LogChargeSet[];
     summary?: LogSummary[];
+    // The last eigenvalue dump of the job (energies and occupations, never
+    // coefficients) and the solvation cavity it describes. A log states both;
+    // only a formatted checkpoint states the coefficients beside them.
+    orbitals?: OrbitalLevels;
+    cavity?: SolventCavity;
 }
 
 export interface ParseFileOptions {
@@ -398,7 +405,9 @@ export function parseLogFile(content: string, fileName?: string): LogFileResult 
         routes: gResult.routes,
         source: 'gaussian',
         charges: gResult.charges,
-        summary: gResult.summary
+        summary: gResult.summary,
+        orbitals: gResult.orbitals,
+        cavity: gResult.cavity
     };
 }
 

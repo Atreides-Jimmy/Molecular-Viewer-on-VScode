@@ -1,13 +1,15 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { parseFile, parseLogFile, parseXyzTrajectory, LogFrame, OrcaFrame, RouteSection, LogChargeSet, LogSummary, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg, ParseFileOptions, DeepmdParseOptions, LammpsParseOptions, LammpsHints, isStructuredProgramOutput, isExtXyz, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox, parseLammpsInputHints, lammpsTypeElements, isLammpsInput, isLammpsData, isLammpsDump, scanLammpsInput, scanOrcaXyzfile, scanAbinitXyzfile, scanAbacusInput, isAbacusInput, isAbinitInput, isCp2kInput, detectBinaryTrajectory, readBinaryTrajectory, lammpsLengthFactor, parseLammpsDumpTrajectory, BinaryTrajectory, TrajectoryFormat, LammpsDumpTrajectory } from '../parsers/index';
+import * as fs from 'fs';
+import { parseFile, parseLogFile, parseXyzTrajectory, LogFrame, OrcaFrame, RouteSection, LogChargeSet, LogSummary, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg, ParseFileOptions, DeepmdParseOptions, LammpsParseOptions, LammpsHints, isStructuredProgramOutput, isExtXyz, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox, parseLammpsInputHints, lammpsTypeElements, isLammpsInput, isLammpsData, isLammpsDump, scanLammpsInput, scanOrcaXyzfile, scanAbinitXyzfile, scanAbacusInput, isAbacusInput, isAbinitInput, isCp2kInput, detectBinaryTrajectory, readBinaryTrajectory, lammpsLengthFactor, parseLammpsDumpTrajectory, BinaryTrajectory, TrajectoryFormat, LammpsDumpTrajectory, parseFchk, readFchkColumn, FchkOrbitals } from '../parsers/index';
 import { ensureBonds } from '../tools/bondDetector';
 import { BOND_PERCEPTION_SOURCE } from '../tools/bondPerception';
 import { BVS_SOURCE } from '../tools/bvs';
 import { addHydrogens } from '../tools/addHydrogens';
 import { beginOptimization, describeForceField, MmHistoryPoint, MmOptimizeResult, MmSession } from '../tools/mmOptimizer';
 import { smilesTo3dSafe, validateSmiles } from '../tools/smilesTo3d';
-import { MolecularData, Atom, Bond, AsymAtom, AtomGroup, OptStep, NormalMode, OptThresholds, VmdScene, VmdMolecule, TrajectoryInfo } from '../types';
+import { CavitySurfaceTask, GridQuality, OrbitalSurfaceTask, SurfaceTask } from '../tools/orbitalMesh';
+import { MolecularData, Atom, Bond, AsymAtom, AtomGroup, OptStep, NormalMode, OptThresholds, VmdScene, VmdMolecule, TrajectoryInfo, OrbitalLevels, SolventCavity } from '../types';
 
 /**
  * Decode a text file the way the writers on other machines wrote it.
@@ -1881,11 +1883,20 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         token: vscode.CancellationToken
     ): Promise<MolecularDocument> {
         if (token.isCancellationRequested) throw new vscode.CancellationError();
+        const fileName = uri.path.split('/').pop() || 'unknown.xyz';
+        const ext0 = fileName.toLowerCase().split('.').pop() || '';
+        // A formatted checkpoint is the one file this reader streams instead of
+        // reading: a 432-atom job's is 850 MB, and turning that into a string
+        // (then into lines) would cost two gigabytes of heap before any parser
+        // ran. The branch is here, above `readFile`, because everything below
+        // assumes the file is already in memory.
+        if (ext0 === 'fchk' || ext0 === 'fch') {
+            return this.openFchkDocument(uri, fileName, token);
+        }
         const content = await vscode.workspace.fs.readFile(uri);
         // The tab may have been closed while the file was being read; the
         // parse below can be expensive and its result has nowhere to go.
         if (token.isCancellationRequested) throw new vscode.CancellationError();
-        const fileName = uri.path.split('/').pop() || 'unknown.xyz';
 
         const ext = fileName.toLowerCase().split('.').pop() || '';
         // A binary trajectory is detected by its magic before anything decodes
@@ -1909,6 +1920,10 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         let logSource: string | undefined;
         let charges: LogChargeSet[] | undefined;
         let summary: LogSummary[] | undefined;
+        // A log states eigenvalues and the cavity model, never the coefficients:
+        // the level diagram can be drawn from these two, a surface cannot.
+        let orbitalLevels: OrbitalLevels | undefined;
+        let cavity: SolventCavity | undefined;
         let vmdPayload: VmdPayload | undefined;
         let autoBeta = false;
 
@@ -1948,6 +1963,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             logSource = logResult.source;
             charges = logResult.charges;
             summary = logResult.summary;
+            orbitalLevels = logResult.orbitals;
+            cavity = logResult.cavity;
             if (frames.length > 0) {
                 data = ensureBonds({
                     atoms: frames[0].atoms,
@@ -2048,6 +2065,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             optThresholds = undefined;
             charges = undefined;
             summary = undefined;
+            orbitalLevels = undefined;
+            cavity = undefined;
         }
 
         applySetupWarnings(data, setup);
@@ -2059,7 +2078,138 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             data.filePath = setup && setup.reference ? setup.reference.uri.fsPath : uri.fsPath;
         }
 
-        return new MolecularDocument(uri, data, frames, optSteps, normalModes, logSource, routes, vmdPayload, autoBeta, optThresholds, trajectoryFrames, charges, summary);
+        return new MolecularDocument(uri, data, frames, optSteps, normalModes, logSource, routes, vmdPayload, autoBeta, optThresholds, trajectoryFrames, charges, summary, undefined, cavity, orbitalLevels);
+    }
+
+    /**
+     * Read a Gaussian formatted checkpoint.
+     *
+     * The file is streamed, so the cost is one pass over its bytes and whatever
+     * the small arrays need; the MO coefficient block is skipped by line count
+     * and only its byte offset is kept, which is what lets an orbital be read
+     * back one column at a time (see `readFchkColumn`).
+     *
+     * A checkpoint is local to the machine that wrote it: `fs.createReadStream`
+     * needs a real path, and a `vscode.workspace.fs` stream does not exist for
+     * a virtual scheme. Anything that is not a `file:` URI is read through the
+     * workspace API instead (a remote workspace buffers it, which is slower but
+     * correct) only when it is small enough to be safe.
+     */
+    private async openFchkDocument(uri: vscode.Uri, fileName: string, token: vscode.CancellationToken): Promise<MolecularDocument> {
+        let size = 0;
+        try {
+            const stat = await vscode.workspace.fs.stat(uri);
+            size = stat.size || 0;
+        } catch {
+            size = 0;
+        }
+        // A checkpoint that is not a local file can only be read through the
+        // workspace API, which returns the whole file as one buffer. That is how
+        // a 900 MB checkpoint would become a 900 MB allocation, so the fallback
+        // is offered only up to a size a buffer can take; beyond it the tab says
+        // why instead of failing with an allocation error.
+        const FCHK_BUFFER_LIMIT = 256 * 1024 * 1024;
+        if (uri.scheme !== 'file' && size > FCHK_BUFFER_LIMIT) {
+            return new MolecularDocument(uri, {
+                atoms: [], bonds: [], title: fileName, hasExplicitBonds: false,
+                filePath: uri.fsPath,
+                warnings: ['this formatted checkpoint is ' + Math.round(size / (1024 * 1024)) +
+                    ' MB and is not a local file: it can only be read through the workspace file API, ' +
+                    'which would hold all of it in memory at once. Open it from a local folder.']
+            });
+        }
+
+        let result: Awaited<ReturnType<typeof parseFchk>>;
+        try {
+            result = await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: 'Molecular Viewer: reading ' + fileName,
+                cancellable: true
+            }, async (progress, progressToken) => {
+                progress.report({ message: 'reading the checkpoint' });
+                let reported = 0;
+                const onProgress = (read: number) => {
+                    if (size > 0) {
+                        const pct = Math.min(99, Math.floor((read / size) * 100));
+                        if (pct > reported) {
+                            progress.report({ increment: pct - reported, message: pct + '%' });
+                            reported = pct;
+                        }
+                    }
+                };
+                if (uri.scheme === 'file') {
+                    const stream = fs.createReadStream(uri.fsPath, { highWaterMark: 1 << 16 });
+                    const cancelled = new Promise<never>((_, reject) => {
+                        progressToken.onCancellationRequested(() => {
+                            stream.destroy();
+                            reject(new vscode.CancellationError());
+                        });
+                    });
+                    return await Promise.race([
+                        parseFchk(stream, { size, path: uri.fsPath, onProgress }),
+                        cancelled
+                    ]);
+                }
+                const bytes = await vscode.workspace.fs.readFile(uri);
+                return await parseFchk((async function* () { yield bytes; })(), { size: bytes.length, path: '' });
+            });
+        } catch (e: any) {
+            // A truncated or non-checkpoint file must open the viewer with the
+            // reader's own words on the canvas, the way every other parse
+            // failure does, instead of failing the tab with "Unknown error".
+            if (e instanceof vscode.CancellationError) throw e;
+            return new MolecularDocument(uri, {
+                atoms: [], bonds: [], title: fileName, hasExplicitBonds: false,
+                filePath: uri.fsPath,
+                warnings: ['this formatted checkpoint could not be read: ' + (e && e.message ? String(e.message) : String(e))]
+            });
+        }
+
+        if (token.isCancellationRequested) throw new vscode.CancellationError();
+
+        // The coefficients are read back one column at a time by byte offset, so
+        // only a checkpoint that is a real local file can become a surface. A
+        // document read through the workspace API (a remote or virtual scheme)
+        // was buffered once for this pass and cannot be addressed again; the
+        // levels are still its own, so they stay and only the surface is refused.
+        if (result.orbitals && !result.orbitals.path) {
+            for (const spin of result.orbitals.spins) spin.layout = undefined;
+            result.warnings.push('this checkpoint was read without a local file path, so its orbital coefficients cannot be read back: the orbital levels are shown, isosurfaces need the file on disk');
+        }
+
+        const title = /^molecule name$/i.test(result.title.trim()) ? fileName : result.title;
+        const data: MolecularData = ensureBonds({
+            atoms: result.atoms,
+            bonds: [],
+            title,
+            hasExplicitBonds: false,
+            charge: result.charge,
+            multiplicity: result.multiplicity,
+            warnings: result.warnings.length > 0 ? result.warnings.slice() : undefined
+        });
+        data.filePath = uri.fsPath;
+
+        // The headline results, in the shape the summary panel already reads. A
+        // checkpoint states no point group, no cpu time and no termination, so
+        // those lines simply do not appear.
+        const summary: LogSummary[] = [];
+        if (result.energies.length > 0 || result.rmsGradient !== undefined) {
+            summary.push({
+                job: 1,
+                nAtoms: result.nAtoms,
+                nBasis: result.nBasis,
+                charge: result.charge,
+                multiplicity: result.multiplicity,
+                energies: result.energies,
+                rmsGradient: result.rmsGradient,
+                rmsGradientLabel: result.rmsGradient !== undefined ? 'RMS Force' : undefined
+            });
+        }
+
+        return new MolecularDocument(uri, data, [], undefined, undefined, undefined, undefined, undefined, false, undefined, undefined,
+            result.charges.length > 0 ? result.charges : undefined,
+            summary.length > 0 ? summary : undefined,
+            result.orbitals, result.cavity, result.orbitals ? orbitalLevelsOf(result.orbitals) : undefined);
     }
 
     /**
@@ -2155,7 +2305,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         };
 
         if (token.isCancellationRequested) return;
-        const html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes, document.vmdPayload, document.autoBeta, document.optThresholds, document.trajectoryFrames, document.charges, document.summary);
+        const html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes, document.vmdPayload, document.autoBeta, document.optThresholds, document.trajectoryFrames, document.charges, document.summary, document.orbitalLevels, document.orbitals, document.cavity);
         // Reading the renderer is asynchronous; if the editor was closed in
         // the meantime, assigning html throws "Webview is disposed" and the
         // extension log fills with a failure the user never caused.
@@ -2171,6 +2321,171 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         // receiving progress and its Pause / Resume / Cancel -- or a brand new
         // run -- are handled while the optimisation is still working.
         let mmRun: MmRunState | null = null;
+
+        // --- Orbitals and the cavity: the surface work runs here ---
+        //
+        // Sampling a 4680-function orbital on a million points costs about a
+        // second of pure arithmetic, and cutting its two lobes out of that grid
+        // another fraction of one. That is far too long to do inside a message
+        // handler — the panel would freeze with no way to show progress — so the
+        // work is a task stepped in slices with a yield between them: the same
+        // shape as the Molecular Mechanics pump, and the reason the panel can
+        // draw a progress bar at all. One run at a time per panel; a new request
+        // cancels the one in flight.
+        //
+        // The meshes travel as base64 of their typed arrays. A JSON array of
+        // 300 000 floats is 2 MB of digits; the same bytes as base64 are 1.6 MB
+        // and decode with one pass, which matters because a message is copied
+        // through the webview's own serialisation.
+        interface SurfaceJob {
+            key: string;
+            label: string;
+            /** Colour pair index, so several orbitals stay tellable apart. */
+            hue: number;
+            task: SurfaceTask;
+        }
+        let surfaceRun: { id: number; reqId: number; cancelled: boolean; jobs: SurfaceJob[] } | null = null;
+        let surfaceRunId = 0;
+
+        const encodeFloats = (a: Float32Array): string =>
+            Buffer.from(a.buffer, a.byteOffset, a.byteLength).toString('base64');
+        const encodeIndices = (a: Uint32Array): string =>
+            Buffer.from(a.buffer, a.byteOffset, a.byteLength).toString('base64');
+
+        /** One orbital's coefficient column, straight out of the checkpoint. */
+        const readColumn = async (spinIndex: number, orbital: number): Promise<Float64Array> => {
+            if (!document.orbitals) throw new Error('this document carries no orbital coefficients');
+            const spin = document.orbitals.spins[spinIndex];
+            if (!spin || !spin.layout) throw new Error('this spin channel has no coefficients in the file');
+            const handle = await fs.promises.open(document.orbitals.path, 'r');
+            try {
+                return await readFchkColumn(spin.layout, document.orbitals.nBasis, orbital, async (start, length) => {
+                    const buffer = Buffer.alloc(length);
+                    const { bytesRead } = await handle.read(buffer, 0, length, start);
+                    return buffer.subarray(0, bytesRead);
+                });
+            } finally {
+                await handle.close();
+            }
+        };
+
+        /** Build every task the request asks for; the first failure aborts all. */
+        const buildJobs = async (message: { [key: string]: any }, run: { id: number }): Promise<SurfaceJob[] | string> => {
+            const quality: GridQuality = message.quality === 'coarse' || message.quality === 'fine' ? message.quality : 'normal';
+            const iso = typeof message.iso === 'number' && isFinite(message.iso) && message.iso > 0 ? message.iso : 0.02;
+            const jobs: SurfaceJob[] = [];
+            if (message.kind === 'cavity') {
+                if (!document.cavity || !document.cavity.spheres || document.cavity.spheres.length === 0) {
+                    return 'this file states no cavity spheres to draw';
+                }
+                jobs.push({
+                    key: 'cavity', label: 'Solvent cavity', hue: 0,
+                    task: new CavitySurfaceTask(document.cavity.spheres, quality)
+                });
+                return jobs;
+            }
+            if (!Array.isArray(message.orbitals) || message.orbitals.length === 0) return 'no orbital was selected';
+            if (message.orbitals.length > 10) return 'at most ten orbitals can be drawn at once';
+            for (const spec of message.orbitals) {
+                const spinIndex = spec && typeof spec.spin === 'number' ? spec.spin : 0;
+                const index = spec && typeof spec.index === 'number' ? spec.index : -1;
+                const label = spec && typeof spec.label === 'string' ? spec.label : '';
+                if (!document.orbitals || !document.orbitals.spins[spinIndex]) return 'no such spin channel';
+                const energy = document.orbitals.spins[spinIndex].energies[index];
+                if (index < 0 || energy === undefined) return 'no such orbital';
+                const hue = typeof spec.hue === 'number' && spec.hue >= 0 ? spec.hue % 10 : jobs.length % 10;
+                const coefficients = await readColumn(spinIndex, index);
+                let task: SurfaceTask;
+                try {
+                    task = new OrbitalSurfaceTask(document.orbitals.basis, coefficients, document.data.atoms, iso, quality);
+                } catch (e: any) {
+                    return e && e.message ? String(e.message) : String(e);
+                }
+                jobs.push({
+                    key: 'mo-' + spinIndex + '-' + index,
+                    label: label || ('MO ' + (index + 1)),
+                    hue, task
+                });
+            }
+            if (run.id !== surfaceRunId) return '';   // superseded while reading
+            return jobs;
+        };
+
+        /** Step the jobs one at a time, posting progress and finally the meshes. */
+        const pumpSurfaces = async (run: { id: number; reqId: number; cancelled: boolean; jobs: SurfaceJob[] }): Promise<void> => {
+            const post = (payload: { [key: string]: unknown }) => {
+                if (!run.cancelled) {
+                    try { webviewPanel.webview.postMessage(payload); } catch { run.cancelled = true; }
+                }
+            };
+            try {
+                for (let j = 0; j < run.jobs.length; j++) {
+                    const job = run.jobs[j];
+                    if (run.cancelled) return;
+                    let lastPost = 0;
+                    for (;;) {
+                        const done = job.task.step(28);
+                        if (run.cancelled) return;
+                        const now = Date.now();
+                        if (done || now - lastPost > 110) {
+                            lastPost = now;
+                            const progress = job.task.progress();
+                            post({
+                                command: 'surfaceProgress',
+                                reqId: run.reqId,
+                                id: run.id,
+                                job: j,
+                                jobs: run.jobs.length,
+                                label: job.label,
+                                fraction: progress.fraction,
+                                phase: progress.phase
+                            });
+                        }
+                        if (done) break;
+                        // A turn for the message loop: this is where Cancel (or a
+                        // brand new request) is seen while the grid is being filled.
+                        await new Promise<void>(resolve => setTimeout(resolve, 0));
+                    }
+                    // One orbital at a time, not the whole batch at the end: ten
+                    // orbitals at Fine are tens of megabytes of base64, and
+                    // sending them one by one lets each lobe appear as soon as
+                    // its grid is cut (and keeps the message below the size a
+                    // webview can copy comfortably).
+                    post({
+                        command: 'surfaceResult', reqId: run.reqId, id: run.id, ok: true,
+                        // Every answer of a multi-orbital run is appended; the
+                        // `surfaceDone` that follows retires the progress line.
+                        partial: run.jobs.length > 1,
+                        surfaces: [{
+                            key: job.key,
+                            label: job.label,
+                            hue: job.hue,
+                            grid: job.task.gridNote(),
+                            lobes: job.task.surfaces().map(lobe => ({
+                                sign: lobe.sign,
+                                pos: encodeFloats(lobe.mesh.positions),
+                                nrm: encodeFloats(lobe.mesh.normals),
+                                idx: encodeIndices(lobe.mesh.indices),
+                                vertices: lobe.mesh.positions.length / 3,
+                                triangles: lobe.mesh.indices.length / 3
+                            }))
+                        }]
+                    });
+                }
+                post({ command: 'surfaceDone', reqId: run.reqId, id: run.id });
+            } catch (e: any) {
+                // A task that throws must still answer the page, or its progress
+                // bar would sit at whatever fraction it had reached forever.
+                post({
+                    command: 'surfaceResult', reqId: run.reqId, id: run.id, ok: false,
+                    message: 'The surface could not be drawn: ' + (e && e.message ? e.message : e)
+                });
+            } finally {
+                // The tasks hold the sampled grid (tens of megabytes); releasing
+                // the run here is what lets it go as soon as it is done.
+                if (surfaceRun === run) surfaceRun = null;
+            }
+        };
 
         /** Everything the panel needs to draw a run's current state. */
         const mmStateMessage = (run: MmRunState, command: string): { [key: string]: unknown } => {
@@ -2340,6 +2655,13 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
 
         webviewPanel.onDidDispose(() => {
             mmDiscardRun('replaced');
+            // A surface run in flight has nowhere to post its meshes; stopping
+            // it here is what keeps a closed tab from finishing a second of
+            // arithmetic for nobody.
+            if (surfaceRun) {
+                surfaceRun.cancelled = true;
+                surfaceRun = null;
+            }
         });
 
         webviewPanel.webview.onDidReceiveMessage(async (message) => {
@@ -2415,6 +2737,15 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                         const diffText = diffBinary ? '' : decodeText(diffContent);
                         const diffFileName = diffUri.path.split('/').pop() || 'unknown.xyz';
                         const diffExt = diffFileName.toLowerCase().split('.').pop() || '';
+                        // A formatted checkpoint is streamed by the viewer's own
+                        // loader and can be a gigabyte; reading it as text here to
+                        // compare it would cost gigabytes of heap for a structure
+                        // the comparison cannot carry anyway (no orbitals, no cavity).
+                        if (diffExt === 'fchk' || diffExt === 'fch') {
+                            vscode.window.showWarningMessage('A formatted checkpoint cannot be compared here: its log holds the same geometries.');
+                            webviewPanel.webview.postMessage({ command: 'diffResult', cancelled: true });
+                            break;
+                        }
                         const diffSetup = diffBinary ? undefined : await buildParseOptions(diffUri, diffFileName, diffContent, diffText);
                         const diffOptions = diffSetup && diffSetup.options;
                         const diffParseText = diffSetup && diffSetup.text !== undefined ? diffSetup.text : diffText;
@@ -3013,6 +3344,43 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                     }
                     break;
                 }
+                case 'surfaceDraw': {
+                    // A new request supersedes the one in flight: its answer is
+                    // no longer wanted and the panel has already cleared the
+                    // picture, so it must not arrive later and draw something
+                    // the user did not ask for.
+                    if (surfaceRun) surfaceRun.cancelled = true;
+                    const id = ++surfaceRunId;
+                    const reqId = typeof message.reqId === 'number' ? message.reqId : 0;
+                    const run: { id: number; reqId: number; cancelled: boolean; jobs: SurfaceJob[] } = { id, reqId, cancelled: false, jobs: [] };
+                    surfaceRun = run;
+                    try {
+                        const built = await buildJobs(message, run);
+                        if (typeof built === 'string') {
+                            // '' means "superseded while reading", which is not
+                            // a failure: the newer request will answer.
+                            if (built !== '') {
+                                webviewPanel.webview.postMessage({ command: 'surfaceResult', reqId, id, ok: false, message: built });
+                            }
+                            break;
+                        }
+                        run.jobs = built;
+                        void pumpSurfaces(run);
+                    } catch (e: any) {
+                        webviewPanel.webview.postMessage({
+                            command: 'surfaceResult', reqId, id,
+                            ok: false,
+                            message: 'The surface could not be drawn: ' + (e && e.message ? e.message : e)
+                        });
+                    }
+                    break;
+                }
+                case 'surfaceCancel':
+                    if (surfaceRun) {
+                        surfaceRun.cancelled = true;
+                        surfaceRun = null;
+                    }
+                    break;
                 case 'error':
                     vscode.window.showErrorMessage(message.text);
                     break;
@@ -3086,7 +3454,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         }
     }
 
-    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[], logSource?: string, routes?: RouteSection[], vmdPayload?: VmdPayload, autoBeta: boolean = false, optThresholds?: OptThresholds, trajectoryFrames?: TrajectoryFramePayload[], charges?: LogChargeSet[], summary?: LogSummary[]): Promise<string> {
+    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[], logSource?: string, routes?: RouteSection[], vmdPayload?: VmdPayload, autoBeta: boolean = false, optThresholds?: OptThresholds, trajectoryFrames?: TrajectoryFramePayload[], charges?: LogChargeSet[], summary?: LogSummary[], orbitalLevels?: OrbitalLevels, orbitals?: FchkOrbitals, cavity?: SolventCavity): Promise<string> {
         const nonce = getNonce();
 
         // The renderer is an extension asset, and an installation that lost
@@ -3239,6 +3607,63 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
 
         const vmdData = vmdPayload && vmdPayload.molecules.length > 0 ? vmdPayload : null;
 
+        // --- Orbitals and the solvation cavity ---
+        //
+        // The level diagram needs the energies, the occupations and nothing
+        // else, so that is what travels: 1673 (or 4680) numbers, not the
+        // coefficient block beside them. `canDraw` says whether a surface is
+        // possible at all — a log states no coefficients, and a basis this
+        // engine does not evaluate says so in `reason` rather than failing
+        // when the button is pressed.
+        let orbitalsData: { [key: string]: unknown } | null = null;
+        if (orbitalLevels && orbitalLevels.spins.length > 0) {
+            const drawable = !!orbitals && orbitals.basis.shellType.length > 0 &&
+                orbitals.spins.some(s => !!s.layout && s.layout.uniform);
+            let reason = '';
+            if (!orbitals) {
+                reason = 'This log prints orbital energies but not the coefficients: a surface needs the ' +
+                    'formatted checkpoint (.fchk) of the same job.';
+            } else if (orbitals.basis.maxL > 3) {
+                reason = 'This basis uses g functions (angular momentum ' + orbitals.basis.maxL +
+                    '); this viewer evaluates s, p, d and f only.';
+            } else if (!orbitals.path) {
+                reason = 'This checkpoint was read without a local file path, so its coefficient block ' +
+                    'cannot be read back for a surface; the levels above are its own.';
+            } else if (!drawable) {
+                reason = 'This checkpoint does not carry the orbital coefficients in a layout this viewer can read.';
+            }
+            orbitalsData = {
+                closedShell: orbitalLevels.closedShell,
+                nBasis: orbitals ? orbitals.nBasis : 0,
+                model: orbitals ? orbitals.model : '',
+                canDraw: drawable,
+                reason: reason,
+                spins: orbitalLevels.spins.map(s => ({
+                    label: s.label,
+                    energies: s.energies,
+                    occupations: s.occupations,
+                    occupied: s.occupied
+                }))
+            };
+        }
+
+        const cavityData = cavity ? {
+            source: cavity.source,
+            model: cavity.model || '',
+            type: cavity.type || '',
+            solvent: cavity.solvent || '',
+            alpha: cavity.alpha,
+            area: cavity.area,
+            volume: cavity.volume,
+            sphereCount: cavity.sphereCount !== undefined ? cavity.sphereCount : (cavity.spheres ? cavity.spheres.length : 0),
+            spheres: cavity.spheres ? cavity.spheres.map(s => ({
+                x: Math.round(s.x * 1e4) / 1e4,
+                y: Math.round(s.y * 1e4) / 1e4,
+                z: Math.round(s.z * 1e4) / 1e4,
+                r: Math.round(s.r * 1e4) / 1e4
+            })) : null
+        } : null;
+
         const optThresholdsData = optThresholds ? {
             maxForce: optThresholds.maxForce, rmsForce: optThresholds.rmsForce,
             maxDisplacement: optThresholds.maxDisplacement, rmsDisplacement: optThresholds.rmsDisplacement
@@ -3274,7 +3699,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         // JSON spelling, which is valid JSON and stops the HTML parser from
         // seeing a tag; U+2028/U+2029 are escaped because they are line
         // terminators to a JavaScript parser.
-        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, optThresholds: optThresholdsData, routes: routesData, vmd: vmdData, charges: chargesData, summary: summaryData, autoBeta: !!(autoBeta && !vmdData), hasExplicitBonds: !!data.hasExplicitBonds, warnings: data.warnings || [], mmParams: describeForceField(), trajectory: trajectoryData, trajectoryFrames: trajectoryFramesData })
+        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, optThresholds: optThresholdsData, routes: routesData, vmd: vmdData, charges: chargesData, summary: summaryData, orbitals: orbitalsData, cavity: cavityData, autoBeta: !!(autoBeta && !vmdData), hasExplicitBonds: !!data.hasExplicitBonds, warnings: data.warnings || [], mmParams: describeForceField(), trajectory: trajectoryData, trajectoryFrames: trajectoryFramesData })
             .replace(/</g, '\\u003c')
             .replace(/\u2028/g, '\\u2028')
             .replace(/\u2029/g, '\\u2029');
@@ -3703,16 +4128,54 @@ canvas{display:block}
 #charge-panel .chg-check.off{opacity:0.5;cursor:default}
 #charge-panel .chg-check.off input{cursor:default}
 #charge-panel .chg-legend{margin:7px 0 2px}
-#charge-panel .chg-bar{height:8px;border-radius:2px;border:1px solid rgba(255,255,255,0.18);background:linear-gradient(90deg,#d94f1c,#d1d1d1,#1c4fd9)}
+#charge-panel .chg-bar{height:8px;border-radius:2px;border:1px solid rgba(255,255,255,0.18);background:linear-gradient(90deg,#ff331a,#cccccc,#1a33ff)}
 #charge-panel .chg-scale{display:flex;justify-content:space-between;font-family:monospace;font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:2px}
 #charge-panel .chg-stat{margin-top:5px;font-family:monospace;font-size:10px;color:#ffb86b;word-break:break-word}
 #charge-panel .chg-note{margin-top:3px;font-size:10px;line-height:1.35;color:var(--vscode-descriptionForeground,#999)}
 #charge-panel .chg-note:empty{display:none}
-#charge-panel .chg-sec{margin:8px 0 3px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.15);font-size:10px;color:var(--vscode-descriptionForeground,#999);text-transform:uppercase;letter-spacing:0.4px}
-#charge-panel .chg-soon{cursor:default;opacity:0.55}
 #charge-panel .chg-hint{margin-top:2px;font-size:10px;line-height:1.35;color:var(--vscode-descriptionForeground,#888)}
 #charge-panel .chg-go{display:none;margin-top:5px;padding:2px 9px;border-radius:3px;border:1px solid var(--vscode-button-border,#555);background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#ccc);font-size:10px;cursor:pointer}
 #charge-panel .chg-go:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e)}
+/* The card's three tabs: charges, cavity, orbitals. One row, equal widths, the
+   open one in the button colour so the card never leaves a doubt about which
+   reading is on screen. */
+#charge-panel .chg-tabs{display:flex;gap:3px;margin:0 0 6px}
+#charge-panel .chg-tab{flex:1 1 0;min-width:0;background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#ccc);border:1px solid var(--vscode-panel-border,#444);border-radius:3px;padding:2px 0;font-size:10px;cursor:pointer}
+#charge-panel .chg-tab:hover:not(:disabled){background:var(--vscode-button-secondaryHoverBackground,#45494e)}
+#charge-panel .chg-tab.on{background:var(--vscode-button-background,#0e639c);border-color:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff)}
+#charge-panel .chg-tab:disabled{opacity:0.4;cursor:default}
+#charge-panel .chg-kv{gap:8px;margin:1px 0}
+#charge-panel .chg-val{margin-left:auto;font-family:monospace;text-align:right;word-break:break-word}
+#charge-panel .chg-btns{display:flex;gap:6px;margin-top:6px}
+#charge-panel .chg-btns .chg-go{display:inline-block;margin-top:0;flex:1 1 0;text-align:center}
+/* The level diagram and the orbital list. Monospace throughout: the numbers
+   sit in columns and a proportional font would not line them up. */
+#charge-panel .orb-canvas{display:block;margin:2px auto 4px;max-width:100%}
+#charge-panel .orb-head,#charge-panel .orb-row{display:flex;align-items:center;gap:4px;font-family:monospace;font-size:10px;line-height:1.5}
+#charge-panel .orb-head{color:var(--vscode-descriptionForeground,#888);border-bottom:1px solid rgba(255,255,255,0.12);margin-bottom:2px}
+#charge-panel .orb-list{max-height:132px;overflow-y:auto}
+#charge-panel .orb-row{cursor:pointer}
+#charge-panel .orb-row:hover{background:rgba(255,255,255,0.06)}
+#charge-panel .orb-row.jump{background:rgba(55,148,255,0.20)}
+#charge-panel .orb-row.homo .orb-e{color:#e05555}
+#charge-panel .orb-row.lumo .orb-e{color:#3fae6a}
+#charge-panel .orb-pick,#charge-panel .orb-spacer{width:12px;height:12px;margin:0;flex:0 0 12px}
+#charge-panel .orb-n{flex:0 0 38px;text-align:right;color:var(--vscode-descriptionForeground,#999)}
+#charge-panel .orb-e{flex:1 1 auto;text-align:right}
+#charge-panel .orb-occ{flex:0 0 22px;text-align:right;color:var(--vscode-descriptionForeground,#999)}
+#charge-panel .orb-nav{display:flex;align-items:center;gap:6px;margin:3px 0}
+#charge-panel .orb-nav button{background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#ccc);border:1px solid var(--vscode-panel-border,#444);border-radius:2px;font-size:9px;padding:0 6px;cursor:pointer}
+#charge-panel .orb-nav span{flex:1 1 auto;text-align:center;font-size:10px;color:var(--vscode-descriptionForeground,#999)}
+#charge-panel .orb-jump .orb-num{flex:1 1 auto;min-width:0}
+#charge-panel .orb-ctl{display:flex;align-items:center;gap:5px;margin:4px 0 0}
+#charge-panel .orb-num{flex:0 0 58px;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;font-size:11px;padding:1px 3px}
+#charge-panel .orb-q{flex:0 0 66px}
+#charge-panel .orb-prog{display:none;height:4px;margin:6px 0 0;border-radius:2px;background:rgba(255,255,255,0.12);overflow:hidden}
+#charge-panel .orb-prog.on{display:block}
+#charge-panel .orb-prog .bar{height:100%;width:0;background:var(--vscode-progressBar-background,#0e70c0)}
+#charge-panel .orb-leg{display:flex;align-items:center;gap:4px;font-size:10px;line-height:1.5}
+#charge-panel .orb-sw{width:9px;height:9px;border-radius:2px;flex:0 0 9px}
+#charge-panel .orb-grid{margin-left:auto;color:var(--vscode-descriptionForeground,#777);font-size:9px}
 /* The values are page furniture drawn over the canvas, one absolutely placed
    span per atom, so they follow every rotation without a texture per atom and
    stay out of the PNG (a snapshot captures the WebGL canvas, not the page). */
@@ -3809,7 +4272,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><div class="pn-head"><h4>Supercell Bounds</h4><button class="pn-close" id="crystal-close" type="button" title="Minimize the crystal panel">&times;</button></div><div class="bnd-row bnd-axis"><label for="bnd-a-min">a</label><input type="number" id="bnd-a-min" value="0" step="0.1" title="lower bound along a" aria-label="lower bound along a"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-a-max" value="1" step="0.1" title="upper bound along a" aria-label="upper bound along a"></div><div class="bnd-row bnd-axis"><label for="bnd-b-min">b</label><input type="number" id="bnd-b-min" value="0" step="0.1" title="lower bound along b" aria-label="lower bound along b"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-b-max" value="1" step="0.1" title="upper bound along b" aria-label="upper bound along b"></div><div class="bnd-row bnd-axis"><label for="bnd-c-min">c</label><input type="number" id="bnd-c-min" value="0" step="0.1" title="lower bound along c" aria-label="lower bound along c"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-c-max" value="1" step="0.1" title="upper bound along c" aria-label="upper bound along c"></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-p2" title="Eight unit cells, 0..2 along every axis">2×2×2</button><button class="bnd-mini" id="bnd-p3" title="Twenty-seven unit cells, 0..3 along every axis">3×3×3</button><button class="bnd-mini" id="bnd-p4" title="Sixty-four unit cells, 0..4 along every axis">4×4×4</button></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-reset" title="Back to the single unit cell, 0..1 along every axis">Reset</button><button class="bnd-mini" id="bnd-origin" title="Keep the spans, move the low corner onto the lattice origin">Align Origin</button></div><div class="bnd-cell" id="bnd-cell-line"></div><div class="bnd-sym" id="bnd-sym-note"></div><div class="bnd-row"><label>Disorder</label><select id="bnd-disorder" title="Show the ordered part plus one disorder group; All shows every alternative the cell lists"><option value="">All</option></select></div><label class="bnd-occ off" id="bnd-occ-label" for="bnd-occ-normalize" title="When one disorder group is selected, count its sites at occupancy 1 in the formula, density and saved files, so the cell describes the ordered variant on screen. All keeps every occupancy the file states."><input type="checkbox" id="bnd-occ-normalize" checked disabled>Selected group fully occupied</label><div class="hk-title">Lattice Planes (h k l)</div><div class="bnd-row hk-row"><label>(h k l)</label><input type="number" id="hk-h" value="0" step="1" title="h"><input type="number" id="hk-k" value="0" step="1" title="k"><input type="number" id="hk-l" value="1" step="1" title="l"></div><div class="hk-val" id="hk-d1"></div><div class="bnd-row hk-row"><label>2nd</label><input type="number" id="hk2-h" value="1" step="1" title="h of the second plane"><input type="number" id="hk2-k" value="0" step="1" title="k of the second plane"><input type="number" id="hk2-l" value="0" step="1" title="l of the second plane"></div><div class="hk-val" id="hk-d2"></div><button id="hk-show" class="bnd-btn" title="Draw the (hkl) plane through the centre of the box">Show Plane</button><button id="xrd-open" class="bnd-btn" title="Calculate the powder X-ray diffraction pattern of the unit cell">Powder XRD Pattern...</button><button id="bvs-open" class="bnd-btn" title="Bond-valence sums per site: how well the coordination around each cation and anion matches its formal valence (read-only)">Bond Valence (BVS)...</button><button id="cav-open" class="bnd-btn" title="Probe the unit cell for closed cavities and open channels and report their volume (read-only)">Cavities...</button><button id="bnd-edit-cell" class="bnd-btn" title="Change the cell parameters; every site keeps its fractional coordinates">Edit Cell...</button><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="pn-head"><span class="vp-title">Auto Rotate</span><button class="pn-close" id="view-close" type="button" title="Minimize the View controls">&times;</button></div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div><div class="vp-title vp-sub">Display</div><select id="style-select" title="How the structure is drawn: ball and stick (the default), van der Waals spheres, sticks without the atom spheres, or coordination polyhedra for a crystal"><option value="ball">Ball &amp; Stick</option><option value="spacefill">Space-filling</option><option value="stick">Stick</option>${(function(){try{return JSON.parse(jsonData).crystal?'<option value="polyhedra">Polyhedra</option>':'';}catch(e){return '';}}())}</select><label class="vp-check off" id="ortep-line" title="Draw atoms that carry anisotropic displacement parameters as 50% probability ellipsoids"><input type="checkbox" id="ortep-chk" disabled> Thermal ellipsoids (50%)</label></div><div id="bake-panel"><div class="pn-head"><span class="vp-title">Edit Coordinates</span><button class="pn-close" id="bake-close" type="button" title="Minimize the Edit Coordinates card">&times;</button></div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="pn-head"><span class="sp-title">Select Atoms</span><button class="pn-close" id="select-close" type="button" title="Minimize the selection panel">&times;</button></div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="neigh-panel"><div class="pn-head"><span class="ng-title">Neighbours</span><button class="pn-close" id="neigh-close" type="button" title="Minimize the neighbour list">&times;</button></div><div class="ng-line"><label for="ng-radius">Radius (A)</label><input type="number" id="ng-radius" value="3.5" min="0.1" max="12" step="0.1"><label class="ng-chk" for="ng-skip"><input type="checkbox" id="ng-skip" checked>skip bonded</label></div><div class="ng-line"><label>Anchor</label><span class="ng-anchor" id="ng-anchor">click an atom</span></div><div class="ng-summary" id="ng-summary"></div><div class="ng-list" id="ng-list"></div><div class="ng-btns"><button id="ng-select">Select listed</button></div><div class="ng-hint" id="ng-hint">Click a row to select that atom. Crystal images outside the drawn cell are listed with their cell offset.</div></div><div id="int-panel"><div class="pn-head"><span class="ng-title">Non-covalent Interactions</span><button class="pn-close" id="int-close" type="button" title="Minimize the interaction list">&times;</button></div><div class="ng-line ng-types"><label class="ng-chk" for="int-hb"><input type="checkbox" id="int-hb" checked>H-bond</label><label class="ng-chk" for="int-xb"><input type="checkbox" id="int-xb" checked>halogen</label><label class="ng-chk" for="int-cb"><input type="checkbox" id="int-cb" checked>chalcogen</label><label class="ng-chk" for="int-pn"><input type="checkbox" id="int-pn" checked>pnictogen</label><label class="ng-chk" for="int-pp"><input type="checkbox" id="int-pp" checked>&pi;-&pi;</label><label class="ng-chk" for="int-chpi"><input type="checkbox" id="int-chpi" checked>CH-&pi;</label></div><div class="ng-line"><label class="ng-chk" for="int-show"><input type="checkbox" id="int-show" checked>draw dashed lines</label></div><div class="ng-summary" id="int-summary"></div><div class="ng-list" id="int-list"></div><div class="ng-hint" id="int-hint">H-bond: d(H&middot;&middot;&middot;A) &lt; 2.5 &Aring; and D-H&middot;&middot;&middot;A &gt; 120&deg;. Halogen, chalcogen and pnictogen bonds: d(X&middot;&middot;&middot;A) &lt; vdW sum &minus; 0.1 &Aring; and D-X&middot;&middot;&middot;A &gt; 130&deg;; acceptors N, O, S, F, Cl, Br, I. &pi;-&pi;: aromatic 5&ndash;7 rings with a plane angle &le; 30&deg;, centroid distance &le; 4.5 &Aring; and a 2.8&ndash;3.8 &Aring; face gap (parallel/offset), or a &ge; 60&deg; T-shape with one ring edge 3.0&ndash;5.5 &Aring; over the other face. CH-&pi;: H&middot;&middot;&middot;centroid &lt; 3.0 &Aring;, C-H&middot;&middot;&middot;centroid &gt; 120&deg; and the H at least 1.0 &Aring; above the ring face.</div></div><div id="xrd-panel"><div class="xr-title"><span>Powder XRD</span><button class="xr-close" id="xrd-close" title="Close (Esc)">&times;</button></div><div class="xr-line"><label for="xrd-rad">Radiation</label><select id="xrd-rad" title="The X-ray wavelength the pattern is calculated for"></select><label for="xrd-2max">2&theta; max</label><select id="xrd-2max" class="xr-narrow" title="The highest diffraction angle in the pattern"></select></div><div class="xr-summary" id="xrd-summary"></div><canvas id="xrd-canvas" width="440" height="150"></canvas><div class="xr-note" id="xrd-peak-info"></div><div class="xr-note" id="xrd-exp-info"></div><div class="xr-note" id="xrd-note"></div><div class="xr-list" id="xrd-list"></div><div class="xr-btns"><button id="xrd-refresh" class="xr-secondary" title="Recalculate after the structure changed">Recalculate</button><button id="xrd-export" title="Save the drawn curve as a two-column text file">Export .xy</button></div><div class="xr-btns"><button id="xrd-import" class="xr-secondary" title="Overlay a measured two-column 2theta/intensity pattern">Import experimental .xy...</button><button id="xrd-clear-exp" class="xr-secondary" disabled title="Remove the experimental curve">Clear exp.</button></div><input type="file" id="xrd-file" accept=".xy,.txt,.csv,text/plain"><div class="xr-hint">Pattern of the unit cell on screen (the supercell bounds do not change it) with Cromer-Mann form factors, Lorenz-polarisation and a Caglioti Gaussian profile. Click a calculated peak to read its position against the experimental curve.</div></div><div id="cav-panel"><div class="cv-title"><span>Voids and Cavities</span><button class="cv-close" id="cav-close" title="Close (Esc)">&times;</button></div><div class="cv-line"><label for="cav-probe">Probe radius</label><input type="number" id="cav-probe" value="1.2" min="0" max="20" step="0.1" title="Radius of the spherical probe rolled through the cell"><span class="cv-unit">&Aring;</span><button id="cav-run" title="Scan the unit cell with this probe">Analyse</button><button id="cav-clear" class="cv-secondary" title="Remove the drawn surface">Clear</button></div><div class="cv-summary" id="cav-summary">Not analysed yet.</div><div class="cv-note" id="cav-note"></div><div class="cv-list" id="cav-list"></div><div class="cv-hint">A point is free when a probe of this radius fits there without touching an atom (van der Waals radii, periodic images included). The free space is split into components: one whose walk winds through a cell face is an open channel, otherwise it is a closed cavity. Click a row to draw that void as a translucent surface. Volumes are per unit cell, so a supercell shows the same numbers; pockets under 0.5 &Aring;&sup3; are ignored. r_free is the largest sphere that fits at the void's deepest point.</div></div><div id="rotate-panel"><div class="pn-head"><span class="rp-title">Rotate Group Around Axis</span><button class="pn-close" id="rotate-close" type="button" title="Minimize the rotate panel">&times;</button></div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="charge-labels"></div><div id="charge-panel"></div><div id="summary-panel"></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div><div id="charge-reopen" class="pn-chip" title="Open the atomic-charge panel">Charges</div><div id="summary-reopen" class="pn-chip" title="Open the job summary">Summary</div><div id="crystal-reopen" class="pn-chip" title="Open the crystal panel">Crystal</div><div id="egg-reopen" class="pn-chip" title="Open the egg list">Eggs</div><div id="view-reopen" class="pn-chip" title="Open the View controls">View</div><div id="bake-reopen" class="pn-chip" title="Open the Edit Coordinates card">Coordinates</div><div id="select-reopen" class="pn-chip" title="Open the Select Atoms panel">Select Atoms</div><div id="neigh-reopen" class="pn-chip" title="Open the Neighbours panel">Neighbours</div><div id="int-reopen" class="pn-chip" title="Open the Non-covalent Interactions panel">Interactions</div><div id="rotate-reopen" class="pn-chip" title="Open the Rotate Group panel">Rotate Group</div><div id="xrd-reopen" class="pn-chip" title="Open the powder XRD panel">Powder XRD</div><div id="cav-reopen" class="pn-chip" title="Open the cavity and void analysis">Cavities</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><div class="pn-head"><h4>Supercell Bounds</h4><button class="pn-close" id="crystal-close" type="button" title="Minimize the crystal panel">&times;</button></div><div class="bnd-row bnd-axis"><label for="bnd-a-min">a</label><input type="number" id="bnd-a-min" value="0" step="0.1" title="lower bound along a" aria-label="lower bound along a"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-a-max" value="1" step="0.1" title="upper bound along a" aria-label="upper bound along a"></div><div class="bnd-row bnd-axis"><label for="bnd-b-min">b</label><input type="number" id="bnd-b-min" value="0" step="0.1" title="lower bound along b" aria-label="lower bound along b"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-b-max" value="1" step="0.1" title="upper bound along b" aria-label="upper bound along b"></div><div class="bnd-row bnd-axis"><label for="bnd-c-min">c</label><input type="number" id="bnd-c-min" value="0" step="0.1" title="lower bound along c" aria-label="lower bound along c"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-c-max" value="1" step="0.1" title="upper bound along c" aria-label="upper bound along c"></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-p2" title="Eight unit cells, 0..2 along every axis">2×2×2</button><button class="bnd-mini" id="bnd-p3" title="Twenty-seven unit cells, 0..3 along every axis">3×3×3</button><button class="bnd-mini" id="bnd-p4" title="Sixty-four unit cells, 0..4 along every axis">4×4×4</button></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-reset" title="Back to the single unit cell, 0..1 along every axis">Reset</button><button class="bnd-mini" id="bnd-origin" title="Keep the spans, move the low corner onto the lattice origin">Align Origin</button></div><div class="bnd-cell" id="bnd-cell-line"></div><div class="bnd-sym" id="bnd-sym-note"></div><div class="bnd-row"><label>Disorder</label><select id="bnd-disorder" title="Show the ordered part plus one disorder group; All shows every alternative the cell lists"><option value="">All</option></select></div><label class="bnd-occ off" id="bnd-occ-label" for="bnd-occ-normalize" title="When one disorder group is selected, count its sites at occupancy 1 in the formula, density and saved files, so the cell describes the ordered variant on screen. All keeps every occupancy the file states."><input type="checkbox" id="bnd-occ-normalize" checked disabled>Selected group fully occupied</label><div class="hk-title">Lattice Planes (h k l)</div><div class="bnd-row hk-row"><label>(h k l)</label><input type="number" id="hk-h" value="0" step="1" title="h"><input type="number" id="hk-k" value="0" step="1" title="k"><input type="number" id="hk-l" value="1" step="1" title="l"></div><div class="hk-val" id="hk-d1"></div><div class="bnd-row hk-row"><label>2nd</label><input type="number" id="hk2-h" value="1" step="1" title="h of the second plane"><input type="number" id="hk2-k" value="0" step="1" title="k of the second plane"><input type="number" id="hk2-l" value="0" step="1" title="l of the second plane"></div><div class="hk-val" id="hk-d2"></div><button id="hk-show" class="bnd-btn" title="Draw the (hkl) plane through the centre of the box">Show Plane</button><button id="xrd-open" class="bnd-btn" title="Calculate the powder X-ray diffraction pattern of the unit cell">Powder XRD Pattern...</button><button id="bvs-open" class="bnd-btn" title="Bond-valence sums per site: how well the coordination around each cation and anion matches its formal valence (read-only)">Bond Valence (BVS)...</button><button id="cav-open" class="bnd-btn" title="Probe the unit cell for closed cavities and open channels and report their volume (read-only)">Cavities...</button><button id="bnd-edit-cell" class="bnd-btn" title="Change the cell parameters; every site keeps its fractional coordinates">Edit Cell...</button><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="pn-head"><span class="vp-title">Auto Rotate</span><button class="pn-close" id="view-close" type="button" title="Minimize the View controls">&times;</button></div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div><div class="vp-title vp-sub">Display</div><select id="style-select" title="How the structure is drawn: ball and stick (the default), van der Waals spheres, sticks without the atom spheres, or coordination polyhedra for a crystal"><option value="ball">Ball &amp; Stick</option><option value="spacefill">Space-filling</option><option value="stick">Stick</option>${(function(){try{return JSON.parse(jsonData).crystal?'<option value="polyhedra">Polyhedra</option>':'';}catch(e){return '';}}())}</select><label class="vp-check off" id="ortep-line" title="Draw atoms that carry anisotropic displacement parameters as 50% probability ellipsoids"><input type="checkbox" id="ortep-chk" disabled> Thermal ellipsoids (50%)</label></div><div id="bake-panel"><div class="pn-head"><span class="vp-title">Edit Coordinates</span><button class="pn-close" id="bake-close" type="button" title="Minimize the Edit Coordinates card">&times;</button></div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="pn-head"><span class="sp-title">Select Atoms</span><button class="pn-close" id="select-close" type="button" title="Minimize the selection panel">&times;</button></div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="neigh-panel"><div class="pn-head"><span class="ng-title">Neighbours</span><button class="pn-close" id="neigh-close" type="button" title="Minimize the neighbour list">&times;</button></div><div class="ng-line"><label for="ng-radius">Radius (A)</label><input type="number" id="ng-radius" value="3.5" min="0.1" max="12" step="0.1"><label class="ng-chk" for="ng-skip"><input type="checkbox" id="ng-skip" checked>skip bonded</label></div><div class="ng-line"><label>Anchor</label><span class="ng-anchor" id="ng-anchor">click an atom</span></div><div class="ng-summary" id="ng-summary"></div><div class="ng-list" id="ng-list"></div><div class="ng-btns"><button id="ng-select">Select listed</button></div><div class="ng-hint" id="ng-hint">Click a row to select that atom. Crystal images outside the drawn cell are listed with their cell offset.</div></div><div id="int-panel"><div class="pn-head"><span class="ng-title">Non-covalent Interactions</span><button class="pn-close" id="int-close" type="button" title="Minimize the interaction list">&times;</button></div><div class="ng-line ng-types"><label class="ng-chk" for="int-hb"><input type="checkbox" id="int-hb" checked>H-bond</label><label class="ng-chk" for="int-xb"><input type="checkbox" id="int-xb" checked>halogen</label><label class="ng-chk" for="int-cb"><input type="checkbox" id="int-cb" checked>chalcogen</label><label class="ng-chk" for="int-pn"><input type="checkbox" id="int-pn" checked>pnictogen</label><label class="ng-chk" for="int-pp"><input type="checkbox" id="int-pp" checked>&pi;-&pi;</label><label class="ng-chk" for="int-chpi"><input type="checkbox" id="int-chpi" checked>CH-&pi;</label></div><div class="ng-line"><label class="ng-chk" for="int-show"><input type="checkbox" id="int-show" checked>draw dashed lines</label></div><div class="ng-summary" id="int-summary"></div><div class="ng-list" id="int-list"></div><div class="ng-hint" id="int-hint">H-bond: d(H&middot;&middot;&middot;A) &lt; 2.5 &Aring; and D-H&middot;&middot;&middot;A &gt; 120&deg;. Halogen, chalcogen and pnictogen bonds: d(X&middot;&middot;&middot;A) &lt; vdW sum &minus; 0.1 &Aring; and D-X&middot;&middot;&middot;A &gt; 130&deg;; acceptors N, O, S, F, Cl, Br, I. &pi;-&pi;: aromatic 5&ndash;7 rings with a plane angle &le; 30&deg;, centroid distance &le; 4.5 &Aring; and a 2.8&ndash;3.8 &Aring; face gap (parallel/offset), or a &ge; 60&deg; T-shape with one ring edge 3.0&ndash;5.5 &Aring; over the other face. CH-&pi;: H&middot;&middot;&middot;centroid &lt; 3.0 &Aring;, C-H&middot;&middot;&middot;centroid &gt; 120&deg; and the H at least 1.0 &Aring; above the ring face.</div></div><div id="xrd-panel"><div class="xr-title"><span>Powder XRD</span><button class="xr-close" id="xrd-close" title="Close (Esc)">&times;</button></div><div class="xr-line"><label for="xrd-rad">Radiation</label><select id="xrd-rad" title="The X-ray wavelength the pattern is calculated for"></select><label for="xrd-2max">2&theta; max</label><select id="xrd-2max" class="xr-narrow" title="The highest diffraction angle in the pattern"></select></div><div class="xr-summary" id="xrd-summary"></div><canvas id="xrd-canvas" width="440" height="150"></canvas><div class="xr-note" id="xrd-peak-info"></div><div class="xr-note" id="xrd-exp-info"></div><div class="xr-note" id="xrd-note"></div><div class="xr-list" id="xrd-list"></div><div class="xr-btns"><button id="xrd-refresh" class="xr-secondary" title="Recalculate after the structure changed">Recalculate</button><button id="xrd-export" title="Save the drawn curve as a two-column text file">Export .xy</button></div><div class="xr-btns"><button id="xrd-import" class="xr-secondary" title="Overlay a measured two-column 2theta/intensity pattern">Import experimental .xy...</button><button id="xrd-clear-exp" class="xr-secondary" disabled title="Remove the experimental curve">Clear exp.</button></div><input type="file" id="xrd-file" accept=".xy,.txt,.csv,text/plain"><div class="xr-hint">Pattern of the unit cell on screen (the supercell bounds do not change it) with Cromer-Mann form factors, Lorenz-polarisation and a Caglioti Gaussian profile. Click a calculated peak to read its position against the experimental curve.</div></div><div id="cav-panel"><div class="cv-title"><span>Voids and Cavities</span><button class="cv-close" id="cav-close" title="Close (Esc)">&times;</button></div><div class="cv-line"><label for="cav-probe">Probe radius</label><input type="number" id="cav-probe" value="1.2" min="0" max="20" step="0.1" title="Radius of the spherical probe rolled through the cell"><span class="cv-unit">&Aring;</span><button id="cav-run" title="Scan the unit cell with this probe">Analyse</button><button id="cav-clear" class="cv-secondary" title="Remove the drawn surface">Clear</button></div><div class="cv-summary" id="cav-summary">Not analysed yet.</div><div class="cv-note" id="cav-note"></div><div class="cv-list" id="cav-list"></div><div class="cv-hint">A point is free when a probe of this radius fits there without touching an atom (van der Waals radii, periodic images included). The free space is split into components: one whose walk winds through a cell face is an open channel, otherwise it is a closed cavity. Click a row to draw that void as a translucent surface. Volumes are per unit cell, so a supercell shows the same numbers; pockets under 0.5 &Aring;&sup3; are ignored. r_free is the largest sphere that fits at the void's deepest point.</div></div><div id="rotate-panel"><div class="pn-head"><span class="rp-title">Rotate Group Around Axis</span><button class="pn-close" id="rotate-close" type="button" title="Minimize the rotate panel">&times;</button></div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="charge-labels"></div><div id="charge-panel"></div><div id="summary-panel"></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div><div id="charge-reopen" class="pn-chip" title="Atomic charges, solvent cavity and molecular orbitals">⚛️ Properties</div><div id="summary-reopen" class="pn-chip" title="Open the job summary">📋 Summary</div><div id="crystal-reopen" class="pn-chip" title="Open the crystal panel">Crystal</div><div id="egg-reopen" class="pn-chip" title="Open the egg list">Eggs</div><div id="view-reopen" class="pn-chip" title="Open the View controls">View</div><div id="bake-reopen" class="pn-chip" title="Open the Edit Coordinates card">Coordinates</div><div id="select-reopen" class="pn-chip" title="Open the Select Atoms panel">Select Atoms</div><div id="neigh-reopen" class="pn-chip" title="Open the Neighbours panel">Neighbours</div><div id="int-reopen" class="pn-chip" title="Open the Non-covalent Interactions panel">Interactions</div><div id="rotate-reopen" class="pn-chip" title="Open the Rotate Group panel">Rotate Group</div><div id="xrd-reopen" class="pn-chip" title="Open the powder XRD panel">Powder XRD</div><div id="cav-reopen" class="pn-chip" title="Open the cavity and void analysis">Cavities</div></div>
 <div id="error-msg"></div>
 <div id="empty-msg"></div>
 <div id="atom-tooltip"></div>
@@ -7192,6 +7655,10 @@ function rebuildScene(keepCenter){
     // following the view transform); lift it out before the clear, drop its
     // meshes here, and put it back — refreshVmdSurfaces rebuilds them below.
     if(vmdSurfaceGroup&&vmdSurfaceGroup.parent===moleculeGroup)moleculeGroup.remove(vmdSurfaceGroup);
+    // The orbital and cavity meshes were computed by the host and cost real
+    // time; they ride inside the molecule group like the script's patches, so
+    // they are lifted out before the clear and put back after it.
+    moGroupPrepare();
     clearVmdSurfaceMeshes();
     var oldChildren=moleculeGroup.children.slice();
     oldChildren.forEach(function(ch){disposeMesh(ch);moleculeGroup.remove(ch)});
@@ -7294,6 +7761,9 @@ function rebuildScene(keepCenter){
     // this function emptied; put the selected void back against the geometry
     // that was just rebuilt.
     cavityRefresh();
+    // The orbital surfaces are children of the same emptied group; put them
+    // back against the new centre (their vertices are absolute).
+    moGroupRestore();
     // The ellipsoid switch only exists for a structure that states ADPs; a
     // molecule read from a coordinate file (or a crystal whose file has no
     // aniso table) leaves it disabled rather than offering a view that would
@@ -7319,6 +7789,9 @@ function updateScenePositions(keepCenter){
     // before it; the cavity mesh is dropped for the duration and rebuilt by
     // the next rebuildScene (a commit invalidates the report outright).
     cavityHideSurface();
+    // Same rule for the orbital and cavity meshes the host computed: they
+    // describe the geometry the drag is changing, so they wait for the commit.
+    if(moGroup)moGroup.visible=false;
     needsRender=true;
 }
 
@@ -7353,7 +7826,10 @@ function shiftAllMeshesForCenter(dx,dy,dz){
     // moves them by the same -Δ, again without rebuilding a hull.
     polySyncPositions();
     // Surface meshes need no shift: their geometry is written relative to the
-    // centre, and refreshVmdSurfaces rebuilds them for the new one.
+    // centre, and refreshVmdSurfaces rebuilds them for the new one. The orbital
+    // and cavity meshes are not rebuilt (the host computed them), so their
+    // group is simply re-placed against the new centre.
+    if(moGroup)moGroup.position.set(-CX,-CY,-CZ);
 }
 // ===== Where the view turns =====
 //
@@ -10351,6 +10827,12 @@ window.addEventListener('message',function(event){
         mmHandleCancelled(msg);
     }else if(msg.command==='mmResult'){
         applyMmResult(msg);
+    }else if(msg.command==='surfaceProgress'){
+        applySurfaceProgress(msg);
+    }else if(msg.command==='surfaceResult'){
+        applySurfaceResult(msg);
+    }else if(msg.command==='surfaceDone'){
+        applySurfaceDone(msg);
     }
 });
 
@@ -14164,6 +14646,17 @@ routeReopenEl.addEventListener('click',function(){buildRoutePanel()});
 // else's number.
 var CHARGES=MD.charges||null;
 var SUMMARY=MD.summary||null;
+// The orbitals a file states (energies and occupations only — the coefficients
+// never leave the host) and the solvation cavity it describes. Both are the
+// same payload shape a log and a formatted checkpoint produce, so the card
+// never has to ask which file it is showing.
+var ORBITALS=MD.orbitals||null;
+var CAVITY=MD.cavity||null;
+// The geometry the file itself states, fingerprinted once. A molecular orbital
+// and a solvation cavity are properties of that geometry, so after an edit or an
+// import a new draw would picture atoms that are no longer on screen; the two
+// Draw buttons refuse it rather than drawing over the wrong structure.
+var docGeometrySignature=moGeometrySignature();
 var CHARGE_LABEL_MAX=500;          // values are drawn for at most this many atoms
 var chargeSel=0;                   // index into CHARGES
 var chargeColorOn=false;
@@ -14236,9 +14729,17 @@ function chargeColorOfValue(v){
     if(v==null||!isFinite(v))return null;
     var t=chargeAbs>0?v/chargeAbs:0;
     if(t>1)t=1;else if(t<-1)t=-1;
+    // A stronger ramp than a plain linear one: most tables sit well inside
+    // plus or minus chargeAbs, so t is lifted (0.78) to give those atoms a
+    // visible hue instead of a near-grey, and the ends run to a saturated red
+    // and blue.
+    var u=Math.pow(t<0?-t:t,0.78);
     var r,g,b;
-    if(t>=0){r=0.82-0.71*t;g=0.82-0.51*t;b=0.82+0.03*t}
-    else{var u=-t;r=0.82+0.03*u;g=0.82-0.51*u;b=0.82-0.71*u}
+    // Symmetric by construction (the negative end is the positive end with red
+    // and blue swapped), so +q and -q of the same magnitude read as the same
+    // strength of the opposite sign.
+    if(t>=0){r=0.80-0.70*u;g=0.80-0.60*u;b=0.80+0.20*u}
+    else{r=0.80+0.20*u;g=0.80-0.60*u;b=0.80-0.70*u}
     return chargeHex(r,g,b);
 }
 // Refresh what the current atoms, the selected scheme and the two switches
@@ -14475,27 +14976,127 @@ function chargeSyncPanel(){
     }
     if(grew)layoutPanels();
 }
+// ===== The Electronic Structure card =====
+//
+// Three readings of one job sit behind one chip: the atomic charges a
+// population analysis prints, the solvent cavity the solvation model built, and
+// the molecular orbitals. They are tabs of one card rather than three cards
+// because they are three views of the same electronic structure and the user
+// wants one of them at a time — three floating cards in a column would cover
+// the molecule to say the same thing.
+//
+// The card keeps the id, the class names and the chip of the charge panel it
+// grew out of, so the layout engine, the Diff folding and the chip stack all
+// keep working unchanged.
+var PROP_TABS=[['charges','Charges'],['cavity','Cavity'],['mos','Orbitals']];
+var propTab='charges';
+var orbitalSpin=0;
+var orbitalSel={};              // 'spin:index' -> true, at most MO_MAX_DRAW
+var orbitalShift=0;             // how far the listed window moved from HOMO
+var orbitalJumpTarget=-1;       // the row a typed orbital number moved the list to
+var orbitalIso=0.02;            // the contour value, in atomic units
+var orbitalQuality='normal';
+var surfaceJob=null;            // {reqId, fraction, phase, label} while drawing
+var surfaceReq=0;               // the id this page stamps on its requests
+var surfaceError='';
+var moSurfaces=[];              // [{key,label,hue,lobes:[{mesh}]}]
+var moGroup=null;               // the group they live in, inside moleculeGroup
+// How many orbitals may be drawn at once. Each orbital gets its own phase
+// colour pair and the palette below holds ten of them, so ten is the limit.
+var MO_MAX_DRAW=10;
+// Ten lobe colour pairs: a positive lobe and its negative partner. Two orbitals
+// drawn at once must not share a pair, or their phases become indistinguishable
+// exactly where they overlap.
+var MO_HUES=[
+    [0xd94f4f,0x3b6fd4],[0xd98b2b,0x2f9e8f],[0x9a5bd6,0x53b83a],[0xd94f9e,0x2f8fd4],
+    [0xd9c22b,0x5b4fd9],[0x7fd93b,0xc13fd4],[0xd95b3b,0x3bbfd9],[0x3bd9a1,0xd93b8f],
+    [0x8f9bd9,0xd9a13b],[0x53b83a,0xd94f4f]
+];
+
+function propsAvailable(){
+    return (CHARGES&&CHARGES.length>0)||!!ORBITALS||!!CAVITY;
+}
+function propsTabHasData(id){
+    if(id==='charges')return !!(CHARGES&&CHARGES.length>0);
+    if(id==='cavity')return !!CAVITY;
+    if(id==='mos')return !!ORBITALS;
+    return false;
+}
+// The tab a fresh open shows: the first one this file can actually fill.
+function propsOpenTab(){
+    if(propsTabHasData(propTab))return propTab;
+    for(var i=0;i<PROP_TABS.length;i++){
+        if(propsTabHasData(PROP_TABS[i][0]))return PROP_TABS[i][0];
+    }
+    return propTab;
+}
+function propsTabsHtml(){
+    var html='';
+    for(var i=0;i<PROP_TABS.length;i++){
+        var id=PROP_TABS[i][0];
+        var on=id===propTab;
+        var has=propsTabHasData(id);
+        html+='<button type="button" class="chg-tab'+(on?' on':'')+(has?'':' off')+'" data-tab="'+id+'"'+
+            (has?'':' disabled')+'>'+PROP_TABS[i][1]+'</button>';
+    }
+    return html;
+}
 function buildChargePanel(){
-    if(!CHARGES||CHARGES.length===0||!chargePanelEl)return;
+    if(!chargePanelEl||!propsAvailable())return;
+    propTab=propsOpenTab();
     chargePanelEl.innerHTML=
-        '<div class="chg-head"><span class="chg-title">Atomic Charges</span><span class="chg-close">\u00d7</span></div>'+
-        '<div class="chg-body">'+
-        '<div class="chg-row"><label class="chg-lab" for="chg-type">Scheme</label>'+
-        '<select id="chg-type" class="chg-sel" title="The population analyses this file prints; the bracketed count is how many atoms a partial table covers">'+chargeTypeOptions()+'</select></div>'+
+        '<div class="chg-head"><span class="chg-title">⚛️ Electronic Structure</span><span class="chg-close">\u00d7</span></div>'+
+        '<div class="chg-tabs">'+propsTabsHtml()+'</div>'+
+        '<div class="chg-body" id="chg-body"></div>';
+    var closeBtn=chargePanelEl.querySelector('.chg-close');
+    if(closeBtn)closeBtn.addEventListener('click',function(){chargeClosePanel()});
+    var tabs=chargePanelEl.querySelectorAll('.chg-tab');
+    for(var i=0;i<tabs.length;i++){
+        tabs[i].addEventListener('click',function(){
+            var id=this.getAttribute('data-tab');
+            if(!id||!propsTabHasData(id)||id===propTab)return;
+            propTab=id;
+            var all=chargePanelEl.querySelectorAll('.chg-tab');
+            for(var k=0;k<all.length;k++)all[k].classList.toggle('on',all[k].getAttribute('data-tab')===id);
+            renderPropsTab();
+        });
+    }
+    chargePanelEl.classList.add('show');
+    chargePanelOpen=true;
+    renderPropsTab();
+}
+function chargeClosePanel(){
+    if(!chargePanelOpen)return;
+    chargePanelOpen=false;
+    chargePanelEl.classList.remove('show');
+    layoutPanels();
+}
+function chargeReopen(){
+    if(!propsAvailable())return;
+    if(diffMode){modeInfoEl.textContent='The electronic structure is not shown in a comparison';return}
+    buildChargePanel();
+}
+function renderPropsTab(){
+    var body=chargePanelEl?chargePanelEl.querySelector('#chg-body'):null;
+    if(!body)return;
+    if(propTab==='charges'){body.innerHTML=propsChargesHtml();bindPropsCharges();}
+    else if(propTab==='cavity'){body.innerHTML=propsCavityHtml();bindPropsCavity();}
+    else{body.innerHTML=propsMoHtml();bindPropsMo();}
+    layoutPanels();
+}
+// --- the charge tab: exactly the panel this card replaced -------------
+function propsChargesHtml(){
+    return '<div class="chg-row"><label class="chg-lab" for="chg-type">Scheme</label>'+
+        '<select id="chg-type" class="chg-sel" title="The population analyses this file states; the bracketed count is how many atoms a partial table covers">'+chargeTypeOptions()+'</select></div>'+
         '<label class="chg-check" id="chg-show-lab"><input type="checkbox" id="chg-show">Show the value on every atom</label>'+
         '<label class="chg-check" id="chg-color-lab"><input type="checkbox" id="chg-color">Colour the atoms by charge</label>'+
         '<div class="chg-legend"><div class="chg-bar" title="Negative charge is red, positive is blue, no charge is grey"></div>'+
         '<div class="chg-scale"><span id="chg-min">-</span><span>0</span><span id="chg-max">+</span></div></div>'+
         '<div class="chg-stat" id="chg-stat"></div>'+
         '<div class="chg-note" id="chg-note"></div>'+
-        '<button id="chg-go" class="chg-go" type="button"></button>'+
-        '<div class="chg-sec">Reserved for the next version</div>'+
-        '<label class="chg-check chg-soon" title="Solvent cavity surface: the switch is reserved, nothing is drawn yet"><input type="checkbox" id="chg-cavity" disabled>Solvent cavity surface</label>'+
-        '<label class="chg-check chg-soon" title="Molecular orbitals: the orbital selector is reserved, nothing is drawn yet"><input type="checkbox" id="chg-mo" disabled>Molecular orbitals</label>'+
-        '<div class="chg-hint">Placeholders: the cavity surface and the orbital isosurface arrive in a later version.</div>'+
-        '</div>';
-    var closeBtn=chargePanelEl.querySelector('.chg-close');
-    if(closeBtn)closeBtn.addEventListener('click',function(){chargeClosePanel()});
+        '<button id="chg-go" class="chg-go" type="button"></button>';
+}
+function bindPropsCharges(){
     var sel=chargePanelEl.querySelector('#chg-type');
     if(sel)sel.addEventListener('change',function(){
         var idx=parseInt(this.value,10);
@@ -14523,21 +15124,611 @@ function buildChargePanel(){
         if(s.frame<0||s.frame>=totalFrames)return;
         switchFrame(s.frame);
     });
-    chargePanelEl.classList.add('show');
-    chargePanelOpen=true;
     chargeSyncPanel();
-    layoutPanels();
 }
-function chargeClosePanel(){
-    if(!chargePanelOpen)return;
-    chargePanelOpen=false;
-    chargePanelEl.classList.remove('show');
-    layoutPanels();
+// --- the cavity tab ---------------------------------------------------
+function propsCavityHtml(){
+    var c=CAVITY;
+    var html='';
+    if(c.model)html+=propsRow('Model',chargeEsc(c.model));
+    if(c.type)html+=propsRow('Cavity',chargeEsc(c.type));
+    else if(c.spheres&&c.spheres.length>0)html+=propsRow('Cavity','PCM spheres listed in the checkpoint');
+    if(c.solvent)html+=propsRow('Solvent',chargeEsc(c.solvent));
+    if(c.sphereCount)html+=propsRow('Spheres',String(c.sphereCount));
+    if(c.area!=null)html+=propsRow('Surface area',c.area.toFixed(2)+' \u00c5\u00b2');
+    if(c.volume!=null)html+=propsRow('Volume',c.volume.toFixed(2)+' \u00c5\u00b3');
+    if(c.spheres&&c.spheres.length>0){
+        var lo=Infinity,hi=-Infinity,i;
+        for(i=0;i<c.spheres.length;i++){
+            var r=c.spheres[i].r;
+            if(r<lo)lo=r;
+            if(r>hi)hi=r;
+        }
+        html+=propsRow('Sphere radii',lo.toFixed(2)+' \u2013 '+hi.toFixed(2)+' \u00c5');
+        html+='<div class="chg-btns"><button id="cav-draw" class="chg-go" type="button" title="Cut the outer envelope of the spheres the file lists out of a grid">Draw cavity</button>'+
+            '<button id="cav-clear" class="chg-go" type="button" title="Remove the cavity surface">Clear</button></div>';
+        html+='<div class="chg-hint">The surface is the outer envelope of the spheres the checkpoint lists \u2014 the cavity GePol builds, before its smoothing. It describes the geometry the file was computed for, so it is retired when the structure on screen changes.</div>';
+    }else{
+        html+='<div class="chg-hint">This file describes the cavity but does not list its spheres. A Gaussian log names the model, the solvent and the area it measured; the per-sphere radii are written to the formatted checkpoint of the same job \u2014 open the <b>.fchk</b> to draw them.</div>';
+    }
+    html+='<div class="orb-prog" id="surf-prog"><div class="bar" id="surf-bar"></div></div>'+
+        '<div class="chg-note" id="surf-note"></div>';
+    return html;
 }
-function chargeReopen(){
-    if(!CHARGES||CHARGES.length===0)return;
-    if(diffMode){modeInfoEl.textContent='Atomic charges are not shown in a comparison';return}
-    buildChargePanel();
+function propsRow(k,v){
+    return '<div class="chg-row chg-kv"><span class="chg-lab">'+k+'</span><span class="chg-val">'+v+'</span></div>';
+}
+function bindPropsCavity(){
+    var d=chargePanelEl.querySelector('#cav-draw');
+    if(d)d.addEventListener('click',function(){
+        if(!surfaceGeometryCurrent())return;
+        surfaceError='';
+        clearSurfaceMeshes();
+        needsRender=true;
+        var reqId=++surfaceReq;
+        vscodeApi.postMessage({command:'surfaceDraw',reqId:reqId,kind:'cavity',quality:orbitalQuality});
+        setSurfaceProgress({reqId:reqId,fraction:0,phase:'Starting',label:'Solvent cavity'});
+    });
+    var c=chargePanelEl.querySelector('#cav-clear');
+    if(c)c.addEventListener('click',function(){clearSurfaces(true)});
+    syncSurfaceStatus();
+}
+// --- the orbital tab --------------------------------------------------
+function propsMoHtml(){
+    var sp=ORBITALS.spins[orbitalSpin]||ORBITALS.spins[0];
+    var html='';
+    if(ORBITALS.spins.length>1){
+        html+='<div class="chg-row"><label class="chg-lab" for="orb-spin">Spin</label><select id="orb-spin" class="chg-sel">';
+        for(var i=0;i<ORBITALS.spins.length;i++){
+            html+='<option value="'+i+'"'+(i===orbitalSpin?' selected':'')+'>'+chargeEsc(ORBITALS.spins[i].label)+'</option>';
+        }
+        html+='</select></div>';
+    }
+    html+='<canvas id="orb-canvas" class="orb-canvas"></canvas>';
+    html+='<div class="orb-head"><span class="orb-spacer"></span><span class="orb-n">#</span><span class="orb-e">E / eV</span><span class="orb-occ">occ</span></div>';
+    html+='<div class="orb-list" id="orb-list">'+orbListHtml()+'</div>';
+    html+='<div class="orb-nav"><button type="button" id="orb-up" title="Shift the listed window towards the core">\u25b2</button>'+
+        '<span id="orb-range"></span>'+
+        '<button type="button" id="orb-down" title="Shift the listed window towards the virtuals">\u25bc</button></div>';
+    // A 4680-orbital job cannot be scrolled to the one a note names, so the
+    // window can also be moved by typing the orbital's own number.
+    html+='<div class="orb-nav orb-jump"><label class="chg-lab" for="orb-jump">MO #</label>'+
+        '<input type="number" id="orb-jump" class="orb-num" min="1" max="'+sp.energies.length+'" step="1" placeholder="1\u2013'+sp.energies.length+'" title="Jump to an orbital by its number (1 = the first one the file prints)">'+
+        '<button type="button" id="orb-go" title="Move the list to this orbital">Go</button></div>';
+    if(ORBITALS.canDraw){
+        html+='<div class="orb-ctl"><label class="chg-lab" for="orb-iso">Isovalue</label>'+
+            '<input type="number" id="orb-iso" class="orb-num" value="'+orbitalIso+'" step="0.005" min="0.0005" max="0.5" title="Contour value in atomic units \u2014 the usual GaussView default is 0.02">'+
+            '<select id="orb-q" class="chg-sel orb-q" title="Grid spacing: a finer grid follows the surface more closely and costs more">'+
+            '<option value="coarse"'+(orbitalQuality==='coarse'?' selected':'')+'>Coarse</option>'+
+            '<option value="normal"'+(orbitalQuality==='normal'?' selected':'')+'>Normal</option>'+
+            '<option value="fine"'+(orbitalQuality==='fine'?' selected':'')+'>Fine</option></select></div>';
+        html+='<div class="chg-btns"><button id="orb-draw" class="chg-go" type="button" title="Compute the selected orbitals and draw both lobes">Draw</button>'+
+            '<button id="orb-clear" class="chg-go" type="button" title="Remove every orbital surface">Clear</button></div>';
+    }
+    if(ORBITALS.model)html+='<div class="chg-hint">'+chargeEsc(ORBITALS.model)+'</div>';
+    // A log prints one eigenvalue dump per SCF; the panel draws the last, which
+    // for an optimisation is the converged geometry's. A job with one geometry
+    // needs no such warning, and saying it there would only be noise.
+    if(totalFrames>1)html+='<div class="chg-hint">Eigenvalues of the last SCF the file printed — not of the frame on screen.</div>';
+    if(!ORBITALS.canDraw)html+='<div class="chg-hint">'+chargeEsc(ORBITALS.reason||'')+'</div>';
+    html+='<div class="orb-prog" id="surf-prog"><div class="bar" id="surf-bar"></div></div>'+
+        '<div class="chg-note" id="surf-note"></div>'+
+        '<div class="chg-note" id="orb-legend"></div>';
+    return html;
+}
+// The window of orbitals the card lists: HOMO and LUMO plus a few either side,
+// moved by the two arrows. A 4680-orbital job cannot list its orbitals, and a
+// window around the gap is what a chemist reads anyway.
+function orbitalWindow(spinIdx){
+    var sp=ORBITALS.spins[spinIdx];
+    if(!sp||sp.energies.length===0)return null;
+    var n=sp.energies.length,occ=sp.occupied;
+    var homo=occ>0?occ-1:0;
+    var below=Math.min(6,homo),above=Math.min(6,Math.max(0,n-occ));
+    var span=below+above+1;
+    // The window keeps its size at either end: shifting past the first or the
+    // last orbital slides it back instead of shrinking it to a row.
+    var from=homo-below+orbitalShift;
+    if(from<0)from=0;
+    if(from+span-1>n-1)from=Math.max(0,n-span);
+    var to=Math.min(n-1,from+span-1);
+    return {from:from,to:to,homo:homo,lumo:occ,n:n};
+}
+// A label a chemist reads: the two frontier orbitals by name, the rest by their
+// distance from them while that distance is small, and the file's own index
+// beyond it.
+function orbitalLabel(spinIdx,idx){
+    var win=orbitalWindow(spinIdx);
+    if(!win)return 'MO '+(idx+1);
+    var d=idx-win.homo;
+    if(d===0)return 'HOMO';
+    if(d===1)return 'LUMO';
+    if(d<0&&d>=-9)return 'HOMO'+d;
+    if(d>1&&d<=9)return 'LUMO+'+(d-1);
+    return 'MO '+(idx+1);
+}
+var HARTREE_EV=27.211386245988;
+function orbListHtml(){
+    var win=orbitalWindow(orbitalSpin);
+    if(!win)return '';
+    var sp=ORBITALS.spins[orbitalSpin];
+    var html='';
+    for(var i=win.from;i<=win.to;i++){
+        var occ=sp.occupations[i];
+        var key=orbitalSpin+':'+i;
+        var cls='orb-row'+(i===win.homo?' homo':'')+(i===win.lumo?' lumo':'')+(i===orbitalJumpTarget?' jump':'');
+        var box=ORBITALS.canDraw?'<input type="checkbox" class="orb-pick" data-key="'+key+'"'+(orbitalSel[key]?' checked':'')+
+            (Object.keys(orbitalSel).length>=MO_MAX_DRAW&&!orbitalSel[key]?' disabled':'')+'>':'';
+        html+='<label class="'+cls+'">'+box+
+            '<span class="orb-n">'+(i+1)+'</span>'+
+            '<span class="orb-e">'+(sp.energies[i]*HARTREE_EV).toFixed(3)+'</span>'+
+            '<span class="orb-occ">'+(occ>0?occ:'&ndash;')+'</span></label>';
+    }
+    return html;
+}
+function drawLevelDiagram(){
+    var canvas=chargePanelEl?chargePanelEl.querySelector('#orb-canvas'):null;
+    var win=orbitalWindow(orbitalSpin);
+    if(!canvas||!win)return;
+    // A 2x backing store: the card is drawn on a high-density display and a
+    // one-pixel level would otherwise blur into the neighbour it is drawn on
+    // top of.
+    var w=260,h=150;
+    canvas.width=w*2;canvas.height=h*2;
+    canvas.style.width=w+'px';canvas.style.height=h+'px';
+    var ctx=canvas.getContext('2d');
+    if(!ctx)return;
+    ctx.setTransform(2,0,0,2,0,0);
+    ctx.clearRect(0,0,w,h);
+    var sp=ORBITALS.spins[orbitalSpin];
+    var lo=Infinity,hi=-Infinity,i;
+    for(i=win.from;i<=win.to;i++){
+        if(sp.energies[i]<lo)lo=sp.energies[i];
+        if(sp.energies[i]>hi)hi=sp.energies[i];
+    }
+    if(!(hi>lo)){hi=lo+0.01}
+    var pad=(hi-lo)*0.10||0.01;
+    lo-=pad;hi+=pad;
+    var x0=44,x1=w-6,y0=8,y1=h-20;
+    function yOf(e){return y0+(hi-e)/(hi-lo)*(y1-y0)}
+    // Axis ticks in eV against the HOMO, which is the zero a chemist reads.
+    var homoE=sp.energies[win.homo];
+    ctx.font='8px monospace';
+    ctx.textAlign='right';
+    ctx.textBaseline='middle';
+    for(i=0;i<=2;i++){
+        var e=hi-i*(hi-lo)/2;
+        var y=yOf(e);
+        ctx.strokeStyle='rgba(255,255,255,0.13)';
+        ctx.beginPath();ctx.moveTo(x0,y);ctx.lineTo(x1,y);ctx.stroke();
+        ctx.fillStyle='#8a8a8a';
+        ctx.fillText(((e-homoE)*HARTREE_EV).toFixed(1),x0-4,y);
+    }
+    for(i=win.from;i<=win.to;i++){
+        var e2=sp.energies[i],y2=yOf(e2);
+        var occ=sp.occupations[i]>0;
+        var isH=i===win.homo,isL=i===win.lumo;
+        var col=isH?'#e05555':(isL?'#3fae6a':'#6ea8fe');
+        if(occ){
+            ctx.fillStyle=col;
+            ctx.fillRect(x0+4,y2-1.5,x1-x0-8,3);
+        }else{
+            ctx.strokeStyle=col;
+            ctx.lineWidth=1;
+            ctx.strokeRect(x0+4.5,y2-1,x1-x0-9,2);
+        }
+    }
+    ctx.textAlign='left';
+    ctx.textBaseline='alphabetic';
+    ctx.fillStyle='#e05555';
+    if(win.homo>=win.from&&win.homo<=win.to)ctx.fillText('HOMO',4,yOf(sp.energies[win.homo])+3);
+    ctx.fillStyle='#3fae6a';
+    if(win.lumo>=win.from&&win.lumo<=win.to&&win.lumo<win.n)ctx.fillText('LUMO',4,yOf(sp.energies[win.lumo])+3);
+    var gap=(sp.energies[win.lumo]-sp.energies[win.homo])*HARTREE_EV;
+    ctx.fillStyle='#b9b9b9';
+    ctx.textAlign='center';
+    ctx.fillText('HOMO\u2013LUMO gap '+(isFinite(gap)?gap.toFixed(2)+' eV':'\u2013'),(x0+x1)/2,h-5);
+    ctx.textAlign='left';
+}
+function bindPropsMo(){
+    var spinSel=chargePanelEl.querySelector('#orb-spin');
+    if(spinSel)spinSel.addEventListener('change',function(){
+        var v=parseInt(this.value,10);
+        orbitalSpin=isNaN(v)||v<0||v>=ORBITALS.spins.length?0:v;
+        orbitalShift=0;
+        orbitalJumpTarget=-1;
+        var list=chargePanelEl.querySelector('#orb-list');
+        if(list)list.innerHTML=orbListHtml();
+        bindOrbRows();
+        drawLevelDiagram();
+        syncOrbRange();
+        syncSurfaceStatus();
+    });
+    var iso=chargePanelEl.querySelector('#orb-iso');
+    if(iso)iso.addEventListener('change',function(){
+        var v=parseFloat(this.value);
+        if(isFinite(v)&&v>0)orbitalIso=v;else this.value=orbitalIso;
+    });
+    var q=chargePanelEl.querySelector('#orb-q');
+    if(q)q.addEventListener('change',function(){
+        if(this.value==='coarse'||this.value==='normal'||this.value==='fine')orbitalQuality=this.value;
+    });
+    var draw=chargePanelEl.querySelector('#orb-draw');
+    if(draw)draw.addEventListener('click',function(){requestOrbitalSurfaces()});
+    var clear=chargePanelEl.querySelector('#orb-clear');
+    if(clear)clear.addEventListener('click',function(){clearSurfaces(true)});
+    var up=chargePanelEl.querySelector('#orb-up');
+    if(up)up.addEventListener('click',function(){shiftOrbitalWindow(-5)});
+    var down=chargePanelEl.querySelector('#orb-down');
+    if(down)down.addEventListener('click',function(){shiftOrbitalWindow(5)});
+    var jump=chargePanelEl.querySelector('#orb-jump');
+    var go=chargePanelEl.querySelector('#orb-go');
+    function submitJump(){
+        var win=orbitalWindow(orbitalSpin);
+        if(!win||!jump)return;
+        var v=parseInt(jump.value,10);
+        // A number the file does not have is not silently clamped: the box is
+        // cleared and its range is offered, so the list never moves by accident.
+        if(!isFinite(v)||v<1||v>win.n){jump.value='';jump.placeholder='1\u2013'+win.n;return}
+        jumpOrbitalTo(v-1);
+    }
+    if(go)go.addEventListener('click',submitJump);
+    if(jump)jump.addEventListener('keydown',function(e){
+        if(e.key==='Enter'){e.preventDefault();submitJump()}
+    });
+    bindOrbRows();
+    drawLevelDiagram();
+    syncOrbRange();
+    syncSurfaceStatus();
+}
+function bindOrbRows(){
+    var list=chargePanelEl?chargePanelEl.querySelector('#orb-list'):null;
+    if(!list)return;
+    var boxes=list.querySelectorAll('input.orb-pick');
+    for(var i=0;i<boxes.length;i++){
+        boxes[i].addEventListener('change',function(){
+            var key=this.getAttribute('data-key');
+            if(!key)return;
+            if(this.checked){
+                if(Object.keys(orbitalSel).length>=MO_MAX_DRAW){this.checked=false;return}
+                orbitalSel[key]=true;
+            }else{
+                delete orbitalSel[key];
+            }
+            // The other rows' disabled state follows the count: a further box is
+            // offered only after one of the selected ones is released.
+            var full=Object.keys(orbitalSel).length>=MO_MAX_DRAW;
+            var all=list.querySelectorAll('input.orb-pick');
+            for(var k=0;k<all.length;k++){
+                var on=!!orbitalSel[all[k].getAttribute('data-key')];
+                all[k].disabled=full&&!on;
+            }
+        });
+    }
+}
+function shiftOrbitalWindow(delta){
+    var win=orbitalWindow(orbitalSpin);
+    if(!win)return;
+    var next=orbitalShift+delta;
+    if(win.from<=0&&delta<0)next=orbitalShift;
+    if(win.to>=win.n-1&&delta>0)next=orbitalShift;
+    orbitalShift=next;
+    orbitalJumpTarget=-1;
+    var list=chargePanelEl?chargePanelEl.querySelector('#orb-list'):null;
+    if(list)list.innerHTML=orbListHtml();
+    bindOrbRows();
+    drawLevelDiagram();
+    syncOrbRange();
+}
+/**
+ * Move the listed window so that one orbital is in it, as close to its centre
+ * as the first and last orbital allow.
+ *
+ * The window is described by orbitalShift, a distance from the home window
+ * around HOMO, so the jump is expressed in that same unit: the start the target
+ * asks for, minus the start the home window would have.
+ */
+function jumpOrbitalTo(target){
+    var win=orbitalWindow(orbitalSpin);
+    var sp=ORBITALS.spins[orbitalSpin];
+    if(!win||!sp)return;
+    var n=sp.energies.length;
+    if(target<0)target=0;
+    if(target>n-1)target=n-1;
+    var occ=sp.occupied,homo=occ>0?occ-1:0;
+    var below=Math.min(6,homo),above=Math.min(6,Math.max(0,n-occ));
+    var span=below+above+1;
+    var from=target-Math.floor((span-1)/2);
+    var maxFrom=Math.max(0,n-span);
+    if(from<0)from=0;
+    if(from>maxFrom)from=maxFrom;
+    orbitalShift=from-(homo-below);
+    orbitalJumpTarget=target;
+    var list=chargePanelEl?chargePanelEl.querySelector('#orb-list'):null;
+    if(list)list.innerHTML=orbListHtml();
+    bindOrbRows();
+    drawLevelDiagram();
+    syncOrbRange();
+}
+function syncOrbRange(){
+    var el=chargePanelEl?chargePanelEl.querySelector('#orb-range'):null;
+    if(!el)return;
+    var win=orbitalWindow(orbitalSpin);
+    if(!win){el.textContent='';return}
+    el.textContent=(win.from+1)+'\u2013'+(win.to+1)+' of '+win.n;
+    var jump=chargePanelEl.querySelector('#orb-jump');
+    if(jump){
+        jump.max=String(win.n);
+        jump.placeholder='1\u2013'+win.n;
+    }
+}
+// The chosen orbitals, in the file's own order.
+//
+// Selection is keyed by spin and orbital index rather than by row, so it
+// survives the window being shifted: an orbital picked and then scrolled out of
+// sight is still drawn, which is what a user who picked four of them expects.
+function selectedOrbitals(){
+    var keys=Object.keys(orbitalSel);
+    var out=[];
+    keys.sort(function(a,b){
+        var pa=a.split(':'),pb=b.split(':');
+        var sa=parseInt(pa[0],10),sb=parseInt(pb[0],10);
+        if(sa!==sb)return sa-sb;
+        return parseInt(pa[1],10)-parseInt(pb[1],10);
+    });
+    for(var i=0;i<keys.length&&out.length<MO_MAX_DRAW;i++){
+        var parts=keys[i].split(':');
+        var sp=parseInt(parts[0],10),idx=parseInt(parts[1],10);
+        if(!ORBITALS.spins[sp]||ORBITALS.spins[sp].energies[idx]===undefined)continue;
+        out.push({spin:sp,index:idx,hue:out.length,label:orbitalLabel(sp,idx)});
+    }
+    return out;
+}
+/** Whether the structure on screen is still the one the file states. */
+function surfaceGeometryCurrent(){
+    if(moGeometrySignature()===docGeometrySignature)return true;
+    surfaceError='The structure on screen has changed since this file was computed, so a surface would describe atoms that are no longer there. Undo the change, or reopen the file.';
+    syncSurfaceStatus();
+    return false;
+}
+function requestOrbitalSurfaces(){
+    var picked=selectedOrbitals();
+    if(picked.length===0){
+        var note=chargePanelEl?chargePanelEl.querySelector('#surf-note'):null;
+        if(note)note.textContent='Select one to ten orbitals first.';
+        return;
+    }
+    if(!surfaceGeometryCurrent())return;
+    surfaceError='';
+    // A new run replaces the picture from its first orbital on; clearing here is
+    // what keeps the first (partial) answer from being appended to the old set.
+    clearSurfaceMeshes();
+    needsRender=true;
+    var reqId=++surfaceReq;
+    vscodeApi.postMessage({command:'surfaceDraw',reqId:reqId,kind:'mo',orbitals:picked,iso:orbitalIso,quality:orbitalQuality});
+    setSurfaceProgress({reqId:reqId,fraction:0,phase:'Starting',label:picked[0].label});
+}
+// --- drawing and clearing the meshes ---------------------------------
+function base64Bytes(b64){
+    var bin=atob(b64);
+    var n=bin.length;
+    var out=new Uint8Array(n);
+    for(var i=0;i<n;i++)out[i]=bin.charCodeAt(i);
+    return out;
+}
+function lobeGeometry(lobe){
+    var pos=base64Bytes(lobe.pos);
+    var nrm=base64Bytes(lobe.nrm);
+    var idx=base64Bytes(lobe.idx);
+    var geo=new THREE.BufferGeometry();
+    geo.setAttribute('position',new THREE.BufferAttribute(new Float32Array(pos.buffer,0,pos.length/4),3));
+    geo.setAttribute('normal',new THREE.BufferAttribute(new Float32Array(nrm.buffer,0,nrm.length/4),3));
+    geo.setIndex(new THREE.BufferAttribute(new Uint32Array(idx.buffer,0,idx.length/4),1));
+    return geo;
+}
+function moGroupEnsure(){
+    if(!moGroup)moGroup=new THREE.Group();
+    return moGroup;
+}
+function clearSurfaces(render){
+    // A reply still in flight answers a picture the user has just removed (or
+    // one drawn for a geometry that is gone), so the request id moves on: the
+    // stale answer then arrives as an older id and is dropped instead of
+    // re-drawing what was cleared. The host is told to stop working on it.
+    surfaceReq++;
+    surfaceJob=null;
+    surfaceError='';
+    clearSurfaceMeshes();
+    try{vscodeApi.postMessage({command:'surfaceCancel'})}catch(e){}
+    syncSurfaceStatus();
+    if(render!==false)needsRender=true;
+}
+/** Remove the meshes without touching the request or the host's run. */
+function clearSurfaceMeshes(){
+    moSignature=null;
+    emptyMoGroup();
+    moSurfaces=[];
+}
+function emptyMoGroup(){
+    if(!moGroup)return;
+    var kids=moGroup.children.slice();
+    for(var i=0;i<kids.length;i++){
+        var m=kids[i];
+        moGroup.remove(m);
+        if(m.geometry)m.geometry.dispose();
+        if(m.material)m.material.dispose();
+    }
+}
+/**
+ * Put the meshes the host computed into the scene.
+ *
+ * The vertices arrive in absolute Angstrom coordinates, like every other mesh
+ * this page builds from a file (a cavity surface, a VMD patch), so the group is
+ * translated by the rotation centre instead of the geometry being rewritten
+ * whenever the centre moves.
+ */
+function applySurfaceResult(msg){
+    // The answer to the newest request, or nothing: an older run that was
+    // superseded or cleared may still be in the queue, and its meshes must not
+    // land on the picture the user is looking at now.
+    if(msg.reqId!==surfaceReq)return;
+    if(!msg.ok){
+        surfaceJob=null;
+        surfaceError=msg.message||'The surface could not be drawn.';
+        syncSurfaceStatus();
+        return;
+    }
+    // A partial answer is one orbital of a longer run: it is appended and the
+    // progress line keeps running. The final answer replaces the picture.
+    if(!msg.partial){
+        surfaceJob=null;
+        emptyMoGroup();
+        moSurfaces=[];
+    }
+    var group=moGroupEnsure();
+    var i,k;
+    var list=msg.surfaces||[];
+    for(i=0;i<list.length;i++){
+        var s=list[i];
+        var entry={key:s.key,label:s.label,hue:s.hue,grid:s.grid,lobes:[]};
+        var pair=MO_HUES[(s.hue||0)%MO_HUES.length];
+        for(k=0;k<s.lobes.length;k++){
+            var lobe=s.lobes[k];
+            if(!lobe||!lobe.vertices)continue;
+            var geo=lobeGeometry(lobe);
+            // The cavity is one translucent envelope, not a phase: it keeps the
+            // violet the void analysis and the VMD patches already use, so the two
+            // pictures of a cavity in this viewer are the same colour.
+            var col=s.key==='cavity'?0xb18cff:(lobe.sign<0?pair[1]:pair[0]);
+            // Orbital lobes are drawn opaque: a translucent one would show the
+            // lobe behind it through the front face, and phase is the one thing
+            // the picture has to state unambiguously. The cavity is the one
+            // surface that stays see-through.
+            var mat=s.key==='cavity'
+                ?new THREE.MeshPhongMaterial({color:col,transparent:true,opacity:0.26,side:THREE.DoubleSide,depthWrite:false,shininess:24,specular:0x222222})
+                :new THREE.MeshPhongMaterial({color:col,side:THREE.DoubleSide,shininess:70,specular:0x333333});
+            var mesh=new THREE.Mesh(geo,mat);
+            mesh.userData={surface:s.key,label:s.label,sign:lobe.sign};
+            group.add(mesh);
+            entry.lobes.push(mesh);
+        }
+        moSurfaces.push(entry);
+    }
+    if(group.parent!==moleculeGroup)moleculeGroup.add(group);
+    group.position.set(-CX,-CY,-CZ);
+    group.visible=!diffMode;
+    moSignature=moGeometrySignature();
+    needsRender=true;
+    syncSurfaceStatus();
+}
+/** The run answered its last orbital: retire the progress line. */
+function applySurfaceDone(msg){
+    if(msg.reqId!==surfaceReq)return;
+    surfaceJob=null;
+    var meshes=0;
+    for(var i=0;i<moSurfaces.length;i++)meshes+=moSurfaces[i].lobes.length;
+    if(meshes===0&&!surfaceError){
+        surfaceError='No surface at this isovalue: the orbital never reaches it. Raise the grid quality or lower the isovalue.';
+    }
+    needsRender=true;
+    syncSurfaceStatus();
+}
+function applySurfaceProgress(msg){
+    if(!surfaceJob||msg.reqId!==surfaceJob.reqId)return;
+    surfaceJob.fraction=msg.fraction||0;
+    surfaceJob.phase=msg.phase||'';
+    surfaceJob.label=msg.label||surfaceJob.label;
+    surfaceJob.job=msg.job||0;
+    surfaceJob.jobs=msg.jobs||1;
+    syncSurfaceStatus();
+}
+function setSurfaceProgress(p){
+    surfaceJob={reqId:p.reqId,fraction:p.fraction||0,phase:p.phase||'',label:p.label||'',job:p.job||0,jobs:p.jobs||1};
+    syncSurfaceStatus();
+}
+function syncSurfaceStatus(){
+    var prog=chargePanelEl?chargePanelEl.querySelector('#surf-prog'):null;
+    var bar=chargePanelEl?chargePanelEl.querySelector('#surf-bar'):null;
+    var note=chargePanelEl?chargePanelEl.querySelector('#surf-note'):null;
+    var legend=chargePanelEl?chargePanelEl.querySelector('#orb-legend'):null;
+    if(bar&&prog){
+        if(surfaceJob){
+            prog.classList.add('on');
+            bar.style.width=Math.round(surfaceJob.fraction*100)+'%';
+        }else{
+            prog.classList.remove('on');
+            bar.style.width='0%';
+        }
+    }
+    if(note){
+        var text='';
+        if(surfaceJob){
+            text=(surfaceJob.label?surfaceJob.label+' \u00b7 ':'')+surfaceJob.phase+' \u00b7 '+
+                Math.round(surfaceJob.fraction*100)+'%'+
+                (surfaceJob.jobs>1?' ('+(surfaceJob.job+1)+' of '+surfaceJob.jobs+')':'');
+        }else if(surfaceError){
+            text=surfaceError;
+        }
+        if(note.textContent!==text){
+            // The layout only has to be taken again when the note appears or
+            // disappears; a percentage that ticks nine times a second would
+            // otherwise re-measure every panel on the canvas nine times a second.
+            var wasEmpty=note.textContent==='';
+            note.textContent=text;
+            if(wasEmpty||text==='')layoutPanels();
+        }
+    }
+    if(legend){
+        var html='';
+        for(var i=0;i<moSurfaces.length;i++){
+            html+='<div class="orb-leg"><span class="orb-sw" style="background:#'+
+                ('000000'+MO_HUES[(moSurfaces[i].hue||0)%MO_HUES.length][0].toString(16)).slice(-6)+'"></span>'+
+                '<span class="orb-sw" style="background:#'+
+                ('000000'+MO_HUES[(moSurfaces[i].hue||0)%MO_HUES.length][1].toString(16)).slice(-6)+'"></span>'+
+                chargeEsc(moSurfaces[i].label)+
+                (moSurfaces[i].lobes.length===0
+                    ?' <span class="orb-grid">no surface at this isovalue</span>'
+                    :(moSurfaces[i].grid?' <span class="orb-grid">'+chargeEsc(moSurfaces[i].grid)+'</span>':''))+'</div>';
+        }
+        if(legend.innerHTML!==html){legend.innerHTML=html;layoutPanels();}
+    }
+}
+/**
+ * The geometry the surfaces on screen were computed for.
+ *
+ * A molecular orbital and a solvation cavity are properties of ONE geometry:
+ * the coefficients and the spheres came from the file's own coordinates. An
+ * edit, a frame switch or an import moves the atoms, and a surface left where
+ * it was would then describe a structure that is no longer on screen — so the
+ * geometry is fingerprinted when the meshes arrive and compared on every
+ * rebuild. The charge map refuses to paint across a mismatch for the same
+ * reason; this is that rule for a picture the viewer cannot recolour.
+ */
+var moSignature=null;
+function moGeometrySignature(){
+    var n=MD.atoms.length,s=0,i;
+    for(i=0;i<n;i++){
+        var a=MD.atoms[i];
+        s+=a.x+a.y*2+a.z*3;
+    }
+    return n+':'+s.toFixed(4);
+}
+// The group is lifted out before rebuildScene clears the molecule group and put
+// back afterwards: its geometries were paid for by the host, so a colour toggle
+// or a frame switch must not throw them away.
+function moGroupPrepare(){
+    if(moGroup&&moGroup.parent===moleculeGroup)moleculeGroup.remove(moGroup);
+}
+function moGroupRestore(){
+    if(!moGroup||!moleculeGroup)return;
+    if(moGroup.children.length===0)return;
+    // The meshes describe the geometry they were computed for; anything else
+    // on screen retires them.
+    if(moSignature!==null&&moSignature!==moGeometrySignature()){clearSurfaces(false);return}
+    if(moGroup.parent!==moleculeGroup)moleculeGroup.add(moGroup);
+    moGroup.position.set(-CX,-CY,-CZ);
+    moGroup.visible=!diffMode;
+    needsRender=true;
 }
 function summaryEsc(s){
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -14577,7 +15768,7 @@ function summaryScfMark(scf,ref,what){
 }
 function buildSummaryPanel(){
     if(!SUMMARY||SUMMARY.length===0||!summaryPanelEl)return;
-    var html='<div class="sm-head"><span class="sm-title">Job Summary</span><span class="sm-close">\u00d7</span></div><div class="sm-body">';
+    var html='<div class="sm-head"><span class="sm-title">📋 Job Summary</span><span class="sm-close">\u00d7</span></div><div class="sm-body">';
     var multi=SUMMARY.length>1;
     for(var j=0;j<SUMMARY.length;j++){
         var s=SUMMARY[j];
@@ -14776,6 +15967,8 @@ function panelRestore(name){
 // cell; a comparison shows two structures, so starting Diff folds them away
 // rather than leaving a reading aid over the right-hand half.
 function closeAnalysisPanelsForDiff(){
+    // A comparison draws two structures; an orbital surface belongs to one.
+    if(moGroup)moGroup.visible=false;
     if(xrdOpen)xrdClosePanel();
     if(cavOpen)cavityClosePanel();
     // A charge map and a job summary describe one structure; a comparison has
@@ -14828,7 +16021,11 @@ function syncPanelChips(){
     // the only way in, so it stands whenever the panel is closed and the file
     // states the data. Both describe the one structure on screen, so they leave
     // the picture while a comparison draws two.
-    panelChip('charge-reopen',!!(CHARGES&&CHARGES.length>0&&!chargePanelOpen&&!diffMode));
+    // The charge map, the cavity and the orbitals live in one card: its chip
+    // stands whenever the panel is closed and the file states any of the three.
+    // All three describe the one structure on screen, so they leave the picture
+    // while a comparison draws two.
+    panelChip('charge-reopen',!!(propsAvailable()&&!chargePanelOpen&&!diffMode));
     panelChip('summary-reopen',!!(SUMMARY&&SUMMARY.length>0&&!summaryPanelOpen&&!diffMode));
 }
 // Turning a floating panel into a chip and back is one click each way for the
@@ -23156,10 +24353,34 @@ class MolecularDocument implements vscode.CustomDocument {
         public readonly optThresholds?: OptThresholds,
         public readonly trajectoryFrames?: TrajectoryFramePayload[],
         public readonly charges?: LogChargeSet[],
-        public readonly summary?: LogSummary[]
+        public readonly summary?: LogSummary[],
+        /**
+         * The orbitals a checkpoint carries, coefficients included. Held on the
+         * document rather than on the payload: the coefficient block is a
+         * scalar product of the basis size, and the page never needs it — a
+         * surface arrives as a mesh (see `pumpSurfaces`).
+         */
+        public readonly orbitals?: FchkOrbitals,
+        /** The cavity the file states, spheres included when it lists them. */
+        public readonly cavity?: SolventCavity,
+        /** Energies and occupations only, for the level diagram. */
+        public readonly orbitalLevels?: OrbitalLevels
     ) {}
 
     dispose(): void {}
+}
+
+/** The level diagram's view of a checkpoint's orbitals. */
+function orbitalLevelsOf(orbitals: FchkOrbitals): OrbitalLevels {
+    return {
+        spins: orbitals.spins.map(s => ({
+            label: s.label,
+            energies: s.energies,
+            occupations: s.occupations,
+            occupied: s.occupied
+        })),
+        closedShell: orbitals.spins.length < 2
+    };
 }
 
 function getNonce(): string {

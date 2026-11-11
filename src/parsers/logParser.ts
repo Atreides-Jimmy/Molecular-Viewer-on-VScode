@@ -1,4 +1,4 @@
-import { Atom, Bond, MolecularData, OptStep, NormalMode } from '../types';
+import { Atom, Bond, MolecularData, OptStep, NormalMode, SolventCavity, OrbitalLevels, OrbitalSpinLevels } from '../types';
 
 const ATOMIC_NUMBER_MAP: { [key: number]: string } = {
     1: 'H', 2: 'He', 3: 'Li', 4: 'Be', 5: 'B', 6: 'C', 7: 'N', 8: 'O', 9: 'F', 10: 'Ne',
@@ -48,6 +48,13 @@ export interface GaussianLogResult {
     charges?: LogChargeSet[];
     /** One block of headline results per job in the file. */
     summary?: LogSummary[];
+    /** The last eigenvalue dump of the file: what the level diagram draws.
+     *  A log states energies and no coefficients, so this can never become a
+     *  surface — only a formatted checkpoint can. */
+    orbitals?: OrbitalLevels;
+    /** The solvation cavity the file describes (type, solvent, area, volume).
+     *  A log names no per-sphere radii; those are in the checkpoint. */
+    cavity?: SolventCavity;
 }
 
 /**
@@ -624,6 +631,187 @@ function noteChargeTable(st: ChargeState, label: string, values: (number | null)
     st.drafts.push({ label: label, values: values, anchor: anchor });
 }
 
+/**
+ * One eigenvalue dump: the two spin channels of one SCF.
+ *
+ * Gaussian prints every occupied alpha eigenvalue, then every virtual alpha
+ * one, then the same for beta; each block is a run of lines that all repeat the
+ * `Alpha  occ. eigenvalues --` banner. The occupied count is therefore known
+ * the moment the virtual block starts, which is what separates HOMO from LUMO
+ * without a second pass over the numbers.
+ */
+interface OrbitalDump {
+    alpha: number[];
+    /** Where the alpha virtual block begins; -1 while no virtual was printed. */
+    alphaOcc: number;
+    beta: number[];
+    betaOcc: number;
+}
+
+interface OrbitalState {
+    /** The last dump whose virtual block was reached — the one that counts. */
+    last: OrbitalDump | null;
+    cur: OrbitalDump | null;
+}
+
+/** ` Alpha  occ. eigenvalues --  -77.28310 ...` — one line of an eigenvalue dump. */
+const ORBITAL_EIGEN_RE = /^\s*(Alpha|Beta)\s+(occ|virt)\.\s*eigenvalues\s*--(.*)$/;
+
+/**
+ * Record one eigenvalue line.
+ *
+ * An optimisation prints one dump per SCF, and the panel must describe the
+ * geometry the run ended on, so the last complete dump wins. A dump is complete
+ * once its alpha *virtual* block starts — that is the only boundary the file
+ * states, and it is why the previous dump is retired there rather than at the
+ * next occupied line: an occupied block runs over dozens of lines, and treating
+ * each as a new dump would leave only the last five eigenvalues.
+ */
+function noteOrbitalLine(st: OrbitalState, spin: string, kind: string, text: string): void {
+    const tokens = text.trim().split(/\s+/);
+    const values: number[] = [];
+    for (let k = 0; k < tokens.length; k++) {
+        const v = parseLogNumber(tokens[k]);
+        if (isFinite(v)) values.push(v);
+    }
+    if (values.length === 0) return;
+    if (!st.cur) st.cur = { alpha: [], alphaOcc: -1, beta: [], betaOcc: -1 };
+    if (spin === 'Alpha' && kind === 'occ' && st.cur.alphaOcc >= 0) {
+        st.last = st.cur;
+        st.cur = { alpha: [], alphaOcc: -1, beta: [], betaOcc: -1 };
+    }
+    if (spin === 'Alpha') {
+        if (kind === 'virt' && st.cur.alphaOcc < 0) st.cur.alphaOcc = st.cur.alpha.length;
+        for (let k = 0; k < values.length; k++) st.cur.alpha.push(values[k]);
+    } else {
+        if (kind === 'virt' && st.cur.betaOcc < 0) st.cur.betaOcc = st.cur.beta.length;
+        for (let k = 0; k < values.length; k++) st.cur.beta.push(values[k]);
+    }
+}
+
+/**
+ * The last dump as the level diagram needs it.
+ *
+ * Occupations are the file's own occupied/virtual split: two electrons per
+ * orbital when the file printed no beta block (a closed-shell job), one per
+ * spin orbital otherwise. A log prints the split, not a population, so nothing
+ * finer is claimed.
+ */
+function orbitalLevelsOf(st: OrbitalState): OrbitalLevels | undefined {
+    // A dump whose virtual block was reached is the converged one; a file that
+    // was cut inside its occupied block still has those numbers, so it is used
+    // only when nothing better exists.
+    const complete = st.cur && st.cur.alphaOcc >= 0 ? st.cur : null;
+    const dump = complete || st.last || st.cur;
+    if (!dump || dump.alpha.length === 0) return undefined;
+    const closed = dump.beta.length === 0;
+    const alphaOcc = dump.alphaOcc >= 0 ? dump.alphaOcc : dump.alpha.length;
+    const betaOcc = dump.betaOcc >= 0 ? dump.betaOcc : dump.beta.length;
+    const spins: OrbitalSpinLevels[] = [];
+    spins.push({
+        label: 'Alpha',
+        energies: dump.alpha,
+        occupations: occupationsOfLevels(dump.alpha.length, alphaOcc, closed ? 2 : 1),
+        occupied: alphaOcc
+    });
+    if (!closed) {
+        spins.push({
+            label: 'Beta',
+            energies: dump.beta,
+            occupations: occupationsOfLevels(dump.beta.length, betaOcc, 1),
+            occupied: betaOcc
+        });
+    }
+    return { spins, closedShell: closed };
+}
+
+function occupationsOfLevels(count: number, occupied: number, perOrbital: number): number[] {
+    const out = new Array<number>(count).fill(0);
+    for (let i = 0; i < Math.min(count, occupied); i++) out[i] = perOrbital;
+    return out;
+}
+
+/** The cavity block's own lines, read in one window (see the scan below). */
+function noteCavityLines(cavity: SolventCavity, lines: string[], from: number, to: number): void {
+    for (let k = from; k < to; k++) {
+        const line = lines[k];
+        // The continuum banner names the family the solver belongs to:
+        // `Polarizable Continuum Model (PCM)`, `(CPCM)`, `(IEFPCM)`, …
+        if (cavity.model === undefined && line.indexOf('Polarizable Continuum Model') >= 0) {
+            const m = /Polarizable Continuum Model\s*\(([^)]+)\)/.exec(line);
+            if (m) cavity.model = m[1].trim();
+        }
+        if (cavity.type === undefined && line.indexOf('Cavity type') >= 0) {
+            const m = line.match(/Cavity type\s*:\s*(.+?)\.?\s*$/);
+            if (m) {
+                cavity.type = m[1].trim();
+                const alpha = /Alpha=\s*([0-9.]+)/.exec(m[1]);
+                if (alpha) cavity.alpha = parseLogNumber(alpha[1]);
+            }
+        }
+        if (cavity.solvent === undefined && line.indexOf('Solvent') >= 0 && line.indexOf('Eps') >= 0) {
+            const m = line.match(/Solvent\s*:\s*([^,]+),/);
+            if (m) cavity.solvent = m[1].trim();
+        }
+        if (cavity.sphereCount === undefined && line.indexOf('NSphG=') >= 0) {
+            const m = line.match(/NSphG=\s*(\d+)/);
+            if (m) cavity.sphereCount = parseInt(m[1], 10);
+        }
+        if (cavity.area === undefined && line.indexOf('Cavity surface area') >= 0) {
+            const m = line.match(/=\s*([0-9.]+)/);
+            if (m) cavity.area = parseLogNumber(m[1]);
+        }
+        if (cavity.volume === undefined && line.indexOf('Cavity volume') >= 0) {
+            const m = line.match(/=\s*([0-9.]+)/);
+            if (m) cavity.volume = parseLogNumber(m[1]);
+        }
+    }
+}
+
+/**
+ * Forget the cavity of the previous geometry.
+ *
+ * An optimisation builds the cavity again at every step and prints one PCM
+ * block per geometry, so the panel — which describes the structure on screen —
+ * must keep the LAST block. Each banner starts a new geometry's cavity, and
+ * clearing here is what stops the first step's area and volume from winning a
+ * `=== undefined` race for the rest of the file.
+ */
+function clearCavity(cavity: SolventCavity): void {
+    cavity.model = undefined;
+    cavity.type = undefined;
+    cavity.solvent = undefined;
+    cavity.alpha = undefined;
+    cavity.area = undefined;
+    cavity.volume = undefined;
+    cavity.sphereCount = undefined;
+}
+
+/** Route tokens that are parameters of `SCRF`, not the model itself. */
+const SCRF_PARAMETER_TOKENS = [
+    'SOLVENT', 'READ', 'EXTERNALITERATION', 'NONE', 'EPS', 'EPSINF', 'RSOLV',
+    'CAVITY', 'SURFACETYPE', 'SURFACERADIUS', 'ADDITIVE', 'TENSER'
+];
+
+/**
+ * The solvation model named by the route, or undefined when it names none.
+ *
+ * The continuum banner says `PCM` for every IEFPCM-family job — SMD included —
+ * so the route is the only place that distinguishes `SMD` from `PCM`; the LAST
+ * route of a `--Link1--` file is the one that describes the cavity kept below.
+ */
+export function scrfModelOf(content: string): string | undefined {
+    const re = /SCRF\s*=\s*\(?\s*([A-Za-z][A-Za-z0-9-]*)/gi;
+    let match: RegExpExecArray | null;
+    let last: string | undefined;
+    while ((match = re.exec(content)) !== null) {
+        const token = match[1];
+        if (SCRF_PARAMETER_TOKENS.indexOf(token.toUpperCase()) >= 0) continue;
+        last = token;
+    }
+    return last;
+}
+
 export function parseGaussianLog(content: string): GaussianLogResult {
     const lines = content.split(/\r?\n/);
     const frames: LogFrame[] = [];
@@ -674,6 +862,10 @@ export function parseGaussianLog(content: string): GaussianLogResult {
     // makes the engine reach for a context object on each access inside it.
     const charges: ChargeState = { drafts: [] };
     const jobs: SummaryState = { list: [], cur: null };
+    /** The eigenvalue dumps of the job being read (the last one wins). */
+    const orbitals: OrbitalState = { last: null, cur: null };
+    /** The cavity the job's solvation model states, when it states one. */
+    const cavity: SolventCavity = { source: 'log' };
     /** How many SCFs of the job being read have closed (1-based for the next
      *  one). A geometry-level value is stamped with it, so a summary can tell
      *  a value of the final geometry from one the file only printed earlier. */
@@ -750,6 +942,9 @@ export function parseGaussianLog(content: string): GaussianLogResult {
                     // finds nothing to close.
                     jobs.cur = null;
                     charges.drafts.length = 0;
+                    orbitals.last = null;
+                    orbitals.cur = null;
+                    clearCavity(cavity);
                     scfCount = 0;
                     i = j;
                     continue;
@@ -898,6 +1093,32 @@ export function parseGaussianLog(content: string): GaussianLogResult {
                     i = block.endIdx;
                     continue;
                 }
+            }
+
+            // --- Orbital eigenvalues: the level diagram's only source ---
+            // ` Alpha  occ. eigenvalues --  -77.28310 …` and the `virt.` block
+            // that follows it, one pair per spin channel. A log prints these
+            // for every SCF, so the reader keeps them all and the last one —
+            // the converged geometry's — is what the panel draws.
+            if (line.indexOf('eigenvalues --') >= 0) {
+                const eig = ORBITAL_EIGEN_RE.exec(line);
+                if (eig) {
+                    noteOrbitalLine(orbitals, eig[1], eig[2], eig[3]);
+                    i++;
+                    continue;
+                }
+            }
+
+            // --- The solvation cavity the job built ---
+            // A block per geometry: an optimisation prints the cavity it builds
+            // at every step, and the panel describes the structure on screen, so
+            // each banner starts the cavity afresh and the last one wins. The
+            // numbers that describe it (type, solvent, sphere count, area,
+            // volume) follow within a few dozen lines, so they are read in one
+            // window rather than by testing every line for five literals.
+            if (line.indexOf('Polarizable Continuum Model') >= 0) {
+                clearCavity(cavity);
+                noteCavityLines(cavity, lines, i, Math.min(lines.length, i + 90));
             }
 
             // --- RMS gradient of the final SCF ---
@@ -1090,6 +1311,17 @@ export function parseGaussianLog(content: string): GaussianLogResult {
     }
 
     const summary = jobs.list.filter(summaryHasData);
+    const levels = orbitalLevelsOf(orbitals);
+    // A cavity object with nothing but its source is not a statement about the
+    // file: no solvation model ran, so the panel must not claim one.
+    const hasCavity = cavity.type !== undefined || cavity.solvent !== undefined ||
+        cavity.sphereCount !== undefined || cavity.area !== undefined || cavity.volume !== undefined;
+    // The banner calls every continuum job PCM, SMD included; when the route
+    // names the model, its word is the more specific one and wins.
+    if (hasCavity) {
+        const routeModel = scrfModelOf(content);
+        if (routeModel) cavity.model = routeModel;
+    }
 
     return {
         frames,
@@ -1098,6 +1330,8 @@ export function parseGaussianLog(content: string): GaussianLogResult {
         normalModes: modes,
         routes: routes.length > 0 ? routes : undefined,
         charges: chargeSets.length > 0 ? chargeSets : undefined,
-        summary: summary.length > 0 ? summary : undefined
+        summary: summary.length > 0 ? summary : undefined,
+        orbitals: levels,
+        cavity: hasCavity ? cavity : undefined
     };
 }
