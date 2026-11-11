@@ -15243,7 +15243,7 @@ var CAVITY=MD.cavity||null;
 // import a new draw would picture atoms that are no longer on screen; the two
 // Draw buttons refuse it rather than drawing over the wrong structure.
 var docGeometrySignature=moGeometrySignature();
-var CHARGE_LABEL_MAX=500;          // values are drawn for at most this many atoms
+var CHARGE_LABEL_MAX=5000;         // values are drawn for at most this many atoms
 var chargeSel=0;                   // index into CHARGES
 var chargeColorOn=false;
 var chargeLabelsOn=false;
@@ -15577,10 +15577,13 @@ function chargeSyncPanel(){
         }
         // A very large structure draws the values for a bounded number of atoms
         // (the layer is one span per atom); saying so is better than a picture
-        // that is quietly missing most of them.
+        // that is quietly missing most of them. The hover tooltip is not bounded
+        // and reads the selected scheme, so the value of an atom past the cap is
+        // still one mouse move away - and it follows the scheme dropdown.
         if(chargeLabelsOn&&MD.atoms.length>CHARGE_LABEL_MAX){
-            text=(text?text+' ':'')+'The values are drawn for the first '+CHARGE_LABEL_MAX+
-                ' atoms; this structure has '+MD.atoms.length+'.';
+            text=(text?text+' ':'')+'This structure has '+MD.atoms.length+' atoms, more than the '+
+                CHARGE_LABEL_MAX+' the value layer draws, so only the first '+CHARGE_LABEL_MAX+
+                ' carry a label. Hovering any atom still reports its charge for the selected scheme.';
         }
         if(note.textContent!==text){note.textContent=text;grew=true}
     }
