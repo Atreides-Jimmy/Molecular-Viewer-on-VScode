@@ -15465,7 +15465,7 @@ function xrdExport(){
     var stem=base;
     var dot=base.lastIndexOf('.');
     if(dot>0)stem=base.substring(0,dot);
-    vscodeApi.postMessage({command:'saveFile',content:out.join('\n')+'\n',suggestedName:stem+'.xy',filePath:MD.filePath||''});
+    vscodeApi.postMessage({command:'saveFile',content:out.join('\n')+'\n',suggestedName:stem+'.xy',extension:'.xy',filePath:MD.filePath||''});
 }
 (function(){
     var openBtn=document.getElementById('xrd-open');
@@ -17488,6 +17488,23 @@ function gjfChargeMultLine(meta){
     var trailing=toks.length>2?toks.slice(2):[];
     return [c,m].concat(trailing).join(' ');
 }
+/**
+ * The bond order a Gaussian connect line states.
+ *
+ * Gaussian's connectivity section takes a real bond order (its own manual
+ * gives 1.0 and 2.0 as examples and names 0.1 for a bond that only guides
+ * internal-coordinate generation), and a real input saved with `geom=connect`
+ * (test/1051388_3.gjf) states 1.5 for an aromatic bond. So 1.5 is written as
+ * it is: rounding it to 1 or 2 would break both the aromatic ring on the next
+ * open and the order Gaussian itself reads. A missing or non-finite order is
+ * the single bond the GJF parser also substitutes, rather than a crash in
+ * toFixed() that would abort the whole save.
+ */
+function gjfBondOrder(order){
+    var o=typeof order==='number'?order:parseFloat(order);
+    if(!isFinite(o)||o<=0)o=1;
+    return o.toFixed(1);
+}
 function doSave(){
     if(!MD.atoms||MD.atoms.length===0){alert('No atoms to save');return}
     for(var ci=0;ci<MD.atoms.length;ci++){var ca=MD.atoms[ci];if(isNaN(ca.x)||isNaN(ca.y)||isNaN(ca.z)){alert('Atom '+(ci+1)+' has invalid coordinates (NaN). Cannot save.');return}}
@@ -17559,7 +17576,7 @@ function doSave(){
     MD.atoms.forEach(function(a,i){
         var parts=[i+1];
         MD.bonds.forEach(function(b){
-            if(b.atom1===i)parts.push(b.atom2+1,b.order.toFixed(1));
+            if(b.atom1===i)parts.push(b.atom2+1,gjfBondOrder(b.order));
         });
         gjf+=parts.join(' ')+'\n';
     });
@@ -18060,7 +18077,11 @@ function doSave(){
             alert('Failed to generate save content: '+(err&&err.message?err.message:String(err)));
             return;
         }
-        vscodeApi.postMessage({command:'saveFile',content:content,suggestedName:suggestName+ext,filePath:MD.filePath||''});
+        // The extension is the content's own format, not the filter the save
+        // dialog happened to show: the host uses it to correct a name typed
+        // without an extension and to question one that contradicts the
+        // content. STRU has no extension of its own and sends ''.
+        vscodeApi.postMessage({command:'saveFile',content:content,suggestedName:suggestName+ext,extension:ext,filePath:MD.filePath||''});
         hideModal();
     });
     document.getElementById('m-cancel').addEventListener('click',function(){hideModal()});
@@ -18279,8 +18300,8 @@ function buildClusterGjf(keepWhole){
     var conn=[];
     for(var ci=0;ci<cl.atoms.length;ci++)conn.push([]);
     cl.bonds.forEach(function(b){
-        if(b.atom1<b.atom2)conn[b.atom1].push(b.atom2+1,b.order.toFixed(1));
-        else if(b.atom2<b.atom1)conn[b.atom2].push(b.atom1+1,b.order.toFixed(1));
+        if(b.atom1<b.atom2)conn[b.atom1].push(b.atom2+1,gjfBondOrder(b.order));
+        else if(b.atom2<b.atom1)conn[b.atom2].push(b.atom1+1,gjfBondOrder(b.order));
     });
     for(var ai=0;ai<cl.atoms.length;ai++){
         out+=[ai+1].concat(conn[ai]).join(' ')+'\n';

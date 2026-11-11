@@ -85,6 +85,28 @@ const MM_CHUNK_UNDER = 0.5;
 /** Shortest gap between two progress messages (ms), unless the run just ended. */
 const MM_PROGRESS_MS = 75;
 
+/**
+ * Other suffixes a Save As filter offers for the same content, so a name that
+ * is legitimately `.poscar` or `.dat` is not questioned for a `.vasp`/`.xy`
+ * payload. The first entry is the canonical extension the page sends.
+ */
+const SAVE_EXTENSION_ALIASES: { [extension: string]: string[] } = {
+    '.gjf': ['.gjf', '.com', '.gjf03', '.gjf09', '.gjf16'],
+    '.xyz': ['.xyz', '.extxyz'],
+    '.vasp': ['.vasp', '.poscar', '.contcar'],
+    '.lmp': ['.lmp', '.data'],
+    '.pwi': ['.pwi', '.in'],
+    '.xy': ['.xy', '.dat']
+};
+
+/**
+ * Conventional extension-less file names a format is read from; a VASP cell
+ * named `POSCAR` must stay `POSCAR`, not become `POSCAR.vasp`.
+ */
+const SAVE_EXTENSIONLESS_NAMES: { [extension: string]: string[] } = {
+    '.vasp': ['poscar', 'contcar']
+};
+
 export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvider<MolecularDocument> {
     constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -1063,6 +1085,13 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             switch (message.command) {
                 case 'saveFile':
                     try {
+                        // The page is the only sender, but content that is not
+                        // text would be encoded as "[object Object]" and leave
+                        // a file that no reader can open.
+                        if (typeof message.content !== 'string') {
+                            vscode.window.showErrorMessage('Save failed: the page sent no file content.');
+                            break;
+                        }
                         const uri = await vscode.window.showSaveDialog({
                             defaultUri: this.saveDialogUri(message.filePath, message.suggestedName, 'molecule.xyz', document.uri),
                             filters: {
@@ -1092,8 +1121,10 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                             }
                         });
                         if (uri) {
-                            await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(message.content));
-                            vscode.window.showInformationMessage('Saved: ' + uri.fsPath);
+                            const target = await this.resolveSaveTarget(uri, message.extension);
+                            if (!target) break;
+                            await vscode.workspace.fs.writeFile(target, new TextEncoder().encode(message.content));
+                            vscode.window.showInformationMessage('Saved: ' + target.fsPath);
                         }
                     } catch (e: any) {
                         vscode.window.showErrorMessage('Save failed: ' + (e.message || e));
@@ -1999,6 +2030,51 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         const folder = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0];
         if (folder) return vscode.Uri.joinPath(folder.uri, name);
         return vscode.Uri.file(name);
+    }
+
+    /**
+     * The file a Save As actually writes.
+     *
+     * The page states the extension of the content it generated, because the
+     * save dialog's filter is only a suggestion: a user can rename a Gaussian
+     * input to `water.xyz` or save it through All Files, and the dialog does
+     * not tell the host which filter was current. A name typed without an
+     * extension gets the content's own extension, and a name whose extension
+     * contradicts the content is confirmed rather than written as a file whose
+     * suffix lies about what it holds. A format with no extension of its own
+     * (STRU) is written exactly as named, and a page that sends no extension
+     * keeps the old behaviour.
+     */
+    private async resolveSaveTarget(uri: vscode.Uri, extension: unknown): Promise<vscode.Uri | undefined> {
+        const raw = typeof extension === 'string' ? extension.trim() : '';
+        const expected = /^\.[A-Za-z0-9]{1,16}$/.test(raw) ? raw.toLowerCase() : '';
+        if (!expected) return uri;
+        const pathText = uri.path;
+        const slash = pathText.lastIndexOf('/');
+        const name = pathText.substring(slash + 1);
+        const dot = name.lastIndexOf('.');
+        const actual = dot >= 0 ? name.substring(dot).toLowerCase() : '';
+        // A filter can offer more than one suffix for the same format (a VASP
+        // cell may be `.vasp`, `.poscar` or `.contcar`), and a name without any
+        // extension can still be the format's conventional one (`POSCAR`).
+        const accepted = SAVE_EXTENSION_ALIASES[expected] || [expected];
+        if (accepted.indexOf(actual) >= 0) return uri;
+        const dir = pathText.substring(0, slash + 1);
+        if (actual === '') {
+            const conventional = SAVE_EXTENSIONLESS_NAMES[expected] || [];
+            if (conventional.indexOf(name.toLowerCase()) >= 0) return uri;
+            return uri.with({ path: dir + name + expected });
+        }
+        const corrected = dir + name.substring(0, name.length - actual.length) + expected;
+        const keepLabel = 'Keep ' + actual;
+        const choice = await vscode.window.showWarningMessage(
+            'The file name ends in "' + actual + '", but the content is ' +
+            expected.substring(1).toUpperCase() + ' format.',
+            'Save as ' + expected, keepLabel);
+        if (choice === 'Save as ' + expected) return uri.with({ path: corrected });
+        if (choice === keepLabel) return uri;
+        // A dismissed warning writes no file, exactly like Cancel.
+        return undefined;
     }
 
     /**

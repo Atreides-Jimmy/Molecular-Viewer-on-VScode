@@ -25,7 +25,14 @@ export const ATOM_COLORS: { [key: string]: string } = {
     Pa: '#00A1FF', U: '#008FFF', Np: '#0080FF', Pu: '#006BFF', Am: '#545CF2',
     Cm: '#785CE3', Bk: '#8A4FE3', Cf: '#A136D4', Es: '#B31FD4', Fm: '#B31FBA',
     Md: '#B30DA6', No: '#BD0D87', Lr: '#C70066', Rf: '#CC0059', Db: '#D9004F',
-    Sg: '#E00045', Bh: '#E6002E', Hs: '#EB0026'
+    Sg: '#E00045', Bh: '#E6002E', Hs: '#EB0026',
+    // Jmol's table ends at Hs and most copies of it stop at Mt. The remaining
+    // ten follow the same transactinide ramp (Avogadro's continuation), so a
+    // superheavy atom keeps a real element colour instead of the magenta
+    // "unknown element" fallback - both when a file is opened and when one is
+    // imported, which read the same table.
+    Mt: '#E80026', Ds: '#EA0023', Rg: '#ED0021', Cn: '#EF001E', Nh: '#F2001C',
+    Fl: '#F40019', Mc: '#F70016', Lv: '#F90014', Ts: '#FC0011', Og: '#FF000F'
 };
 
 /** 导入消息里的原子载荷 (客户端 importStructure 逐项写入 MD.atoms)。 */

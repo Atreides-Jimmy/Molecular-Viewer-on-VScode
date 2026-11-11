@@ -442,9 +442,13 @@ class FchkScan {
         }
         if (/Charges$/.test(name)) {
             if (CHARGE_BLOCKLIST.indexOf(name.toLowerCase()) >= 0) return false;
-            // A per-atom population is exactly as long as the structure; an
-            // array of another length is a per-shell or per-primitive table.
-            return this.nAtoms > 0 && count === this.nAtoms;
+            // A per-atom population is normally exactly as long as the
+            // structure. A different length is still collected rather than
+            // skipped: `chargesOf` fills the missing slots with null and says
+            // how many the file stated, so a truncated table (or a QM-region
+            // population of an ONIOM job) stays visible as partial data
+            // instead of disappearing from the panel without a word.
+            return this.nAtoms > 0 && count > 0;
         }
         return false;
     }
@@ -635,7 +639,10 @@ class FchkScan {
             // made the analysis disappear instead.
             if (table.values.length !== atoms.length) {
                 this.warnings.push('the "' + table.label + '" charge table states ' + table.values.length +
-                    ' values for ' + atoms.length + ' atoms: the missing values are left blank');
+                    ' values for ' + atoms.length + ' atoms: ' +
+                    (table.values.length < atoms.length
+                        ? 'the missing values are left blank'
+                        : 'the extra values are ignored'));
             }
             const covered = values.filter(q => q !== null).length;
             out.push({

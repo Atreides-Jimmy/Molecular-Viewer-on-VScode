@@ -162,9 +162,21 @@ export function postImportCopies(webview: vscode.Webview, fileName: string,
                           atoms: ImportAtomPayload[], bonds: ImportBondPayload[],
                           hasExplicitBonds: boolean, copies: number,
                           charge?: number, multiplicity?: number): void {
-    const affordable = Math.max(1, Math.floor(IMPORT_ATOM_LIMIT / Math.max(1, atoms.length)));
+    const perCopy = Math.max(1, atoms.length);
+    const affordable = Math.floor(IMPORT_ATOM_LIMIT / perCopy);
     let count = copies;
-    if (count > affordable) {
+    if (affordable < 1) {
+        // One copy alone is already past the limit. Trimming it would cut
+        // atoms out of a structure the user asked to see, so the copy is
+        // imported whole and the user is told why the view may be slow;
+        // additional copies are still reduced to one, because the limit is
+        // about how many atoms one import adds.
+        count = 1;
+        vscode.window.showWarningMessage('Import: the structure has ' + atoms.length +
+            ' atoms, above the ' + IMPORT_ATOM_LIMIT + '-atom import limit, so ' +
+            (copies > 1 ? 'only one copy is imported instead of ' + copies : 'it is imported whole') +
+            '; a structure this large may be slow to view.');
+    } else if (count > affordable) {
         count = affordable;
         vscode.window.showWarningMessage('Import: ' + copies + ' copies of a ' + atoms.length +
             '-atom structure would add ' + (copies * atoms.length) + ' atoms, so this import is limited to ' +

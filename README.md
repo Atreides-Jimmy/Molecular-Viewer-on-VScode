@@ -116,7 +116,7 @@ A script also works as the comparison side of **Structure Diff**, using the scri
 
 | Format | Extensions | What is read |
 |--------|------------|--------------|
-| Gaussian input | `.gjf` `.gjf03` `.gjf09` `.gjf16` `.com` | Link 0, route, title, charge/multiplicity, coordinates, connect section, fixed-atom notation; a multi-line route section is preserved on save, a missing charge/multiplicity line is reported instead of consuming the first atom, and a multi-job `--Link1--` file reports that only the first structure is shown |
+| Gaussian input | `.gjf` `.gjf03` `.gjf09` `.gjf16` `.com` | Link 0, route, title, charge/multiplicity, coordinates, connect section, fixed-atom notation; a multi-line route section is preserved on save, a missing charge/multiplicity line is reported instead of consuming the first atom, a multi-job `--Link1--` file reports that only the first structure is shown, and an aromatic bond is written as the real order `1.5` in the connect section |
 | XYZ | `.xyz` | Standard XYZ; multi-frame trajectories (including ORCA `_trj.xyz`) with frame navigation and convergence when every frame has an energy; a truncated final frame is dropped, and a block shorter than its declared count is reported |
 | MOL2 | `.mol2` | ATOM and BOND sections, aromatic `ar` bonds |
 | MDL Mol | `.mol` | V2000 and V3000 CTfiles: three header lines (a file written with only a title is accepted too), fixed-column or spaced atoms/bonds, aromatic bond type, `*`/`LP`/query atoms as dummy points |
@@ -183,7 +183,7 @@ A large file shows a progress notification with a percentage bar in whole points
 
 1. Click **Import Structure** in the toolbar (View mode; not available for crystals or in Diff).
 2. Enter the number of copies (1–50) and choose **From File** or **From SMILES**. SMILES input is validated as you type with the parser's error message and the same atom-count limit the generator applies; press Enter to build the 3D structure.
-3. A request that would exceed 20,000 atoms is trimmed with a warning.
+3. Copies are reduced so the whole import stays within 20,000 added atoms, with a warning. A single structure already above that limit is imported whole — trimming it would discard atoms — and the warning says so; further copies are reduced to one.
 4. Copies are placed beside the existing structure without overlap and spaced along +X. The whole import is one Undo step, and Save As exports everything together. A ghost atom stays a ghost in every copy, and the imported part keeps the connectivity perceived for its own file — including its own charge — instead of being re-perceived with the current structure's charge.
 
 SMILES support covers the organic subset plus branches, `%nn` ring closures, aromaticity, explicit bonds, disconnected fragments, isotopes, charges and `@`/`@@` tetrahedral configuration. Aromatic systems are planar, unspecified double bonds default to trans, and the conformation comes from local rules rather than a conformer search; organometallic geometry is not special-cased.
@@ -255,7 +255,7 @@ Shortcuts work when the 3D view has focus and do not override editor keybindings
 4. Choose which atoms stay fixed and which move.
 5. Adjust the value with the numeric input or slider; the 3D view previews in real time.
 6. Click **OK** to confirm or **Cancel** to revert.
-7. Use **Save As** to export the modified structure.
+7. Use **Save As** to export the modified structure. The file name is checked against the format that will be written: a missing extension is added, and one that contradicts the content is confirmed before anything is saved.
 
 ### Development
 
@@ -399,7 +399,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 | 格式 | 扩展名 | 读取内容 |
 |------|--------|----------|
-| Gaussian 输入 | `.gjf` `.gjf03` `.gjf09` `.gjf16` `.com` | Link 0、route、标题、电荷/多重度、坐标、connect 段、固定原子写法；多行 route 在另存时完整保留，缺少电荷/多重度行时会提示而不是吞掉第一个原子；多任务 `--Link1--` 文件会提示只显示第一个结构 |
+| Gaussian 输入 | `.gjf` `.gjf03` `.gjf09` `.gjf16` `.com` | Link 0、route、标题、电荷/多重度、坐标、connect 段、固定原子写法；多行 route 在另存时完整保留，缺少电荷/多重度行时会提示而不是吞掉第一个原子；多任务 `--Link1--` 文件会提示只显示第一个结构；芳香键在 connect 段按真实键级 `1.5` 写出 |
 | XYZ | `.xyz` | 标准 XYZ；多帧轨迹（含 ORCA `_trj.xyz`）支持帧导航，每帧都带能量时显示收敛信息；被截断的末帧会被丢弃，原子块少于声明数量时会警告 |
 | MOL2 | `.mol2` | ATOM 与 BOND 段、芳香 `ar` 键 |
 | MDL Mol | `.mol` | V2000 与 V3000 CTfile：三行头部（只写了标题的旧文件也能读）、定宽或空格分隔的原子/键表、芳香键类型、`*`/`LP`/查询原子按哑点处理 |
@@ -466,7 +466,7 @@ npx vsce package --no-dependencies
 
 1. 在工具栏点击 **Import Structure**（View 模式；晶体结构与 Diff 模式下不可用）。
 2. 输入副本数量（1–50），并选择 **From File** 或 **From SMILES**。SMILES 输入会边输入边校验，显示解析器的错误信息，并使用与生成阶段相同的原子数上限；按 Enter 构建 3D 结构。
-3. 若请求会超过 20,000 原子，会自动裁剪并给出提示。
+3. 若请求会超过 20,000 个新增原子，会自动减少份数并给出提示。单份结构本身就超过该上限时不会裁剪（裁剪会丢掉原子），而是按一份完整导入并在提示中说明；更多副本仍会减为一份。
 4. 副本会放在已有结构旁边、互不重叠，并沿 +X 方向等距排开。整次导入是一步 Undo，Save As 会导出全部结构。幽灵原子在每一份副本中都保持为幽灵原子；导入部分沿用按导入文件自身（含其电荷）判定的连接关系，而不会用当前结构的电荷重新判定。
 
 SMILES 支持有机子集以及分支、`%nn` 环闭合、芳香性、显式键、断开片段、同位素、电荷和 `@`/`@@` 四面体构型。芳香体系保持平面，未指定构型的双键默认为反式，构象由局部规则生成而非构象搜索；有机金属几何不做特殊处理。
@@ -538,7 +538,7 @@ SMILES 支持有机子集以及分支、`%nn` 环闭合、芳香性、显式键�
 4. 选择哪些原子固定、哪些移动。
 5. 用数值输入或滑块调节，3D 视图实时预览。
 6. 点击 **OK** 确认，或 **Cancel** 还原。
-7. 用 **Save As** 导出修改后的结构。
+7. 用 **Save As** 导出修改后的结构。写入前会按实际格式检查文件名：缺少扩展名时自动补上，扩展名与内容不符时会先询问，确认后才保存。
 
 ### 开发
 
