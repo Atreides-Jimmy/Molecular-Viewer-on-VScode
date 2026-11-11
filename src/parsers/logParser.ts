@@ -43,6 +43,101 @@ export interface GaussianLogResult {
     optSteps?: OptStep[];
     normalModes?: NormalMode[];
     routes?: RouteSection[];
+    /** The population analyses of the final job, one per scheme the file
+     *  printed (Mulliken, ESP, APT, …). Absent when the job states none. */
+    charges?: LogChargeSet[];
+    /** One block of headline results per job in the file. */
+    summary?: LogSummary[];
+}
+
+/**
+ * One per-atom charge table a log prints: a population-analysis scheme read
+ * from the block's own rows.
+ *
+ * A block that lists fewer atoms than the structure — Gaussian's "Mulliken
+ * charges with hydrogens summed into heavy atoms" is the common one — is kept
+ * as it stands: `values` holds `null` at the atoms it says nothing about, so a
+ * view can paint exactly what the file stated and never fill a gap with a
+ * guessed zero.
+ */
+export interface LogChargeSet {
+    /** The block's own name, as printed and without the trailing colon. */
+    label: string;
+    /** Charge per atom in electron units, by 0-based atom index. */
+    values: (number | null)[];
+    /** The element of each atom the values were read for, in the same order.
+     *  A page only paints a value onto an atom that is still the atom it was
+     *  read for: an edit, or a frame of another job, changes this list. */
+    elements: string[];
+    /** How many atoms the block states a value for. */
+    covered: number;
+    /** True when every atom of that frame has a value. */
+    complete: boolean;
+    /** 0-based index of the frame whose geometry the analysis belongs to. */
+    frame: number;
+}
+
+/** One energy a job printed, under the file's own label (`E(RPM7)`). */
+export interface LogEnergy {
+    label: string;
+    /** Hartree, as printed. */
+    value: number;
+    /** Which SCF of the job printed it (1-based). An optimisation prints one
+     *  per step; the last is the converged geometry. */
+    scf?: number;
+}
+
+/** The dipole moment a job states, in Debye. */
+export interface LogDipole {
+    x: number;
+    y: number;
+    z: number;
+    total: number;
+}
+
+/**
+ * The headline results of one job in a log: the block a reader checks before
+ * looking at the structure — what energy, how well converged, what dipole and
+ * point group, what it cost.
+ *
+ * Every field is what the FILE states. Nothing here is derived, defaulted or
+ * converted (an energy stays in Hartree, a dipole in Debye, a time in the
+ * program's own words), so a summary can never show a number the file does not
+ * contain; a field the file omits stays absent and is not shown at all.
+ */
+export interface LogSummary {
+    /** 1-based job number in the file (a `--Link1--` file holds several). */
+    job: number;
+    nAtoms?: number;
+    nBasis?: number;
+    charge?: number;
+    multiplicity?: number;
+    /** Every SCF energy the job printed, last value per label, in printed order. */
+    energies: LogEnergy[];
+    /** Cycles the last SCF took. */
+    scfCycles?: number;
+    /** The last 'RMS Gradient Norm' the job printed. */
+    rmsGradient?: number;
+    /** The label that line carried, when the file words it differently. */
+    rmsGradientLabel?: string;
+    dipole?: LogDipole;
+    pointGroup?: string;
+    /** 'Job cpu time' / 'Elapsed time', as the file words them. */
+    cpuTime?: string;
+    elapsedTime?: string;
+    termination?: 'normal' | 'error';
+    /**
+     * The SCF (1-based, within this job) each geometry-level value was last
+     * printed at. They are all the same for a job that finished — the converged
+     * geometry — and differ when the file only printed a value for an earlier
+     * step (a run that was cut short), which the panel marks instead of
+     * presenting two geometries as one.
+     */
+    scfOf?: {
+        energy?: number;
+        rmsGradient?: number;
+        dipole?: number;
+    };
 }
 
 /**
@@ -349,6 +444,186 @@ function assignPendingEnergyToFrames(frames: LogFrame[], energy: number): void {
     }
 }
 
+/** A number as these programs print one: `-0.1234`, `.10134D-02`, `1.5e-3`.
+ *  Every value the summary reads carries this shape, so the patterns below
+ *  state it once. */
+const LOG_NUMBER = '([-+]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[DdEe][-+]?\\d+)?)';
+
+/** Parse one number in a program's own notation (Fortran `D` exponents). */
+function parseLogNumber(text: string): number {
+    const v = parseFloat(text.replace(/[Dd]/, 'E'));
+    return isFinite(v) ? v : NaN;
+}
+
+// The patterns the single pass asks every line about, built once: the scan runs
+// over every line of a log, and a regex compiled per line is the most expensive
+// thing in it. `LOG_NUMBER` is spliced in so a value in `D` notation reads the
+// same as one in plain decimals.
+const SCF_DONE_RE = new RegExp('SCF Done:\\s+E\\(([^)]+)\\)\\s*=\\s*' + LOG_NUMBER);
+const SCF_CYCLES_RE = /after\s+(\d+)\s+cycles/;
+const CHARGE_MULT_RE = /Charge\s*=\s*(-?\d+)\s+Multiplicity\s*=\s*(\d+)/;
+const RMS_GRADIENT_RE = new RegExp('RMS Gradient Norm\\s*=\\s*' + LOG_NUMBER);
+const POINT_GROUP_RE = /Point Group\s*=\s*(\S+)/;
+const FULL_POINT_GROUP_RE = /Full point group\s+(\S+)/;
+const DIPOLE_RE = new RegExp('X=\\s*' + LOG_NUMBER + '\\s+Y=\\s*' + LOG_NUMBER +
+    '\\s+Z=\\s*' + LOG_NUMBER + '\\s+Tot=\\s*' + LOG_NUMBER);
+const NATOMS_RE = /NAtoms=\s*(\d+)/;
+const NBUSE_RE = /NBsUse=\s*(\d+)/;
+/** 'Job cpu time:  0 days  4 hours 25 minutes 40.3 seconds.' — the tail is
+ *  kept as written; only the label and the closing period are dropped. */
+const JOB_CPU_RE = /Job cpu time:\s*(.+?)\s*\.?\s*$/;
+const ELAPSED_RE = /Elapsed time:\s*(.+?)\s*\.?\s*$/;
+
+/** The most atoms a charge table may address. A row that names an index past
+ *  this is not a charge table (or not one this reader understands), and the
+ *  table is refused rather than used to build an array of that length. */
+const MAX_CHARGE_ATOMS = 200000;
+
+/**
+ * Read one per-atom charge table starting at its header line.
+ *
+ * Gaussian prints a population analysis as a short header naming the scheme
+ * followed by one row per atom:
+ *
+ *      Mulliken charges:
+ *                    1
+ *          1  N   -0.654835
+ *          2  H    0.274990
+ *
+ * The column header between the two is a bare atom number in some versions and
+ * a dashed rule in others, and a block that sums hydrogens into heavy atoms
+ * lists fewer rows than the structure has atoms. Both are read as they are: the
+ * row count is not assumed, and the value of an atom the block omits stays
+ * `null`.
+ *
+ * A row must be exactly (atom number, label, one number) — the shape every
+ * simple charge table has — so a table with extra columns (Hirshfeld's spin
+ * densities, a fit's per-atom errors) is refused instead of having one of its
+ * other columns read as a charge.
+ *
+ * Returns null when the line is not such a table, so a mention of charges in
+ * a settings block ("Polarization charges : Total charges.") costs one failed
+ * attempt and nothing else.
+ */
+function readChargeBlock(
+    lines: string[],
+    headerIdx: number
+): { label: string; values: (number | null)[]; endIdx: number } | null {
+    const header = lines[headerIdx].trim();
+    if (header.length < 6 || header.length > 120) return null;
+    const label = header.replace(/:\s*$/, '').replace(/\s+/g, ' ').trim();
+    if (label.length < 5) return null;
+    let i = headerIdx + 1;
+    // The column header sits between the title and the first row: a bare atom
+    // number, a dashed rule, or nothing at all. A block whose rows do not
+    // begin within that window is not a table.
+    for (let k = 0; k < 4 && i < lines.length; k++, i++) {
+        const text = lines[i].trim();
+        if (text === '' || /^-{4,}/.test(text) || /^\d+$/.test(text)) continue;
+        break;
+    }
+    const values: (number | null)[] = [];
+    let rows = 0;
+    let maxIdx = 0;
+    while (i < lines.length) {
+        const text = lines[i].trim();
+        if (text === '' || text.length > 80) break;
+        const m = text.match(/^(\d+)\s+([A-Za-z]{1,3}\d*)\s+([-+]?(?:\d+\.?\d*|\.\d+)(?:[DdEe][-+]?\d+)?)$/);
+        if (!m) break;
+        const idx = parseInt(m[1], 10);
+        const value = parseLogNumber(m[3]);
+        if (!isFinite(value) || idx < 1 || idx > MAX_CHARGE_ATOMS) break;
+        if (idx > maxIdx) {
+            maxIdx = idx;
+            while (values.length < maxIdx) values.push(null);
+        }
+        values[idx - 1] = value;
+        rows++;
+        i++;
+    }
+    if (rows === 0) return null;
+    return { label, values, endIdx: i };
+}
+
+/** Whether a job summary carries anything worth showing. A job whose only
+ *  record is its charge/multiplicity line is not a result block. */
+function summaryHasData(s: LogSummary): boolean {
+    return s.energies.length > 0 || s.rmsGradient != null || !!s.dipole ||
+        !!s.pointGroup || !!s.cpuTime || !!s.elapsedTime || !!s.termination ||
+        s.nAtoms != null || s.nBasis != null;
+}
+
+/** A charge table before the frame it belongs to is known. */
+interface ChargeDraft {
+    label: string;
+    values: (number | null)[];
+    /** Frames on the list when the table ended — the geometry it describes. */
+    anchor: number;
+}
+
+/** The charge tables of the job being read. */
+interface ChargeState {
+    drafts: ChargeDraft[];
+}
+
+/** The headline results of every job in the file, and the one being filled. */
+interface SummaryState {
+    list: LogSummary[];
+    cur: LogSummary | null;
+}
+
+/** The job being read, created (and numbered) on its first recorded value. */
+function summaryOf(st: SummaryState): LogSummary {
+    if (!st.cur) {
+        st.cur = { job: st.list.length + 1, energies: [] };
+        st.list.push(st.cur);
+    }
+    return st.cur;
+}
+
+/** Record the SCF (1-based) a geometry-level value was last printed at.
+ *
+ *  A summary keeps the last value of each field, and for a finished
+ *  optimisation that is one geometry: the converged one. It is not always so —
+ *  a run that was cut short prints no analysis for its final step, so its
+ *  dipole is the first step's while its energy is the last one's. Stamping the
+ *  SCF lets the panel say which values do not belong to the final geometry
+ *  instead of presenting two structures as one. */
+function noteScf(st: SummaryState, field: 'energy' | 'rmsGradient' | 'dipole', scf: number): void {
+    const s = summaryOf(st);
+    if (!s.scfOf) s.scfOf = {};
+    s.scfOf[field] = scf;
+}
+
+/** Record one SCF energy under the file's own label, keeping the LAST value
+ *  printed for it: an optimisation prints one per step, and the converged one
+ *  is what a summary is for. `scf` is the number of that SCF in the job. */
+function noteEnergy(st: SummaryState, label: string, value: number, scf: number): void {
+    const s = summaryOf(st);
+    noteScf(st, 'energy', scf);
+    for (let k = 0; k < s.energies.length; k++) {
+        if (s.energies[k].label === label) {
+            s.energies[k].value = value;
+            s.energies[k].scf = scf;
+            return;
+        }
+    }
+    s.energies.push({ label, value, scf });
+}
+
+/** Record one charge table, replacing an earlier table of the same scheme in
+ *  the same job: a population analysis printed at every step keeps the last
+ *  one, which is the geometry the run ended on. */
+function noteChargeTable(st: ChargeState, label: string, values: (number | null)[], anchor: number): void {
+    for (let k = 0; k < st.drafts.length; k++) {
+        if (st.drafts[k].label === label) {
+            st.drafts[k] = { label: label, values: values, anchor: anchor };
+            return;
+        }
+    }
+    st.drafts.push({ label: label, values: values, anchor: anchor });
+}
+
 export function parseGaussianLog(content: string): GaussianLogResult {
     const lines = content.split(/\r?\n/);
     const frames: LogFrame[] = [];
@@ -392,6 +667,17 @@ export function parseGaussianLog(content: string): GaussianLogResult {
     // are collected (parsed into RouteSection[]) for the Route panel.
     let routeHasOpt = false;
     const routes: RouteSection[] = [];
+    // The per-atom charge tables of the job currently being read, and the
+    // headline results of every job in the file. Both are plain boxes handed to
+    // the helpers below rather than variables closed over by them: this loop
+    // visits every line of the file, and a function that captures its state
+    // makes the engine reach for a context object on each access inside it.
+    const charges: ChargeState = { drafts: [] };
+    const jobs: SummaryState = { list: [], cur: null };
+    /** How many SCFs of the job being read have closed (1-based for the next
+     *  one). A geometry-level value is stamped with it, so a summary can tell
+     *  a value of the final geometry from one the file only printed earlier. */
+    let scfCount = 0;
 
     let i = 0;
     while (i < lines.length) {
@@ -401,11 +687,14 @@ export function parseGaussianLog(content: string): GaussianLogResult {
         // Gaussian prints the line once per job, before that job's geometries,
         // so updating the state here gives each frame the values of its own job.
         if (line.indexOf('Charge') >= 0 && line.indexOf('Multiplicity') >= 0) {
-            const cm = line.match(/Charge\s*=\s*(-?\d+)\s+Multiplicity\s*=\s*(\d+)/);
+            const cm = line.match(CHARGE_MULT_RE);
             if (cm) {
                 logCharge = parseInt(cm[1], 10);
                 logMultiplicity = parseInt(cm[2], 10);
                 chargeMultLine = `Charge=${cm[1]} Mult=${cm[2]}`;
+                const s = summaryOf(jobs);
+                s.charge = logCharge;
+                s.multiplicity = logMultiplicity;
                 i++;
                 continue;
             }
@@ -454,6 +743,14 @@ export function parseGaussianLog(content: string): GaussianLogResult {
                     const sec = parseRouteSection(joinRouteLines(lines.slice(routeStart, j).map(l => l.trim())));
                     routes.push(sec);
                     if (sec.hasOpt) routeHasOpt = true;
+                    // A route card is the start of a job: the results and the
+                    // population analysis that follow belong to it, not to the
+                    // job whose card preceded them. This is the only boundary a
+                    // `--Link1--` file states, and the first card of a file
+                    // finds nothing to close.
+                    jobs.cur = null;
+                    charges.drafts.length = 0;
+                    scfCount = 0;
                     i = j;
                     continue;
                 }
@@ -558,30 +855,143 @@ export function parseGaussianLog(content: string): GaussianLogResult {
             continue;
         }
 
-        // --- Convergence table steps ---
-        // SCF Done:  E(RHF) =  -76.0107469158     A.U. after   10 cycles
-        const scfMatch = line.match(/SCF Done:\s+E\([^)]+\)\s*=\s*(-?\d+\.\d+)/);
-        if (scfMatch) {
-            // The energy is carried into the next geometry frame below, which is
-            // the structure it was computed at. [2026-09-12 | Atreides-Jimmy]
-            pendingEnergy = parseFloat(scfMatch[1]);
-            i++;
-            continue;
+        // --- Convergence tables, charge tables and the job summary ---
+        //
+        // Every value read below is printed as a banner: indented, and starting
+        // with a capital letter. That shape is the gate — two character reads —
+        // so the literal scans run on about a sixth of the lines instead of on
+        // every coordinate row, frequency table and eigenvalue dump a log is
+        // mostly made of. Nothing is lost by it: these programs indent their
+        // banners, and a line they did not would be one this reader never
+        // matched either.
+        let gateP = 0;
+        while (gateP < line.length && line.charCodeAt(gateP) === 32) gateP++;
+        const gateC = gateP < line.length ? line.charCodeAt(gateP) : 0;
+        if (gateC >= 65 && gateC <= 90) {
+
+            // SCF Done:  E(RHF) =  -76.0107469158     A.U. after   10 cycles
+            if (line.indexOf('SCF Done') >= 0) {
+                const scfMatch = line.match(SCF_DONE_RE);
+                if (scfMatch) {
+                    // The energy is carried into the next geometry frame below, which is
+                    // the structure it was computed at. [2026-09-12 | Atreides-Jimmy]
+                    pendingEnergy = parseLogNumber(scfMatch[2]);
+                    scfCount++;
+                    // E(RPM7), E(RB3LYP), … — the label is the file's own.
+                    noteEnergy(jobs, 'E(' + scfMatch[1] + ')', pendingEnergy, scfCount);
+                    const cycles = line.match(SCF_CYCLES_RE);
+                    if (cycles) summaryOf(jobs).scfCycles = parseInt(cycles[1], 10);
+                    i++;
+                    continue;
+                }
+            }
+
+            // --- A per-atom charge table (population analysis) ---
+            // ` Mulliken charges:`, ` ESP charges:`, ` APT charges:`,
+            // ` Mulliken charges with hydrogens summed into heavy atoms:` —
+            // whatever the file printed, by the file's own name. A line that
+            // merely mentions charges yields no rows and costs one attempt.
+            if (line.indexOf('harges') >= 0) {
+                const block = readChargeBlock(lines, i);
+                if (block) {
+                    noteChargeTable(charges, block.label, block.values, frames.length);
+                    i = block.endIdx;
+                    continue;
+                }
+            }
+
+            // --- RMS gradient of the final SCF ---
+            // Only the full label is taken: `RMS Force = .10134D-02` is the
+            // SCF's DIIS convergence test, not the gradient of the structure.
+            if (line.indexOf('RMS Gradient Norm') >= 0) {
+                const g = line.match(RMS_GRADIENT_RE);
+                if (g) {
+                    const s = summaryOf(jobs);
+                    s.rmsGradient = parseLogNumber(g[1]);
+                    s.rmsGradientLabel = 'RMS Gradient Norm';
+                    noteScf(jobs, 'rmsGradient', scfCount);
+                    i++;
+                    continue;
+                }
+            }
+
+            // --- Dipole moment: the label line, then X / Y / Z / Tot ---
+            if (line.indexOf('ipole moment') >= 0 || line.indexOf('ipole Moment') >= 0) {
+                const d = (lines[i + 1] || '').match(DIPOLE_RE);
+                if (d) {
+                    summaryOf(jobs).dipole = {
+                        x: parseLogNumber(d[1]), y: parseLogNumber(d[2]),
+                        z: parseLogNumber(d[3]), total: parseLogNumber(d[4])
+                    };
+                    noteScf(jobs, 'dipole', scfCount);
+                    i += 2;
+                    continue;
+                }
+            }
+
+            // --- Atoms, basis functions ---
+            if (line.indexOf('NAtoms=') >= 0) {
+                const n = line.match(NATOMS_RE);
+                if (n) { summaryOf(jobs).nAtoms = parseInt(n[1], 10); i++; continue; }
+            }
+            if (line.indexOf('NBsUse=') >= 0) {
+                const n = line.match(NBUSE_RE);
+                if (n) { summaryOf(jobs).nBasis = parseInt(n[1], 10); i++; continue; }
+            }
+
+            // --- Job cpu time / elapsed time, kept in the file's own words ---
+            if (line.indexOf('time:') >= 0) {
+                if (line.indexOf('Job cpu time') >= 0) {
+                    const t = line.match(JOB_CPU_RE);
+                    if (t) { summaryOf(jobs).cpuTime = t[1]; i++; continue; }
+                }
+                if (line.indexOf('Elapsed time') >= 0) {
+                    const t = line.match(ELAPSED_RE);
+                    if (t) { summaryOf(jobs).elapsedTime = t[1]; i++; continue; }
+                }
+            }
+
+            // --- Point group ('Point Group = C1', 'Full point group  C1  NOp 1') ---
+            if (line.indexOf('oint group') >= 0) {
+                const pg = line.match(POINT_GROUP_RE) || line.match(FULL_POINT_GROUP_RE);
+                if (pg) {
+                    summaryOf(jobs).pointGroup = pg[1];
+                    i++;
+                    continue;
+                }
+            }
+
+            // --- Termination: the one line that says the job finished ---
+            if (line.indexOf('ermination') >= 0) {
+                if (line.indexOf('Normal termination') >= 0) {
+                    summaryOf(jobs).termination = 'normal';
+                    i++;
+                    continue;
+                }
+                if (line.indexOf('Error termination') >= 0) {
+                    summaryOf(jobs).termination = 'error';
+                    i++;
+                    continue;
+                }
+            }
         }
 
         // External energy (opt=external, e.g. Gaussian + xTB/XO combined runs
         // have no SCF Done; the optimizer prints the external energy as):
         //  Energy=    -9905.57592     NIter=   0.
         // Anchored so lines like "Predicted change in Energy=-5.282751D-01"
-        // do not match.
-        const extEnergyMatch = line.match(/^\s*Energy=\s*(-?\d+\.\d+)\s+NIter=/);
-        if (extEnergyMatch) {
-            pendingEnergy = parseFloat(extEnergyMatch[1]);
-            // [2026-09-12 | Atreides-Jimmy] opt=external logs print the cycle's
-            // geometry BEFORE its energy — bind it here (same purpose as above).
-            assignPendingEnergyToFrames(frames, pendingEnergy);
-            i++;
-            continue;
+        // do not match. The literal test in front of the pattern is what that
+        // anchor already requires, so it can only save work.
+        if (line.indexOf('Energy=') >= 0) {
+            const extEnergyMatch = line.match(/^\s*Energy=\s*(-?\d+\.\d+)\s+NIter=/);
+            if (extEnergyMatch) {
+                pendingEnergy = parseFloat(extEnergyMatch[1]);
+                // [2026-09-12 | Atreides-Jimmy] opt=external logs print the cycle's
+                // geometry BEFORE its energy — bind it here (same purpose as above).
+                assignPendingEnergyToFrames(frames, pendingEnergy);
+                i++;
+                continue;
+            }
         }
 
         // Convergence criteria block starts with "Maximum Force" data line
@@ -620,29 +1030,74 @@ export function parseGaussianLog(content: string): GaussianLogResult {
     // This creates visually redundant frames in the 3D viewer (which normalizes orientation).
     const hasInput = frames.some(f => f.stepLabel.startsWith('Input'));
     const hasStandard = frames.some(f => f.stepLabel.startsWith('Step'));
+    // Where each frame ended up after the filter, so a charge table recorded
+    // against a pre-filter position still names the frame it describes.
+    let frameRemap: number[] | null = null;
     if (hasInput && hasStandard) {
         let inputSeen = false;
-        const filtered = frames.filter(f => {
+        const kept: LogFrame[] = [];
+        const remap: number[] = [];
+        for (let k = 0; k < frames.length; k++) {
+            const f = frames[k];
             if (f.stepLabel.startsWith('Input')) {
-                if (inputSeen) return false;
+                if (inputSeen) { remap.push(-1); continue; }
                 inputSeen = true;
-                return true;
             }
-            return true;
-        });
+            remap.push(kept.length);
+            kept.push(f);
+        }
         frames.length = 0;
-        frames.push(...filtered);
+        frames.push(...kept);
+        frameRemap = remap;
     }
 
     if (frames.length === 0 && fallbackFrame) {
         frames.push(fallbackFrame);
     }
 
+    // Population analyses: a table describes the geometry printed before it
+    // (Gaussian closes a step's SCF with its charges, then prints the next
+    // geometry), so it takes the last frame that existed when the table ended —
+    // and the frame at the end of a single-point job, where no geometry follows
+    // the analysis at all. Values are laid out by atom index, padded to the
+    // frame's atom list so a view can read one by index without a second table.
+    const chargeSets: LogChargeSet[] = [];
+    if (frames.length > 0) {
+        for (const draft of charges.drafts) {
+            let fr = draft.anchor > 0 ? draft.anchor - 1 : 0;
+            if (fr > frames.length - 1) fr = frames.length - 1;
+            if (frameRemap) {
+                while (fr > 0 && frameRemap[fr] < 0) fr--;
+                fr = frameRemap[fr] < 0 ? 0 : frameRemap[fr];
+            }
+            const frameAtoms = frames[fr].atoms;
+            const values: (number | null)[] = [];
+            let covered = 0;
+            for (let k = 0; k < frameAtoms.length; k++) {
+                const v = k < draft.values.length ? draft.values[k] : null;
+                values.push(v == null ? null : v);
+                if (v != null) covered++;
+            }
+            chargeSets.push({
+                label: draft.label,
+                values,
+                elements: frameAtoms.map(a => a.element),
+                covered,
+                complete: frameAtoms.length > 0 && covered === frameAtoms.length,
+                frame: fr
+            });
+        }
+    }
+
+    const summary = jobs.list.filter(summaryHasData);
+
     return {
         frames,
         title,
         optSteps: routeHasOpt && optSteps.length > 0 ? optSteps : undefined,
         normalModes: modes,
-        routes: routes.length > 0 ? routes : undefined
+        routes: routes.length > 0 ? routes : undefined,
+        charges: chargeSets.length > 0 ? chargeSets : undefined,
+        summary: summary.length > 0 ? summary : undefined
     };
 }

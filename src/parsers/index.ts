@@ -3,7 +3,7 @@ import { parseGjf } from './gjfParser';
 import { parseXyz, parseXyzTrajectory, XyzFrame, XyzTrajectory } from './xyzParser';
 import { parseMol2 } from './mol2Parser';
 import { parseMol, isMdlMol } from './molParser';
-import { parseGaussianLog, LogFrame, GaussianLogResult, RouteSection, RouteKeyword } from './logParser';
+import { parseGaussianLog, LogFrame, GaussianLogResult, RouteSection, RouteKeyword, LogChargeSet, LogSummary } from './logParser';
 import { parseCoord } from './coordParser';
 import { parseOrcainp, scanOrcaXyzfile, OrcaExternalStructure, OrcaXyzReference } from './orcaInpParser';
 import { parseOrcaOut, isOrcaOutput, OrcaFrame, OrcaLogResult } from './orcaOutParser';
@@ -28,6 +28,7 @@ import { detectBinaryTrajectory, readBinaryTrajectory, isTrajectoryFileName, Bin
 
 export { parseGaussianLog, LogFrame, GaussianLogResult };
 export { RouteSection, RouteKeyword };
+export { LogChargeSet, LogSummary };
 export { parseOrcaOut, isOrcaOutput, OrcaFrame, OrcaLogResult };
 export { scanOrcaXyzfile, OrcaExternalStructure, OrcaXyzReference };
 export { parseXyzTrajectory, XyzFrame, XyzTrajectory };
@@ -72,6 +73,13 @@ export interface LogFileResult {
     // Which log format produced this result. The webview uses it to label the
     // panel; the numeric scales come from `optThresholds`.
     source?: 'gaussian' | 'xtb' | 'orca';
+    // The per-atom charge tables the file prints (a Gaussian population
+    // analysis) and the headline results of each job. Both come from the file
+    // as it states them; a format that prints neither leaves them undefined,
+    // which is what keeps the charge and summary panels from appearing on a
+    // log that has no such data.
+    charges?: LogChargeSet[];
+    summary?: LogSummary[];
 }
 
 export interface ParseFileOptions {
@@ -388,7 +396,9 @@ export function parseLogFile(content: string, fileName?: string): LogFileResult 
         optSteps: gResult.optSteps,
         normalModes: gResult.normalModes,
         routes: gResult.routes,
-        source: 'gaussian'
+        source: 'gaussian',
+        charges: gResult.charges,
+        summary: gResult.summary
     };
 }
 

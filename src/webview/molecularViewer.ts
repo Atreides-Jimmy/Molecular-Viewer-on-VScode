@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { parseFile, parseLogFile, parseXyzTrajectory, LogFrame, OrcaFrame, RouteSection, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg, ParseFileOptions, DeepmdParseOptions, LammpsParseOptions, LammpsHints, isStructuredProgramOutput, isExtXyz, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox, parseLammpsInputHints, lammpsTypeElements, isLammpsInput, isLammpsData, isLammpsDump, scanLammpsInput, scanOrcaXyzfile, scanAbinitXyzfile, scanAbacusInput, isAbacusInput, isAbinitInput, isCp2kInput, detectBinaryTrajectory, readBinaryTrajectory, lammpsLengthFactor, parseLammpsDumpTrajectory, BinaryTrajectory, TrajectoryFormat, LammpsDumpTrajectory } from '../parsers/index';
+import { parseFile, parseLogFile, parseXyzTrajectory, LogFrame, OrcaFrame, RouteSection, LogChargeSet, LogSummary, parseTcl, resolveVmdScene, resolveSelection, vdwRadius, hasScalarChannel, parseUnitFile, parseEggFile, matchEggsToSegments, VmdEgg, ParseFileOptions, DeepmdParseOptions, LammpsParseOptions, LammpsHints, isStructuredProgramOutput, isExtXyz, parseDeepmdTypes, parseDeepmdTypeMap, deepmdFirstBox, parseLammpsInputHints, lammpsTypeElements, isLammpsInput, isLammpsData, isLammpsDump, scanLammpsInput, scanOrcaXyzfile, scanAbinitXyzfile, scanAbacusInput, isAbacusInput, isAbinitInput, isCp2kInput, detectBinaryTrajectory, readBinaryTrajectory, lammpsLengthFactor, parseLammpsDumpTrajectory, BinaryTrajectory, TrajectoryFormat, LammpsDumpTrajectory } from '../parsers/index';
 import { ensureBonds } from '../tools/bondDetector';
 import { BOND_PERCEPTION_SOURCE } from '../tools/bondPerception';
 import { BVS_SOURCE } from '../tools/bvs';
@@ -194,6 +194,10 @@ interface LoadedStructure {
     normalModes?: NormalMode[];
     routes?: RouteSection[];
     optThresholds?: OptThresholds;
+    /** The population analyses and the job results a log states (see
+     *  `LogChargeSet` / `LogSummary`); absent for every other format. */
+    charges?: LogChargeSet[];
+    summary?: LogSummary[];
     logSource?: string;
     error?: string;
 }
@@ -1634,6 +1638,8 @@ async function loadStructureFile(uri: vscode.Uri): Promise<LoadedStructure> {
             normalModes: logResult.normalModes,
             routes: logResult.routes,
             optThresholds: logResult.optThresholds,
+            charges: logResult.charges,
+            summary: logResult.summary,
             logSource: logResult.source
         };
     }
@@ -1901,6 +1907,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         let routes: RouteSection[] | undefined;
         let optThresholds: OptThresholds | undefined;
         let logSource: string | undefined;
+        let charges: LogChargeSet[] | undefined;
+        let summary: LogSummary[] | undefined;
         let vmdPayload: VmdPayload | undefined;
         let autoBeta = false;
 
@@ -1938,6 +1946,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             routes = logResult.routes;
             optThresholds = logResult.optThresholds;
             logSource = logResult.source;
+            charges = logResult.charges;
+            summary = logResult.summary;
             if (frames.length > 0) {
                 data = ensureBonds({
                     atoms: frames[0].atoms,
@@ -2036,6 +2046,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             optSteps = undefined;
             normalModes = undefined;
             optThresholds = undefined;
+            charges = undefined;
+            summary = undefined;
         }
 
         applySetupWarnings(data, setup);
@@ -2047,7 +2059,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             data.filePath = setup && setup.reference ? setup.reference.uri.fsPath : uri.fsPath;
         }
 
-        return new MolecularDocument(uri, data, frames, optSteps, normalModes, logSource, routes, vmdPayload, autoBeta, optThresholds, trajectoryFrames);
+        return new MolecularDocument(uri, data, frames, optSteps, normalModes, logSource, routes, vmdPayload, autoBeta, optThresholds, trajectoryFrames, charges, summary);
     }
 
     /**
@@ -2063,6 +2075,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         optSteps?: OptStep[];
         normalModes?: NormalMode[];
         routes?: RouteSection[];
+        charges?: LogChargeSet[];
+        summary?: LogSummary[];
         logSource?: string;
     }> {
         const payload: VmdPayload = {
@@ -2125,6 +2139,8 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             optSteps: first.optSteps,
             normalModes: first.normalModes,
             routes: first.routes,
+            charges: first.charges,
+            summary: first.summary,
             logSource: first.logSource
         };
     }
@@ -2139,7 +2155,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         };
 
         if (token.isCancellationRequested) return;
-        const html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes, document.vmdPayload, document.autoBeta, document.optThresholds, document.trajectoryFrames);
+        const html = await this.getHtmlForWebview(webviewPanel.webview, document.data, document.frames, document.optSteps, document.normalModes, document.logSource, document.routes, document.vmdPayload, document.autoBeta, document.optThresholds, document.trajectoryFrames, document.charges, document.summary);
         // Reading the renderer is asynchronous; if the editor was closed in
         // the meantime, assigning html throws "Webview is disposed" and the
         // extension log fills with a failure the user never caused.
@@ -3070,7 +3086,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         }
     }
 
-    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[], logSource?: string, routes?: RouteSection[], vmdPayload?: VmdPayload, autoBeta: boolean = false, optThresholds?: OptThresholds, trajectoryFrames?: TrajectoryFramePayload[]): Promise<string> {
+    private async getHtmlForWebview(webview: vscode.Webview, data: MolecularData, frames: (LogFrame | OrcaFrame)[] = [], optSteps?: OptStep[], normalModes?: NormalMode[], logSource?: string, routes?: RouteSection[], vmdPayload?: VmdPayload, autoBeta: boolean = false, optThresholds?: OptThresholds, trajectoryFrames?: TrajectoryFramePayload[], charges?: LogChargeSet[], summary?: LogSummary[]): Promise<string> {
         const nonce = getNonce();
 
         // The renderer is an extension asset, and an installation that lost
@@ -3192,6 +3208,35 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             keywords: r.keywords.map(k => ({ name: k.name, options: k.options }))
         })) : null;
 
+        // The population analyses and the job results, as the file states them.
+        // A charge value is `null` at an atom the table does not cover, which
+        // the page reads as "no value" and never as zero.
+        const chargesData = charges && charges.length > 0 ? charges.map(c => ({
+            label: c.label,
+            values: c.values,
+            elements: c.elements,
+            covered: c.covered,
+            complete: c.complete,
+            frame: c.frame
+        })) : null;
+
+        const summaryData = summary && summary.length > 0 ? summary.map(s => ({
+            job: s.job,
+            nAtoms: s.nAtoms,
+            nBasis: s.nBasis,
+            charge: s.charge,
+            multiplicity: s.multiplicity,
+            energies: s.energies.map(e => ({ label: e.label, value: e.value })),
+            scfCycles: s.scfCycles,
+            rmsGradient: s.rmsGradient,
+            rmsGradientLabel: s.rmsGradientLabel,
+            dipole: s.dipole ? { x: s.dipole.x, y: s.dipole.y, z: s.dipole.z, total: s.dipole.total } : null,
+            pointGroup: s.pointGroup,
+            cpuTime: s.cpuTime,
+            elapsedTime: s.elapsedTime,
+            termination: s.termination
+        })) : null;
+
         const vmdData = vmdPayload && vmdPayload.molecules.length > 0 ? vmdPayload : null;
 
         const optThresholdsData = optThresholds ? {
@@ -3229,7 +3274,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         // JSON spelling, which is valid JSON and stops the HTML parser from
         // seeing a tag; U+2028/U+2029 are escaped because they are line
         // terminators to a JavaScript parser.
-        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, optThresholds: optThresholdsData, routes: routesData, vmd: vmdData, autoBeta: !!(autoBeta && !vmdData), hasExplicitBonds: !!data.hasExplicitBonds, warnings: data.warnings || [], mmParams: describeForceField(), trajectory: trajectoryData, trajectoryFrames: trajectoryFramesData })
+        const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, optThresholds: optThresholdsData, routes: routesData, vmd: vmdData, charges: chargesData, summary: summaryData, autoBeta: !!(autoBeta && !vmdData), hasExplicitBonds: !!data.hasExplicitBonds, warnings: data.warnings || [], mmParams: describeForceField(), trajectory: trajectoryData, trajectoryFrames: trajectoryFramesData })
             .replace(/</g, '\\u003c')
             .replace(/\u2028/g, '\\u2028')
             .replace(/\u2029/g, '\\u2029');
@@ -3636,6 +3681,62 @@ canvas{display:block}
 #route-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
 #route-reopen.show{display:block}
 #route-reopen:hover{background:var(--vscode-button-background,#0e639c)}
+/* Atomic charges and the job summary: two reading aids for a log that states a
+   population analysis and a set of results. Both are cards of the same shape as
+   the route panel — a header with a close control, a body that scrolls inside a
+   capped height — so they stack with it instead of inventing a third look. */
+#charge-panel{display:none;position:absolute;top:36px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.78);padding:8px 10px;border-radius:4px;z-index:25;width:300px;max-width:calc(100% - 16px);max-height:70%;overflow:hidden;pointer-events:auto;line-height:1.4}
+#charge-panel.show{display:flex;flex-direction:column}
+#charge-panel .chg-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.15)}
+#charge-panel .chg-title{font-size:12px;font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff)}
+#charge-panel .chg-close{cursor:pointer;color:var(--vscode-descriptionForeground,#999);font-size:14px;padding:0 4px}
+#charge-panel .chg-close:hover{color:var(--vscode-errorForeground,#f66)}
+/* The scrollbar is reserved, not added when it is needed: the panels that
+   came before this one do the same, and a body whose width changes under its
+   own content re-wraps a value at the moment the bar appears. */
+#charge-panel .chg-body{overflow-y:scroll;overflow-x:hidden;flex:1 1 auto;min-height:0;width:100%;box-sizing:border-box;padding-right:8px}
+#charge-panel .chg-row{display:flex;align-items:center;gap:6px;margin:2px 0 6px}
+#charge-panel .chg-lab{flex:0 0 auto;color:var(--vscode-descriptionForeground,#999)}
+#charge-panel .chg-sel{flex:1 1 auto;min-width:0;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,#444);border-radius:2px;font-size:11px;padding:1px 2px}
+#charge-panel .chg-check{display:flex;align-items:center;gap:6px;margin:4px 0;cursor:pointer}
+#charge-panel .chg-check input{margin:0;cursor:pointer}
+#charge-panel .chg-check.off{opacity:0.5;cursor:default}
+#charge-panel .chg-check.off input{cursor:default}
+#charge-panel .chg-legend{margin:7px 0 2px}
+#charge-panel .chg-bar{height:8px;border-radius:2px;border:1px solid rgba(255,255,255,0.18);background:linear-gradient(90deg,#d94f1c,#d1d1d1,#1c4fd9)}
+#charge-panel .chg-scale{display:flex;justify-content:space-between;font-family:monospace;font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:2px}
+#charge-panel .chg-stat{margin-top:5px;font-family:monospace;font-size:10px;color:#ffb86b;word-break:break-word}
+#charge-panel .chg-note{margin-top:3px;font-size:10px;line-height:1.35;color:var(--vscode-descriptionForeground,#999)}
+#charge-panel .chg-note:empty{display:none}
+#charge-panel .chg-sec{margin:8px 0 3px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.15);font-size:10px;color:var(--vscode-descriptionForeground,#999);text-transform:uppercase;letter-spacing:0.4px}
+#charge-panel .chg-soon{cursor:default;opacity:0.55}
+#charge-panel .chg-hint{margin-top:2px;font-size:10px;line-height:1.35;color:var(--vscode-descriptionForeground,#888)}
+#charge-panel .chg-go{display:none;margin-top:5px;padding:2px 9px;border-radius:3px;border:1px solid var(--vscode-button-border,#555);background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#ccc);font-size:10px;cursor:pointer}
+#charge-panel .chg-go:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e)}
+/* The values are page furniture drawn over the canvas, one absolutely placed
+   span per atom, so they follow every rotation without a texture per atom and
+   stay out of the PNG (a snapshot captures the WebGL canvas, not the page). */
+#charge-labels{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:24;overflow:hidden}
+#charge-labels span{position:absolute;left:0;top:0;display:none;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10px;line-height:1;color:#fff;text-shadow:0 0 2px #000,0 0 3px #000;white-space:nowrap}
+#summary-panel{display:none;position:absolute;top:36px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.78);padding:8px 10px;border-radius:4px;z-index:25;width:320px;max-width:calc(100% - 16px);max-height:70%;overflow:hidden;pointer-events:auto;line-height:1.4}
+#summary-panel.show{display:flex;flex-direction:column}
+#summary-panel .sm-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.15)}
+#summary-panel .sm-title{font-size:12px;font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff)}
+#summary-panel .sm-close{cursor:pointer;color:var(--vscode-descriptionForeground,#999);font-size:14px;padding:0 4px}
+#summary-panel .sm-close:hover{color:var(--vscode-errorForeground,#f66)}
+#summary-panel .sm-body{overflow-y:scroll;overflow-x:hidden;flex:1 1 auto;min-height:0;width:100%;box-sizing:border-box;padding-right:8px}
+#summary-panel .sm-job{font-weight:bold;color:var(--vscode-textLink-foreground,#3794ff);margin:7px 0 3px}
+#summary-panel .sm-row{display:flex;align-items:baseline;gap:8px;padding:1px 0}
+#summary-panel .sm-k{flex:0 0 42%;color:var(--vscode-descriptionForeground,#a9a9a9);word-break:break-word}
+#summary-panel .sm-v{flex:1 1 auto;min-width:0;font-family:monospace;text-align:right;word-break:break-word}
+#summary-panel .sm-v.sm-bad{color:var(--vscode-errorForeground,#f66)}
+/* A value the file only printed for an earlier SCF than the energy, and the
+   line that says which geometry the block describes. */
+#summary-panel .sm-late{margin-left:4px;padding:0 3px;border-radius:2px;background:rgba(232,163,61,0.18);color:#e8a33d;font-family:var(--vscode-font-family,sans-serif);font-size:9px;white-space:nowrap}
+#summary-panel .sm-note{margin-top:5px;padding-top:4px;border-top:1px solid rgba(255,255,255,0.12);font-size:10px;line-height:1.35;color:var(--vscode-descriptionForeground,#999)}
+#summary-panel .sm-note.sm-warn{color:#e8a33d;border-top:none;padding-top:1px}
+#summary-panel .sm-sub{margin:-1px 0 3px;font-family:monospace;font-size:10px;color:var(--vscode-descriptionForeground,#999);text-align:right;word-break:break-word}
+#charge-reopen,#summary-reopen{top:36px;left:8px}
 /* One header row, one close control and one chip for the panels that used to
    have neither: the x folds the panel into its chip, the chip puts it back,
    and layoutPanels() gives both a collision box, so a panel can never cover
@@ -3708,7 +3809,7 @@ canvas{display:block}
 </div>
 </div>
 <div id="status-bar"><span id="mode-info">View Mode</span><span id="selection-info"></span></div>
-<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><div class="pn-head"><h4>Supercell Bounds</h4><button class="pn-close" id="crystal-close" type="button" title="Minimize the crystal panel">&times;</button></div><div class="bnd-row bnd-axis"><label for="bnd-a-min">a</label><input type="number" id="bnd-a-min" value="0" step="0.1" title="lower bound along a" aria-label="lower bound along a"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-a-max" value="1" step="0.1" title="upper bound along a" aria-label="upper bound along a"></div><div class="bnd-row bnd-axis"><label for="bnd-b-min">b</label><input type="number" id="bnd-b-min" value="0" step="0.1" title="lower bound along b" aria-label="lower bound along b"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-b-max" value="1" step="0.1" title="upper bound along b" aria-label="upper bound along b"></div><div class="bnd-row bnd-axis"><label for="bnd-c-min">c</label><input type="number" id="bnd-c-min" value="0" step="0.1" title="lower bound along c" aria-label="lower bound along c"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-c-max" value="1" step="0.1" title="upper bound along c" aria-label="upper bound along c"></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-p2" title="Eight unit cells, 0..2 along every axis">2×2×2</button><button class="bnd-mini" id="bnd-p3" title="Twenty-seven unit cells, 0..3 along every axis">3×3×3</button><button class="bnd-mini" id="bnd-p4" title="Sixty-four unit cells, 0..4 along every axis">4×4×4</button></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-reset" title="Back to the single unit cell, 0..1 along every axis">Reset</button><button class="bnd-mini" id="bnd-origin" title="Keep the spans, move the low corner onto the lattice origin">Align Origin</button></div><div class="bnd-cell" id="bnd-cell-line"></div><div class="bnd-sym" id="bnd-sym-note"></div><div class="bnd-row"><label>Disorder</label><select id="bnd-disorder" title="Show the ordered part plus one disorder group; All shows every alternative the cell lists"><option value="">All</option></select></div><label class="bnd-occ off" id="bnd-occ-label" for="bnd-occ-normalize" title="When one disorder group is selected, count its sites at occupancy 1 in the formula, density and saved files, so the cell describes the ordered variant on screen. All keeps every occupancy the file states."><input type="checkbox" id="bnd-occ-normalize" checked disabled>Selected group fully occupied</label><div class="hk-title">Lattice Planes (h k l)</div><div class="bnd-row hk-row"><label>(h k l)</label><input type="number" id="hk-h" value="0" step="1" title="h"><input type="number" id="hk-k" value="0" step="1" title="k"><input type="number" id="hk-l" value="1" step="1" title="l"></div><div class="hk-val" id="hk-d1"></div><div class="bnd-row hk-row"><label>2nd</label><input type="number" id="hk2-h" value="1" step="1" title="h of the second plane"><input type="number" id="hk2-k" value="0" step="1" title="k of the second plane"><input type="number" id="hk2-l" value="0" step="1" title="l of the second plane"></div><div class="hk-val" id="hk-d2"></div><button id="hk-show" class="bnd-btn" title="Draw the (hkl) plane through the centre of the box">Show Plane</button><button id="xrd-open" class="bnd-btn" title="Calculate the powder X-ray diffraction pattern of the unit cell">Powder XRD Pattern...</button><button id="bvs-open" class="bnd-btn" title="Bond-valence sums per site: how well the coordination around each cation and anion matches its formal valence (read-only)">Bond Valence (BVS)...</button><button id="cav-open" class="bnd-btn" title="Probe the unit cell for closed cavities and open channels and report their volume (read-only)">Cavities...</button><button id="bnd-edit-cell" class="bnd-btn" title="Change the cell parameters; every site keeps its fractional coordinates">Edit Cell...</button><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="pn-head"><span class="vp-title">Auto Rotate</span><button class="pn-close" id="view-close" type="button" title="Minimize the View controls">&times;</button></div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div><div class="vp-title vp-sub">Display</div><select id="style-select" title="How the structure is drawn: ball and stick (the default), van der Waals spheres, sticks without the atom spheres, or coordination polyhedra for a crystal"><option value="ball">Ball &amp; Stick</option><option value="spacefill">Space-filling</option><option value="stick">Stick</option>${(function(){try{return JSON.parse(jsonData).crystal?'<option value="polyhedra">Polyhedra</option>':'';}catch(e){return '';}}())}</select><label class="vp-check off" id="ortep-line" title="Draw atoms that carry anisotropic displacement parameters as 50% probability ellipsoids"><input type="checkbox" id="ortep-chk" disabled> Thermal ellipsoids (50%)</label></div><div id="bake-panel"><div class="pn-head"><span class="vp-title">Edit Coordinates</span><button class="pn-close" id="bake-close" type="button" title="Minimize the Edit Coordinates card">&times;</button></div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="pn-head"><span class="sp-title">Select Atoms</span><button class="pn-close" id="select-close" type="button" title="Minimize the selection panel">&times;</button></div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="neigh-panel"><div class="pn-head"><span class="ng-title">Neighbours</span><button class="pn-close" id="neigh-close" type="button" title="Minimize the neighbour list">&times;</button></div><div class="ng-line"><label for="ng-radius">Radius (A)</label><input type="number" id="ng-radius" value="3.5" min="0.1" max="12" step="0.1"><label class="ng-chk" for="ng-skip"><input type="checkbox" id="ng-skip" checked>skip bonded</label></div><div class="ng-line"><label>Anchor</label><span class="ng-anchor" id="ng-anchor">click an atom</span></div><div class="ng-summary" id="ng-summary"></div><div class="ng-list" id="ng-list"></div><div class="ng-btns"><button id="ng-select">Select listed</button></div><div class="ng-hint" id="ng-hint">Click a row to select that atom. Crystal images outside the drawn cell are listed with their cell offset.</div></div><div id="int-panel"><div class="pn-head"><span class="ng-title">Non-covalent Interactions</span><button class="pn-close" id="int-close" type="button" title="Minimize the interaction list">&times;</button></div><div class="ng-line ng-types"><label class="ng-chk" for="int-hb"><input type="checkbox" id="int-hb" checked>H-bond</label><label class="ng-chk" for="int-xb"><input type="checkbox" id="int-xb" checked>halogen</label><label class="ng-chk" for="int-cb"><input type="checkbox" id="int-cb" checked>chalcogen</label><label class="ng-chk" for="int-pn"><input type="checkbox" id="int-pn" checked>pnictogen</label><label class="ng-chk" for="int-pp"><input type="checkbox" id="int-pp" checked>&pi;-&pi;</label><label class="ng-chk" for="int-chpi"><input type="checkbox" id="int-chpi" checked>CH-&pi;</label></div><div class="ng-line"><label class="ng-chk" for="int-show"><input type="checkbox" id="int-show" checked>draw dashed lines</label></div><div class="ng-summary" id="int-summary"></div><div class="ng-list" id="int-list"></div><div class="ng-hint" id="int-hint">H-bond: d(H&middot;&middot;&middot;A) &lt; 2.5 &Aring; and D-H&middot;&middot;&middot;A &gt; 120&deg;. Halogen, chalcogen and pnictogen bonds: d(X&middot;&middot;&middot;A) &lt; vdW sum &minus; 0.1 &Aring; and D-X&middot;&middot;&middot;A &gt; 130&deg;; acceptors N, O, S, F, Cl, Br, I. &pi;-&pi;: aromatic 5&ndash;7 rings with a plane angle &le; 30&deg;, centroid distance &le; 4.5 &Aring; and a 2.8&ndash;3.8 &Aring; face gap (parallel/offset), or a &ge; 60&deg; T-shape with one ring edge 3.0&ndash;5.5 &Aring; over the other face. CH-&pi;: H&middot;&middot;&middot;centroid &lt; 3.0 &Aring;, C-H&middot;&middot;&middot;centroid &gt; 120&deg; and the H at least 1.0 &Aring; above the ring face.</div></div><div id="xrd-panel"><div class="xr-title"><span>Powder XRD</span><button class="xr-close" id="xrd-close" title="Close (Esc)">&times;</button></div><div class="xr-line"><label for="xrd-rad">Radiation</label><select id="xrd-rad" title="The X-ray wavelength the pattern is calculated for"></select><label for="xrd-2max">2&theta; max</label><select id="xrd-2max" class="xr-narrow" title="The highest diffraction angle in the pattern"></select></div><div class="xr-summary" id="xrd-summary"></div><canvas id="xrd-canvas" width="440" height="150"></canvas><div class="xr-note" id="xrd-peak-info"></div><div class="xr-note" id="xrd-exp-info"></div><div class="xr-note" id="xrd-note"></div><div class="xr-list" id="xrd-list"></div><div class="xr-btns"><button id="xrd-refresh" class="xr-secondary" title="Recalculate after the structure changed">Recalculate</button><button id="xrd-export" title="Save the drawn curve as a two-column text file">Export .xy</button></div><div class="xr-btns"><button id="xrd-import" class="xr-secondary" title="Overlay a measured two-column 2theta/intensity pattern">Import experimental .xy...</button><button id="xrd-clear-exp" class="xr-secondary" disabled title="Remove the experimental curve">Clear exp.</button></div><input type="file" id="xrd-file" accept=".xy,.txt,.csv,text/plain"><div class="xr-hint">Pattern of the unit cell on screen (the supercell bounds do not change it) with Cromer-Mann form factors, Lorenz-polarisation and a Caglioti Gaussian profile. Click a calculated peak to read its position against the experimental curve.</div></div><div id="cav-panel"><div class="cv-title"><span>Voids and Cavities</span><button class="cv-close" id="cav-close" title="Close (Esc)">&times;</button></div><div class="cv-line"><label for="cav-probe">Probe radius</label><input type="number" id="cav-probe" value="1.2" min="0" max="20" step="0.1" title="Radius of the spherical probe rolled through the cell"><span class="cv-unit">&Aring;</span><button id="cav-run" title="Scan the unit cell with this probe">Analyse</button><button id="cav-clear" class="cv-secondary" title="Remove the drawn surface">Clear</button></div><div class="cv-summary" id="cav-summary">Not analysed yet.</div><div class="cv-note" id="cav-note"></div><div class="cv-list" id="cav-list"></div><div class="cv-hint">A point is free when a probe of this radius fits there without touching an atom (van der Waals radii, periodic images included). The free space is split into components: one whose walk winds through a cell face is an open channel, otherwise it is a closed cavity. Click a row to draw that void as a translucent surface. Volumes are per unit cell, so a supercell shows the same numbers; pockets under 0.5 &Aring;&sup3; are ignored. r_free is the largest sphere that fits at the void's deepest point.</div></div><div id="rotate-panel"><div class="pn-head"><span class="rp-title">Rotate Group Around Axis</span><button class="pn-close" id="rotate-close" type="button" title="Minimize the rotate panel">&times;</button></div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div><div id="crystal-reopen" class="pn-chip" title="Open the crystal panel">Crystal</div><div id="egg-reopen" class="pn-chip" title="Open the egg list">Eggs</div><div id="view-reopen" class="pn-chip" title="Open the View controls">View</div><div id="bake-reopen" class="pn-chip" title="Open the Edit Coordinates card">Coordinates</div><div id="select-reopen" class="pn-chip" title="Open the Select Atoms panel">Select Atoms</div><div id="neigh-reopen" class="pn-chip" title="Open the Neighbours panel">Neighbours</div><div id="int-reopen" class="pn-chip" title="Open the Non-covalent Interactions panel">Interactions</div><div id="rotate-reopen" class="pn-chip" title="Open the Rotate Group panel">Rotate Group</div><div id="xrd-reopen" class="pn-chip" title="Open the powder XRD panel">Powder XRD</div><div id="cav-reopen" class="pn-chip" title="Open the cavity and void analysis">Cavities</div></div>
+<div id="container"><div id="loading">Loading 3D Viewer...</div><div id="mol-info"></div><div id="mm-panel"></div><div id="mm-reopen">MM Optimize</div><div id="egg-panel"></div><div id="diff-label"></div><div id="diff-label-right"></div><div id="diff-panel"></div><div id="diff-reopen">📊 Show Results</div><div id="axes-indicator"></div><div id="crystal-panel"><div class="pn-head"><h4>Supercell Bounds</h4><button class="pn-close" id="crystal-close" type="button" title="Minimize the crystal panel">&times;</button></div><div class="bnd-row bnd-axis"><label for="bnd-a-min">a</label><input type="number" id="bnd-a-min" value="0" step="0.1" title="lower bound along a" aria-label="lower bound along a"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-a-max" value="1" step="0.1" title="upper bound along a" aria-label="upper bound along a"></div><div class="bnd-row bnd-axis"><label for="bnd-b-min">b</label><input type="number" id="bnd-b-min" value="0" step="0.1" title="lower bound along b" aria-label="lower bound along b"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-b-max" value="1" step="0.1" title="upper bound along b" aria-label="upper bound along b"></div><div class="bnd-row bnd-axis"><label for="bnd-c-min">c</label><input type="number" id="bnd-c-min" value="0" step="0.1" title="lower bound along c" aria-label="lower bound along c"><span class="bnd-dash">&ndash;</span><input type="number" id="bnd-c-max" value="1" step="0.1" title="upper bound along c" aria-label="upper bound along c"></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-p2" title="Eight unit cells, 0..2 along every axis">2×2×2</button><button class="bnd-mini" id="bnd-p3" title="Twenty-seven unit cells, 0..3 along every axis">3×3×3</button><button class="bnd-mini" id="bnd-p4" title="Sixty-four unit cells, 0..4 along every axis">4×4×4</button></div><div class="bnd-presets"><button class="bnd-mini" id="bnd-reset" title="Back to the single unit cell, 0..1 along every axis">Reset</button><button class="bnd-mini" id="bnd-origin" title="Keep the spans, move the low corner onto the lattice origin">Align Origin</button></div><div class="bnd-cell" id="bnd-cell-line"></div><div class="bnd-sym" id="bnd-sym-note"></div><div class="bnd-row"><label>Disorder</label><select id="bnd-disorder" title="Show the ordered part plus one disorder group; All shows every alternative the cell lists"><option value="">All</option></select></div><label class="bnd-occ off" id="bnd-occ-label" for="bnd-occ-normalize" title="When one disorder group is selected, count its sites at occupancy 1 in the formula, density and saved files, so the cell describes the ordered variant on screen. All keeps every occupancy the file states."><input type="checkbox" id="bnd-occ-normalize" checked disabled>Selected group fully occupied</label><div class="hk-title">Lattice Planes (h k l)</div><div class="bnd-row hk-row"><label>(h k l)</label><input type="number" id="hk-h" value="0" step="1" title="h"><input type="number" id="hk-k" value="0" step="1" title="k"><input type="number" id="hk-l" value="1" step="1" title="l"></div><div class="hk-val" id="hk-d1"></div><div class="bnd-row hk-row"><label>2nd</label><input type="number" id="hk2-h" value="1" step="1" title="h of the second plane"><input type="number" id="hk2-k" value="0" step="1" title="k of the second plane"><input type="number" id="hk2-l" value="0" step="1" title="l of the second plane"></div><div class="hk-val" id="hk-d2"></div><button id="hk-show" class="bnd-btn" title="Draw the (hkl) plane through the centre of the box">Show Plane</button><button id="xrd-open" class="bnd-btn" title="Calculate the powder X-ray diffraction pattern of the unit cell">Powder XRD Pattern...</button><button id="bvs-open" class="bnd-btn" title="Bond-valence sums per site: how well the coordination around each cation and anion matches its formal valence (read-only)">Bond Valence (BVS)...</button><button id="cav-open" class="bnd-btn" title="Probe the unit cell for closed cavities and open channels and report their volume (read-only)">Cavities...</button><button id="bnd-edit-cell" class="bnd-btn" title="Change the cell parameters; every site keeps its fractional coordinates">Edit Cell...</button><button id="bnd-remove-disorder" class="bnd-btn">Remove Disorder &lt;0.5</button></div><div id="view-panel"><div class="pn-head"><span class="vp-title">Auto Rotate</span><button class="pn-close" id="view-close" type="button" title="Minimize the View controls">&times;</button></div><button class="tbtn" id="spin-btn">Off</button><div class="vp-hint">Drag and release to spin, or hold an arrow key &mdash; the longer the hold, the faster. The next left press stops it.</div><div class="vp-title vp-sub">Display</div><select id="style-select" title="How the structure is drawn: ball and stick (the default), van der Waals spheres, sticks without the atom spheres, or coordination polyhedra for a crystal"><option value="ball">Ball &amp; Stick</option><option value="spacefill">Space-filling</option><option value="stick">Stick</option>${(function(){try{return JSON.parse(jsonData).crystal?'<option value="polyhedra">Polyhedra</option>':'';}catch(e){return '';}}())}</select><label class="vp-check off" id="ortep-line" title="Draw atoms that carry anisotropic displacement parameters as 50% probability ellipsoids"><input type="checkbox" id="ortep-chk" disabled> Thermal ellipsoids (50%)</label></div><div id="bake-panel"><div class="pn-head"><span class="vp-title">Edit Coordinates</span><button class="pn-close" id="bake-close" type="button" title="Minimize the Edit Coordinates card">&times;</button></div><div class="vp-hint" id="vp-bake-hint">Hold <b>Alt</b> and drag: left rotates the structure, right/middle moves it. The atom coordinates change, so Save writes the new geometry.</div></div><div id="select-panel"><div class="pn-head"><span class="sp-title">Select Atoms</span><button class="pn-close" id="select-close" type="button" title="Minimize the selection panel">&times;</button></div><input type="text" id="sel-panel-input" placeholder="e.g. 1 3-5 C H 8"><div class="sp-btns"><button class="mbtn mbtn-ok" id="sel-panel-ok">Select</button><button class="mbtn mbtn-cancel" id="sel-panel-clear">Clear</button></div></div><div id="neigh-panel"><div class="pn-head"><span class="ng-title">Neighbours</span><button class="pn-close" id="neigh-close" type="button" title="Minimize the neighbour list">&times;</button></div><div class="ng-line"><label for="ng-radius">Radius (A)</label><input type="number" id="ng-radius" value="3.5" min="0.1" max="12" step="0.1"><label class="ng-chk" for="ng-skip"><input type="checkbox" id="ng-skip" checked>skip bonded</label></div><div class="ng-line"><label>Anchor</label><span class="ng-anchor" id="ng-anchor">click an atom</span></div><div class="ng-summary" id="ng-summary"></div><div class="ng-list" id="ng-list"></div><div class="ng-btns"><button id="ng-select">Select listed</button></div><div class="ng-hint" id="ng-hint">Click a row to select that atom. Crystal images outside the drawn cell are listed with their cell offset.</div></div><div id="int-panel"><div class="pn-head"><span class="ng-title">Non-covalent Interactions</span><button class="pn-close" id="int-close" type="button" title="Minimize the interaction list">&times;</button></div><div class="ng-line ng-types"><label class="ng-chk" for="int-hb"><input type="checkbox" id="int-hb" checked>H-bond</label><label class="ng-chk" for="int-xb"><input type="checkbox" id="int-xb" checked>halogen</label><label class="ng-chk" for="int-cb"><input type="checkbox" id="int-cb" checked>chalcogen</label><label class="ng-chk" for="int-pn"><input type="checkbox" id="int-pn" checked>pnictogen</label><label class="ng-chk" for="int-pp"><input type="checkbox" id="int-pp" checked>&pi;-&pi;</label><label class="ng-chk" for="int-chpi"><input type="checkbox" id="int-chpi" checked>CH-&pi;</label></div><div class="ng-line"><label class="ng-chk" for="int-show"><input type="checkbox" id="int-show" checked>draw dashed lines</label></div><div class="ng-summary" id="int-summary"></div><div class="ng-list" id="int-list"></div><div class="ng-hint" id="int-hint">H-bond: d(H&middot;&middot;&middot;A) &lt; 2.5 &Aring; and D-H&middot;&middot;&middot;A &gt; 120&deg;. Halogen, chalcogen and pnictogen bonds: d(X&middot;&middot;&middot;A) &lt; vdW sum &minus; 0.1 &Aring; and D-X&middot;&middot;&middot;A &gt; 130&deg;; acceptors N, O, S, F, Cl, Br, I. &pi;-&pi;: aromatic 5&ndash;7 rings with a plane angle &le; 30&deg;, centroid distance &le; 4.5 &Aring; and a 2.8&ndash;3.8 &Aring; face gap (parallel/offset), or a &ge; 60&deg; T-shape with one ring edge 3.0&ndash;5.5 &Aring; over the other face. CH-&pi;: H&middot;&middot;&middot;centroid &lt; 3.0 &Aring;, C-H&middot;&middot;&middot;centroid &gt; 120&deg; and the H at least 1.0 &Aring; above the ring face.</div></div><div id="xrd-panel"><div class="xr-title"><span>Powder XRD</span><button class="xr-close" id="xrd-close" title="Close (Esc)">&times;</button></div><div class="xr-line"><label for="xrd-rad">Radiation</label><select id="xrd-rad" title="The X-ray wavelength the pattern is calculated for"></select><label for="xrd-2max">2&theta; max</label><select id="xrd-2max" class="xr-narrow" title="The highest diffraction angle in the pattern"></select></div><div class="xr-summary" id="xrd-summary"></div><canvas id="xrd-canvas" width="440" height="150"></canvas><div class="xr-note" id="xrd-peak-info"></div><div class="xr-note" id="xrd-exp-info"></div><div class="xr-note" id="xrd-note"></div><div class="xr-list" id="xrd-list"></div><div class="xr-btns"><button id="xrd-refresh" class="xr-secondary" title="Recalculate after the structure changed">Recalculate</button><button id="xrd-export" title="Save the drawn curve as a two-column text file">Export .xy</button></div><div class="xr-btns"><button id="xrd-import" class="xr-secondary" title="Overlay a measured two-column 2theta/intensity pattern">Import experimental .xy...</button><button id="xrd-clear-exp" class="xr-secondary" disabled title="Remove the experimental curve">Clear exp.</button></div><input type="file" id="xrd-file" accept=".xy,.txt,.csv,text/plain"><div class="xr-hint">Pattern of the unit cell on screen (the supercell bounds do not change it) with Cromer-Mann form factors, Lorenz-polarisation and a Caglioti Gaussian profile. Click a calculated peak to read its position against the experimental curve.</div></div><div id="cav-panel"><div class="cv-title"><span>Voids and Cavities</span><button class="cv-close" id="cav-close" title="Close (Esc)">&times;</button></div><div class="cv-line"><label for="cav-probe">Probe radius</label><input type="number" id="cav-probe" value="1.2" min="0" max="20" step="0.1" title="Radius of the spherical probe rolled through the cell"><span class="cv-unit">&Aring;</span><button id="cav-run" title="Scan the unit cell with this probe">Analyse</button><button id="cav-clear" class="cv-secondary" title="Remove the drawn surface">Clear</button></div><div class="cv-summary" id="cav-summary">Not analysed yet.</div><div class="cv-note" id="cav-note"></div><div class="cv-list" id="cav-list"></div><div class="cv-hint">A point is free when a probe of this radius fits there without touching an atom (van der Waals radii, periodic images included). The free space is split into components: one whose walk winds through a cell face is an open channel, otherwise it is a closed cavity. Click a row to draw that void as a translucent surface. Volumes are per unit cell, so a supercell shows the same numbers; pockets under 0.5 &Aring;&sup3; are ignored. r_free is the largest sphere that fits at the void's deepest point.</div></div><div id="rotate-panel"><div class="pn-head"><span class="rp-title">Rotate Group Around Axis</span><button class="pn-close" id="rotate-close" type="button" title="Minimize the rotate panel">&times;</button></div><div class="rp-field"><label>Group atoms (click atoms or type, e.g. H581 O380 C44 ...):</label><input type="text" id="rp-group-input" placeholder="e.g. H581 O380 C44 C43 C42 ..."></div><div class="rp-field"><label>Axis atoms (2+ atoms, single-bonded chain):</label><input type="text" id="rp-axis-input" placeholder="e.g. C32 C33 C43 C53  or  C33 C43"></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-apply">Apply &amp; Rotate</button><button class="mbtn mbtn-cancel" id="rp-clear">Clear</button></div><div class="rp-error" id="rp-error"></div><div id="rp-slider-wrap"><div class="rp-slider-row"><label>Angle:</label><input type="range" id="rp-slider" min="0" max="360" step="0.5" value="0"><input type="number" id="rp-angle-input" min="0" max="360" step="0.5" value="0" title="Type an angle (0-360) and press Enter"><span class="rp-angle-val" id="rp-angle-val">0°</span></div><div class="rp-btns"><button class="mbtn mbtn-ok" id="rp-done">Done</button><button class="mbtn mbtn-danger" id="rp-reset">Reset</button></div></div><div class="rp-hint">Axis atoms are kept fixed; the rest of the selected group rotates around the line through the axis atoms (0–360°).</div></div><div id="charge-labels"></div><div id="charge-panel"></div><div id="summary-panel"></div><div id="opt-panel"></div><div id="opt-reopen">📈 Convergence</div><div id="freq-panel"></div><div id="freq-reopen">🎵 Modes</div><div id="route-panel"></div><div id="route-reopen">⚙️ Route</div><div id="charge-reopen" class="pn-chip" title="Open the atomic-charge panel">Charges</div><div id="summary-reopen" class="pn-chip" title="Open the job summary">Summary</div><div id="crystal-reopen" class="pn-chip" title="Open the crystal panel">Crystal</div><div id="egg-reopen" class="pn-chip" title="Open the egg list">Eggs</div><div id="view-reopen" class="pn-chip" title="Open the View controls">View</div><div id="bake-reopen" class="pn-chip" title="Open the Edit Coordinates card">Coordinates</div><div id="select-reopen" class="pn-chip" title="Open the Select Atoms panel">Select Atoms</div><div id="neigh-reopen" class="pn-chip" title="Open the Neighbours panel">Neighbours</div><div id="int-reopen" class="pn-chip" title="Open the Non-covalent Interactions panel">Interactions</div><div id="rotate-reopen" class="pn-chip" title="Open the Rotate Group panel">Rotate Group</div><div id="xrd-reopen" class="pn-chip" title="Open the powder XRD panel">Powder XRD</div><div id="cav-reopen" class="pn-chip" title="Open the cavity and void analysis">Cavities</div></div>
 <div id="error-msg"></div>
 <div id="empty-msg"></div>
 <div id="atom-tooltip"></div>
@@ -7126,6 +7227,11 @@ function rebuildScene(keepCenter){
     // no real structure reaches. Only the cache is emptied: the meshes on
     // screen hold their own references, so nothing about the picture changes.
     if(Object.keys(matPool).length>8192)matPool={};
+    // A charge map is read against the atoms that were just put here: the cache
+    // is refreshed before the spheres are built, so the colours drawn and the
+    // values a label prints always describe the same structure (a frame switch,
+    // an edit and an undo all arrive through this one call).
+    chargeRefreshCache();
     // The stick style's joints are the thickness of the sticks meeting at each
     // atom, read off the bond list once for the whole build. The other two
     // styles do not consult it, so the pass is skipped rather than paid for.
@@ -7135,11 +7241,11 @@ function rebuildScene(keepCenter){
         var gh=isGhostAtom(a);
         var r=drawnRadius(a,stickR?stickR[i]:0);
         var drawn=r>0.0005;
-        // 标量配色是视图状态: 在这里按原子现算, a.color 保持元素颜色不变。
+        // 标量配色与电荷配色都是视图状态: 在这里按原子现算, a.color 保持元素颜色不变。
         // A ghost has no element colour and no scalar to show: it keeps the one
         // marker colour, so a counterpoise ghost never looks like the atom it
         // stands for.
-        var col=gh?GHOST_COLOR:(betaColorOf(a)||a.color);
+        var col=gh?GHOST_COLOR:atomDrawColor(a);
         var occ=a.occupancy!=null?a.occupancy:1;
         // One record per atom, not one Mesh per atom: radius, colour and the
         // appearance key are what the instanced layer needs, and every other
@@ -7965,10 +8071,10 @@ function createBond(b){
     var ord=b.order||1;
     // Multiple-bond line offsets keep their proportions to the bond radius.
     var offK=br/BOND_R;
-    // 键的两半跟随它连的原子: 标量 (Beta) 配色下原子球是按标量画视图色, 这里
-    // 让半键读同一个颜色, 一根键两半就与两端原子一致。betaColorOf 在配色关闭
-    // (或原子没有标量) 时返回 null, 退化成元素颜色, 非 Beta 文件的行为不变。
-    var c1=new THREE.Color(betaColorOf(a1)||a1.color),c2=new THREE.Color(betaColorOf(a2)||a2.color);
+    // 键的两半跟随它连的原子: 标量 (Beta) 或电荷配色下原子球是按数据画视图色,
+    // 这里让半键读同一个颜色, 一根键两半就与两端原子一致。atomDrawColor 在配色
+    // 关闭 (或原子没有该数据) 时返回元素颜色, 未开启配色的文件行为不变。
+    var c1=new THREE.Color(atomDrawColor(a1)),c2=new THREE.Color(atomDrawColor(a2));
     if(ord<1.25){
         addBondPiece(br,c1,false,0,0,0,0,0);addBondPiece(br,c2,false,0,0,0,0,1);
     }else if(ord<1.75){
@@ -12674,6 +12780,9 @@ function switchFrame(idx){
     if(currentMode==='mmOpt'){mmLastResult=null;refreshMmPanel()}
     rebuildScene(keepTrajCenter);
     updateFrameInfo();
+    // A charge table belongs to one geometry: the panel names the frame its
+    // numbers describe, and says so when they are not the one on screen.
+    if(typeof chargeSyncPanel==='function')chargeSyncPanel();
     // [2026-09-12 | Atreides-Jimmy] Follow the structure change in the
     // convergence charts: the point of the step now on screen gets highlighted
     // (renderOptCharts is a no-op while the panel is closed).
@@ -14037,6 +14146,516 @@ function buildRoutePanel(){
 }
 routeReopenEl.addEventListener('click',function(){buildRoutePanel()});
 
+// ===== Atomic charges (population analysis) and the job summary =====
+//
+// A Gaussian job can close with the population analysis it was asked for: one
+// table per scheme (Mulliken, ESP, APT, ...), each giving one number per atom,
+// and a set of headline results. The host reads both out of the file and hands
+// them over by atom index; this section turns them into the two things a charge
+// map is for - the colour of an atom and the number written on it - and offers
+// the choice of scheme the FILE states, never a list the viewer knows about.
+//
+// Both are view state, exactly like the scalar (Beta) colouring: a colour is
+// computed on every rebuild and never written into a.color, and no charge is
+// written into an atom record at all. A value is painted only onto the atom it
+// was read for: the host sends the element of every atom a table covers, so a
+// structure that has been edited - or a frame belonging to another job's
+// molecule - fails that comparison and shows nothing rather than somebody
+// else's number.
+var CHARGES=MD.charges||null;
+var SUMMARY=MD.summary||null;
+var CHARGE_LABEL_MAX=500;          // values are drawn for at most this many atoms
+var chargeSel=0;                   // index into CHARGES
+var chargeColorOn=false;
+var chargeLabelsOn=false;
+var chargePanelOpen=false;
+var summaryPanelOpen=false;
+var chargeVals=null;               // values of the selected scheme, atom-aligned
+var chargeColors=null;             // per-atom colour of that scheme
+var chargeAbs=0;                   // |q| the colour ramp is scaled against
+var chargePanelEl=document.getElementById('charge-panel');
+var chargeReopenEl=document.getElementById('charge-reopen');
+var summaryPanelEl=document.getElementById('summary-panel');
+var summaryReopenEl=document.getElementById('summary-reopen');
+
+function chargeEsc(s){
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function chargeSetAt(idx){
+    if(!CHARGES||idx<0||idx>=CHARGES.length)return null;
+    return CHARGES[idx];
+}
+function chargeSet(){return chargeSetAt(chargeSel)}
+// The values of the selected scheme, or null when they do not describe the
+// atoms on screen. Two numbers decide that: the count, and the element of every
+// atom - an edited structure or another molecule changes one of them.
+// Why the selected scheme can or cannot be drawn on the atoms on screen.
+//
+//   'ok'    the table describes the structure and the frame on screen;
+//   'frame' it describes another frame of the same structure - the numbers are
+//           real but belong to that geometry, so nothing is painted here and
+//           the panel offers to go there;
+//   'atoms' the atoms are not the ones the table was read for (an edit, or a
+//           frame of another job's molecule) - no frame can fix that.
+//
+// A charge is a property of one geometry: painting the converged structure's
+// charges onto step 1 would read as step 1's charges, which is the one thing
+// this table must never do.
+function chargeMatch(){
+    var set=chargeSet();
+    if(!set||!set.values||!set.elements)return 'atoms';
+    var atoms=MD.atoms;
+    if(set.values.length!==atoms.length||set.elements.length!==atoms.length)return 'atoms';
+    for(var i=0;i<atoms.length;i++){
+        if(set.elements[i]!==atoms[i].element)return 'atoms';
+    }
+    if(typeof set.frame==='number'&&set.frame!==currentFrame)return 'frame';
+    return 'ok';
+}
+/** The values of the selected scheme, or null when they cannot be put on the
+ *  atoms on screen (see chargeMatch for why). */
+function chargeValues(){
+    return chargeMatch()==='ok'?chargeSet().values:null;
+}
+function chargeHex(r,g,b){
+    function one(x){
+        var n=Math.round(x*255);
+        if(!isFinite(n))n=0;
+        if(n<0)n=0;if(n>255)n=255;
+        var s=n.toString(16).toUpperCase();
+        return s.length<2?'0'+s:s;
+    }
+    return '#'+one(r)+one(g)+one(b);
+}
+// The colour of one charge: neutral grey at zero, blue with positive charge and
+// red with negative, its depth set by |q| against the largest magnitude the
+// table holds. It is symmetric about zero on purpose - a zero-charge atom is the
+// same grey in every file, so two schemes can be compared by eye - and the ramp
+// is the one the legend draws.
+function chargeColorOfValue(v){
+    if(v==null||!isFinite(v))return null;
+    var t=chargeAbs>0?v/chargeAbs:0;
+    if(t>1)t=1;else if(t<-1)t=-1;
+    var r,g,b;
+    if(t>=0){r=0.82-0.71*t;g=0.82-0.51*t;b=0.82+0.03*t}
+    else{var u=-t;r=0.82+0.03*u;g=0.82-0.51*u;b=0.82-0.71*u}
+    return chargeHex(r,g,b);
+}
+// Refresh what the current atoms, the selected scheme and the two switches
+// imply. Called from rebuildScene, the one door every structural change goes
+// through, so the cache can never describe another structure than the one drawn.
+function chargeRefreshCache(){
+    chargeVals=chargeValues();
+    chargeColors=null;
+    chargeAbs=0;
+    if(!chargeVals)return;
+    if(!chargeColorOn&&!chargeLabelsOn)return;
+    var i,v,a,abs=0;
+    for(i=0;i<chargeVals.length;i++){
+        v=chargeVals[i];
+        if(v==null||!isFinite(v))continue;
+        a=v<0?-v:v;
+        if(a>abs)abs=a;
+    }
+    chargeAbs=abs;
+    var out=new Array(chargeVals.length);
+    for(i=0;i<chargeVals.length;i++)out[i]=chargeColorOfValue(chargeVals[i]);
+    chargeColors=out;
+}
+// The colour a charge gives this atom, or null for "keep the element colour".
+function chargeColorOf(a){
+    if(!chargeColorOn||!chargeColors)return null;
+    var i=a?a.index:-1;
+    if(i<0||i>=chargeColors.length)return null;
+    return chargeColors[i];
+}
+// The colour one ATOM is drawn in, as a hex string: a charge map wins over the
+// scalar (Beta) map, because it is the one the user just switched on, and the
+// two are never both on (each switch turns the other off). Distinct from
+// atomColorOf(col), which turns a colour *string* into a THREE.Color.
+function atomDrawColor(a){
+    var q=chargeColorOf(a);
+    if(q)return q;
+    return betaColorOf(a)||a.color;
+}
+function chargeValueText(v){
+    if(v==null||!isFinite(v))return '';
+    var s=v.toFixed(3);
+    return s==='-0.000'?'0.000':s;
+}
+// Place the value of every atom over it, or clear the layer. Called after each
+// rendered frame: the numbers are page furniture over the canvas, so they have
+// to follow the camera in the same task that drew it.
+function updateChargeLabels(){
+    var layer=document.getElementById('charge-labels');
+    if(!layer)return;
+    if(!chargeLabelsOn||diffMode||CRY||!chargeColors||!chargeVals){
+        if(layer.firstChild)layer.textContent='';
+        return;
+    }
+    var atoms=MD.atoms;
+    var n=atoms.length<CHARGE_LABEL_MAX?atoms.length:CHARGE_LABEL_MAX;
+    var nodes=layer.childNodes;
+    while(nodes.length<n)layer.appendChild(document.createElement('span'));
+    while(nodes.length>n)layer.removeChild(layer.lastChild);
+    var w=container.clientWidth,h=container.clientHeight;
+    if(w<2||h<2){layer.textContent='';return}
+    var m=moleculeGroup.matrixWorld,v=new THREE.Vector3();
+    for(var i=0;i<n;i++){
+        var sp=nodes[i],q=chargeVals[i],a=atoms[i];
+        if(q==null||!isFinite(q)||!a){sp.style.display='none';continue}
+        v.set(a.x-CX,a.y-CY,a.z-CZ).applyMatrix4(m).project(camera);
+        if(!(v.z>-1&&v.z<1)){sp.style.display='none';continue}
+        var sx=(v.x*0.5+0.5)*w,sy=(-v.y*0.5+0.5)*h;
+        if(sx<-8||sx>w+8||sy<-8||sy>h+8){sp.style.display='none';continue}
+        var txt=chargeValueText(q);
+        if(sp.textContent!==txt)sp.textContent=txt;
+        sp.style.display='block';
+        sp.style.transform='translate('+Math.round(sx)+'px,'+Math.round(sy)+'px) translate(-50%,-50%)';
+    }
+}
+// The charge of the atom under the cursor, for the hover tooltip. Only the
+// structure the table was read for answers: a comparison's right half and a
+// crystal have no table here.
+function chargeTooltipSuffix(i,right){
+    if(right||diffMode||CRY)return '';
+    if(!chargeVals||i<0||i>=chargeVals.length)return '';
+    var q=chargeVals[i];
+    if(q==null||!isFinite(q))return '';
+    var set=chargeSet();
+    return ' \u00b7 q '+q.toFixed(4)+' e'+(set?' ('+set.label+')':'');
+}
+function chargeStatusLine(){
+    if((chargeColorOn||chargeLabelsOn)&&chargeSet()){
+        var label=chargeSet().label;
+        modeInfoEl.textContent=chargeColorOn&&chargeAbs>0
+            ?('Charge colouring: '+label+' ('+(-chargeAbs).toFixed(3)+' to '+chargeAbs.toFixed(3)+' e)')
+            :('Atomic charges: '+label);
+    }else{
+        modeInfoEl.textContent=MODE_INFO[currentMode]||currentMode;
+    }
+}
+function applyChargeColoring(on){
+    if(on&&chargeMatch()==='atoms')on=false;
+    chargeColorOn=!!on;
+    // One colour map at a time: the two switches would otherwise both claim the
+    // sphere and the last one to run would win silently.
+    if(chargeColorOn&&betaColorOn){
+        betaColorOn=false;
+        var bb=document.getElementById('beta-btn');
+        if(bb)bb.classList.remove('active');
+    }
+    chargeRefreshCache();
+    chargeSyncPanel();
+    rebuildScene(!!TRAJ_FRAMES);
+    chargeStatusLine();
+}
+function applyChargeLabels(on){
+    if(on&&chargeMatch()==='atoms')on=false;
+    chargeLabelsOn=!!on;
+    chargeSyncPanel();
+    if(chargeLabelsOn)chargeRefreshCache();
+    updateChargeLabels();
+    chargeStatusLine();
+}
+function chargeTypeOptions(){
+    var html='';
+    for(var i=0;i<CHARGES.length;i++){
+        var c=CHARGES[i];
+        var total=c.values?c.values.length:0;
+        var n=c.covered!=null?c.covered:total;
+        // A table that sums hydrogens into heavy atoms covers fewer atoms than
+        // the structure has; the count says so instead of hiding it.
+        var label=c.label+(c.complete?'':' ('+n+'/'+total+')');
+        html+='<option value="'+i+'"'+(i===chargeSel?' selected':'')+'>'+chargeEsc(label)+'</option>';
+    }
+    return html;
+}
+// The state of the two switches, the numbers under them and the reason nothing
+// is drawn when nothing can be. Cheap enough to run on every frame change.
+function chargeSyncPanel(){
+    if(!chargePanelOpen||!chargePanelEl)return;
+    chargeVals=chargeValues();
+    var set=chargeSet();
+    var state=chargeMatch();
+    var showChk=chargePanelEl.querySelector('#chg-show');
+    var colChk=chargePanelEl.querySelector('#chg-color');
+    var sel=chargePanelEl.querySelector('#chg-type');
+    if(sel&&sel.selectedIndex!==chargeSel)sel.selectedIndex=chargeSel;
+    // A table of another frame is a real table the user can reach, so the
+    // switches stay usable (and keep their state) - only a structure that is
+    // not the one the table was read for can refuse them.
+    var usable=state!=='atoms';
+    var ok=!!chargeVals;
+    if(showChk){showChk.checked=chargeLabelsOn;showChk.disabled=!usable}
+    if(colChk){colChk.checked=chargeColorOn;colChk.disabled=!usable}
+    var showLab=chargePanelEl.querySelector('#chg-show-lab');
+    if(showLab)showLab.classList.toggle('off',!usable);
+    var colLab=chargePanelEl.querySelector('#chg-color-lab');
+    if(colLab)colLab.classList.toggle('off',!usable);
+    // The range the ramp is drawn over. The table's own numbers are used while
+    // it belongs to another frame as well - they are real, only not this
+    // geometry's - so the legend and the stat line still say what the scheme
+    // holds before the user goes there.
+    var pool=chargeVals||(state==='frame'&&set&&set.values?set.values:null);
+    var lo=Infinity,hi=-Infinity,n=0,sum=0;
+    if(pool){
+        for(var i=0;i<pool.length;i++){
+            var v=pool[i];
+            if(v==null||!isFinite(v))continue;
+            n++;sum+=v;
+            if(v<lo)lo=v;
+            if(v>hi)hi=v;
+        }
+    }
+    var stat=chargePanelEl.querySelector('#chg-stat');
+    if(stat){
+        if(!set){stat.textContent=''}
+        else if(!pool){
+            stat.textContent=set.label+' \u00b7 '+set.covered+' of '+(set.values?set.values.length:0)+' atoms';
+        }else{
+            stat.textContent=set.label+' \u00b7 '+n+' of '+pool.length+' atoms \u00b7 '
+                +(n>0?(lo.toFixed(3)+' to '+hi.toFixed(3)+' e'):'no value')
+                +(n>0?' \u00b7 sum '+sum.toFixed(3)+' e':'');
+        }
+    }
+    var mn=chargePanelEl.querySelector('#chg-min');
+    var mx=chargePanelEl.querySelector('#chg-max');
+    // The bar is the ramp itself, which is symmetric about zero, so its ends are
+    // ±the largest magnitude on screen - not the data's minimum and maximum. The
+    // real range of the values is on the stat line above. This is the same scale
+    // chargeRefreshCache() paints with, computed here too so the legend still
+    // reads while the colour map is switched off.
+    var span=0;
+    if(n>0)span=Math.max(lo<0?-lo:lo,hi<0?-hi:hi);
+    if(mn)mn.textContent=span>0?(-span).toFixed(3):'-';
+    if(mx)mx.textContent=span>0?('+'+span.toFixed(3)):'+';
+    var note=chargePanelEl.querySelector('#chg-note');
+    // Whether the card changed height. The layout gives every panel and chip a
+    // collision box, so a card that grows after it was measured (a note and the
+    // button appearing when the frame changes) would have its own chip drawn
+    // over it until the boxes are taken again.
+    var grew=false;
+    if(note){
+        var text='';
+        if(state==='atoms'){
+            if(set&&set.values&&set.values.length!==MD.atoms.length){
+                text='This structure has '+MD.atoms.length+' atoms; the analysis states '+set.values.length+'. Nothing is drawn on the wrong atom.';
+            }else{
+                text='The atoms on screen are not the ones this analysis was read for (the structure was edited, or this frame belongs to another job), so nothing is drawn.';
+            }
+        }else if(state==='frame'){
+            text='The analysis belongs to frame '+(set.frame+1)+' of '+totalFrames+
+                '; frame '+(currentFrame+1)+' is on screen, so nothing is drawn on it.';
+        }else if(set&&set.complete===false){
+            text='This scheme sums hydrogens into heavy atoms: '+(set.covered)+' of '+(set.values?set.values.length:0)+' atoms carry a value.';
+        }
+        // A very large structure draws the values for a bounded number of atoms
+        // (the layer is one span per atom); saying so is better than a picture
+        // that is quietly missing most of them.
+        if(chargeLabelsOn&&MD.atoms.length>CHARGE_LABEL_MAX){
+            text=(text?text+' ':'')+'The values are drawn for the first '+CHARGE_LABEL_MAX+
+                ' atoms; this structure has '+MD.atoms.length+'.';
+        }
+        if(note.textContent!==text){note.textContent=text;grew=true}
+    }
+    // One click to the geometry the table describes - the only way to see it
+    // without leaving the panel to guess which frame that is.
+    var go=chargePanelEl.querySelector('#chg-go');
+    if(go){
+        var showGo=state==='frame'&&!!set&&typeof set.frame==='number';
+        if(go.style.display!==(showGo?'inline-block':'none')){
+            go.style.display=showGo?'inline-block':'none';
+            grew=true;
+        }
+        if(showGo){
+            go.textContent='Show frame '+(set.frame+1);
+            go.title='Draw the structure this analysis was computed for';
+        }
+    }
+    if(grew)layoutPanels();
+}
+function buildChargePanel(){
+    if(!CHARGES||CHARGES.length===0||!chargePanelEl)return;
+    chargePanelEl.innerHTML=
+        '<div class="chg-head"><span class="chg-title">Atomic Charges</span><span class="chg-close">\u00d7</span></div>'+
+        '<div class="chg-body">'+
+        '<div class="chg-row"><label class="chg-lab" for="chg-type">Scheme</label>'+
+        '<select id="chg-type" class="chg-sel" title="The population analyses this file prints; the bracketed count is how many atoms a partial table covers">'+chargeTypeOptions()+'</select></div>'+
+        '<label class="chg-check" id="chg-show-lab"><input type="checkbox" id="chg-show">Show the value on every atom</label>'+
+        '<label class="chg-check" id="chg-color-lab"><input type="checkbox" id="chg-color">Colour the atoms by charge</label>'+
+        '<div class="chg-legend"><div class="chg-bar" title="Negative charge is red, positive is blue, no charge is grey"></div>'+
+        '<div class="chg-scale"><span id="chg-min">-</span><span>0</span><span id="chg-max">+</span></div></div>'+
+        '<div class="chg-stat" id="chg-stat"></div>'+
+        '<div class="chg-note" id="chg-note"></div>'+
+        '<button id="chg-go" class="chg-go" type="button"></button>'+
+        '<div class="chg-sec">Reserved for the next version</div>'+
+        '<label class="chg-check chg-soon" title="Solvent cavity surface: the switch is reserved, nothing is drawn yet"><input type="checkbox" id="chg-cavity" disabled>Solvent cavity surface</label>'+
+        '<label class="chg-check chg-soon" title="Molecular orbitals: the orbital selector is reserved, nothing is drawn yet"><input type="checkbox" id="chg-mo" disabled>Molecular orbitals</label>'+
+        '<div class="chg-hint">Placeholders: the cavity surface and the orbital isosurface arrive in a later version.</div>'+
+        '</div>';
+    var closeBtn=chargePanelEl.querySelector('.chg-close');
+    if(closeBtn)closeBtn.addEventListener('click',function(){chargeClosePanel()});
+    var sel=chargePanelEl.querySelector('#chg-type');
+    if(sel)sel.addEventListener('change',function(){
+        var idx=parseInt(this.value,10);
+        if(isNaN(idx)||idx<0||idx>=CHARGES.length)return;
+        chargeSel=idx;
+        // Another scheme is another set of numbers: the cache, the labels and -
+        // when the colour map is on - the scene all follow it.
+        chargeRefreshCache();
+        chargeSyncPanel();
+        if(chargeColorOn)rebuildScene(!!TRAJ_FRAMES);
+        updateChargeLabels();
+        chargeStatusLine();
+    });
+    var showChk=chargePanelEl.querySelector('#chg-show');
+    if(showChk)showChk.addEventListener('change',function(){applyChargeLabels(!!this.checked)});
+    var colChk=chargePanelEl.querySelector('#chg-color');
+    if(colChk)colChk.addEventListener('change',function(){applyChargeColoring(!!this.checked)});
+    // "Show frame n" is the panel's own way to the geometry the table belongs
+    // to; the frame switch runs the same path the toolbar arrows do, so the
+    // selection, undo and provenance all behave exactly as a manual change.
+    var goBtn=chargePanelEl.querySelector('#chg-go');
+    if(goBtn)goBtn.addEventListener('click',function(){
+        var s=chargeSet();
+        if(!s||typeof s.frame!=='number')return;
+        if(s.frame<0||s.frame>=totalFrames)return;
+        switchFrame(s.frame);
+    });
+    chargePanelEl.classList.add('show');
+    chargePanelOpen=true;
+    chargeSyncPanel();
+    layoutPanels();
+}
+function chargeClosePanel(){
+    if(!chargePanelOpen)return;
+    chargePanelOpen=false;
+    chargePanelEl.classList.remove('show');
+    layoutPanels();
+}
+function chargeReopen(){
+    if(!CHARGES||CHARGES.length===0)return;
+    if(diffMode){modeInfoEl.textContent='Atomic charges are not shown in a comparison';return}
+    buildChargePanel();
+}
+function summaryEsc(s){
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+// A number as the file's own precision deserves. The shortest round-trip form
+// of the value *is* the digits the file printed (the parser read them), so it is
+// used as it stands and padded only to a minimum number of decimals. toFixed()
+// is deliberately not used for that: its result for a value of a few thousand
+// with nine decimals differs between engine versions, which would silently drop
+// a digit from an energy on one browser and not another.
+function summaryNum(v,minDec){
+    if(v==null||!isFinite(v))return '-';
+    var s=String(v);
+    if(s.indexOf('e')>=0||s.indexOf('E')>=0){
+        s=v.toFixed(minDec>0?minDec:9);
+    }
+    if(minDec>0){
+        var dot=s.indexOf('.');
+        if(dot<0){s+='.';dot=s.length-1}
+        while(s.length-dot-1<minDec)s+='0';
+    }
+    return s;
+}
+function summaryRow(k,v,sub){
+    var html='<div class="sm-row"><span class="sm-k">'+k+'</span><span class="sm-v">'+v+'</span></div>';
+    if(sub)html+='<div class="sm-sub">'+sub+'</div>';
+    return html;
+}
+// A value the file printed at an earlier SCF than the energy: an optimisation
+// that was cut short prints no analysis for its last step, so its dipole is the
+// first step's. The row says so rather than sitting beside an energy from
+// another geometry as if the two described one structure.
+function summaryScfMark(scf,ref,what){
+    if(scf==null||ref==null||scf===ref)return '';
+    return ' <span class="sm-late" title="Printed at SCF '+scf+' of this job; the energy above is from SCF '+ref+
+        ', so this '+what+' describes an earlier geometry.">SCF '+scf+'</span>';
+}
+function buildSummaryPanel(){
+    if(!SUMMARY||SUMMARY.length===0||!summaryPanelEl)return;
+    var html='<div class="sm-head"><span class="sm-title">Job Summary</span><span class="sm-close">\u00d7</span></div><div class="sm-body">';
+    var multi=SUMMARY.length>1;
+    for(var j=0;j<SUMMARY.length;j++){
+        var s=SUMMARY[j];
+        // Every geometry-level row is stamped with the SCF it came from; the
+        // energy's SCF is the reference because that is the one the reader
+        // takes the summary to describe.
+        var of=s.scfOf||{};
+        var ref=of.energy!=null?of.energy:null;
+        if(multi)html+='<div class="sm-job">Job '+s.job+'</div>';
+        for(var e=0;e<s.energies.length;e++){
+            html+=summaryRow(summaryEsc(s.energies[e].label),
+                summaryNum(s.energies[e].value,0)+' Hartree','');
+        }
+        if(s.rmsGradient!=null){
+            html+=summaryRow(summaryEsc(s.rmsGradientLabel||'RMS Gradient Norm'),
+                summaryNum(s.rmsGradient,0)+summaryScfMark(of.rmsGradient,ref,'gradient'),'');
+        }
+        if(s.dipole){
+            html+=summaryRow('Dipole Moment',summaryNum(s.dipole.total,4)+' D'+
+                summaryScfMark(of.dipole,ref,'dipole'),
+                'X '+summaryNum(s.dipole.x,4)+' \u00b7 Y '+summaryNum(s.dipole.y,4)+
+                ' \u00b7 Z '+summaryNum(s.dipole.z,4));
+        }
+        if(s.pointGroup)html+=summaryRow('Point Group',summaryEsc(s.pointGroup),'');
+        if(s.charge!=null||s.multiplicity!=null){
+            html+=summaryRow('Charge / mult',
+                (s.charge!=null?String(s.charge):'-')+' / '+(s.multiplicity!=null?String(s.multiplicity):'-'),'');
+        }
+        if(s.nAtoms!=null||s.nBasis!=null){
+            html+=summaryRow('Atoms / basis',
+                (s.nAtoms!=null?String(s.nAtoms):'-')+' / '+(s.nBasis!=null?String(s.nBasis):'-'),'');
+        }
+        if(s.scfCycles!=null)html+=summaryRow('SCF cycles',String(s.scfCycles),'');
+        if(s.cpuTime)html+=summaryRow('Job cpu time',summaryEsc(s.cpuTime),'');
+        if(s.elapsedTime)html+=summaryRow('Elapsed time',summaryEsc(s.elapsedTime),'');
+        if(s.termination){
+            var normal=s.termination==='normal';
+            html+='<div class="sm-row"><span class="sm-k">Termination</span><span class="sm-v'+
+                (normal?'':' sm-bad')+'">'+(normal?'Normal':'Error')+'</span></div>';
+        }
+        // Which structure these numbers describe, said in words: for an
+        // optimisation it is the last SCF the job printed, which is the
+        // converged geometry - not the frame on screen.
+        var late=[];
+        if(of.rmsGradient!=null&&ref!=null&&of.rmsGradient!==ref)late.push('gradient');
+        if(of.dipole!=null&&ref!=null&&of.dipole!==ref)late.push('dipole');
+        if(ref!=null&&ref>1){
+            html+='<div class="sm-note">Energy'+(s.rmsGradient!=null?', gradient':'')+
+                (s.dipole?', dipole':'')+' from SCF '+ref+' of this job \u2014 its final geometry'+
+                (s.termination==='normal'?', the converged one':'')+'.</div>';
+        }
+        if(late.length>0){
+            html+='<div class="sm-note sm-warn">The file only printed the '+late.join(' and ')+
+                ' for an earlier SCF; '+(late.length>1?'those rows are':'that row is')+
+                ' marked.</div>';
+        }
+    }
+    html+='</div>';
+    summaryPanelEl.innerHTML=html;
+    var closeBtn=summaryPanelEl.querySelector('.sm-close');
+    if(closeBtn)closeBtn.addEventListener('click',function(){summaryClosePanel()});
+    summaryPanelEl.classList.add('show');
+    summaryPanelOpen=true;
+    layoutPanels();
+}
+function summaryClosePanel(){
+    if(!summaryPanelOpen)return;
+    summaryPanelOpen=false;
+    summaryPanelEl.classList.remove('show');
+    layoutPanels();
+}
+function summaryReopen(){
+    if(!SUMMARY||SUMMARY.length===0)return;
+    buildSummaryPanel();
+}
+if(chargeReopenEl)chargeReopenEl.addEventListener('click',function(){chargeReopen()});
+if(summaryReopenEl)summaryReopenEl.addEventListener('click',function(){summaryReopen()});
+
 // Initial panel display — show reopen buttons only, don't auto-open panels
 if(OPT_STEPS&&OPT_STEPS.length>0){
     optReopenEl.classList.add('show');
@@ -14159,6 +14778,10 @@ function panelRestore(name){
 function closeAnalysisPanelsForDiff(){
     if(xrdOpen)xrdClosePanel();
     if(cavOpen)cavityClosePanel();
+    // A charge map and a job summary describe one structure; a comparison has
+    // two, so both fold away (their chips leave with them, see syncPanelChips).
+    if(chargePanelOpen)chargeClosePanel();
+    if(summaryPanelOpen)summaryClosePanel();
 }
 function syncPanelChips(){
     var st=panelMinState;
@@ -14201,6 +14824,12 @@ function syncPanelChips(){
     var cvp=document.getElementById('cav-panel');
     if(cvp)cvp.style.display=(cavOpen&&!st.cav)?'block':'none';
     panelChip('cav-reopen',!!(cavOpen&&CRY&&st.cav));
+    // The charge map and the job summary follow the log panels: their chip is
+    // the only way in, so it stands whenever the panel is closed and the file
+    // states the data. Both describe the one structure on screen, so they leave
+    // the picture while a comparison draws two.
+    panelChip('charge-reopen',!!(CHARGES&&CHARGES.length>0&&!chargePanelOpen&&!diffMode));
+    panelChip('summary-reopen',!!(SUMMARY&&SUMMARY.length>0&&!summaryPanelOpen&&!diffMode));
 }
 // Turning a floating panel into a chip and back is one click each way for the
 // static panels; the rebuilt panels bind their own in the code that builds
@@ -14299,10 +14928,16 @@ function layoutPanels(){
         {id:'opt-panel',pr:7,anc:'tl'},
         {id:'freq-panel',pr:8,anc:'tl'},
         {id:'route-panel',pr:8,anc:'tl'},
+        // The charge map and the job summary are reading aids of the same
+        // family, opened from their own chip in the same top-left stack.
+        {id:'charge-panel',pr:8,anc:'tl'},
+        {id:'summary-panel',pr:8,anc:'tl'},
         {id:'mm-reopen',pr:9,anc:'tl',chip:true},
         {id:'opt-reopen',pr:9,anc:'tl',chip:true},
         {id:'freq-reopen',pr:10,anc:'tl',chip:true},
-        {id:'route-reopen',pr:10,anc:'tl',chip:true}
+        {id:'route-reopen',pr:10,anc:'tl',chip:true},
+        {id:'charge-reopen',pr:10,anc:'tl',chip:true},
+        {id:'summary-reopen',pr:10,anc:'tl',chip:true}
     ];
     var vis=[];
     defs.forEach(function(d){
@@ -21867,6 +22502,10 @@ canvas.addEventListener('mousemove',function(e){
             // parameter table can evaluate, so other structures read as before.
             tip+=bvsTooltipSuffix(a);
         }
+        // The population analysis of this atom, when the file states one and it
+        // belongs to the structure on screen. Both halves of a comparison are
+        // excluded: only the left one carries the table.
+        if(!diffRight)tip+=chargeTooltipSuffix(hi,false);
         tooltipEl.textContent=tip;
         tooltipEl.style.display='block';
         tooltipEl.style.left=(e.clientX-container.getBoundingClientRect().left+15)+'px';
@@ -22267,6 +22906,10 @@ function animate(){
     updateAxesIndicator();
     var frameSize=viewSize();
     renderFrame(frameSize.w,frameSize.h);
+    // The values written over the atoms are page furniture over the canvas, so
+    // they are placed in the task that drew the frame - never one rotation
+    // behind it. They cost nothing while the layer is empty.
+    updateChargeLabels();
 }
 
 // ===== PNG snapshot =====
@@ -22511,7 +23154,9 @@ class MolecularDocument implements vscode.CustomDocument {
         public readonly vmdPayload?: VmdPayload,
         public readonly autoBeta: boolean = false,
         public readonly optThresholds?: OptThresholds,
-        public readonly trajectoryFrames?: TrajectoryFramePayload[]
+        public readonly trajectoryFrames?: TrajectoryFramePayload[],
+        public readonly charges?: LogChargeSet[],
+        public readonly summary?: LogSummary[]
     ) {}
 
     dispose(): void {}
