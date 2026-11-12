@@ -811,8 +811,12 @@ export function parseOrcaOut(content: string, onProgress?: (fraction: number) =>
             }
             if (found < 0) { i++; continue; }
             j = found;
-            let guard = 0;
-            while (j < lines.length && guard++ < 400) {
+            // One row per mode, until the first line that is not a row (the
+            // blank line and the `The epsilon …` note under the table). A mode
+            // count is never guessed at: a 400-mode cap truncated the second
+            // half of every large molecule's spectrum (3N-6 rows), so the table
+            // itself — not a fixed budget — decides where it ends.
+            while (j < lines.length) {
                 const t = lines[j].trim();
                 const m = /^(\d+):\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)/.exec(t);
                 if (!m) break;

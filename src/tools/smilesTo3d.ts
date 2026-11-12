@@ -150,7 +150,7 @@ const BOND_LENGTH_OVERRIDE: { [key: string]: number } = (function () {
 const AROMATIC_BOND_SCALE = 0.90;
 
 /** 键级对共价半径和的收缩系数 (查表未命中时使用) */
-const BOND_ORDER_SCALE: { [key: number]: number } = { 1: 1.00, 2: 0.87, 3: 0.78 };
+const BOND_ORDER_SCALE: { [key: number]: number } = { 1: 1.00, 2: 0.87, 3: 0.78, 4: 0.72 };
 
 const DEFAULT_BOND_LENGTH = 1.50;
 const DEFAULT_VDW_RADIUS = 1.80;
@@ -519,6 +519,12 @@ interface SmilesBond {
     order: number;
     aromatic: boolean;
     direction: string;
+    /**
+     * 该键是否由 SMILES 显式写出键符号 (`-` `=` `#` `:` `$` `/` `\`)。
+     * 只有"未写出符号"的键才在两端都是芳香原子时被提升为芳香键:
+     * 显式 `-` 是单键的明确声明 (联苯 c1ccccc1-c1ccccc1 的环间键)。
+     */
+    explicit: boolean;
 }
 
 interface Mol {
@@ -531,6 +537,8 @@ interface Mol {
 const SINGLE_BOND = 1;
 const DOUBLE_BOND = 2;
 const TRIPLE_BOND = 3;
+/** `$`: 四重键 (OpenSMILES 扩展, 如 Cr–Cr) */
+const QUADRUPLE_BOND = 4;
 const AROMATIC_BOND = 0;
 
 /** 允许不加方括号书写的两字母元素符号 */
@@ -560,12 +568,14 @@ function addAtom(mol: Mol, element: string, aromatic: boolean, charge: number, i
 }
 
 /** 追加一条键, 返回其索引; 两端邻接表各记录该键索引一次。 */
-function addBond(mol: Mol, a: number, b: number, order: number, aromatic: boolean, direction: string): number {
+function addBond(mol: Mol, a: number, b: number, order: number, aromatic: boolean,
+                 direction: string, explicit?: boolean): number {
     const bond: SmilesBond = {
         a: a, b: b,
         order: order,
         aromatic: aromatic,
         direction: direction,
+        explicit: explicit === true,
     };
     mol.bonds.push(bond);
     const index = mol.bonds.length - 1;
@@ -881,7 +891,7 @@ export function parseSmiles(smiles: unknown): ParseResult {
     let pendingDir = '';
     let pendingSet = false;         // 是否已显式给出键符号
     const branchStack: number[] = [];
-    const ringOpen: { [key: number]: [number, number, boolean] } = {};   // 环号 -> (原子索引, 键级, 是否芳香)
+    const ringOpen: { [key: number]: [number, number, boolean, boolean] } = {};   // 环号 -> (原子索引, 键级, 是否芳香, 是否显式)
 
     /** 把 current 原子接上前一个原子 */
     const add = (current: number, needBond: boolean): void => {
@@ -893,7 +903,7 @@ export function parseSmiles(smiles: unknown): ParseResult {
                 aromatic = false;
                 order = SINGLE_BOND;
             }
-            addBond(mol, prev, current, order, aromatic, pendingDir);
+            addBond(mol, prev, current, order, aromatic, pendingDir, pendingSet);
         }
         prev = current;
     };
@@ -952,6 +962,12 @@ export function parseSmiles(smiles: unknown): ParseResult {
                 pendingOrder = DOUBLE_BOND;
             } else if (ch === '#') {
                 pendingOrder = TRIPLE_BOND;
+            } else if (ch === '$') {
+                // OpenSMILES' fourth bond order (Cr–Cr and other metal–metal
+                // quadruple bonds). It is a bond, not a direction mark: letting
+                // it fall through to `pendingDir` both downgraded the order to
+                // a single bond and made the bond look cis/trans-specified.
+                pendingOrder = QUADRUPLE_BOND;
             } else if (ch === ':') {
                 pendingOrder = AROMATIC_BOND;
                 pendingArom = true;
@@ -1003,11 +1019,15 @@ export function parseSmiles(smiles: unknown): ParseResult {
                     arom = false;
                     order = SINGLE_BOND;
                 }
-                addBond(mol, other, prev, order, arom, pendingDir);
+                // A symbol on either end of the ring closure states the bond
+                // (`c1ccccc-1` closes with an explicit single bond); with both
+                // ends bare, the bond is the implicit one the ring's aromatic
+                // atoms imply.
+                addBond(mol, other, prev, order, arom, pendingDir, pendingSet || entry[3]);
             } else {
                 // 注意: 环编号在闭合之后可以再次使用 (如 c1ccccc1C1CC1),
                 // 因此这里只检查"当前是否已打开", 不记录历史。
-                ringOpen[ringId] = [prev, pendingOrder, pendingArom];
+                ringOpen[ringId] = [prev, pendingOrder, pendingArom, pendingSet];
             }
             pendingOrder = SINGLE_BOND;
             pendingArom = false;
@@ -1087,11 +1107,15 @@ export function parseSmiles(smiles: unknown): ParseResult {
 }
 
 /**
- * 把"芳香原子-芳香原子"之间的单键升级为芳香键 (order=0)。
+ * 把"芳香原子-芳香原子"之间**未写键符号**的单键升级为芳香键 (order=0)。
+ * 显式写出的 `-` 是单键声明 (联苯的环间键), 不在此升级。
  */
 function markAromaticBonds(mol: Mol): void {
     for (let k = 0; k < mol.bonds.length; k++) {
         const bond = mol.bonds[k];
+        if (bond.explicit) {
+            continue;
+        }
         const a = mol.atoms[bond.a];
         const b = mol.atoms[bond.b];
         if (a.aromatic && b.aromatic && bond.order === SINGLE_BOND) {
@@ -1216,7 +1240,8 @@ function expandHydrogens(mol: Mol): Mol {
     }
     for (let k = 0; k < mol.bonds.length; k++) {
         const bond = mol.bonds[k];
-        out.bonds.push({ a: bond.a, b: bond.b, order: bond.order, aromatic: bond.aromatic, direction: bond.direction });
+        out.bonds.push({ a: bond.a, b: bond.b, order: bond.order, aromatic: bond.aromatic,
+                         direction: bond.direction, explicit: bond.explicit });
         const index = out.bonds.length - 1;
         out.adj[bond.a].push(index);
         out.adj[bond.b].push(index);
@@ -1237,7 +1262,7 @@ function expandHydrogens(mol: Mol): Mol {
                 stereo_h_first: false,
             });
             out.adj.push([]);
-            out.bonds.push({ a: i, b: hidx, order: SINGLE_BOND, aromatic: false, direction: '' });
+            out.bonds.push({ a: i, b: hidx, order: SINGLE_BOND, aromatic: false, direction: '', explicit: false });
             const bi = out.bonds.length - 1;
             out.adj[i].push(bi);
             out.adj[hidx].push(bi);
@@ -3246,7 +3271,7 @@ export interface SmilesAtomDetail {
     z: number;
 }
 
-/** 单键信息 (键明细表的一项)。 */
+/** 单键信息 (键明细表的一项)。order 为 1/2/3/4 (4 = `$` 四重键); 芳香键另行标记。 */
 export interface SmilesBondDetail {
     a: number;
     b: number;

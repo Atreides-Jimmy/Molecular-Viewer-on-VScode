@@ -89,6 +89,15 @@ export function parseCube(content: string): MolecularData {
     }
 
     const lengthFactor = isBohr ? BOHR_TO_ANGSTROM : 1.0;
+    // The header's origin is the first voxel of the grid, in the same frame as
+    // the atom coordinates. The cell this viewer draws starts at (0,0,0), so
+    // the atoms are moved into the grid's own frame by subtracting it — a cube
+    // whose grid is a sub-box (a non-zero origin) otherwise draws its atoms in
+    // absolute coordinates and its cell at the origin, one shifted against the
+    // other. A file with the usual zero origin is unchanged (subtracting zero).
+    const originX = origin[0] * lengthFactor;
+    const originY = origin[1] * lengthFactor;
+    const originZ = origin[2] * lengthFactor;
 
     let lattice: number[][] | null = null;
     if (voxelValid) {
@@ -126,9 +135,9 @@ export function parseCube(content: string): MolecularData {
         atomBlockEnd = i + 1;
         if (atomicNumber <= 0) continue;
 
-        const x = Number(parts[2]) * lengthFactor;
-        const y = Number(parts[3]) * lengthFactor;
-        const z = Number(parts[4]) * lengthFactor;
+        const x = Number(parts[2]) * lengthFactor - originX;
+        const y = Number(parts[3]) * lengthFactor - originY;
+        const z = Number(parts[4]) * lengthFactor - originZ;
 
         const element = ELEMENT_BY_NUMBER[atomicNumber] || 'X';
 

@@ -736,7 +736,7 @@ export async function buildParseOptions(
         }
 
         for (const item of chainTexts) {
-            const parsed = parseLammpsInputHints(item.content, item.variables);
+            const parsed = parseLammpsInputHints(item.content, item.variables, units);
             if (!units && parsed.units) units = parsed.units;
             if (!atomStyle && parsed.atomStyle) atomStyle = parsed.atomStyle;
             for (const key of Object.keys(parsed.typeElements)) {
@@ -796,7 +796,7 @@ export async function buildParseOptions(
             }
         }
         if (dataText !== undefined) {
-            const masses = lammpsTypeElements(dataText);
+            const masses = lammpsTypeElements(dataText, units);
             for (const key of Object.keys(masses)) {
                 const type = Number(key);
                 if (!hints.typeElements[type]) hints.typeElements[type] = masses[type];

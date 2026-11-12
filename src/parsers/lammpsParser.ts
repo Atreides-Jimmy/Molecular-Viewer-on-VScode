@@ -171,7 +171,11 @@ function readDataBox(lines: string[]): DataBox {
     return { lattice, xlo, xhi, ylo, yhi, zlo, zhi, tilt };
 }
 
-function parseMasses(lines: string[]): { [type: number]: string } {
+function parseMasses(lines: string[], units?: string): { [type: number]: string } {
+    // In `units lj` a data file's `Masses` section holds reduced masses, so a
+    // value of 1.0 says nothing about the element; only an explicit comment tag
+    // (`mass 1 1.0 # Ar`) names it.
+    const massNames = units === undefined || units.toLowerCase() !== 'lj';
     const out: { [type: number]: string } = {};
     for (let i = 0; i < lines.length; i++) {
         if (!/^Masses\b/i.test(lines[i].trim())) continue;
@@ -199,7 +203,9 @@ function parseMasses(lines: string[]): { [type: number]: string } {
             const dummy = /^(x|xx|du|dummy|bq)$/i.test(tag);
             const fromComment = dummy ? 'X' : (tag ? normalizeElementSymbol(tag) : undefined);
             const element = fromComment ||
-                (isFinite(mass) && mass === 0 ? 'X' : (isFinite(mass) ? elementFromMass(mass) : undefined));
+                (isFinite(mass) && mass === 0
+                    ? 'X'
+                    : (massNames && isFinite(mass) ? elementFromMass(mass) : undefined));
             if (element) out[type] = element;
         }
         break;
@@ -207,8 +213,8 @@ function parseMasses(lines: string[]): { [type: number]: string } {
     return out;
 }
 
-export function lammpsTypeElements(content: string): { [type: number]: string } {
-    return parseMasses(content.split(/\r?\n/));
+export function lammpsTypeElements(content: string, units?: string): { [type: number]: string } {
+    return parseMasses(content.split(/\r?\n/), units);
 }
 
 interface AtomStyle {
@@ -448,7 +454,7 @@ export function parseLammpsData(content: string, options?: LammpsParseOptions): 
             '" are not a length unit this reader knows: coordinates are shown unscaled');
     }
     const unitFactor = unitFactorRead === undefined ? 1 : unitFactorRead;
-    const masses = parseMasses(lines);
+    const masses = parseMasses(lines, options && options.units);
     const typeElements: { [type: number]: string } = { ...(options && options.typeElements ? options.typeElements : {}) };
     for (const key of Object.keys(masses)) {
         const type = Number(key);
@@ -502,8 +508,15 @@ export function parseLammpsData(content: string, options?: LammpsParseOptions): 
     const missing = data.rows.filter(row => !typeElements[row.type]);
     if (missing.length > 0) {
         const types = Array.from(new Set(missing.map(row => row.type))).sort((a, b) => a - b);
+        // In `units lj` the rejected mass is still a number, so "no mass" would
+        // be wrong: the mass is reduced and cannot name an element.
+        const reduced = options && typeof options.units === 'string' &&
+            options.units.toLowerCase() === 'lj';
         warnings.push('atom type' + (types.length === 1 ? ' ' : 's ') + types.join(', ') +
-            ' has no mass or element hint: read as ' + types.map(t => typeElementLabel(t)).join(', '));
+            (reduced
+                ? ' has no element name (a units lj mass is a reduced mass): read as '
+                : ' has no mass or element hint: read as ') +
+            types.map(t => typeElementLabel(t)).join(', '));
     }
     const lattice = box.lattice.map(row => row.map(v => v * unitFactor));
     if (!isUsableLattice(lattice)) {
@@ -943,10 +956,20 @@ export interface LammpsHints {
  * whether the numbers in the dump are Angstrom, nanometres or metres. Variables
  * defined in the script are expanded in the same words the command has, so
  * `variable data string si.data` followed by `read_data ${data}` names the file
- * the run actually read.
+ * the run actually read. `inheritedUnits` is the `units` value in force when
+ * this file runs (an `include` need not repeat it), so a `mass` in a secondary
+ * script is judged in the unit system the whole run uses.
  */
-export function parseLammpsInputHints(content: string, inherited?: { [name: string]: string }): LammpsHints {
+export function parseLammpsInputHints(content: string, inherited?: { [name: string]: string },
+                                      inheritedUnits?: string): LammpsHints {
     const hints: LammpsHints = { typeMasses: {}, typeElements: {} };
+    if (inheritedUnits) hints.units = inheritedUnits.toLowerCase();
+    // A mass names its type only when it is a real atomic weight. In
+    // `units lj` it is a reduced mass (1.0 for every type of a one-component
+    // melt), which `elementFromMass` would read as hydrogen. The units line can
+    // come before or after the `mass` commands, so the mass-derived names are
+    // held back and merged once the whole script has been read.
+    const massElements: { [type: number]: string } = {};
     const variables: { [name: string]: string } = { ...(inherited || {}) };
     for (const raw of content.split(/\r?\n/)) {
         const words = lammpsWords(stripLammpsComment(raw));
@@ -963,7 +986,7 @@ export function parseLammpsInputHints(content: string, inherited?: { [name: stri
             if (isFinite(type) && isFinite(value)) {
                 hints.typeMasses[type] = value;
                 const element = elementFromMass(value);
-                if (element) hints.typeElements[type] = element;
+                if (element) massElements[type] = element;
             }
             continue;
         }
@@ -989,6 +1012,15 @@ export function parseLammpsInputHints(content: string, inherited?: { [name: stri
                 if (!element) break;
                 hints.typeElements[i - at] = element;
             }
+        }
+    }
+    // A `dump_modify … element` list names the types explicitly, so it wins
+    // over an inferred mass whichever command came first; with `units lj` the
+    // mass names nothing at all and the `TypeN` label stands.
+    if (hints.units !== 'lj') {
+        for (const key of Object.keys(massElements)) {
+            const type = Number(key);
+            if (!hints.typeElements[type]) hints.typeElements[type] = massElements[type];
         }
     }
     return hints;

@@ -82,12 +82,14 @@ export function cartToFrac(cart: number[], lattice: number[][]): number[] {
  * to 0 — would otherwise name the same atom in the *next* cell, which every
  * comparison downstream would then treat as a different point. Folding it back
  * to 0 is what makes "this image is the atom at (0,0,0)" true again.
+ *
+ * `v - Math.floor(v)` already lands in [0, 1), so the fold is one-way: the
+ * value returns 0 and is not pushed back below zero (subtracting 1 and then
+ * adding 1 again would restore the very 0.999999 this is meant to remove).
  */
 export function wrapFrac(v: number): number {
-    let r = v - Math.floor(v);
-    if (r >= 1 - 1e-6) r -= 1;
-    if (r < 0) r += 1;
-    return r;
+    const r = v - Math.floor(v);
+    return r >= 1 - 1e-6 ? 0 : r;
 }
 
 // ===== Symmetry =====
@@ -118,7 +120,10 @@ export function parseSymOp(s: string): SymOp {
                 k++;
                 continue;
             }
-            const numMatch = expr.substring(k).match(/^(\d+\/\d+|\d+\.?\d*)/);
+            // A translation may be written as `1/2`, `0.5` or `.5`: the leading
+            // dot is a decimal point, not punctuation to skip — without the
+            // `\.\d+` branch, `x+.5` was read as `x+5`.
+            const numMatch = expr.substring(k).match(/^(\d+\/\d+|\d*\.\d+|\d+\.?\d*)/);
             if (numMatch) {
                 let v: number;
                 if (numMatch[1].includes('/')) {

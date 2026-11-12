@@ -131,13 +131,13 @@ A script also works as the comparison side of **Structure Diff**, using the scri
 | VMD TCL | `.tcl` | Display recipe with molecules, representations, colours, selections, surfaces and egg metadata |
 | CIF | `.cif` | Cell, space group and symmetry operations, fractional/Cartesian sites, occupancy, asymmetric unit, `_geom_bond`; CIF 1.1, 1.2 and 2 tags |
 | VASP POSCAR | `.vasp` `POSCAR` `CONTCAR` | Scale (negative = target volume), lattice, element counts, selective dynamics, Direct/Cartesian |
-| Gaussian Cube | `.cube` | Voxel vectors and atoms, Bohr/Å auto-detection, robust lattice fallback; a truncated atom table is reported instead of being read as grid data |
+| Gaussian Cube | `.cube` | Voxel vectors and atoms, Bohr/Å auto-detection, the header origin honoured (a sub-grid's atoms are placed in the cell that is drawn), robust lattice fallback; a truncated atom table is reported instead of being read as grid data |
 | VESTA | `.vesta` | CELLP, STRUC, GROUP and SYMOP; symmetry expansion and occupancy, with the same logic as CIF |
 | ABACUS | `.stru` `STRU` `STRU_MD_*` `.md_dump` `INPUT` | ATOMIC_SPECIES/MASS, LATTICE_CONSTANT (Bohr default), Direct/Cartesian positions, constraint flags; `INPUT` opens the `stru_file` it names (default `STRU`); SCF log and MD dump |
 | ABINIT | `.abi` `.abo` | `acell`/`rprim` (Bohr default or `angstrom`), `znucl`/`typat` with `N*value` repeats, `xred`/`xcart`/`xangst`, `xyzfile` (external XYZ) and `include` files; converged output geometry |
 | CP2K | `.inp` `.out` | `&CELL` (ABC + angles or A/B/C vectors), `&COORD` Cartesian/scaled, `&KIND`, `COORD_FILE_NAME` (XYZ/PDB/CP2K, last one wins), `@INCLUDE`/`@SET`/`@IF`/`@IFDEF`; output geometries |
 | Quantum ESPRESSO | `.in` `.pwi` `.pwo` | `ibrav` + `celldm` or `CELL_PARAMETERS`, `ATOMIC_POSITIONS` crystal/alat/bohr/angstrom, including a card's own `(alat= …)` value; final output cell and geometry |
-| LAMMPS | `.lmp` `.lammps` `.data` `.lammpstrj` `.dump` `data` | Data box and tilt, `Masses`/`mass`/`dump_modify element` type names, atomic/charge/full/molecular styles, and the `Bonds` section (the file's connectivity and, when the header says `# order`, its bond orders; the minimum-image shift is recovered from the cell); a multi-frame dump opens with frame navigation and a per-frame triclinic box (restricted or general `abc origin`), a single frame stays a periodic crystal; an input script (`read_data`, `include`, `variable`) opens the structure it names, and the bare `data` file opens by itself |
+| LAMMPS | `.lmp` `.lammps` `.data` `.lammpstrj` `.dump` `data` | Data box and tilt, `Masses`/`mass`/`dump_modify element` type names (a `units lj` reduced mass names no element; `dump_modify element` wins), atomic/charge/full/molecular styles, and the `Bonds` section (the file's connectivity and, when the header says `# order`, its bond orders; the minimum-image shift is recovered from the cell); a multi-frame dump opens with frame navigation and a per-frame triclinic box (restricted or general `abc origin`), a single frame stays a periodic crystal; an input script (`read_data`, `include`, `variable`) opens the structure it names, and the bare `data` file opens by itself |
 | GROMACS trajectory | `.xtc` `.trr` | Binary XTC/TRR recognised by magic: XTC integer-compressed coordinates, TRR coordinate blocks, nm → Å, per-frame box; topology, elements and bonds from the same-name `.gro`/`.pdb` (or a unique atom-count match) |
 | DCD trajectory | `.dcd` | CHARMM/NAMD/LAMMPS DCD with 4- or 8-byte Fortran records, either byte order, fixed atoms and unit-cell records; per-frame coordinates and box, with `.gro`/`.pdb`/`.xyz`/`.data` topology. A binary `.trj` that is not XTC/TRR/DCD is reported as an unsupported binary trajectory instead of being decoded as text |
 | GROMACS | `.gro` | nm → Å, nine-value triclinic box in GROMACS order, velocities ignored; atom names resolved by residue/atom-name rules (protein `CA`/`HG` stay C/H, ion residues keep their metal); a zero box is a molecule |
@@ -186,7 +186,7 @@ A large file shows a progress notification with a percentage bar in whole points
 3. Copies are reduced so the whole import stays within 20,000 added atoms, with a warning. A single structure already above that limit is imported whole — trimming it would discard atoms — and the warning says so; further copies are reduced to one.
 4. Copies are placed beside the existing structure without overlap and spaced along +X. The whole import is one Undo step, and Save As exports everything together. A ghost atom stays a ghost in every copy, and the imported part keeps the connectivity perceived for its own file — including its own charge — instead of being re-perceived with the current structure's charge.
 
-SMILES support covers the organic subset plus branches, `%nn` ring closures, aromaticity, explicit bonds, disconnected fragments, isotopes, charges and `@`/`@@` tetrahedral configuration. Aromatic systems are planar, unspecified double bonds default to trans, and the conformation comes from local rules rather than a conformer search; organometallic geometry is not special-cased.
+SMILES support covers the organic subset plus branches, `%nn` ring closures, aromaticity, explicit bonds, disconnected fragments, isotopes, charges and `@`/`@@` tetrahedral configuration. A written bond symbol is taken as stated: `-` between two aromatic atoms stays a single bond (the biphenyl inter-ring bond is not aromatic), and `$` is the quadruple bond of OpenSMILES rather than a single bond. Aromatic systems are planar, unspecified double bonds default to trans, and the conformation comes from local rules rather than a conformer search; organometallic geometry is not special-cased.
 
 #### Set as Default Viewer
 
@@ -414,13 +414,13 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 | VMD TCL | `.tcl` | 显示配方：分子、表示、颜色、选择、曲面与 egg 元数据 |
 | CIF | `.cif` | 晶胞、空间群与对称操作、分数/笛卡尔位点、占据率、不对称单元、`_geom_bond`；支持 CIF 1.1、1.2 与 2 标签 |
 | VASP POSCAR | `.vasp` `POSCAR` `CONTCAR` | 缩放因子（负值表示目标体积）、晶格、元素数量、选择性动力学、Direct/Cartesian |
-| Gaussian Cube | `.cube` | 体素矢量与原子、Bohr/Å 自动识别、晶格损坏时的稳健回退；截断的原子表会给出警告，不再把网格数据读成原子 |
+| Gaussian Cube | `.cube` | 体素矢量与原子、Bohr/Å 自动识别、头部 origin 参与定位（子网格的原子落在所画晶胞内）、晶格损坏时的稳健回退；截断的原子表会给出警告，不再把网格数据读成原子 |
 | VESTA | `.vesta` | CELLP、STRUC、GROUP 与 SYMOP；对称展开与占据率，逻辑与 CIF 一致 |
 | ABACUS | `.stru` `STRU` `STRU_MD_*` `.md_dump` `INPUT` | ATOMIC_SPECIES/MASS、LATTICE_CONSTANT（默认 Bohr）、Direct/Cartesian 坐标、约束标记；`INPUT` 打开其 `stru_file`（缺省 `STRU`）；SCF 日志与 MD dump |
 | ABINIT | `.abi` `.abo` | `acell`/`rprim`（默认 Bohr 或 `angstrom`）、`znucl`/`typat`（支持 `N*value` 重复）、`xred`/`xcart`/`xangst`、`xyzfile`（外部 XYZ）与 `include`；收敛后的输出几何 |
 | CP2K | `.inp` `.out` | `&CELL`（ABC + 角度或 A/B/C 矢量）、`&COORD` 笛卡尔/缩放坐标、`&KIND`、`COORD_FILE_NAME`（XYZ/PDB/CP2K，取最后一个）、`@INCLUDE`/`@SET`/`@IF`/`@IFDEF`；输出几何 |
 | Quantum ESPRESSO | `.in` `.pwi` `.pwo` | `ibrav` + `celldm` 或 `CELL_PARAMETERS`、`ATOMIC_POSITIONS` 的 crystal/alat/bohr/angstrom，卡片自带的 `(alat= …)` 数值同样生效；输出中的最终晶胞与几何 |
-| LAMMPS | `.lmp` `.lammps` `.data` `.lammpstrj` `.dump` `data` | 数据文件盒与倾斜、`Masses`/`mass`/`dump_modify element` 类型名、atomic/charge/full/molecular 样式，以及 `Bonds` 段（文件的连通性；头部写 `# order` 时还读入键级；最小镜像平移由晶胞反算）；多帧 dump 以帧浏览打开并携带每帧三斜盒（restricted 或 general `abc origin`），单帧仍按周期晶体显示；输入脚本（`read_data`、`include`、`variable`）会打开它指向的结构，裸 `data` 文件也可单独打开 |
+| LAMMPS | `.lmp` `.lammps` `.data` `.lammpstrj` `.dump` `data` | 数据文件盒与倾斜、`Masses`/`mass`/`dump_modify element` 类型名（`units lj` 下约化质量不用于命名元素，`dump_modify element` 优先）、atomic/charge/full/molecular 样式，以及 `Bonds` 段（文件的连通性；头部写 `# order` 时还读入键级；最小镜像平移由晶胞反算）；多帧 dump 以帧浏览打开并携带每帧三斜盒（restricted 或 general `abc origin`），单帧仍按周期晶体显示；输入脚本（`read_data`、`include`、`variable`）会打开它指向的结构，裸 `data` 文件也可单独打开 |
 | GROMACS 轨迹 | `.xtc` `.trr` | 按魔数识别的二进制 XTC/TRR：XTC 整数压缩坐标、TRR 坐标块、nm → Å、每帧盒子；元素、颜色与键来自同名 `.gro`/`.pdb`（或唯一原子数匹配） |
 | DCD 轨迹 | `.dcd` | CHARMM/NAMD/LAMMPS DCD，支持 4/8 字节 Fortran 记录、两种字节序、固定原子与晶胞记录；逐帧坐标与盒子，拓扑取 `.gro`/`.pdb`/`.xyz`/`.data`。不是 XTC/TRR/DCD 的二进制 `.trj` 会明确提示为不支持的二进制轨迹，而不再被当成文本解码 |
 | GROMACS | `.gro` | nm → Å、按 GROMACS 顺序排列的九值三斜盒、忽略速度列；原子名按残基/原子名规则判定（蛋白 `CA`/`HG` 保持 C/H，离子残基保留金属）；零盒按分子处理 |
@@ -469,7 +469,7 @@ npx vsce package --no-dependencies
 3. 若请求会超过 20,000 个新增原子，会自动减少份数并给出提示。单份结构本身就超过该上限时不会裁剪（裁剪会丢掉原子），而是按一份完整导入并在提示中说明；更多副本仍会减为一份。
 4. 副本会放在已有结构旁边、互不重叠，并沿 +X 方向等距排开。整次导入是一步 Undo，Save As 会导出全部结构。幽灵原子在每一份副本中都保持为幽灵原子；导入部分沿用按导入文件自身（含其电荷）判定的连接关系，而不会用当前结构的电荷重新判定。
 
-SMILES 支持有机子集以及分支、`%nn` 环闭合、芳香性、显式键、断开片段、同位素、电荷和 `@`/`@@` 四面体构型。芳香体系保持平面，未指定构型的双键默认为反式，构象由局部规则生成而非构象搜索；有机金属几何不做特殊处理。
+SMILES 支持有机子集以及分支、`%nn` 环闭合、芳香性、显式键、断开片段、同位素、电荷和 `@`/`@@` 四面体构型。写出的键符号按字面执行：两个芳香原子之间的 `-` 仍是单键（联苯的环间键不按芳香键处理），`$` 是 OpenSMILES 的四重键而不是单键。芳香体系保持平面，未指定构型的双键默认为反式，构象由局部规则生成而非构象搜索；有机金属几何不做特殊处理。
 
 #### 设为默认查看器
 

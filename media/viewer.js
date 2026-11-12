@@ -4297,6 +4297,16 @@ function createBond(b){
         addBondPiece(br*0.45,c1,false,0,0,0,0,0);addBondPiece(br*0.45,c2,false,0,0,0,0,1);
         addBondPiece(br*0.45,c1,false,0,0,1,off3,0);addBondPiece(br*0.45,c2,false,0,0,1,off3,1);
         addBondPiece(br*0.45,c1,false,0,0,-1,off3,0);addBondPiece(br*0.45,c2,false,0,0,-1,off3,1);
+    }else if(ord<4.5){
+        // `$` (OpenSMILES quadruple bond): four parallel lines. Two sit close
+        // to the axis and two at three times that offset, so the bond reads as
+        // four orders rather than as a thick single one.
+        var off4=0.09*offK,r4=br*0.34;
+        addBondPiece(r4,c1,false,0,0,0,0,0);addBondPiece(r4,c2,false,0,0,0,0,1);
+        addBondPiece(r4,c1,false,0,0,1,off4,0);addBondPiece(r4,c2,false,0,0,1,off4,1);
+        addBondPiece(r4,c1,false,0,0,-1,off4,0);addBondPiece(r4,c2,false,0,0,-1,off4,1);
+        addBondPiece(r4,c1,false,0,0,1,off4*3,0);addBondPiece(r4,c2,false,0,0,1,off4*3,1);
+        addBondPiece(r4,c1,false,0,0,-1,off4*3,0);addBondPiece(r4,c2,false,0,0,-1,off4*3,1);
     }else{
         addBondPiece(br,c1,false,0,0,0,0,0);addBondPiece(br,c2,false,0,0,0,0,1);
     }
@@ -7668,6 +7678,7 @@ function diffOrderLabel(o){
     if(o===1)return 'single';
     if(o===2)return 'double';
     if(o===3)return 'triple';
+    if(o===4)return 'quadruple';
     return String(o);
 }
 function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct,geo){
