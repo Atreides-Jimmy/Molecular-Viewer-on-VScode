@@ -175,10 +175,18 @@ function skipDashedLines(lines: string[], startIdx: number, count: number): numb
     return i;
 }
 
-/** A route card starts with '#' optionally followed by a single-letter print
- *  level (#p/#P/#t/#n, case-insensitive) or a bare '#'; the keyword part must
- *  follow. '#pop'-style strings are not route cards. */
-const ROUTE_START_RE = /^#(\s|[A-Za-z]\b|$)/;
+/** The shape of a route card's first line: '#' plus the keywords, with or
+ *  without a print level. Gaussian prints `#p B3LYP/6-31G(d) opt freq` and
+ *  `#B3LYP/6-31G(d) opt freq` for the same request, so the '#' may be followed
+ *  by whitespace, by nothing, by a single-letter print level (#p/#P/#t/#n,
+ *  case-insensitive), or directly by the first keyword.
+ *
+ *  This is a SHAPE test only — '# OF POINTS ALONG THE PATH = 1' (an IRC
+ *  banner) has it too. What separates a card from such text is the dash box
+ *  it is printed in, and the scan below therefore accepts a boxed line of this
+ *  shape, and an unboxed one only when it states a method/basis pair (a '/',
+ *  which every printed card carries) or is closed by a rule. */
+const ROUTE_START_RE = /^#(?:\s|[A-Za-z]\b|$|[A-Za-z0-9][^\s]*\/)/;
 /** Pure dashed separator line (Gaussian prints 50-70 dashes). Route cards are
  *  always enclosed between two of these, single-line or wrapped. */
 const DASH_RE = /^\s*-{5,}\s*$/;
@@ -906,11 +914,19 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
     // Optimization steps are the optimizer's per-step Item/Value/Converged?
     // tables — but SP jobs that compute gradients (Force keyword) and freq
     // jobs print the SAME gradient banner and the same 4-metric table without
-    // running an optimizer. The reliable trigger is the route card: emit
-    // optSteps only when a '#...' route section in the file actually requests
-    // an optimization (opt / optimization / freq=calcall). All route sections
-    // are collected (parsed into RouteSection[]) for the Route panel.
-    let routeHasOpt = false;
+    // running an optimizer. The reliable trigger is the route card of the job
+    // that printed the table: only a job that asks for an optimization (opt /
+    // optimization / freq=calcall) runs Berny's step loop, so a table is taken
+    // only while such a job is the one being read. The distinction matters for
+    // the `opt freq` composite every Gaussian run writes as two jobs: the
+    // `Freq` job repeats the table once at the geometry it was handed, under
+    // '! Non-Optimized Parameters !', and appending it would add a pseudo-step
+    // whose force is ~1e-6 — a drop the optimization never made. A job that
+    // stated no card at all (a log whose head is gone) cannot be classified, so
+    // its tables are taken. All route sections are collected (parsed into
+    // RouteSection[]) for the Route panel.
+    let jobHasOpt = false;      // the current job's card requests an optimization
+    let jobCardSeen = false;    // the current job stated a card at all
     const routes: RouteSection[] = [];
     // The per-atom charge tables of the job currently being read, and the
     // headline results of every job in the file. Both are plain boxes handed to
@@ -979,7 +995,15 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
                 let routeStart = -1;
                 if (DASH_RE.test(tr)) {
                     if (i + 1 < lines.length && ROUTE_START_RE.test(lines[i + 1].trim())) routeStart = i + 1;
-                } else if (ROUTE_START_RE.test(tr)) {
+                } else if (ROUTE_START_RE.test(tr) &&
+                           (tr.indexOf('/') >= 0 ||
+                            (i + 1 < lines.length && DASH_RE.test(lines[i + 1].trim())))) {
+                    // A card whose OPENING rule is missing (hand-edited or
+                    // non-standard output). It must still look like a card: it
+                    // states a method/basis pair, or its closing rule sits right
+                    // below it. The bare '#…' shape alone is not enough — an IRC
+                    // banner's `# OF POINTS ALONG THE PATH = 1` has that shape
+                    // and used to be collected as one route section per point.
                     routeStart = i;
                 }
                 if (routeStart >= 0) {
@@ -1001,7 +1025,9 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
                     }
                     const sec = parseRouteSection(joinRouteLines(lines.slice(routeStart, j).map(l => l.trim())));
                     routes.push(sec);
-                    if (sec.hasOpt) routeHasOpt = true;
+                    // Which kind of job the following tables belong to.
+                    jobHasOpt = sec.hasOpt;
+                    jobCardSeen = true;
                     // A route card is the start of a job: the results and the
                     // population analysis that follow belong to it, not to the
                     // job whose card preceded them. This is the only boundary a
@@ -1301,12 +1327,20 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
 
         // Convergence criteria block starts with "Maximum Force" data line
         if (line.includes('Maximum Force') && /-?\d+\.\d/.test(line)) {
-            const step: OptStep = { step: stepCounter + 1, energy: pendingEnergy };
-            stepCounter++;
+            // The series belongs to the job that printed the table: only a job
+            // whose route asks for an optimization runs Berny's step loop (see
+            // `jobHasOpt`). A job that stated no card at all — a log whose head
+            // is gone — cannot be classified, and its tables are taken, because
+            // a file that plainly holds a Berny run is an optimization whatever
+            // its first lines say.
+            const take = jobHasOpt || !jobCardSeen;
+            const step: OptStep | null = take ? { step: stepCounter + 1, energy: pendingEnergy } : null;
+            if (step) stepCounter++;
             pendingEnergy = undefined;
 
             // Parse this block: 4 lines (Maximum Force, RMS Force, Maximum Displacement, RMS Displacement)
             for (let k = 0; k < 4 && i < lines.length; k++, i++) {
+                if (!step) continue;    // a non-optimizing job's table: consume it whole
                 const cur = lines[i];
                 const valMatch = cur.match(/(-?\d+\.\d+(?:[EDed][-+]?\d+)?)/);
                 if (!valMatch) continue;
@@ -1321,7 +1355,7 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
                     step.rmsDisplacement = val;
                 }
             }
-            optSteps.push(step);
+            if (step) optSteps.push(step);
             continue;
         }
 
@@ -1411,7 +1445,10 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
     return {
         frames,
         title,
-        optSteps: routeHasOpt && optSteps.length > 0 ? optSteps : undefined,
+        // A table is only taken from a job that asked to optimize (or from a
+        // file that states no route at all), so a non-empty list is already the
+        // answer — there is no file-level opt flag left to consult.
+        optSteps: optSteps.length > 0 ? optSteps : undefined,
         normalModes: modes,
         routes: routes.length > 0 ? routes : undefined,
         charges: chargeSets.length > 0 ? chargeSets : undefined,
