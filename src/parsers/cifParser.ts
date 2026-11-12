@@ -11,7 +11,7 @@ import {
     SymOp,
     wrapFrac
 } from '../tools/crystalGeometry';
-import { lookupSpaceGroupOps, SpaceGroupOps } from '../tools/spaceGroupTable';
+import { lookupSpaceGroupOps, lookupSpaceGroupSettings, SpaceGroupOps } from '../tools/spaceGroupTable';
 import { normalizeElementSymbol } from '../tools/periodicTable';
 import { isUsableLattice } from './periodicUtils';
 import { AnisoTensor, rotateAnisoTensor, symOpCartesianRotation } from '../tools/adp';
@@ -985,7 +985,7 @@ function symOpSetsEquivalent(a: SymOp[], b: SymOp[]): boolean {
     return cifOpsMatch(ea, eb, centering) && cifOpsMatch(eb, ea, centering);
 }
 
-function symmetryCheckWarning(check: CrystalSymmetryCheck): string {
+function symmetryCheckWarning(check: CrystalSymmetryCheck, canSwitch: boolean): string {
     const label = check.symbol + ' (No. ' + check.number +
         (check.settingLabel === '' ? '' : ', ' + check.settingLabel) + ')';
     return 'space-group check: the file names ' + label + ', whose ' + check.tableOps.length +
@@ -993,7 +993,9 @@ function symmetryCheckWarning(check: CrystalSymmetryCheck): string {
         check.tableAtoms + ' atom' + (check.tableAtoms === 1 ? '' : 's') + ', but its own ' +
         check.fileOps.length + ' operation' + (check.fileOps.length === 1 ? '' : 's') +
         ' expand them to ' + check.fileAtoms + ' atom' + (check.fileAtoms === 1 ? '' : 's') +
-        '; the file\'s operations are used, and the crystal panel offers a switch to the name\'s';
+        '; the file\'s operations are used, and ' + (canSwitch
+            ? 'the crystal panel offers a switch to the name\'s'
+            : 'the name states no setting its coordinates could be re-expanded under, so no switch is offered');
 }
 
 // ===== The file's own bond table =====
@@ -1552,16 +1554,38 @@ export function parseCif(content: string): MolecularData {
     // The file's operations are what the picture is built from — that does not
     // change. When the file also names a group the built-in table knows, the
     // two statements are compared once; a disagreement is reported with the
-    // atom count of each expansion, and the name's expansion is kept so the
-    // page can offer a one-time switch.
+    // atom count of each expansion. A name that leaves its setting open is
+    // checked against every setting it allows, and the name's expansion is kept
+    // for the one-time switch only when the name states which setting it is.
     let symmetryCheck: CrystalSymmetryCheck | undefined;
     let symmetryAlternative: CrystalSymmetryAlternative | undefined;
     if (scan.ops.length > 0 && spaceGroupOut !== undefined) {
-        const hit = lookupSpaceGroupOps(spaceGroupOut, cell);
-        if (hit !== null) {
-            const nameSymOps = hit.ops.map(parseSymOp);
-            if (!symOpSetsEquivalent(parsedSymOps, nameSymOps)) {
-                const nameExpansion = expandCifSites(rawAtoms, nameSymOps, lattice);
+        const settings = lookupSpaceGroupSettings(spaceGroupOut, cell);
+        if (settings.length > 0) {
+            // A name that leaves the setting open names a family, not one
+            // operation list: `P n n n` fits either origin and `R -3 c` fits
+            // either axis triple. The file is consistent when its own
+            // operations are any member's — the member the table prefers is a
+            // convention, and comparing against it alone reported a correctly
+            // written origin-choice-1 file as contradicting its own name.
+            let equivalent = false;
+            for (const setting of settings) {
+                if (symOpSetsEquivalent(parsedSymOps, setting.ops.map(parseSymOp))) {
+                    equivalent = true;
+                    break;
+                }
+            }
+            if (!equivalent) {
+                const hit = settings[0];
+                const nameExpansion = expandCifSites(rawAtoms, hit.ops.map(parseSymOp), lattice);
+                // The switch puts this file's coordinates under the name's
+                // setting. That is the same structure only when the name says
+                // which setting the coordinates were written in: with an
+                // origin choice left open, applying the conventional one to
+                // coordinates written for the other moves every atom that the
+                // two operations place differently — a different structure,
+                // not a correction. Such a file is reported without a switch.
+                const canSwitch = settings.length === 1;
                 symmetryCheck = {
                     declared: spaceGroupOut,
                     symbol: hit.symbol,
@@ -1572,17 +1596,19 @@ export function parseCif(content: string): MolecularData {
                     fileAtoms: baseAtoms.length,
                     tableAtoms: nameExpansion.baseAtoms.length
                 };
-                symmetryAlternative = {
-                    ops: hit.ops.slice(),
-                    symbol: hit.symbol,
-                    settingLabel: hit.settingLabel,
-                    baseAtoms: nameExpansion.baseAtoms,
-                    asymAtoms: nameExpansion.asymAtoms
-                };
+                if (canSwitch) {
+                    symmetryAlternative = {
+                        ops: hit.ops.slice(),
+                        symbol: hit.symbol,
+                        settingLabel: hit.settingLabel,
+                        baseAtoms: nameExpansion.baseAtoms,
+                        asymAtoms: nameExpansion.asymAtoms
+                    };
+                }
                 // First, because the panel's warning line shows only the head
                 // of the list and a self-contradicting file is the one thing
                 // here that changes what the structure is.
-                warnings.unshift(symmetryCheckWarning(symmetryCheck));
+                warnings.unshift(symmetryCheckWarning(symmetryCheck, canSwitch));
             }
         }
     }

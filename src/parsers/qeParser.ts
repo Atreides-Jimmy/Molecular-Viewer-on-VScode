@@ -94,6 +94,12 @@ interface QeSystem {
     cosBC: number;
     /** Cartesian positions in `alat` units are scaled by this (Angstrom). */
     alat: number;
+    /**
+     * Whether the file states that lattice parameter at all (`celldm(1)`, `A`
+     * or `alat` in `&SYSTEM`). A card's `(alat= …)` value may only stand in for
+     * one the file never stated; see `cardScale`.
+     */
+    alatStated: boolean;
 }
 
 function readQeSystem(lines: string[]): QeSystem {
@@ -112,9 +118,14 @@ function readQeSystem(lines: string[]): QeSystem {
     let a = numValue(map, 'a');
     let b = numValue(map, 'b');
     let c = numValue(map, 'c');
+    // `alat` in `&SYSTEM` is the same parameter as `A` (both in Angstrom); a
+    // file that states it is not a file without a lattice parameter.
+    const namelistAlat = numValue(map, 'alat');
+    if (a === undefined) a = namelistAlat;
     // A/B/C are already Angstrom; celldm is in Bohr, and celldm(2)/(3) are
     // ratios to celldm(1), not lengths in their own right.
     const aFromCelldm = celldm1 !== undefined && celldm1 > 0 ? celldm1 * BOHR_TO_ANGSTROM : undefined;
+    const alatStated = aFromCelldm !== undefined || numValue(map, 'a') !== undefined || namelistAlat !== undefined;
     if (a === undefined) a = aFromCelldm;
     if (a === undefined) a = 1;
     if (b === undefined) b = a * (celldm2 !== undefined && celldm2 > 0 ? celldm2 : 1);
@@ -143,7 +154,8 @@ function readQeSystem(lines: string[]): QeSystem {
         cosAB: cosAB !== undefined ? cosAB : 0,
         cosAC: cosAC !== undefined ? cosAC : 0,
         cosBC: cosBC !== undefined ? cosBC : 0,
-        alat: aFromCelldm !== undefined ? aFromCelldm : a
+        alat: aFromCelldm !== undefined ? aFromCelldm : a,
+        alatStated
     };
 }
 
@@ -247,18 +259,19 @@ function latticeFromIbrav(sys: QeSystem): number[][] | null {
 }
 
 /**
- * The unit a card header states, and the value of its optional `alat=`
- * attribute when it states one.
+ * The unit a card header states, and the value beside an optional `alat=`
+ * attribute.
  *
  * The unit is a bare name (`angstrom`, `bohr`, `crystal`, `alat`), but a card
- * may also carry the lattice parameter itself — `CELL_PARAMETERS (alat= 5.43)`,
- * `ATOMIC_POSITIONS (alat= 5.43)`. The attribute is in Ångström (QE divides it
- * by the Bohr radius when it reads the card), which is the unit `QeSystem.alat`
- * is in as well, so the two are interchangeable. Discarding the value read
- * such a cell as 1 Å and every fractional coordinate as so many Å instead of
- * the cell's own fraction: a cubic `(alat= 5.43)` block came out 5.43 times
- * too small, with periodic bonds, volume and supercells wrong by the same
- * factor.
+ * may also be written with the lattice parameter spelled out —
+ * `CELL_PARAMETERS (alat= 5.43)`, `ATOMIC_POSITIONS (alat= 5.43)`. **QE does
+ * not read that number.** `card_cell_parameters` and `card_atomic_positions`
+ * in `Modules/read_cards.f90` match `ANGSTROM`, `BOHR`, `ALAT` and `CRYSTAL`
+ * as substrings of the header and stop there; the `alat` a card is scaled by
+ * is the one `&SYSTEM` states (`celldm(1)` in Bohr, or `alat`/`A` in
+ * Ångström). A reader that believed the number would draw a cell the program
+ * never used, so the value is carried out of here only to be checked against
+ * the system's — see `cardScale`.
  */
 function alignmentUnit(header: string): { unit: string; alat: number | null } {
     const named = /(?:CELL_PARAMETERS|ATOMIC_POSITIONS)\s*(?:\(|\{)?\s*(alat|bohr|angstrom|ang|au|crystal)(?![A-Za-z0-9])/i.exec(header);
@@ -270,6 +283,47 @@ function alignmentUnit(header: string): { unit: string; alat: number | null } {
     const inline = /alat\s*=\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[EeDd][-+]?\d+)?)/i.exec(header);
     const value = inline ? parseFloatSafe(inline[1].replace(/[Dd]/, 'E')) : undefined;
     return { unit: unit, alat: value !== undefined && isFinite(value) && value > 0 ? value : null };
+}
+
+/**
+ * The factor a card's numbers are multiplied by, and the note the file is owed
+ * when its `alat=` attribute and its `&SYSTEM` disagree.
+ *
+ * Following QE means the system's lattice parameter wins whenever the file
+ * states one: `(alat= 5.43)` is a comment on the card, not a scale. A file
+ * that states no lattice parameter at all is the one case where the number is
+ * the only scale there is — QE itself would stop on such an input ("must
+ * specify either celldm(1) or alat"), so honouring it is a deliberate
+ * leniency, and it is said out loud rather than applied silently. Either way
+ * a value that disagrees with the scale actually used is reported, because
+ * that disagreement is exactly the file whose picture would otherwise differ
+ * from the program's.
+ */
+function cardScale(
+    header: string,
+    systemAlat: number,
+    alatStated: boolean,
+    card: string
+): { factor: number; warning?: string } {
+    const { unit, alat: inline } = alignmentUnit(header);
+    if (unit === 'bohr') return { factor: BOHR_TO_ANGSTROM };
+    if (unit === 'angstrom') return { factor: 1 };
+    if (inline === null) return { factor: systemAlat };
+    if (!alatStated) {
+        return {
+            factor: inline,
+            warning: card + ' (alat= ' + String(inline) + '): the file states no lattice parameter in &SYSTEM, ' +
+                'so the value on the card is used as one, in A (QE itself would stop on this input)'
+        };
+    }
+    if (Math.abs(inline - systemAlat) > 1e-3 * Math.max(1, Math.abs(systemAlat))) {
+        return {
+            factor: systemAlat,
+            warning: card + ' states alat= ' + String(inline) + ', which QE does not read: the card is in units of ' +
+                'the system\'s alat (' + String(systemAlat) + ' A), and that is the scale used'
+        };
+    }
+    return { factor: systemAlat };
 }
 
 /**
@@ -298,22 +352,23 @@ function readThreeByThree(lines: string[], start: number): { rows: number[][]; n
 }
 
 /** A CELL_PARAMETERS block, converted to Angstrom. */
-function readCellParameters(lines: string[], start: number, alat: number): { lattice: number[][] | null; next: number } {
+function readCellParameters(
+    lines: string[],
+    start: number,
+    systemAlat: number,
+    alatStated: boolean
+): { lattice: number[][] | null; next: number; warnings: string[] } {
     const header = lines[start];
-    const { unit, alat: inline } = alignmentUnit(header);
-    // A card that states its own lattice parameter uses that one, in Angstrom,
-    // for `alat` as well: the block and the positions that follow it are read
-    // against the same scale the card names.
-    const scale = inline === null ? alat : inline;
+    const scale = cardScale(header, systemAlat, alatStated, 'CELL_PARAMETERS');
     const read = readThreeByThree(lines, start + 1);
-    if (read.rows.length !== 3) return { lattice: null, next: start + 1 };
+    if (read.rows.length !== 3) return { lattice: null, next: start + 1, warnings: scale.warning ? [scale.warning] : [] };
     // QE's default for CELL_PARAMETERS is alat, the same as for positions;
     // reading an unqualified block as Angstrom would rescale a cell written in
     // units of the lattice parameter by the lattice parameter itself.
-    const factor = unit === 'bohr' ? BOHR_TO_ANGSTROM : unit === 'angstrom' ? 1 : scale;
     return {
-        lattice: read.rows.map(r => r.map(v => v * factor)),
-        next: read.next
+        lattice: read.rows.map(r => r.map(v => v * scale.factor)),
+        next: read.next,
+        warnings: scale.warning ? [scale.warning] : []
     };
 }
 
@@ -339,16 +394,18 @@ function readAtomicSpecies(lines: string[]): { [label: string]: string } {
 function readAtomicPositions(
     lines: string[],
     start: number,
-    alat: number,
+    systemAlat: number,
+    alatStated: boolean,
     species: { [label: string]: string },
     nat: number
-): { rows: Site[]; next: number } {
+): { rows: Site[]; next: number; warnings: string[] } {
     const header = lines[start];
-    const { unit: explicit, alat: inline } = alignmentUnit(header);
+    const { unit: explicit } = alignmentUnit(header);
     // QE's default for ATOMIC_POSITIONS is alat; crystal is the only unit that
     // means fractional coordinates, and `alat` is Cartesian in units of a.
     const unit = explicit || 'alat';
-    const scale = inline === null ? alat : inline;
+    const scale = unit === 'crystal' ? null : cardScale(header, systemAlat, alatStated, 'ATOMIC_POSITIONS');
+    const warnings = scale && scale.warning ? [scale.warning] : [];
     const rows: Site[] = [];
     let i = start + 1;
     while (i < lines.length && (nat <= 0 || rows.length < nat)) {
@@ -373,14 +430,14 @@ function readAtomicPositions(
         if (unit === 'crystal') {
             site = { element, frac: [x, y, z], label };
         } else {
-            const factor = unit === 'bohr' ? BOHR_TO_ANGSTROM : unit === 'alat' ? scale : 1;
+            const factor = scale === null ? 1 : scale.factor;
             site = { element, cart: [x * factor, y * factor, z * factor], label };
         }
         if (constraint) site.constraint = constraint;
         rows.push(site);
         i++;
     }
-    return { rows, next: i };
+    return { rows, next: i, warnings };
 }
 
 function natFromSystem(lines: string[]): number {
@@ -406,7 +463,10 @@ export function parseQeInput(content: string): MolecularData {
     // A CELL_PARAMETERS block overrides the Bravais cell (ibrav 0 requires it).
     for (let i = 0; i < lines.length; i++) {
         if (!/^\s*CELL_PARAMETERS\b/i.test(lines[i])) continue;
-        const read = readCellParameters(lines, i, sys.alat);
+        const read = readCellParameters(lines, i, sys.alat, sys.alatStated);
+        for (const note of read.warnings) {
+            if (warnings.indexOf(note) < 0) warnings.push(note);
+        }
         if (read.lattice) lattice = read.lattice;
         else warnings.push('CELL_PARAMETERS is incomplete: the cell could not be read');
     }
@@ -428,7 +488,10 @@ export function parseQeInput(content: string): MolecularData {
         if (/crystal_sg/i.test(lines[i])) {
             warnings.push('ATOMIC_POSITIONS crystal_sg lists symmetry-unique sites: only the listed atoms are shown');
         }
-        const read = readAtomicPositions(lines, i, sys.alat, species, nat);
+        const read = readAtomicPositions(lines, i, sys.alat, sys.alatStated, species, nat);
+        for (const note of read.warnings) {
+            if (warnings.indexOf(note) < 0) warnings.push(note);
+        }
         if (read.rows.length > 0) sites = read.rows;
     }
     if (!sawPositions || sites.length === 0) {
@@ -518,10 +581,12 @@ function parseOutputGeometry(content: string): OutputGeometry {
         const nat = 0;
         for (let i = beginFinal; i < endFinal; i++) {
             if (/^\s*CELL_PARAMETERS\b/i.test(lines[i])) {
-                const read = readCellParameters(lines, i, axes.alat);
+                const read = readCellParameters(lines, i, axes.alat, true);
+                warnings.push(...read.warnings);
                 if (read.lattice) lattice = read.lattice;
             } else if (/^\s*ATOMIC_POSITIONS\b/i.test(lines[i])) {
-                const read = readAtomicPositions(lines, i, axes.alat, species, nat);
+                const read = readAtomicPositions(lines, i, axes.alat, true, species, nat);
+                warnings.push(...read.warnings);
                 if (read.rows.length > 0) finalSites = read.rows;
             }
         }
@@ -537,7 +602,8 @@ function parseOutputGeometry(content: string): OutputGeometry {
             // blocks in its own output, so the last one is the best fallback.
             for (let i = lines.length - 1; i >= 0 && sites.length === 0; i--) {
                 if (!/^\s*ATOMIC_POSITIONS\b/i.test(lines[i])) continue;
-                const read = readAtomicPositions(lines, i, axes.alat, {}, 0);
+                const read = readAtomicPositions(lines, i, axes.alat, true, {}, 0);
+                warnings.push(...read.warnings);
                 sites = read.rows;
             }
         }

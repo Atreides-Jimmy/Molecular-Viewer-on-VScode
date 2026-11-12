@@ -9,7 +9,9 @@
  * The data is International Tables for Crystallography Vol. B (2001), Table
  * A1.4.2.7: one Hall symbol (Hall 1981) for every setting of all 230 space
  * groups, 530 settings in all, including both origins where a group has two
- * and both the hexagonal and rhombohedral axes of the seven R groups. A Hall
+ * and both the hexagonal and rhombohedral axes of the seven R groups. The five
+ * orthorhombic groups whose 2002 symbol is an e glide (No. 39 `A e m 2` beside
+ * the older `A b m 2`) are indexed under both spellings; see `E_GLIDE_SYMBOLS`. A Hall
  * symbol is a compact list of generators, so the operations are produced by
  * closing the group rather than stored one by one: the whole table costs a few
  * kilobytes instead of the tens of thousands of operation strings an explicit
@@ -883,6 +885,25 @@ function symbolKey(hm: string): string {
     return symbolTokens(hm).join('');
 }
 
+/**
+ * The five orthorhombic groups whose 2002 symbol carries an e glide.
+ *
+ * A double glide plane `e` is what a `b` and a `c` glide become together in an
+ * A- or C-centred cell, so `A e m 2` is the same group as the older `A b m 2`
+ * (No. 39) — same lattice, same operations, only a newer spelling. The IT table
+ * this data comes from predates the 2002 symbols, so a modern CIF that writes
+ * the `e` form would otherwise be "not in the built-in space-group table" and
+ * its sites would be read as P1; the old spelling is still what most deposited
+ * files state, so both are indexed and the group answers to either.
+ */
+const E_GLIDE_SYMBOLS: { [oldKey: string]: string } = {
+    'abm2': 'aem2',
+    'aba2': 'aea2',
+    'cmca': 'cmce',
+    'cmma': 'cmme',
+    'ccca': 'ccce'
+};
+
 const ROWS: SgRow[] = [];
 const INDEX = new Map<string, number[]>();
 
@@ -910,6 +931,8 @@ for (const line of SG_HALL_DATA) {
     const tokens = symbolTokens(base);
     if (tokens.length < 2) continue;
     const keys = [symbolKey(base)];
+    const eGlide = E_GLIDE_SYMBOLS[keys[0]];
+    if (eGlide) keys.push(eGlide);
     // Monoclinic HM symbols are written full (P 1 21/c 1); the short form the
     // rest of the world writes (P 21/c) is the same group with the redundant
     // 1 positions dropped. Only the unique-axis-b rows get that alias: a short
@@ -1140,13 +1163,8 @@ export interface SpaceGroupOps {
     assumedOrigin: boolean;
 }
 
-/**
- * The operations a declared space-group name stands for, or null when the
- * name is not one this table knows. The `cell` is only consulted to choose
- * between the hexagonal and rhombohedral settings of an R group; everything
- * else is decided by the name's own settings suffix and the table's defaults.
- */
-export function lookupSpaceGroupOps(name: string, cell?: CellShape): SpaceGroupOps | null {
+/** The rows a name resolves to, most preferred first, or null when unknown. */
+function resolveRows(name: string, cell?: CellShape): { rows: SgRow[]; ordered: SgRow[] } | null {
     const parsed = parseName(name);
     if (!parsed) return null;
 
@@ -1169,17 +1187,58 @@ export function lookupSpaceGroupOps(name: string, cell?: CellShape): SpaceGroupO
         if (filtered.length > 0) rows = filtered;
     }
 
+    // The setting a convention picks comes first; the rest keep the table's
+    // order, which is the order the settings are listed in the International
+    // Tables (abc, ba-c, cab, …, origin 1 before origin 2).
     const chosen = pickRow(rows, cell);
-    const assumedOrigin = rows.length > 1 && originChoiceOf(chosen.setting) === '2' &&
-        rows.some(r => originChoiceOf(r.setting) === '1');
+    const ordered = [chosen];
+    for (const row of rows) {
+        if (row !== chosen) ordered.push(row);
+    }
+    return { rows, ordered };
+}
 
+function opsOfRow(row: SgRow, rows: SgRow[]): SpaceGroupOps {
     return {
-        ops: operationsFor(chosen).map(symOpToString),
-        number: chosen.number,
-        symbol: chosen.symbol,
-        setting: chosen.setting,
-        settingLabel: settingLabelFor(chosen, rows),
+        ops: operationsFor(row).map(symOpToString),
+        number: row.number,
+        symbol: row.symbol,
+        setting: row.setting,
+        settingLabel: settingLabelFor(row, rows),
         assumed: rows.length > 1,
-        assumedOrigin
+        assumedOrigin: rows.length > 1 && originChoiceOf(row.setting) === '2' &&
+            rows.some(r => originChoiceOf(r.setting) === '1')
     };
+}
+
+/**
+ * The operations a declared space-group name stands for, or null when the
+ * name is not one this table knows. The `cell` is only consulted to choose
+ * between the hexagonal and rhombohedral settings of an R group; everything
+ * else is decided by the name's own settings suffix and the table's defaults.
+ */
+export function lookupSpaceGroupOps(name: string, cell?: CellShape): SpaceGroupOps | null {
+    const resolved = resolveRows(name, cell);
+    return resolved === null ? null : opsOfRow(resolved.ordered[0], resolved.rows);
+}
+
+/**
+ * Every setting a name leaves open, the one `lookupSpaceGroupOps` answers with
+ * first.
+ *
+ * A name such as `P n n n` names a group but says nothing about which of its
+ * two origins the coordinates use, and `R -3 c` says nothing about hexagonal
+ * versus rhombohedral axes. The choice the table makes for those is a
+ * convention, not a statement of the file, so a caller comparing a file's own
+ * operation list against the name has to try every setting before it may call
+ * the two inconsistent — otherwise a correctly written origin-choice-1 file is
+ * reported as contradicting its own name, and the "fix" it is offered rewrites
+ * the structure under the other origin.
+ *
+ * Returns an empty array when the name is not one this table knows.
+ */
+export function lookupSpaceGroupSettings(name: string, cell?: CellShape): SpaceGroupOps[] {
+    const resolved = resolveRows(name, cell);
+    if (resolved === null) return [];
+    return resolved.ordered.map(row => opsOfRow(row, resolved.rows));
 }

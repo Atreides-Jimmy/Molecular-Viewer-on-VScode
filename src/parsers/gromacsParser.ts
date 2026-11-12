@@ -111,9 +111,36 @@ function readAtomLines(lines: string[], count: number): { atoms: GroAtom[]; next
     return { atoms, next: i };
 }
 
+/**
+ * The monoatomic-ion residues whose names are not element spellings.
+ *
+ * CHARMM (and the GROMACS ports of its force fields) writes its ions as `SOD`,
+ * `CLA`, `CAL`, `POT`, `CES`, `BAR` and `IOD`, and the topology's atom name is
+ * the element the ion carries (`SOD  NA`, `CLA  CL`). Neither name is an
+ * element symbol, so neither of the rules below can read them: a three-letter
+ * residue fails the "residue name is the element" test, and `NA` then matches
+ * the protein atom-name pattern and becomes nitrogen. A sodium drawn as a
+ * nitrogen takes nitrogen's radius, colour and mass, and bonds to the wrong
+ * neighbours. The table states the element the residue is, which is the only
+ * place that fact exists.
+ */
+const ION_RESIDUE_ELEMENTS: { [residue: string]: string } = {
+    SOD: 'Na', CLA: 'Cl', CAL: 'Ca', POT: 'K', CES: 'Cs', BAR: 'Ba', IOD: 'I'
+};
+
 function atomElement(atom: GroAtom): string {
     const label = atom.label.trim();
     const residue = atom.residueName.trim();
+
+    // An ion residue is checked first: its atom name is a label for the ion,
+    // which may well read like a protein atom (`NA`, `CL`). The table is only
+    // trusted when the atom name agrees with it — it repeats the residue or
+    // spells the ion's element — so a residue that merely happens to be called
+    // `CAL` and carries a carbon is left to the ordinary rules.
+    const ion = ION_RESIDUE_ELEMENTS[residue.toUpperCase()];
+    if (ion && (label.toUpperCase() === residue.toUpperCase() || normalizeElementSymbol(label) === ion)) {
+        return ion;
+    }
 
     // A monoatomic ion's residue name is the element itself and its atom name
     // repeats it (`CA` in `CA`, `CL` in `CL`, `NA` in `NA`). The residue name

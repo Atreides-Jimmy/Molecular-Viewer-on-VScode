@@ -1,4 +1,6 @@
 import { Atom, Bond, MolecularData } from '../types';
+import { cellToLatticeVectors } from '../tools/crystalGeometry';
+import { buildPeriodicStructure, CellParameters, isUsableLattice, Site } from './periodicUtils';
 
 const ATOMIC_NUMBER_MAP: { [key: string]: number } = {
     H: 1, D: 1, HE: 2, LI: 3, BE: 4, B: 5, C: 6, N: 7, O: 8, F: 9, NE: 10,
@@ -75,7 +77,82 @@ interface PdbConect {
     hiCount: number;
 }
 
-export function parsePdb(content: string): MolecularData {    const lines = content.split(/\r?\n/);
+/**
+ * The unit cell a `CRYST1` record states, and the space-group name beside it.
+ *
+ * `CRYST1` is the only place a PDB states a cell, and it is fixed-width:
+ * a(9.3) in columns 7-15, b in 16-24, c in 25-33, the three angles as 7.2 in
+ * 34-54 and the Hermann-Mauguin symbol in 56-66, with the Z value after it.
+ * The columns are the authority as long as they agree with the same six
+ * numbers read as tokens; a writer that collapsed the padding still leaves
+ * those six numbers as the record's first tokens, and that is what is read
+ * when a slice disagrees with them — a shifted column picks up its neighbour
+ * (`640 20.0` for b) rather than failing. Anything the record cannot state as
+ * a cell — a non-positive axis length, an angle outside 0-180 — is rejected
+ * here and the caller reports the record instead of building a degenerate
+ * lattice from it.
+ */
+function readCryst1(line: string): { cell: CellParameters; spaceGroup: string } | null {
+    const sliceNumber = (from: number, to: number): number | null => {
+        const v = parseFloat(line.substring(from, to).trim());
+        return isFinite(v) ? v : null;
+    };
+    const parts = line.trim().split(/\s+/);
+    const toks = parts.slice(1, 7).map(t => parseFloat(t));
+    const tokenised = toks.length === 6 && toks.every(v => isFinite(v)) ? toks : null;
+
+    const fixed = [sliceNumber(6, 15), sliceNumber(15, 24), sliceNumber(24, 33),
+        sliceNumber(33, 40), sliceNumber(40, 47), sliceNumber(47, 54)];
+    const fixedOk = fixed.every(v => v !== null);
+    // The columns are trusted only when they agree with the same numbers read
+    // as tokens. A writer that collapsed the padding shifts every field, and a
+    // column slice then picks up the neighbouring value (`640 20.0` for b), so
+    // a disagreement means the line is not in the format's columns — the
+    // tokens, which cannot be shifted, are what is read then.
+    const aligned = fixedOk && (tokenised === null ||
+        fixed.every((v, i) => Math.abs((v as number) - tokenised[i]) <= 1e-6 * Math.max(1, Math.abs(tokenised[i]))));
+
+    let values: number[];
+    let spaceGroup: string;
+    if (aligned) {
+        values = fixed as number[];
+        spaceGroup = line.substring(55, 66).trim();
+    } else if (tokenised !== null) {
+        values = tokenised;
+        // The trailing Z is a bare integer; a symbol's settings are digits too
+        // (`P 21 21 21`), so only a token after at least two others is taken
+        // as the Z value.
+        const rest = parts.slice(7);
+        if (rest.length >= 3 && /^\d+$/.test(rest[rest.length - 1])) rest.pop();
+        spaceGroup = rest.join(' ');
+    } else {
+        return null;
+    }
+    const [a, b, c, alpha, beta, gamma] = values;
+    if (!(a > 0 && b > 0 && c > 0)) return null;
+    if (!(alpha > 0 && alpha < 180 && beta > 0 && beta < 180 && gamma > 0 && gamma < 180)) return null;
+    return {
+        cell: { a, b, c, alpha, beta, gamma },
+        spaceGroup: /[A-Za-z]/.test(spaceGroup) ? spaceGroup : ''
+    };
+}
+
+/**
+ * The cell a molecule-only writer emits when it has none: a 1 Angstrom cube.
+ *
+ * OpenBabel and several converters write `CRYST1 1.000 1.000 1.000 90 90 90 P
+ * 1` for a structure that has no cell at all. Taken at face value it folds
+ * every atom into a one-Angstrom box, so it is recognised as the placeholder it
+ * is — no crystal has an axis shorter than its own bonds.
+ */
+function isPlaceholderCell(cell: CellParameters): boolean {
+    const near = (v: number, want: number, tol: number) => Math.abs(v - want) <= tol;
+    return near(cell.a, 1, 1e-3) && near(cell.b, 1, 1e-3) && near(cell.c, 1, 1e-3) &&
+        near(cell.alpha, 90, 1e-2) && near(cell.beta, 90, 1e-2) && near(cell.gamma, 90, 1e-2);
+}
+
+export function parsePdb(content: string): MolecularData {
+    const lines = content.split(/\r?\n/);
     const atoms: Atom[] = [];
     const bonds: Bond[] = [];
     let hasExplicitBonds = false;
@@ -86,6 +163,14 @@ export function parsePdb(content: string): MolecularData {    const lines = cont
 
     const atomSerialMap = new Map<number, number>();
     const seenSerials = new Set<number>();
+    // The first `CRYST1` record wins: a file that repeats it (two jobs
+    // concatenated) describes the same cell both times, and the atoms are the
+    // ones written under the first. A record that is present but unreadable is
+    // remembered so the reader can say so rather than silently drawing a
+    // molecule.
+    let cell: CellParameters | null = null;
+    let cellSpaceGroup = '';
+    let cellBroken = false;
     // Collected rather than pushed: a `CONECT` record may name an atom that is
     // listed further down the file, and the order of a bond is only known once
     // every record has been seen.
@@ -182,7 +267,16 @@ export function parsePdb(content: string): MolecularData {    const lines = cont
             }
         } else if (recType === 'TITLE') {
             title += line.substring(10).trim() + ' ';
-        } else if (recType === 'CRYST1' || recType === 'HEADER' || recType === 'REMARK' || recType === 'COMPND' || recType === 'SOURCE' || recType === 'KEYWDS' || recType === 'EXPDTA' || recType === 'AUTHOR' || recType === 'REVDAT' || recType === 'JRNL' || recType === 'SEQRES' || recType === 'MODRES' || recType === 'DBREF' || recType === 'FORMUL' || recType === 'HELIX' || recType === 'SHEET' || recType === 'TURN' || recType === 'SSBOND' || recType === 'MASTER') {
+        } else if (recType === 'CRYST1') {
+            if (cell === null && !cellBroken) {
+                const read = readCryst1(line);
+                if (read === null) cellBroken = true;
+                else {
+                    cell = read.cell;
+                    cellSpaceGroup = read.spaceGroup;
+                }
+            }
+        } else if (recType === 'HEADER' || recType === 'REMARK' || recType === 'COMPND' || recType === 'SOURCE' || recType === 'KEYWDS' || recType === 'EXPDTA' || recType === 'AUTHOR' || recType === 'REVDAT' || recType === 'JRNL' || recType === 'SEQRES' || recType === 'MODRES' || recType === 'DBREF' || recType === 'FORMUL' || recType === 'HELIX' || recType === 'SHEET' || recType === 'TURN' || recType === 'SSBOND' || recType === 'MASTER') {
             // skip
         }
     }
@@ -206,5 +300,49 @@ export function parsePdb(content: string): MolecularData {    const lines = cont
 
     title = title.trim() || 'PDB Structure';
 
-    return { atoms, bonds, title, hasExplicitBonds, charge, multiplicity };
+    // ----- the cell the file states -----
+    // A `CRYST1` record is the file's statement that the atoms below are a
+    // unit cell, not a lone molecule: without it every periodic property —
+    // periodic bonds, supercells, the cell editor, XRD — is unavailable and a
+    // NaCl slab is drawn as 16 disconnected ions. The operations are the
+    // identity, though: a PDB model is the coordinates the depositor wrote
+    // (for a protein, the asymmetric unit), and expanding it under the stated
+    // group would multiply every molecule in the file. The group is kept for
+    // the cell panel, which is where the file states it.
+    const warnings: string[] = [];
+    if (cellBroken) {
+        warnings.push('the CRYST1 record does not state a usable cell: the structure is read as a molecule');
+    }
+    if (cell !== null && atoms.length > 0) {
+        const lattice = cellToLatticeVectors(cell.a, cell.b, cell.c, cell.alpha, cell.beta, cell.gamma);
+        if (isPlaceholderCell(cell)) {
+            warnings.push('the CRYST1 record states the 1 A placeholder cell some writers emit for a ' +
+                'structure without one: the structure is read as a molecule');
+        } else if (isUsableLattice(lattice)) {
+            const sites: Site[] = atoms.map(atom => {
+                const site: Site = { element: atom.element, cart: [atom.x, atom.y, atom.z] };
+                if (atom.occupancy !== undefined) site.occupancy = atom.occupancy;
+                if (atom.ghost) site.ghost = true;
+                return site;
+            });
+            const data = buildPeriodicStructure(lattice, sites, title, warnings);
+            if (data.crystal) {
+                if (cellSpaceGroup !== '') data.crystal.spaceGroup = cellSpaceGroup;
+                // `CONECT` bonds are the file's own table, exactly like a CIF's
+                // `_geom_bond` loop: they address these cell atoms, so they
+                // travel as `fileBonds` and are merged over the perceived set.
+                if (bonds.length > 0) {
+                    data.crystal.fileBonds = bonds;
+                    data.hasExplicitBonds = true;
+                }
+            }
+            return data;
+        } else {
+            warnings.push('the CRYST1 cell is degenerate: the structure is read as a molecule');
+        }
+    }
+
+    const result: MolecularData = { atoms, bonds, title, hasExplicitBonds, charge, multiplicity };
+    if (warnings.length > 0) result.warnings = warnings;
+    return result;
 }
