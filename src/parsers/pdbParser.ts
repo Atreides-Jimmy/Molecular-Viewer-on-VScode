@@ -59,6 +59,22 @@ function pdbElement(atomNameField: string, altElement?: string): string {
     return first;
 }
 
+/**
+ * One bond a `CONECT` record states, keyed by its two serials.
+ *
+ * The record names a partner once per bond, so a partner listed twice is a
+ * double bond — the format's only way of stating an order at all. Records are
+ * normally written from both ends (`CONECT    1    2    2` beside
+ * `CONECT    2    1`), which is why the two directions are counted apart: the
+ * order is one direction's count, not the total of both.
+ */
+interface PdbConect {
+    lo: number;
+    hi: number;
+    loCount: number;
+    hiCount: number;
+}
+
 export function parsePdb(content: string): MolecularData {    const lines = content.split(/\r?\n/);
     const atoms: Atom[] = [];
     const bonds: Bond[] = [];
@@ -70,6 +86,10 @@ export function parsePdb(content: string): MolecularData {    const lines = cont
 
     const atomSerialMap = new Map<number, number>();
     const seenSerials = new Set<number>();
+    // Collected rather than pushed: a `CONECT` record may name an atom that is
+    // listed further down the file, and the order of a bond is only known once
+    // every record has been seen.
+    const conect = new Map<string, PdbConect>();
 
     for (const line of lines) {
         const recType = line.substring(0, 6).trim();
@@ -135,22 +155,29 @@ export function parsePdb(content: string): MolecularData {    const lines = cont
         } else if (recType === 'CONECT') {
             hasExplicitBonds = true;
             const fields: number[] = [];
+            // CONECT carries up to four partners per line (columns 7-11, 12-16,
+            // 17-21, 22-26) and a bond order is expressed by repeating a serial;
+            // the scan therefore runs over every field the line has, not just
+            // the four the format reserves.
             for (let pos = 6; pos < Math.min(line.length, 46); pos += 5) {
                 const val = parseInt(line.substring(pos, pos + 5).trim(), 10);
                 if (!isNaN(val)) fields.push(val);
             }
             if (fields.length >= 2) {
-                const a1Serial = fields[0];
+                const anchor = fields[0];
                 for (let k = 1; k < fields.length; k++) {
-                    const a2Serial = fields[k];
-                    const a1 = atomSerialMap.get(a1Serial);
-                    const a2 = atomSerialMap.get(a2Serial);
-                    if (a1 !== undefined && a2 !== undefined && a1 < a2) {
-                        const exists = bonds.some(b =>
-                            (b.atom1 === a1 && b.atom2 === a2) || (b.atom1 === a2 && b.atom2 === a1)
-                        );
-                        if (!exists) bonds.push({ atom1: a1, atom2: a2, order: 1 });
+                    const partner = fields[k];
+                    if (partner === anchor) continue;
+                    const lo = anchor < partner ? anchor : partner;
+                    const hi = anchor < partner ? partner : anchor;
+                    const key = lo + '_' + hi;
+                    let pair = conect.get(key);
+                    if (pair === undefined) {
+                        pair = { lo: lo, hi: hi, loCount: 0, hiCount: 0 };
+                        conect.set(key, pair);
                     }
+                    if (anchor === lo) pair.loCount++;
+                    else pair.hiCount++;
                 }
             }
         } else if (recType === 'TITLE') {
@@ -159,6 +186,23 @@ export function parsePdb(content: string): MolecularData {    const lines = cont
             // skip
         }
     }
+
+    // ----- the bonds the file stated -----
+    // Emitted once every record has been read, so a record that names a later
+    // atom still finds it. The order is the larger of the two directions'
+    // counts: a channel written from both ends lists each single bond once on
+    // each side, and summing would turn every one of them into a double bond.
+    // Nothing is invented for a file that states no order — a bond listed once
+    // stays a single bond, and that is exactly what the reader knows.
+    conect.forEach(pair => {
+        const i1 = atomSerialMap.get(pair.lo);
+        const i2 = atomSerialMap.get(pair.hi);
+        if (i1 === undefined || i2 === undefined || i1 === i2) return;
+        let order = pair.loCount > pair.hiCount ? pair.loCount : pair.hiCount;
+        if (order < 1) order = 1;
+        if (order > 3) order = 3;
+        bonds.push({ atom1: Math.min(i1, i2), atom2: Math.max(i1, i2), order });
+    });
 
     title = title.trim() || 'PDB Structure';
 

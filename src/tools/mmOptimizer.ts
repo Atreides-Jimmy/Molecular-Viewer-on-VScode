@@ -105,6 +105,8 @@ const ANGLE_CAP_COMPRESSED_RAD = (30.0 * Math.PI) / 180.0;
  *  drawing that should be pulled back — while an over-compressed one only ever
  *  appears in a strained ring that must be left alone. */
 const ANGLE_CAP_OPEN_RAD = (60.0 * Math.PI) / 180.0;
+/** An ideal angle at or above this is a linear centre (a two-coordinate sp one). */
+const LINEAR_ANGLE_RAD = Math.PI - 1e-6;
 /** Non-bonded term: the pair is switched off here. Settable per run (the panel
  *  offers 5-12 Å); the default is the value every earlier release used. */
 const DEFAULT_CUTOFF = 8.0;
@@ -504,6 +506,16 @@ interface AngleTerm {
     j: number;
     k: number;
     theta0: number;
+    /**
+     * A two-coordinate centre whose ideal angle is 180°. Its deviation is
+     * always negative, so the compressed-angle cap below — which exists to
+     * leave a strained ring as drawn — would silence the very term that has to
+     * straighten a cumulated centre (O=C=O drawn at 120°). Such a centre cannot
+     * be part of a strained ring: a ring atom has at least two ring bonds and a
+     * 180° angle between them is impossible in a three-membered ring and
+     * unstrained in any larger one.
+     */
+    linear?: boolean;
 }
 interface TorsionTerm {
     i: number;
@@ -717,15 +729,30 @@ function coordinationIdeal(el: string, cn: number): { kind: number; theta0: numb
  * Hybridisation code the engine uses: 2 = sp, 1 = sp2, 0 = sp3. Read off the
  * bond orders an atom already has, exactly the way the engine's own passes read
  * a bond list (a triple bond is sp, a double or an aromatic bond is sp2).
+ *
+ * A two-coordinate centre carrying two multiple bonds is cumulated — O=C=O,
+ * allene, ketene, C3O2 — and its two ligands leave along one axis, so it is sp,
+ * not sp2: reading it as sp2 bends it to 120° and an MM run can then never
+ * straighten it. The rule is stated for carbon only, because a two-coordinate
+ * centre of another element can still own a lone pair that keeps it bent
+ * (SO2's 119° with two S=O bonds), and the element is the only thing that tells
+ * the two cases apart here.
  */
-function hybridisationOf(orders: number[]): number {
+function hybridisationOf(orders: number[], element: string): number {
     let max = 0;
+    let multiple = 0;
     for (let i = 0; i < orders.length; i++) {
         if (orders[i] > max) {
             max = orders[i];
         }
+        if (orders[i] >= 1.75) {
+            multiple++;
+        }
     }
     if (max >= 2.5) {
+        return 2;
+    }
+    if (element === 'C' && multiple >= 2 && orders.length === 2) {
         return 2;
     }
     if (max >= 1.25) {
@@ -843,8 +870,9 @@ function buildField(
         if (flags.coordination && isMetal(elements[c])) {
             continue;
         }
-        const hyb = hybridisationOf(nbOrders[c]);
+        const hyb = hybridisationOf(nbOrders[c], elements[c]);
         const theta0 = (empiricalBondAngle(elements[c], hyb) * Math.PI) / 180.0;
+        const linear = list.length === 2 && theta0 >= LINEAR_ANGLE_RAD;
         const k = angleForce(elements[c]) * HYBRIDISATION_ANGLE_SCALE[hyb];
         for (let a = 0; a < list.length - 1; a++) {
             for (let b2 = a + 1; b2 < list.length; b2++) {
@@ -853,7 +881,7 @@ function buildField(
                 if (!mobile[c] && !mobile[i] && !mobile[j]) {
                     continue;
                 }
-                anglesOut.push({ c: c, i: i, j: j, k: k, theta0: theta0 });
+                anglesOut.push({ c: c, i: i, j: j, k: k, theta0: theta0, linear: linear });
                 stiffness[c] += 0.5 * k;
                 stiffness[i] += 0.25 * k;
                 stiffness[j] += 0.25 * k;
@@ -886,8 +914,8 @@ function buildField(
         if (!mobile[na] && !mobile[j] && !mobile[k] && !mobile[nc]) {
             continue;
         }
-        const hybJ = hybridisationOf(nbOrders[j]);
-        const hybK = hybridisationOf(nbOrders[k]);
+        const hybJ = hybridisationOf(nbOrders[j], elements[j]);
+        const hybK = hybridisationOf(nbOrders[k], elements[k]);
         let terms: TorsionTerm | null = null;
         if (bond.order >= 1.75) {
             // A double bond: two-fold, so both cis and trans are minima — the
@@ -920,7 +948,7 @@ function buildField(
         if (list.length !== 3) {
             continue;
         }
-        if (hybridisationOf(nbOrders[c]) !== 1) {
+        if (hybridisationOf(nbOrders[c], elements[c]) !== 1) {
             continue;
         }
         const i = list[0];
@@ -1233,14 +1261,14 @@ function evaluate(
         }
         const theta = Math.acos(cosTheta);
         const dev = theta - term.theta0;
-        if (dev > ANGLE_CAP_OPEN_RAD) {
+        if (!term.linear && dev > ANGLE_CAP_OPEN_RAD) {
             // Off by more than the cap on the open side: a drawing that is too
             // wide to be trusted, so the term keeps its capped energy but exerts
             // no force and the optimiser never fights whatever holds it there.
             energy += 0.5 * term.k * ANGLE_CAP_OPEN_RAD * ANGLE_CAP_OPEN_RAD;
             continue;
         }
-        if (dev < -ANGLE_CAP_COMPRESSED_RAD) {
+        if (!term.linear && dev < -ANGLE_CAP_COMPRESSED_RAD) {
             // Squeezed past the compressed cap: a strained ring, left as drawn.
             energy += 0.5 * term.k * ANGLE_CAP_COMPRESSED_RAD * ANGLE_CAP_COMPRESSED_RAD;
             continue;

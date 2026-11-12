@@ -48,6 +48,26 @@ interface CifLoop {
     rows: string[][];
 }
 
+/**
+ * A place in the file that survives a line break.
+ *
+ * A CIF loop body is a stream of values, not a table of lines: a record is
+ * exactly as many values as the loop has keys, and the file is free to put two
+ * records on one line or to wrap one record over several. The reader therefore
+ * walks the body with a cursor that can cross lines, and only the item/keyword
+ * level below stays line-oriented.
+ */
+interface CifCursor {
+    line: number;
+    col: number;
+}
+
+/** One token of that stream: a value, a data name, or a structural keyword. */
+interface CifToken {
+    kind: 'value' | 'tag' | 'keyword';
+    text: string;
+}
+
 interface CifData {
     items: { [key: string]: string };
     loops: CifLoop[];
@@ -231,18 +251,109 @@ function tokenize(content: string): CifBlock[] {
         semicolonKey = null;
     }
 
-    function readValue(rest: string): { value: string; consumed: number } {
-        const trimmed = rest.trimStart();
-        if (trimmed.startsWith("'")) {
-            const end = trimmed.indexOf("'", 1);
-            if (end >= 0) return { value: trimmed.substring(1, end), consumed: (rest.length - trimmed.length) + end + 1 };
+    /** The characters CIF treats as token separators. */
+    function isBlankChar(ch: string): boolean {
+        return ch === ' ' || ch === '\t' || ch === '\r' || ch === '\f' || ch === '\v';
+    }
+
+    /**
+     * Move the cursor onto the next token: past blank space, past a comment
+     * (`#` to the end of its line) and past empty lines. A `#` only starts a
+     * comment where a token could start, which is where this leaves the cursor.
+     */
+    function skipGap(cur: CifCursor): void {
+        while (cur.line < lines.length) {
+            const text = lines[cur.line];
+            if (cur.col >= text.length) {
+                cur.line++;
+                cur.col = 0;
+                continue;
+            }
+            const ch = text.charAt(cur.col);
+            if (isBlankChar(ch)) {
+                cur.col++;
+                continue;
+            }
+            if (ch === '#') {
+                cur.line++;
+                cur.col = 0;
+                continue;
+            }
+            return;
         }
-        if (trimmed.startsWith('"')) {
-            const end = trimmed.indexOf('"', 1);
-            if (end >= 0) return { value: trimmed.substring(1, end), consumed: (rest.length - trimmed.length) + end + 1 };
+    }
+
+    /** A structural keyword that ends whatever construct is being read. */
+    function isKeywordToken(text: string): boolean {
+        const lower = text.charAt(0).toLowerCase();
+        if (lower !== 'l' && lower !== 'd' && lower !== 's' && lower !== 'g') return false;
+        const word = text.toLowerCase();
+        return word.indexOf('loop_') === 0 || word.indexOf('data_') === 0 ||
+            word.indexOf('save_') === 0 || word.indexOf('stop_') === 0 || word.indexOf('global_') === 0;
+    }
+
+    /**
+     * The token at the cursor, which must already sit on a non-blank character.
+     *
+     * Quoted values are delimited by their own quote and may contain blanks; a
+     * semicolon text field runs from a `;` in the first column to the next line
+     * that opens with one, and is the only value a CIF may wrap over lines
+     * without a quote. Everything else is a run of non-blank characters and
+     * ends at the line boundary — which is exactly what lets the caller read two
+     * records from one line and one record from several.
+     */
+    function readToken(cur: CifCursor): CifToken {
+        const text = lines[cur.line];
+        const start = cur.col;
+        const ch = text.charAt(start);
+        if (ch === "'" || ch === '"') {
+            const end = text.indexOf(ch, start + 1);
+            if (end >= 0) {
+                cur.col = end + 1;
+                return { kind: 'value', text: text.substring(start + 1, end) };
+            }
+        } else if (ch === ';' && text.substring(0, start).trim() === '') {
+            // A text field: this line to the next line that opens with a `;`.
+            const buf: string[] = [];
+            const head = text.substring(start + 1);
+            if (head !== '') buf.push(head);
+            cur.line++;
+            cur.col = 0;
+            while (cur.line < lines.length) {
+                const body = lines[cur.line];
+                const mark = body.indexOf(';');
+                if (mark >= 0 && body.substring(0, mark).trim() === '') {
+                    // Whatever follows the closing `;` on its own line is the
+                    // next token, not part of the text.
+                    cur.col = mark + 1;
+                    break;
+                }
+                buf.push(body);
+                cur.line++;
+            }
+            return { kind: 'value', text: buf.join('\n').trim() };
         }
-        const parts = trimmed.split(/\s+/);
-        return { value: parts[0], consumed: rest.length - trimmed.length + parts[0].length };
+        let end = start;
+        while (end < text.length && !isBlankChar(text.charAt(end))) end++;
+        cur.col = end;
+        const word = text.substring(start, end);
+        if (word.charAt(0) === '_') return { kind: 'tag', text: word };
+        if (isKeywordToken(word)) return { kind: 'keyword', text: word };
+        return { kind: 'value', text: word };
+    }
+
+    /**
+     * The line the outer, line-oriented reader resumes from when a loop body
+     * ends. A body can end in the middle of a line (a `_key value` written
+     * behind the last value), so what is left of that line is handed back
+     * rather than dropped.
+     */
+    function resumeAfterLoop(cur: CifCursor): number {
+        if (cur.line >= lines.length) return lines.length;
+        const text = lines[cur.line];
+        if (cur.col >= text.length) return cur.line + 1;
+        if (cur.col > 0) lines[cur.line] = text.substring(cur.col);
+        return cur.line;
     }
 
     while (i < lines.length) {
@@ -300,57 +411,71 @@ function tokenize(content: string): CifBlock[] {
         if (line.startsWith('loop_')) {
             pendingKey = null;
             const loop: CifLoop = { keys: [], rows: [] };
-            i++;
-            let startedRows = false;
-            while (i < lines.length) {
-                const l = lines[i].trim();
-                if (l === '' || l.startsWith('#')) { i++; continue; }
-                if (l.startsWith('_')) {
-                    if (startedRows) break;
-                    const parts = l.split(/\s+/);
-                    if (parts.length > 1) {
-                        // Key with inline value = scalar item, not part of loop
+            const cur: CifCursor = { line: i, col: rawLine.indexOf('loop_') + 5 };
+
+            // ----- the key list -----
+            // Keys may share the keyword's line and may run over several lines.
+            // A value that follows a key *on the key's own line* is a `_key
+            // value` item rather than a loop header, which is how this reader
+            // has always read such a line: the pair is handed back to the line
+            // reader and the loop keeps the keys of the lines above it.
+            let abandoned = false;
+            let lastKey: CifCursor = { line: cur.line, col: cur.col };
+            while (true) {
+                skipGap(cur);
+                if (cur.line >= lines.length) break;
+                const before: CifCursor = { line: cur.line, col: cur.col };
+                const tok = readToken(cur);
+                if (tok.kind === 'tag') {
+                    lastKey = before;
+                    loop.keys.push(tok.text);
+                    continue;
+                }
+                const inlineItem = loop.keys.length > 0 && before.line === lastKey.line;
+                cur.line = inlineItem ? lastKey.line : before.line;
+                cur.col = inlineItem ? lastKey.col : before.col;
+                if (inlineItem) {
+                    loop.keys.pop();
+                    abandoned = true;
+                }
+                break;
+            }
+
+            // ----- the records -----
+            // A record is complete when it holds one value per key, whatever
+            // the line breaks did. The old reader assembled at most one record
+            // per line and discarded the rest of the line, so a compact table
+            // (`1 2 3 4` for two keys) lost half its rows, and a record wrapped
+            // over two lines came out short and took the whole loop with it.
+            if (!abandoned && loop.keys.length > 0) {
+                const width = loop.keys.length;
+                let row: string[] = [];
+                while (true) {
+                    skipGap(cur);
+                    if (cur.line >= lines.length) break;
+                    const before: CifCursor = { line: cur.line, col: cur.col };
+                    const tok = readToken(cur);
+                    // A data name or a keyword is never a value: the loop body
+                    // ends here, exactly where the next construct starts.
+                    if (tok.kind !== 'value') {
+                        cur.line = before.line;
+                        cur.col = before.col;
                         break;
                     }
-                    loop.keys.push(parts[0]);
-                    i++;
-                } else if (l.startsWith('loop_') || l.startsWith('data_') || l.startsWith('save_')) {
-                    break;
-                } else {
-                    startedRows = true;
-                    const row: string[] = [];
-                    let lineRest = lines[i];
-                    for (let k = 0; k < loop.keys.length; k++) {
-                        if (lineRest.trim() === '') break;
-                        if (lineRest.trim().startsWith(';')) {
-                            const buf: string[] = [];
-                            const firstPart = lineRest.trim().substring(1);
-                            if (firstPart !== '') buf.push(firstPart);
-                            i++;
-                            while (i < lines.length && !lines[i].trim().startsWith(';')) {
-                                buf.push(lines[i]);
-                                i++;
-                            }
-                            row.push(buf.join('\n').trim());
-                            lineRest = '';
-                            if (i < lines.length) {
-                                lineRest = lines[i].replace(/^\s*;\s*/, '');
-                            }
-                        } else {
-                            const { value, consumed } = readValue(lineRest);
-                            row.push(value);
-                            lineRest = lineRest.substring(consumed);
-                        }
+                    row.push(tok.text);
+                    if (row.length === width) {
+                        loop.rows.push(row);
+                        row = [];
                     }
-                    if (row.length > 0) loop.rows.push(row);
-                    i++;
                 }
+                // What a truncated file leaves behind: a partial record is kept
+                // so its consumer can count it as the short row it is instead
+                // of the structure quietly losing an atom.
+                if (row.length > 0) loop.rows.push(row);
             }
-            if (loop.keys.length > 0) {
-                if (loop.rows.length === 0 || loop.rows[0].length === loop.keys.length) {
-                    data.loops.push(loop);
-                }
-            }
+
+            if (loop.keys.length > 0) data.loops.push(loop);
+            i = resumeAfterLoop(cur);
             continue;
         }
 

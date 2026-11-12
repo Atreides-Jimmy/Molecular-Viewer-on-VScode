@@ -55,6 +55,18 @@ const ANGLE_ITERATIONS = 300;
 const ANGLE_STEP_DEG = 12.0;
 const ANGLE_DAMPING = 0.5;
 const ANGLE_TOLERANCE_DEG = 0.02;
+/**
+ * Shape thresholds for a centre whose bond list states no order. A planar
+ * three-coordinate carbon's three angles make a full turn (360°); a tetrahedral
+ * one's make 328°, and no real sp3 centre comes near 350°. A linear
+ * two-coordinate centre is 180°; nothing sp3 is anywhere near 160°. Two bonds
+ * at a trigonal angle are the third-direction pair of an sp2 centre that is one
+ * hydrogen short, well above the ~109° of a tetrahedral centre (and its
+ * methylene, which has two hydrogens to add).
+ */
+const PLANAR_ANGLE_SUM_DEG = 350.0;
+const LINEAR_ANGLE_DEG = 160.0;
+const TRIGONAL_ANGLE_DEG = 115.0;
 /** Direction candidates of the greedy start (deterministic Fibonacci sphere). */
 const DIRECTION_CANDIDATES = 64;
 /** Non-bonded clash: below this fraction of the van der Waals sum the hydrogen moves away. */
@@ -231,7 +243,16 @@ function placeHydrogens(rawAtoms: unknown, rawBonds: unknown, rawSelected: unkno
             continue;
         }
         const v = valence[idx];
-        const hybrid = hybridizationOf(adjOrders[idx], neighbourConjugated(idx, adj, adjOrders), el);
+        let hybrid = hybridizationOf(adjOrders[idx], neighbourConjugated(idx, adj, adjOrders), el);
+        if (hybrid === SP3) {
+            // A bond list that states no order at all — PDB `CONECT`, a Gaussian
+            // `connect` section — reads as a set of single bonds, and the shape
+            // of the centre is then the only evidence there is.
+            const shaped = hybridizationFromShape(idx, adj, adjOrders, el, xs, ys, zs, usable);
+            if (shaped >= 0) {
+                hybrid = shaped;
+            }
+        }
         // A hydrogen is a whole atom, so the deficit cannot simply be rounded:
         // an aromatic bond is 1.5 in this model and a partially charged centre
         // can leave a half unit. See `hydrogenDeficit`.
@@ -352,6 +373,81 @@ function hybridizationOf(orders: number[], neighbourConjugated: boolean, element
         return SP2;
     }
     return SP3;
+}
+
+/**
+ * Hybridization from the shape around a carbon centre, for a structure whose
+ * bond list states no bond order.
+ *
+ * A `CONECT` record, a Gaussian `connect` section and every other
+ * "connectivity, not bonding" source write each bond once, whatever its order,
+ * so the pass above calls an aromatic or carbonyl carbon sp3 and the σ count
+ * completes it with a hydrogen the molecule does not have: a benzene CH gains
+ * one, and so does an amide carbonyl carbon. The shape is the evidence those
+ * files do carry — a three-coordinate carbon whose three angles make a full turn
+ * is planar (sp2, three σ bonds) and a two-coordinate one at 180° is linear
+ * (sp, two σ bonds) — so it is consulted only when no bond order was stated,
+ * and only for carbon, the element whose deficit is counted in σ bonds.
+ *
+ * Returns -1 when the shape has nothing to say, so the caller keeps the
+ * order-based answer.
+ */
+function hybridizationFromShape(
+    centre: number,
+    adj: number[][],
+    adjOrders: number[][],
+    element: string,
+    xs: number[],
+    ys: number[],
+    zs: number[],
+    usable: boolean[]
+): number {
+    if (element !== 'C') {
+        return -1;
+    }
+    const orders = adjOrders[centre];
+    for (let k = 0; k < orders.length; k++) {
+        // An order the structure did state is the better evidence, and the
+        // pass above has already used it.
+        if (orders[k] > 1.0 + 1e-6) {
+            return -1;
+        }
+    }
+    const list = adj[centre];
+    const count = list.length;
+    if (count < 2 || count > 3) {
+        return -1;
+    }
+    const dirs: number[][] = [];
+    for (let k = 0; k < count; k++) {
+        const j = list[k];
+        if (!usable[j]) {
+            return -1;
+        }
+        const dir = unitVector(xs[centre], ys[centre], zs[centre], xs[j], ys[j], zs[j]);
+        if (dir === null) {
+            return -1;
+        }
+        dirs.push(dir);
+    }
+    if (count === 2) {
+        const angle = angleBetween(dirs[0], dirs[1]);
+        if (angle >= LINEAR_ANGLE_DEG) {
+            return SP;
+        }
+        // A PDB refined from X-ray data carries no hydrogens at all, so an
+        // aromatic carbon appears with its two ring bonds and nothing else:
+        // two bonds at a trigonal angle are an sp2 centre one hydrogen short,
+        // not a methylene. A tetrahedral centre — including a small ring's
+        // methylene, whose angle is smaller still — stays below this.
+        if (angle >= TRIGONAL_ANGLE_DEG) {
+            return SP2;
+        }
+        return -1;
+    }
+    const sum = angleBetween(dirs[0], dirs[1]) + angleBetween(dirs[1], dirs[2]) +
+        angleBetween(dirs[0], dirs[2]);
+    return sum >= PLANAR_ANGLE_SUM_DEG ? SP2 : -1;
 }
 
 /** True when a neighbour carries a multiple bond of its own — an amide/phosphoramide centre. */

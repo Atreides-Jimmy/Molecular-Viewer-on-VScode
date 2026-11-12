@@ -17714,7 +17714,10 @@ function doSave(){
     // CONECT is written in the (atom1 < atom2) direction the parser reads, so a
     // stored reverse bond is the same edge after a save and a re-open instead of
     // being dropped as "a2 < a1". Pairs are also sorted, which is what makes a
-    // strict PDB tool list them in serial order.
+    // strict PDB tool list them in serial order. A multiple bond repeats the
+    // partner's serial, which is the only way this format states an order: the
+    // reader counts the repeats back into one, so a saved PDB no longer loses
+    // the double bonds it was opened with.
     var conectPairs=[];
     MD.bonds.forEach(function(b){
         if(typeof b.atom1!=='number'||typeof b.atom2!=='number')return;
@@ -17722,7 +17725,10 @@ function doSave(){
         var lo=b.atom1<b.atom2?b.atom1:b.atom2;
         var hi=b.atom1<b.atom2?b.atom2:b.atom1;
         if(lo<0||hi>=MD.atoms.length)return;
-        conectPairs.push([lo+1,hi+1]);
+        // 1, 2 or 3: an aromatic 1.5 has no spelling here and stays one edge,
+        // which is what every PDB of an aromatic ring writes.
+        var rep=b.order>=2.5?3:(b.order>=1.75?2:1);
+        conectPairs.push([lo+1,hi+1,rep]);
     });
     conectPairs.sort(function(p,q){return p[0]-q[0]||p[1]-q[1]});
     var lastPair='';
@@ -17732,7 +17738,10 @@ function doSave(){
         lastPair=key;
         var a1=(''+p[0]);while(a1.length<5)a1=' '+a1;
         var a2=(''+p[1]);while(a2.length<5)a2=' '+a2;
-        pdb+='CONECT'+a1+a2+'\n';
+        var line='CONECT'+a1;
+        var rep=p[2]===2||p[2]===3?p[2]:1;
+        for(var r=0;r<rep;r++)line+=a2;
+        pdb+=line+'\n';
     });
     pdb+='END\n';
 
