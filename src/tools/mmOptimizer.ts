@@ -120,9 +120,22 @@ const LIST_BUFFER = 2.0;
  *  build. Shorter than the buffer the list is built with, so a pair that
  *  comes into range is always seen before it matters. */
 const VDW_REBUILD_DRIFT = 0.5;
-/** A 1-3 pair (two atoms sharing a neighbour) counts at full strength below
- *  this fraction of its van der Waals sum — see buildNonbondedList. */
+/** A 1-3 pair (two atoms sharing a neighbour) is re-admitted as pure repulsion
+ *  inside this fraction of its van der Waals sum — see buildNonbondedList. The
+ *  term switches OFF exactly here and reaches full strength at
+ *  `CLASH_1_3_FULL`, so entering the pair list at this boundary adds no energy
+ *  and no force: a bare membership test injected ~(1/0.45)^12·ε ≈ 1.1e4·ε the
+ *  moment a rebuilt list happened to catch a pair just inside it.
+ *
+ *  The list window is wider than the switch so a rebuild sees the pair before
+ *  it reaches the strong part of the well. */
 const CLASH_1_3_FRACTION = 0.45;
+/** Where the 1-3 clash term reaches full strength (fraction of σ). */
+const CLASH_1_3_FULL = 0.35;
+/** How far past the switch a 1-3 pair is still carried in the list. Beyond
+ *  `CLASH_1_3_FRACTION` the term is exactly zero, so this only decides when the
+ *  pair starts being watched, never what it contributes. */
+const CLASH_1_3_WINDOW = 0.6;
 /** A 1-4 pair (three bonds apart) counts at this fraction of full strength. */
 const FOURTEEN_SCALE = 0.5;
 /** σ/r ceiling: keeps a pile-up finite instead of Infinity/NaN. */
@@ -1146,11 +1159,16 @@ function buildNonbondedList(
                             // (a hydrogen pushed onto its neighbour's hydrogen by a
                             // drag, say) would otherwise sit in the angle term's
                             // capped, force-free window and could collapse onto the
-                            // atom. Below this fraction of the van der Waals sum the
+                            // atom. Inside this fraction of the van der Waals sum the
                             // pair comes back as pure repulsion, which can only ever
                             // push the two apart.
+                            //
+                            // The window is deliberately wider than the switch in
+                            // the energy below: a pair enters the list where its
+                            // contribution is already zero, so a rebuilt list can
+                            // never add a finite jump at the moment it is rebuilt.
                             const r = Math.sqrt(rx * rx + ry * ry + rz * rz);
-                            if (!(r < CLASH_1_3_FRACTION * sigma)) {
+                            if (!(r < CLASH_1_3_WINDOW * sigma)) {
                                 continue;
                             }
                             out.push({ i: i, j: j, epsilon: epsilon, sigma: sigma, scale: 1.0, repulsionOnly: true });
@@ -1483,6 +1501,27 @@ function evaluate(
             if (!useLJ) {
                 continue;
             }
+            // The term is switched on over `CLASH_1_3_FULL`…`CLASH_1_3_FRACTION`
+            // of σ and is exactly zero at the outer end, which is also where the
+            // pair enters and leaves the list. Without the switch a rebuilt list
+            // that caught a pair just inside the window added the whole
+            // (1/0.45)^12·ε ≈ 1.1e4·ε at once — a step of the energy between two
+            // evaluations of the *same* geometry, which no line search can walk
+            // and which showed up as a failed optimisation rather than as the
+            // clash it was.
+            const off = CLASH_1_3_FRACTION * term.sigma;
+            if (r >= off) {
+                continue;
+            }
+            const on = CLASH_1_3_FULL * term.sigma;
+            let clash = 1.0;
+            let dClash = 0.0;
+            if (r > on) {
+                const t = (off - r) / (off - on);
+                clash = t * t * (3.0 - 2.0 * t);
+                // dw/dr of the smoothstep above.
+                dClash = (-6.0 * t * (1.0 - t)) / (off - on);
+            }
             // Pure r^-12 repulsion, kept finite (and still separating) by the
             // same tangent continuation the main path uses.
             const c = 1.0 / MIN_DISTANCE_RATIO;
@@ -1491,9 +1530,9 @@ function evaluate(
                 const s12c = s6c * s6c;
                 const rc = term.sigma / c;
                 const slope = -(12.0 * s12c) / rc;
-                energy += term.scale * term.epsilon * (s12c + slope * (r - rc));
+                energy += term.scale * term.epsilon * (s12c + slope * (r - rc)) * clash;
                 if (gx) {
-                    const dedr = term.scale * term.epsilon * slope;
+                    const dedr = term.scale * term.epsilon * slope * clash;
                     addGrad(term.i, (dedr * dx) / r, (dedr * dy) / r, (dedr * dz) / r);
                     addGrad(term.j, (-dedr * dx) / r, (-dedr * dy) / r, (-dedr * dz) / r);
                 }
@@ -1501,9 +1540,12 @@ function evaluate(
             }
             const s6r = Math.pow(ratio, 6);
             const s12r = s6r * s6r;
-            energy += term.scale * term.epsilon * s12r;
+            energy += term.scale * term.epsilon * s12r * clash;
             if (gx) {
-                const dedr = -(12.0 * term.scale * term.epsilon * s12r) / r;
+                // dE/dr of (r^-12 · w): the repulsion's own slope plus the
+                // switch's, so the force vanishes with the energy at the edge.
+                const dedr = term.scale * term.epsilon *
+                    (-(12.0 * s12r * clash) / r + s12r * dClash);
                 addGrad(term.i, (dedr * dx) / r, (dedr * dy) / r, (dedr * dz) / r);
                 addGrad(term.j, (-dedr * dx) / r, (-dedr * dy) / r, (-dedr * dz) / r);
             }
@@ -2193,12 +2235,21 @@ export class MmSession {
         });
     }
 
-    /** Current coordinates of the run's atoms, in the caller's order. */
+    /**
+     * The coordinates of the geometry the run reports, in the caller's order.
+     *
+     * This is the lowest-energy geometry the run has accepted — the same one
+     * `finish()` answers with — not the transient point the search happens to
+     * stand on. The two differ exactly when a rebuilt pair list reads the
+     * committed geometry slightly higher than the one it was accepted against,
+     * and reporting the transient one made a pause move the atoms onto another
+     * geometry than the one the run had been drawing.
+     */
     coords(): number[][] {
         const out: number[][] = [];
         for (let s = 0; s < this.indices.length; s++) {
             const i = this.indices[s];
-            out.push([this.work.x[i], this.work.y[i], this.work.z[i]]);
+            out.push([this.bestX[i], this.bestY[i], this.bestZ[i]]);
         }
         return out;
     }
@@ -2227,11 +2278,77 @@ export class MmSession {
         };
     }
 
-    /** Stop the wall-clock budget counting while nobody is stepping the run. */
+    /**
+     * Stop the wall-clock budget counting while nobody is stepping the run, and
+     * put the search itself back on the geometry the pause reports.
+     *
+     * A paused run answers with `finish()` — the lowest-energy geometry it has
+     * accepted — while the search's own working arrays can sit a rebuild apart
+     * from it (a new pair list reads the committed point slightly higher, and
+     * that is what the best-geometry copy exists for). Without this the atoms
+     * jumped onto that other geometry when the pause arrived and jumped back
+     * when Resume continued from the working point, and the energy quoted for
+     * the pause was not the energy of the geometry the search resumed from.
+     * Adopting the reported geometry here makes the three one geometry.
+     */
     pause(): void {
         if (this.pauseStarted === 0) {
             this.pauseStarted = Date.now();
         }
+        this.adoptBestGeometry();
+    }
+
+    /**
+     * Move the working geometry onto the best accepted one and re-measure it.
+     *
+     * The pair list is rebuilt and the conjugate direction dropped: both were
+     * built for the point the search stood on, and a step that mixed them with
+     * this geometry would compare an energy against a basis it never had. The
+     * force reading is taken at the adopted point, so the numbers quoted by a
+     * pause are the numbers the next step starts from.
+     */
+    private adoptBestGeometry(): void {
+        const n = this.atomCount;
+        if (this.done || this.isEmptyField()) {
+            return;
+        }
+        const x = this.work.x;
+        const y = this.work.y;
+        const z = this.work.z;
+        let moved = false;
+        for (let i = 0; i < n; i++) {
+            if (x[i] !== this.bestX[i] || y[i] !== this.bestY[i] || z[i] !== this.bestZ[i]) {
+                moved = true;
+                break;
+            }
+        }
+        if (!moved) {
+            return;
+        }
+        for (let i = 0; i < n; i++) {
+            x[i] = this.bestX[i];
+            y[i] = this.bestY[i];
+            z[i] = this.bestZ[i];
+        }
+        if (this.settings.flags.nonbonded || this.settings.flags.electrostatic ||
+            this.settings.flags.hbond || this.settings.flags.polarization) {
+            this.field.nonbonded = buildNonbondedList(
+                x, y, z, this.elements, buildNeighbourLists(this.bonds, n), this.mobile, n,
+                this.settings.listCutoff);
+            this.field.counts.nonbonded = this.field.nonbonded.length;
+            this.work.drift.fill(0.0);
+        }
+        this.cg.valid = false;
+        this.cg.resetUsed = false;
+        this.energy = evaluate(this.field, x, y, z, this.mobile, this.work.grad);
+        this.readStats();
+        // The geometry now *is* the answer, so the answer's numbers are the ones
+        // measured here — same point, same pair list, same basis as the resume.
+        this.bestEnergy = this.energy;
+        this.bestMaxForce = this.maxForce;
+        this.bestRmsForce = this.rmsForce;
+        this.lastEnergy = this.energy;
+        this.plateau = 0;
     }
 
     /** Resume after a pause: the time spent paused is added back to the budget. */
@@ -2252,6 +2369,12 @@ export class MmSession {
      * Run up to `budget` passes of the search (Infinity runs to completion) and
      * report the state it is in. A stopped run answers at once, so a caller may
      * keep asking without doing further work.
+     *
+     * The geometry, the energy and the forces reported are all read off the
+     * same point — the best accepted one, which is what `coords()` and
+     * `finish()` answer with — so a chunk streamed mid-run and a pause taken
+     * between two chunks describe one structure, and the curve's last point is
+     * the only thing that follows the raw search.
      */
     step(budget: number): MmStepResult {
         let used = 0;
@@ -2261,9 +2384,9 @@ export class MmSession {
         }
         return {
             step: this.iterations,
-            energy: this.energy,
-            maxGrad: this.maxForce,
-            rmsGrad: this.rmsForce,
+            energy: this.bestEnergy,
+            maxGrad: this.bestMaxForce,
+            rmsGrad: this.bestRmsForce,
             done: this.done,
             converged: this.converged,
             stopReason: this.stopReason,

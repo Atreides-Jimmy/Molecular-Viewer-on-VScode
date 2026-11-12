@@ -268,6 +268,132 @@ function bpIsGhost(a: Atom | null | undefined): boolean {
 // ---------------------------------------------------------------------------
 
 /**
+ * The best order a pair's length supports that is *not* the aromatic one.
+ *
+ * Used only to downgrade a bond the ring test has ruled out; the nearest
+ * tabulated length wins, so a 1.40 Å C–C becomes the 1.38 Å double bond and a
+ * 1.43 Å one the 1.51 Å single bond it is closer to than to 1.39.
+ */
+function bpNonAromaticOrder(el1: string, el2: string, d: number): number {
+    const specs = SPECS[bpSpecKey(el1, el2)];
+    if (!specs) return 1.0;
+    let best = 1.0;
+    let bestDiff = Infinity;
+    for (let i = 0; i < specs.length; i++) {
+        if (Math.abs(specs[i].o - 1.5) < 1e-9) continue;
+        const diff = Math.abs(d - specs[i].l);
+        if (diff < bestDiff) {
+            bestDiff = diff;
+            best = specs[i].o;
+        }
+    }
+    return best;
+}
+
+/**
+ * Take the aromatic order 1.5 off every bond that is not on a ring.
+ *
+ * The C–C length table brackets 1.34–1.44 Å with *both* the aromatic and the
+ * double order, and bpGeometricOrder returns the first band that contains the
+ * distance — so every alkene in that window came out aromatic: a four-
+ * substituted C=C at 1.40 Å was read as 1.5, went into the MM parameters and
+ * the drawing, and was exported to MOL2 as "ar", which states a ring.
+ *
+ * Ring membership is the fact the distance cannot state, and it is exactly what
+ * a bridge search answers: an edge lies on a cycle if and only if it is not a
+ * bridge. A bridge is therefore downgraded to the best non-aromatic order its
+ * length supports, while every bond of a phenyl ring keeps its 1.5. This is a
+ * property of the graph, not of the element pair, so the other pairs with an
+ * aromatic entry (C–N, N–O, C–S) are covered by the same test.
+ *
+ * Iterative Tarjan with an explicit stack: a 20 000-atom structure must not be
+ * able to overflow the call stack, and the pass is O(V+E).
+ */
+function bpDropNonRingAromatic(bondMap: Map<number, Map<number, number>>, atoms: Atom[]): number {
+    const n = atoms.length;
+    const adj: number[][] = new Array(n);
+    for (let i = 0; i < n; i++) adj[i] = [];
+    const from: number[] = [];
+    const to: number[] = [];
+    bondMap.forEach(function (neighbors, i) {
+        neighbors.forEach(function (_order, j) {
+            // Each edge once, from its lower end, in insertion order.
+            if (j <= i) return;
+            const id = from.length;
+            from.push(i);
+            to.push(j);
+            adj[i].push(id);
+            adj[j].push(id);
+        });
+    });
+    const m = from.length;
+    if (m === 0) return 0;
+
+    const isBridge = new Uint8Array(m);
+    const disc = new Int32Array(n).fill(-1);
+    const low = new Int32Array(n);
+    const stackNode: number[] = [];
+    const stackEdge: number[] = [];
+    const stackNext: number[] = [];
+    let timer = 0;
+    for (let root = 0; root < n; root++) {
+        if (disc[root] !== -1) continue;
+        disc[root] = timer;
+        low[root] = timer;
+        timer++;
+        stackNode.push(root);
+        stackEdge.push(-1);
+        stackNext.push(0);
+        while (stackNode.length > 0) {
+            const top = stackNode.length - 1;
+            const u = stackNode[top];
+            if (stackNext[top] < adj[u].length) {
+                const e = adj[u][stackNext[top]];
+                stackNext[top]++;
+                if (e === stackEdge[top]) continue;
+                const v = from[e] === u ? to[e] : from[e];
+                if (disc[v] === -1) {
+                    disc[v] = timer;
+                    low[v] = timer;
+                    timer++;
+                    stackNode.push(v);
+                    stackEdge.push(e);
+                    stackNext.push(0);
+                } else if (disc[v] < low[u]) {
+                    low[u] = disc[v];
+                }
+            } else {
+                stackNode.pop();
+                stackNext.pop();
+                const parentEdge = stackEdge.pop() as number;
+                if (top > 0) {
+                    const p = stackNode[top - 1];
+                    if (low[u] < low[p]) low[p] = low[u];
+                    // u cannot reach above its parent without using the edge it
+                    // came in on, so that edge lies on no cycle.
+                    if (low[u] > disc[p]) isBridge[parentEdge] = 1;
+                }
+            }
+        }
+    }
+
+    let changed = 0;
+    for (let e = 0; e < m; e++) {
+        if (!isBridge[e]) continue;
+        const i = from[e];
+        const j = to[e];
+        const ni = bondMap.get(i);
+        if (!ni || ni.get(j) !== 1.5) continue;
+        const order = bpNonAromaticOrder(atoms[i].element, atoms[j].element, bpDist(atoms[i], atoms[j]));
+        ni.set(j, order);
+        const nj = bondMap.get(j);
+        if (nj) nj.set(i, order);
+        changed++;
+    }
+    return changed;
+}
+
+/**
  * Distance above which a (normalised) element pair can never bond: the
  * per-pair cutoff when tabulated, otherwise the covalent radii sum plus half
  * an angstrom.
@@ -455,6 +581,10 @@ function bpConnectivity(atoms: Atom[]): Map<number, Map<number, number>> {
             }
         }
     }
+    // Aromaticity is a property of a ring, and the length table cannot tell a
+    // ring bond from an alkene of the same length: the order the geometry
+    // suggests stands only where the graph says a cycle exists.
+    if (bondMap.size > 0) bpDropNonRingAromatic(bondMap, atoms);
     return bondMap;
 }
 
@@ -1995,6 +2125,15 @@ export function perceiveBonds(rawAtoms: Atom[], opts?: PerceptionOptions): Perce
     //     largest group of bonds in the structure for nothing.
     diagnostics.refinedBonds = bpRefineValences(bondMap, atoms);
 
+    // 5c) The ring rule, once more, as the guarantee: a pass above may have
+    //     re-planned a centre onto 1.5 (the local relaxation does that when a
+    //     centre is over-coordinated, and the aromatic restore of the solver
+    //     path looks at the length alone), and an order that states a ring must
+    //     not survive on a bond that is not in one. In the ordinary path this
+    //     changes nothing — the connectivity pass already applied it — so it
+    //     costs a second O(V+E) walk and no behaviour.
+    bpDropNonRingAromatic(bondMap, atoms);
+
     // 6) Collect the result. The formal charges and the off-valence list are
     //    derived from the finished orders here — they read, they never write,
     //    so they carry no risk to the bonds the passes above settled.
@@ -2048,7 +2187,7 @@ export function perceiveBonds(rawAtoms: Atom[], opts?: PerceptionOptions): Perce
  */
 const MODULE_FUNCTIONS: Array<(...args: never[]) => unknown> = [
     bpNorm, bpPairKey, bpSpecKey, bpDist, bpIsTerminal, bpCeiling, bpZOf, bpIsGhost,
-    bpPairCutoff, bpGeometricOrder, bpConnectivity,
+    bpNonAromaticOrder, bpDropNonRingAromatic, bpPairCutoff, bpGeometricOrder, bpConnectivity,
     bpAllowedOrders, bpNearestAllowed, bpFixOrders,
     bpMaximumMatching,
     bpPossibleValences, bpValenceOk, bpValenceGap, bpPruneValences, bpAtomicCharge,

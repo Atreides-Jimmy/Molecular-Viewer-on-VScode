@@ -432,21 +432,24 @@ function parseModesFromHeader(lines: string[], headerIdx: number): { modes: Norm
  * belongs to" if the parser records which energy a frame's geometry was
  * computed at.
  *
- * - `opt=external` runs (Gaussian + XTB/XO) print the geometry of every cycle
- *   BEFORE its `Energy= ... NIter=` line, so the energy belongs to the single
- *   frame printed since the previous energy.
- * - Standard Gaussian logs print `SCF Done` before the geometry, so the energy
- *   already in `pendingEnergy` is assigned to the first frame that follows it
- *   (a second geometry block of the same cycle keeps no energy, matching the
- *   fact that it has no convergence-table row of its own).
+ * Gaussian prints the geometry of a cycle BEFORE the energy computed at it
+ * (`Standard orientation` … `SCF Done` … convergence table), and an
+ * `opt=external` run prints `Energy= … NIter=` in the same order, so the energy
+ * is bound BACKWARDS to the frames printed since the previous one. The previous
+ * form read the energy into the next frame at creation time and therefore
+ * produced 139 frames with no energy at all on a real optimisation (the value
+ * was consumed by the convergence table before the next geometry arrived).
  *
- * The backward scan is bounded by `MAX_FRAMES_PER_ENERGY` so a pathological log
- * can never turn this into a quadratic scan over the whole trajectory. Frames
- * that already carry an energy are stepped over, never overwritten.
+ * The backward scan is bounded by `MAX_FRAMES_PER_ENERGY` and never reaches
+ * past `floor` (the first frame of the current job), so a pathological log
+ * cannot turn this into a quadratic scan and a `--Link1--` job cannot inherit
+ * its predecessor's energy. Frames that already carry an energy are stepped
+ * over, never overwritten.
  */
 const MAX_FRAMES_PER_ENERGY = 8;
-function assignPendingEnergyToFrames(frames: LogFrame[], energy: number): void {
-    for (let k = frames.length - 1; k >= 0 && k >= frames.length - MAX_FRAMES_PER_ENERGY; k--) {
+function assignPendingEnergyToFrames(frames: LogFrame[], energy: number, floor: number): void {
+    const stop = Math.max(floor, frames.length - MAX_FRAMES_PER_ENERGY);
+    for (let k = frames.length - 1; k >= stop; k--) {
         if (frames[k].energy == null) frames[k].energy = energy;
     }
 }
@@ -812,20 +815,72 @@ export function scrfModelOf(content: string): string | undefined {
     return last;
 }
 
+/** How far into a log the title card is looked for. Gaussian's own banner, the
+ *  route card and the IOp block put it well inside the first 120 lines; the
+ *  window stops a 60 MB log from paying a second full pass for a one-line field. */
+const TITLE_SCAN_LINES = 400;
+
+/**
+ * The job title a Gaussian log echoes: the line between two dashed rules that
+ * immediately precede `Symbolic Z-matrix:`.
+ *
+ * The title card sits AFTER the route section, not before it — the line above
+ * a route card is the rule that opens the card, so the previous anchor (the
+ * last non-empty, non-`%` line before the first `#`) captured `-----…` and put
+ * 51 hyphens into every GJF/XYZ title and every Diff label the file produced.
+ * Anchoring on `Symbolic Z-matrix:` also survives a `--Link1--` job whose
+ * title card is preceded by a different banner.
+ */
+function gaussianTitleOf(lines: string[]): string {
+    const limit = Math.min(lines.length, TITLE_SCAN_LINES);
+    let symbolic = -1;
+    for (let i = 0; i < limit; i++) {
+        if (lines[i].indexOf('Symbolic Z-matrix') >= 0) { symbolic = i; break; }
+    }
+    if (symbolic >= 0) {
+        // Walk up over the blank line and the closing rule, then read the title
+        // back to the rule that opens it. A title card may be empty, which is a
+        // statement (no title), not a reason to grab the line above it.
+        let k = symbolic - 1;
+        while (k >= 0 && lines[k].trim() === '') k--;
+        if (k < 0 || !DASH_RE.test(lines[k].trim())) return '';
+        k--;
+        const end = k;
+        // A title card is one line (Gaussian joins a multi-line title with
+        // blanks); the walk is bounded so a box with no opening rule cannot
+        // swallow the banner above it.
+        for (let guard = 0; guard < 4 && k >= 0; guard++) {
+            const t = lines[k].trim();
+            if (t === '' || DASH_RE.test(t)) break;
+            k--;
+        }
+        const parts: string[] = [];
+        for (let j = k + 1; j <= end; j++) parts.push(lines[j].trim());
+        return parts.join(' ').trim();
+    }
+
+    // No Z-matrix section (a checkpoint-restart continuation, a shape written
+    // by another tool): keep the older anchor, but a rule is a rule, never a
+    // title.
+    let routeIdx = -1;
+    for (let i = 0; i < limit; i++) {
+        if (ROUTE_START_RE.test(lines[i].trim())) { routeIdx = i; break; }
+    }
+    if (routeIdx < 0) return '';
+    for (let i = routeIdx - 1; i >= 0; i--) {
+        const t = lines[i].trim();
+        if (t === '' || t.startsWith('%') || DASH_RE.test(t)) continue;
+        return t;
+    }
+    return '';
+}
+
 export function parseGaussianLog(content: string, onProgress?: (fraction: number) => void): GaussianLogResult {
     const lines = content.split(/\r?\n/);
     const lineTotal = lines.length || 1;
     let lastProgress = 0;
     const frames: LogFrame[] = [];
-    let title = '';
-
-    const titleMatch = content.match(/#\s*[A-Za-z]/);
-    if (titleMatch) {
-        const routeIdx = content.indexOf(titleMatch[0]);
-        const afterRoute = content.substring(0, routeIdx);
-        const titleLines = afterRoute.split(/\r?\n/).filter(l => l.trim() !== '' && !l.trim().startsWith('%'));
-        if (titleLines.length > 0) title = titleLines[titleLines.length - 1].trim();
-    }
+    const title = gaussianTitleOf(lines);
 
     // The charge and multiplicity printed with the geometry (`Charge = 0
     // Multiplicity = 1`). A `--Link1--` file can run several jobs with
@@ -872,6 +927,9 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
      *  one). A geometry-level value is stamped with it, so a summary can tell
      *  a value of the final geometry from one the file only printed earlier. */
     let scfCount = 0;
+    /** Where the current job's frames begin, so an energy can never be bound to
+     *  a frame the previous job of a `--Link1--` file printed. */
+    let jobFrameStart = 0;
 
     let i = 0;
     while (i < lines.length) {
@@ -955,6 +1013,11 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
                     orbitals.cur = null;
                     clearCavity(cavity);
                     scfCount = 0;
+                    // A job that ended without a convergence table (a single
+                    // point) leaves its SCF energy pending; carrying it into the
+                    // next job would stamp it onto that job's first geometry.
+                    pendingEnergy = undefined;
+                    jobFrameStart = frames.length;
                     i = j;
                     continue;
                 }
@@ -1008,10 +1071,16 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
                     stepLabel: label,
                     charge: logCharge,
                     multiplicity: logMultiplicity,
-                    // A `SCF Done` line prints BEFORE its geometry in standard
-                    // Gaussian output, so the pending energy is the one this
-                    // frame was computed at. [2026-09-12 | Atreides-Jimmy]
-                    energy: pendingEnergy
+                    // No energy yet: this program prints a cycle's geometry
+                    // BEFORE the energy computed at it (`Standard orientation` …
+                    // `SCF Done` … convergence table), so the value is bound back
+                    // to this frame by `assignPendingEnergyToFrames` when the
+                    // energy line arrives. Reading `pendingEnergy` here instead
+                    // was the bug: it handed the *previous* cycle's energy to any
+                    // frame printed before the next one, and the ordinary opt log
+                    // — where the convergence table clears the value in between —
+                    // left every frame without one. [2026-11-12 | Atreides-Jimmy]
+                    energy: undefined
                 });
                 if (isStandard) stdFrames++;
             }
@@ -1077,12 +1146,17 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
             if (line.indexOf('SCF Done') >= 0) {
                 const scfMatch = line.match(SCF_DONE_RE);
                 if (scfMatch) {
-                    // The energy is carried into the next geometry frame below, which is
-                    // the structure it was computed at. [2026-09-12 | Atreides-Jimmy]
+                    // The geometry of this step was printed just above, so the
+                    // energy is bound back to the frame(s) still waiting for one
+                    // — and only to this job's frames. The copy in
+                    // `pendingEnergy` is what the convergence table below (and
+                    // an `opt=external` run's `Energy=` line) consumes.
+                    // [2026-11-12 | Atreides-Jimmy]
                     pendingEnergy = parseLogNumber(scfMatch[2]);
                     scfCount++;
                     // E(RPM7), E(RB3LYP), … — the label is the file's own.
                     noteEnergy(jobs, 'E(' + scfMatch[1] + ')', pendingEnergy, scfCount);
+                    assignPendingEnergyToFrames(frames, pendingEnergy, jobFrameStart);
                     const cycles = line.match(SCF_CYCLES_RE);
                     if (cycles) summaryOf(jobs).scfCycles = parseInt(cycles[1], 10);
                     i++;
@@ -1217,8 +1291,9 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
             if (extEnergyMatch) {
                 pendingEnergy = parseFloat(extEnergyMatch[1]);
                 // [2026-09-12 | Atreides-Jimmy] opt=external logs print the cycle's
-                // geometry BEFORE its energy — bind it here (same purpose as above).
-                assignPendingEnergyToFrames(frames, pendingEnergy);
+                // geometry BEFORE its energy — bind it here (same purpose as above),
+                // to this job's frames only.
+                assignPendingEnergyToFrames(frames, pendingEnergy, jobFrameStart);
                 i++;
                 continue;
             }

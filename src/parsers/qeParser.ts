@@ -246,11 +246,30 @@ function latticeFromIbrav(sys: QeSystem): number[][] | null {
     }
 }
 
-function alignmentUnit(header: string): string {
-    const m = /(?:CELL_PARAMETERS|ATOMIC_POSITIONS)\s*(?:\(|\{)?\s*(alat|bohr|angstrom|ang|crystal|au)/i.exec(header);
-    if (!m) return '';
-    const u = m[1].toLowerCase();
-    return u === 'ang' ? 'angstrom' : u === 'au' ? 'bohr' : u;
+/**
+ * The unit a card header states, and the value of its optional `alat=`
+ * attribute when it states one.
+ *
+ * The unit is a bare name (`angstrom`, `bohr`, `crystal`, `alat`), but a card
+ * may also carry the lattice parameter itself — `CELL_PARAMETERS (alat= 5.43)`,
+ * `ATOMIC_POSITIONS (alat= 5.43)`. The attribute is in Ångström (QE divides it
+ * by the Bohr radius when it reads the card), which is the unit `QeSystem.alat`
+ * is in as well, so the two are interchangeable. Discarding the value read
+ * such a cell as 1 Å and every fractional coordinate as so many Å instead of
+ * the cell's own fraction: a cubic `(alat= 5.43)` block came out 5.43 times
+ * too small, with periodic bonds, volume and supercells wrong by the same
+ * factor.
+ */
+function alignmentUnit(header: string): { unit: string; alat: number | null } {
+    const named = /(?:CELL_PARAMETERS|ATOMIC_POSITIONS)\s*(?:\(|\{)?\s*(alat|bohr|angstrom|ang|au|crystal)(?![A-Za-z0-9])/i.exec(header);
+    let unit = '';
+    if (named) {
+        const u = named[1].toLowerCase();
+        unit = u === 'ang' ? 'angstrom' : u === 'au' ? 'bohr' : u;
+    }
+    const inline = /alat\s*=\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[EeDd][-+]?\d+)?)/i.exec(header);
+    const value = inline ? parseFloatSafe(inline[1].replace(/[Dd]/, 'E')) : undefined;
+    return { unit: unit, alat: value !== undefined && isFinite(value) && value > 0 ? value : null };
 }
 
 /**
@@ -281,13 +300,17 @@ function readThreeByThree(lines: string[], start: number): { rows: number[][]; n
 /** A CELL_PARAMETERS block, converted to Angstrom. */
 function readCellParameters(lines: string[], start: number, alat: number): { lattice: number[][] | null; next: number } {
     const header = lines[start];
-    const unit = alignmentUnit(header);
+    const { unit, alat: inline } = alignmentUnit(header);
+    // A card that states its own lattice parameter uses that one, in Angstrom,
+    // for `alat` as well: the block and the positions that follow it are read
+    // against the same scale the card names.
+    const scale = inline === null ? alat : inline;
     const read = readThreeByThree(lines, start + 1);
     if (read.rows.length !== 3) return { lattice: null, next: start + 1 };
     // QE's default for CELL_PARAMETERS is alat, the same as for positions;
     // reading an unqualified block as Angstrom would rescale a cell written in
     // units of the lattice parameter by the lattice parameter itself.
-    const factor = unit === 'bohr' ? BOHR_TO_ANGSTROM : unit === 'angstrom' ? 1 : alat;
+    const factor = unit === 'bohr' ? BOHR_TO_ANGSTROM : unit === 'angstrom' ? 1 : scale;
     return {
         lattice: read.rows.map(r => r.map(v => v * factor)),
         next: read.next
@@ -321,10 +344,11 @@ function readAtomicPositions(
     nat: number
 ): { rows: Site[]; next: number } {
     const header = lines[start];
-    const explicit = alignmentUnit(header);
+    const { unit: explicit, alat: inline } = alignmentUnit(header);
     // QE's default for ATOMIC_POSITIONS is alat; crystal is the only unit that
     // means fractional coordinates, and `alat` is Cartesian in units of a.
     const unit = explicit || 'alat';
+    const scale = inline === null ? alat : inline;
     const rows: Site[] = [];
     let i = start + 1;
     while (i < lines.length && (nat <= 0 || rows.length < nat)) {
@@ -349,7 +373,7 @@ function readAtomicPositions(
         if (unit === 'crystal') {
             site = { element, frac: [x, y, z], label };
         } else {
-            const factor = unit === 'bohr' ? BOHR_TO_ANGSTROM : unit === 'alat' ? alat : 1;
+            const factor = unit === 'bohr' ? BOHR_TO_ANGSTROM : unit === 'alat' ? scale : 1;
             site = { element, cart: [x * factor, y * factor, z * factor], label };
         }
         if (constraint) site.constraint = constraint;

@@ -12,6 +12,7 @@ import {
     wrapFrac
 } from '../tools/crystalGeometry';
 import { lookupSpaceGroupOps, SpaceGroupOps } from '../tools/spaceGroupTable';
+import { normalizeElementSymbol } from '../tools/periodicTable';
 import { isUsableLattice } from './periodicUtils';
 import { AnisoTensor, rotateAnisoTensor, symOpCartesianRotation } from '../tools/adp';
 
@@ -138,6 +139,61 @@ function normaliseElement(raw: string): string {
     const m = bare.match(/[A-Za-z]{1,2}/);
     if (!m) return '';
     return m[0].charAt(0).toUpperCase() + m[0].slice(1).toLowerCase();
+}
+
+/**
+ * The element a site *label* names, for a row whose `_atom_site_type_symbol`
+ * says nothing.
+ *
+ * CIF's own rule is the leading letters of the label, and that is right for
+ * `C12` and `O1W`. It is wrong for a label that is a PDB atom name: an X-ray
+ * file with no type column writes `CA` for the alpha carbon, `CD` for a delta
+ * carbon and `HG` for a gamma hydrogen, and reading those as calcium, cadmium
+ * and mercury turned a protein into three metals — no bonds, no valence, every
+ * table lookup missing. A polymer CIF is the common case for that shape.
+ *
+ * So a two-letter label is read as a PDB atom name — the element is its first
+ * letter — with two exceptions:
+ *
+ *   - a lowercase second letter (`Ca`, `Zn`, `Cl`) spells a two-letter symbol
+ *     outright, so it is read as one;
+ *   - the file's own type column, when it states a symbol somewhere, settles
+ *     the ambiguity: a file that declares `Ca` and never `C` means calcium by
+ *     `CA`. This is what keeps a partially typed inorganic CIF correct.
+ *
+ * A first letter that is not an element (`Z` in `ZN`) falls back to the
+ * two-letter symbol, so `ZN1` still reads as zinc.
+ */
+function elementFromLabel(raw: string, declared: { [sym: string]: boolean }): string {
+    const s = String(raw === undefined || raw === null ? '' : raw).trim();
+    if (s === '' || s === '?' || s === '.') return '';
+    const m = /[A-Za-z]{1,2}/.exec(s);
+    if (!m) return '';
+    const letters = m[0];
+    if (letters.length === 1) return normalizeElementSymbol(letters) || '';
+    const second = letters.charAt(1);
+    if (second !== second.toUpperCase()) {
+        // `Ca`, `Zn`, `Cl` — and `Ow`, whose fallback is the O it starts with.
+        return normalizeElementSymbol(letters) || normalizeElementSymbol(letters.charAt(0)) || '';
+    }
+    const one = normalizeElementSymbol(letters.charAt(0)) || '';
+    const two = normalizeElementSymbol(letters.charAt(0) + second.toLowerCase()) || '';
+    if (two && declared[two] && !(one && declared[one])) return two;
+    if (one && declared[one] && !(two && declared[two])) return one;
+    // PDB atom name — `CA` is C-alpha, `HG` is H-gamma — unless the first letter
+    // is not an element at all.
+    return one || two;
+}
+
+/** Every element a site loop's type column states, for `elementFromLabel`. */
+function declaredElementsOf(loop: CifLoop, typeCol: number): { [sym: string]: boolean } {
+    const out: { [sym: string]: boolean } = {};
+    if (typeCol < 0) return out;
+    for (const row of loop.rows) {
+        const el = normaliseElement(row[typeCol]);
+        if (el) out[el] = true;
+    }
+    return out;
 }
 
 // ===== Tags =====
@@ -1389,17 +1445,28 @@ export function parseCif(content: string): MolecularData {
     let skipped = 0;
     let unknownElements = 0;
 
+    // The elements the file's own type column states, so a row that leaves it
+    // empty can be read against what the rest of the same column says. Built on
+    // the first row that needs it: a file whose column is complete (the usual
+    // case) never pays for the pass.
+    let declaredElements: { [sym: string]: boolean } | null = null;
+
     for (const row of atomLoop.rows) {
         if (row.length < minCols) { skipped++; continue; }
         const label = labelCol >= 0 ? (row[labelCol] || '') : '';
         const typeSym = typeCol >= 0 ? row[typeCol] : '';
-        // The label is the fallback the dictionary itself suggests (`C12` is a
-        // carbon), and it is also what a file with no type column has. A row
-        // that names no readable element is a dummy point, not a carbon: an
-        // invented C would take part in bonding, formula and valence checks as
-        // a real atom the file never stated.
-        const named = normaliseElement(isMissingValue(typeSym) ? label : typeSym) ||
-            normaliseElement(label);
+        // The type column is the file's own statement and wins whenever it
+        // names an element. Only when it says nothing (or says something that
+        // is not a symbol) does the label speak, by the PDB name rules above —
+        // `CA`/`CD`/`HG` are carbons and a hydrogen, not three metals. A row
+        // that still names no readable element is a dummy point, not a carbon:
+        // an invented C would take part in bonding, formula and valence checks
+        // as a real atom the file never stated.
+        let named = normaliseElement(typeSym);
+        if (!named) {
+            if (declaredElements === null) declaredElements = declaredElementsOf(atomLoop, typeCol);
+            named = elementFromLabel(label, declaredElements);
+        }
         const element = named || 'X';
         const xv = parseNumber(row[xCol]);
         const yv = parseNumber(row[yCol]);

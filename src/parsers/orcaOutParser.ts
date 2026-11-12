@@ -288,7 +288,7 @@ const CONV_ROW_RE = /^(Energy change|RMS gradient|MAX gradient|RMS step|MAX step
 const TOL_LINE_RE = /Tol(MAXG|RMSG|MAXD|RMSD)\s+\.+\s*(\S+)/;
 
 /** `|  1> ! B3LYP def2-SVP Opt freq` — one echoed input line. */
-const INPUT_ECHO_RE = /^\|\s*\d+>\s?(.*)$/;
+const INPUT_ECHO_RE = /^\|\s*(\d+)>\s?(.*)$/;
 
 /**
  * Read the echoed input file, which gives the three things the rest of the
@@ -296,20 +296,30 @@ const INPUT_ECHO_RE = /^\|\s*\d+>\s?(.*)$/;
  * and the charge/multiplicity of the run (the info panel and bond perception).
  *
  * ORCA 4/5/6 all echo the input as `|  n> <text>`; the echo repeats for every
- * job in a compound run, so the values are simply kept up to date as they are
- * met. Returns whether the line belonged to the echo.
+ * job in a compound run, so the values are kept up to date as they are met.
+ * The line number restarts at 1 for each job, which is the only certain mark of
+ * a job boundary: a second `|  1>` means the values of the previous job no
+ * longer describe what follows, and `newJob` says so. Returns whether the line
+ * belonged to the echo.
  */
 interface EchoState {
     keywords: string[];
     raw: string;
     charge?: number;
     multiplicity?: number;
+    /** Set on the line that opens a new job's echo (see above). */
+    newJob?: boolean;
 }
 
 function readEchoLine(line: string, state: EchoState): boolean {
     const m = INPUT_ECHO_RE.exec(line);
     if (!m) return false;
-    const text = m[1].trim();
+    const text = m[2].trim();
+    state.newJob = parseInt(m[1], 10) === 1 && state.raw !== '';
+    if (state.newJob) {
+        state.charge = undefined;
+        state.multiplicity = undefined;
+    }
 
     if (text.charAt(0) === '!') {
         // The simple input line; wrapped `!` lines are joined in order.
@@ -558,6 +568,10 @@ export function parseOrcaOut(content: string, onProgress?: (fraction: number) =>
     const echo: EchoState = { keywords: [], raw: '' };
     let charge: number | undefined;
     let multiplicity: number | undefined;
+    /** Where the current job's geometry blocks begin (see `readEchoLine`). The
+     *  end-of-file fill-in below must not reach past it, or the first job of a
+     *  compound run would inherit the last job's charge. */
+    let jobFrameStart = 0;
 
     /** Label the next geometry block gets, set by the banner that precedes it. */
     let pendingLabel = '';
@@ -591,6 +605,13 @@ export function parseOrcaOut(content: string, onProgress?: (fraction: number) =>
         // --- Echoed input file (keywords, charge, multiplicity) --------------
         // The char check keeps the regex off the overwhelming majority of lines.
         if (line.charCodeAt(0) === 124 /* '|' */ && readEchoLine(line, echo)) {
+            if (echo.newJob) {
+                // A new job states its own charge and multiplicity; the previous
+                // job's values describe the previous geometry list, not this one.
+                charge = undefined;
+                multiplicity = undefined;
+                jobFrameStart = frames.length;
+            }
             if (echo.charge !== undefined) charge = echo.charge;
             if (echo.multiplicity !== undefined) multiplicity = echo.multiplicity;
             i++;
@@ -809,26 +830,33 @@ export function parseOrcaOut(content: string, onProgress?: (fraction: number) =>
     // The A.U. fallback is used only when no Ångström geometry was found; a
     // half-written block at either end of the file is dropped from whichever
     // list is used.
-    const source = dropOddSizedFrames(frames.length > 0 ? frames : auFrames);
+    const raw = frames.length > 0 ? frames : auFrames;
+    const rawStart = frames.length > 0 ? jobFrameStart : 0;
 
     // A coordinate block comes before the `SCF SETTINGS` section that states the
     // charge, so a frame created before that point is filled in here. A frame
-    // that already carries a value keeps it: a compound run can change the
-    // charge between jobs and each job's frames must keep their own.
+    // that already carries a value keeps it, and only the current job's frames
+    // are touched: a compound run can change the charge between jobs and each
+    // job's frames must keep their own.
     if (charge !== undefined || multiplicity !== undefined) {
-        for (const f of source) {
+        for (let k = Math.min(rawStart, raw.length); k < raw.length; k++) {
+            const f = raw[k];
             if (f.charge === undefined && charge !== undefined) f.charge = charge;
             if (f.multiplicity === undefined && multiplicity !== undefined) f.multiplicity = multiplicity;
         }
     }
+    const source = dropOddSizedFrames(raw);
 
     // Labels are composed once, when every fact they mention is known — the same
     // `(Charge=0 Mult=1)` suffix a Gaussian log's `Step k` frames carry, so a
-    // trajectory reads the same whichever program wrote it.
-    const suffix = (charge !== undefined && multiplicity !== undefined)
-        ? ' (Charge=' + charge + ' Mult=' + multiplicity + ')'
-        : '';
+    // trajectory reads the same whichever program wrote it. The suffix is taken
+    // from the frame's own values, never from the last job's globals: a
+    // compound run that changed the charge used to label every job's frames
+    // with the final one, contradicting the `f.charge` beside it.
     for (const f of source) {
+        const suffix = (f.charge !== undefined && f.multiplicity !== undefined)
+            ? ' (Charge=' + f.charge + ' Mult=' + f.multiplicity + ')'
+            : '';
         f.stepLabel = f.stepLabel + suffix;
         f.title = f.stepLabel;
     }

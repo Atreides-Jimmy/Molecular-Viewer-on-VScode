@@ -215,10 +215,9 @@ export interface CrystalData {
      */
     asymBonds?: Bond[];
     /**
-     * The bonds the file itself states (`_geom_bond`), already expanded into
-     * `baseAtoms` indices with the periodic image each bond points at. Only the
-     * CIF reader fills it, because only CIF carries a bond table among the
-     * formats read here.
+     * The bonds the file itself states (`_geom_bond` in a CIF, the `Bonds`
+     * section of a LAMMPS data file), already expanded into `baseAtoms` indices
+     * with the periodic image each bond points at.
      *
      * This is evidence, not the session's bond list: `baseBonds` stays the
      * geometry-perceived list, and the page merges this table over it once, on
