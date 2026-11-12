@@ -9380,16 +9380,34 @@ function convTooltipValue(v,spanDec){
 }
 
 /** Index of the optimization step whose structure is currently displayed, or -1.
- *  Frames of an opt log are the per-step geometries in step order (the parser
- *  numbers them "Step k"), so the frame index IS the step index; the frame's
- *  own single-point energy is only a guard for formats/labels that do not
- *  follow that numbering. */
+ *  The parser links every frame it builds to the step whose geometry it is
+ *  (`optStep`), and that link is what the charts follow: a log that prints the
+ *  input orientation as a block of its own repeats the first step's geometry as
+ *  a frame of its own, so the frame index sits one slot past the step index and
+ *  an index-based match marked the first point only. A frame the optimizer did
+ *  not print a table for (the converged structure repeated at the end of a job,
+ *  or the copy an `opt freq` run hands to its Freq job) is still that step's
+ *  structure, so it is matched by the single-point energy both were printed
+ *  with. A payload that carries no link (a trajectory built from frame
+ *  energies) keeps the old index identity, and a step whose printed energy is
+ *  not this frame's is never marked. */
 function convSelectedStep(steps){
-    if(typeof currentFrame!=='number'||currentFrame<0||currentFrame>=steps.length)return -1;
+    if(typeof currentFrame!=='number'||currentFrame<0)return -1;
     var f=MD.frames&&MD.frames[currentFrame];
-    var e=f?f.energy:undefined;
-    if(e!=null&&!isNaN(e)&&steps[currentFrame].energy!=null&&Math.abs(steps[currentFrame].energy-e)>1e-9)return -1;
-    return currentFrame;
+    if(!f)return -1;
+    var e=f.energy;
+    var k=(typeof f.optStep==='number')?f.optStep-1:currentFrame;
+    var se=(k>=0&&k<steps.length)?steps[k].energy:null;
+    if(k>=0&&k<steps.length&&(e==null||isNaN(e)||se==null||Math.abs(se-e)<=1e-9))return k;
+    if(e==null||isNaN(e))return -1;
+    var best=-1,bestD=Infinity;
+    for(var j=0;j<steps.length;j++){
+        var sj=steps[j].energy;
+        if(sj==null||isNaN(sj)||Math.abs(sj-e)>1e-9)continue;
+        var d=Math.abs(j-(k>=0?k:currentFrame));
+        if(d<bestD){best=j;bestD=d}
+    }
+    return best;
 }
 
 /** Draw the value tooltip of the data point nearest to the cursor (feature 3)

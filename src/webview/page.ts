@@ -185,6 +185,7 @@ export async function renderViewerPage(extensionUri: vscode.Uri, options: Viewer
         charge?: number;
         multiplicity?: number;
         energy?: number;
+        optStep?: number;
     };
     const framesData: FramePayloadData[] = [];
     for (let fi = 0; fi < frames.length; fi++) {
@@ -202,7 +203,12 @@ export async function renderViewerPage(extensionUri: vscode.Uri, options: Viewer
             // Single-point energy of this frame's structure (opt logs only), used
             // by the convergence charts to highlight the selected step and to
             // report its exact value. [2026-09-12 | Atreides-Jimmy]
-            energy: (f as { energy?: number }).energy
+            energy: (f as { energy?: number }).energy,
+            // Which optimizer step this geometry is. A log that prints the input
+            // orientation as its own block starts with a frame that repeats the
+            // first step, so the charts cannot use the frame index as the step
+            // index. [2026-11-12 | Atreides-Jimmy]
+            optStep: (f as { optStep?: number }).optStep
         });
         // A 647-frame log is 650 000 atom objects; serialising them in one
         // synchronous loop holds the host for seconds. Only the view that

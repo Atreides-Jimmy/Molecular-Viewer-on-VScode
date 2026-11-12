@@ -35,6 +35,18 @@ export interface LogFrame {
      *  [2026-09-12 | Atreides-Jimmy] Added for the convergence-chart highlight
      *  (feature 2) and value tooltip (feature 3). */
     energy?: number;
+    /** The optimizer step (1-based, in the file's own series) whose geometry
+     *  this frame is, when the job that printed it runs an optimization.
+     *
+     *  The frame INDEX is not that number: a log that prints the input
+     *  orientation as a block of its own repeats the first step's geometry as a
+     *  frame of its own (the input pose, then the standard pose), so every
+     *  later frame sits one slot past its step. The convergence charts follow
+     *  this link instead of the index. Absent on frames no optimizer produced —
+     *  the converged structure an `opt freq` run hands to its `Freq` job, an
+     *  IRC path point, a trajectory frame.
+     *  [2026-11-12 | Atreides-Jimmy] Added for the step guide of feature 2. */
+    optStep?: number;
 }
 
 export interface GaussianLogResult {
@@ -1089,6 +1101,13 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
                 const label = isStandard
                     ? `Step ${stdFrames + 1}${chargeMultLine ? ' (' + chargeMultLine + ')' : ''}`
                     : `Input${chargeMultLine ? ' (' + chargeMultLine + ')' : ''}`;
+                // Which optimizer step this geometry is: its own table comes
+                // AFTER the geometry (`Standard orientation` … `SCF Done` … the
+                // four rows), so the number it will take is the next one. A job
+                // whose tables are not a series (a Freq job re-reading the
+                // converged geometry, an IRC) stamps nothing, and the page then
+                // has no step to mark on those frames.
+                const stepOfFrame = (jobHasOpt || !jobCardSeen) ? optSteps.length + 1 : undefined;
                 frames.push({
                     atoms,
                     bonds: [],
@@ -1097,6 +1116,7 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
                     stepLabel: label,
                     charge: logCharge,
                     multiplicity: logMultiplicity,
+                    optStep: stepOfFrame,
                     // No energy yet: this program prints a cycle's geometry
                     // BEFORE the energy computed at it (`Standard orientation` …
                     // `SCF Done` … convergence table), so the value is bound back
