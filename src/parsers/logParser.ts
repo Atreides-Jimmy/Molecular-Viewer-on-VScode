@@ -704,6 +704,8 @@ interface OrbitalDump {
     alphaOcc: number;
     beta: number[];
     betaOcc: number;
+    /** The geometry whose SCF printed this dump (pre-filter frame index). */
+    frame: number;
 }
 
 interface OrbitalState {
@@ -725,7 +727,7 @@ const ORBITAL_EIGEN_RE = /^\s*(Alpha|Beta)\s+(occ|virt)\.\s*eigenvalues\s*--(.*)
  * next occupied line: an occupied block runs over dozens of lines, and treating
  * each as a new dump would leave only the last five eigenvalues.
  */
-function noteOrbitalLine(st: OrbitalState, spin: string, kind: string, text: string): void {
+function noteOrbitalLine(st: OrbitalState, spin: string, kind: string, text: string, frame: number): void {
     const tokens = text.trim().split(/\s+/);
     const values: number[] = [];
     for (let k = 0; k < tokens.length; k++) {
@@ -733,10 +735,13 @@ function noteOrbitalLine(st: OrbitalState, spin: string, kind: string, text: str
         if (isFinite(v)) values.push(v);
     }
     if (values.length === 0) return;
-    if (!st.cur) st.cur = { alpha: [], alphaOcc: -1, beta: [], betaOcc: -1 };
+    // A dump starts at the first line printed after a geometry's SCF closed, so
+    // the frame on the list when it begins is the one it describes.
+    const fresh = (): OrbitalDump => ({ alpha: [], alphaOcc: -1, beta: [], betaOcc: -1, frame });
+    if (!st.cur) st.cur = fresh();
     if (spin === 'Alpha' && kind === 'occ' && st.cur.alphaOcc >= 0) {
         st.last = st.cur;
-        st.cur = { alpha: [], alphaOcc: -1, beta: [], betaOcc: -1 };
+        st.cur = fresh();
     }
     if (spin === 'Alpha') {
         if (kind === 'virt' && st.cur.alphaOcc < 0) st.cur.alphaOcc = st.cur.alpha.length;
@@ -780,7 +785,9 @@ function orbitalLevelsOf(st: OrbitalState): OrbitalLevels | undefined {
             occupied: betaOcc
         });
     }
-    return { spins, closedShell: closed };
+    const levels: OrbitalLevels = { spins, closedShell: closed };
+    if (dump.frame >= 0) levels.frame = dump.frame;
+    return levels;
 }
 
 function occupationsOfLevels(count: number, occupied: number, perOrbital: number): number[] {
@@ -1129,6 +1136,45 @@ function scanFrameLabel(point: number, step: number, chargeMult: string): string
     return 'Point ' + point + ' · step ' + step + (chargeMult ? ' (' + chargeMult + ')' : '');
 }
 
+/**
+ * Name every frame an IRC path claims by the row the card lists it under.
+ *
+ * The parser can only label a geometry when it meets it, and the transition
+ * state is printed above the path banner with no point header at all — it used
+ * to keep the generic `Input` label while the card called the same structure
+ * `TS`. Once the paths and the run that owns them are known, the labels are
+ * rewritten from those links: `TS`, `R12`, `F3`, with the run number when a
+ * `--Link1--` file holds more than one IRC calculation. The electronic state
+ * the file printed stays in the suffix.
+ */
+function labelIrcFrames(frames: LogFrame[], irc: IrcResult | undefined): void {
+    if (!irc) return;
+    const dirOf = new Map<number, IrcDirection>();
+    for (const p of irc.paths) if (p.dir) dirOf.set(p.path, p.dir);
+    const runOfPath = new Map<number, number>();
+    for (let r = 0; r < irc.runs.length; r++) {
+        for (const pn of irc.runs[r].paths) runOfPath.set(pn, r + 1);
+    }
+    const manyRuns = irc.runs.length > 1;
+    const set = (frame: number | undefined, name: string, run: number | undefined): void => {
+        if (typeof frame !== 'number' || frame < 0 || frame >= frames.length) return;
+        const f = frames[frame];
+        const cm = (f.charge != null && f.multiplicity != null)
+            ? ' (Charge=' + f.charge + ' Mult=' + f.multiplicity + ')' : '';
+        const label = (manyRuns && run ? 'Run ' + run + ' · ' : '') + name + cm;
+        f.stepLabel = label;
+        f.title = label;
+    };
+    for (const p of irc.points) {
+        const dir = dirOf.get(p.path);
+        const name = (dir === 'reverse' ? 'R' : dir === 'forward' ? 'F' : '') + p.point;
+        set(p.frame, name, runOfPath.get(p.path));
+    }
+    for (let r = 0; r < irc.runs.length; r++) {
+        set(irc.runs[r].tsFrame, 'TS', manyRuns ? r + 1 : undefined);
+    }
+}
+
 /** Two frames describe the same geometry, element for element. */
 function sameGeometry(a: Atom[], b: Atom[]): boolean {
     if (a.length !== b.length) return false;
@@ -1332,7 +1378,8 @@ function orderIrcFrames(
     frames: LogFrame[],
     irc: IrcResult | undefined,
     scan: ScanResult | undefined,
-    charges: LogChargeSet[]
+    charges: LogChargeSet[],
+    levels?: OrbitalLevels
 ): void {
     if (!irc || irc.runs.length === 0 || frames.length < 2) return;
 
@@ -1424,6 +1471,7 @@ function orderIrcFrames(
         }
     }
     for (const c of charges) c.frame = newIndex[c.frame];
+    if (levels && typeof levels.frame === 'number') levels.frame = newIndex[levels.frame];
     frames.length = 0;
     for (const f of next) frames.push(f);
 }
@@ -1836,6 +1884,7 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
                 if (sp) {
                     const point = parseInt(sp[3], 10);
                     const stepNo = parseInt(sp[1], 10);
+                    const firstPoint = scanState.cur === null && scanState.list.length === 0;
                     if (!scanState.cur || scanState.cur.point !== point) {
                         if (scanState.cur) scanState.list.push(scanState.cur);
                         scanState.cur = {
@@ -1844,6 +1893,35 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
                         };
                     } else {
                         scanState.cur.step = stepNo;
+                    }
+                    // The geometry a step's table describes is printed ABOVE the
+                    // step line (Gaussian prints the structure, its SCF, then
+                    // announces the next step). Binding it here — not only when
+                    // the table arrives — keeps the structure of a point whose
+                    // run was cut off between the two, which would otherwise sit
+                    // on screen with no point naming it.
+                    const fr = frames.length - 1;
+                    if (fr >= 0 && fr >= jobFrameStart) {
+                        scanState.cur.frame = fr;
+                        const f = frames[fr];
+                        f.scanPoint = point;
+                        f.scanStep = stepNo;
+                        f.optStep = undefined;
+                        f.stepLabel = scanFrameLabel(point, stepNo, chargeMultLine);
+                        kinds.bound[fr] = true;
+                    }
+                    // The pose the scan starts from is printed before point 1's
+                    // own geometry, so no table ever claims it. It is where the
+                    // first point's relaxation began, so it is listed with that
+                    // point: opening the file then marks a row and the chart
+                    // instead of showing a frame no row describes.
+                    if (firstPoint) {
+                        for (let k = jobFrameStart; k < frames.length - 1; k++) {
+                            if (kinds.input[k] && frames[k].scanPoint === undefined) {
+                                frames[k].scanPoint = point;
+                                break;
+                            }
+                        }
                     }
                     const total = parseInt(sp[4], 10);
                     if (total > 0) scanState.total = total;
@@ -1974,7 +2052,7 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
             if (line.indexOf('eigenvalues --') >= 0) {
                 const eig = ORBITAL_EIGEN_RE.exec(line);
                 if (eig) {
-                    noteOrbitalLine(orbitals, eig[1], eig[2], eig[3]);
+                    noteOrbitalLine(orbitals, eig[1], eig[2], eig[3], frames.length - 1);
                     i++;
                     continue;
                 }
@@ -2211,6 +2289,10 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
     // It is dropped, so the list is exactly the steps the run took. Only an
     // unbound trailing frame can go — every frame a point claims stays, and no
     // link can name a frame that is not there.
+    //
+    // The count before the drop is kept: a charge table or an orbital dump
+    // recorded against one of these frames must still be addressable after it.
+    const preDropFrameCount = frames.length;
     if ((scanState.list.length > 0 || ircDrafts.length > 0) && frames.length > 1) {
         const lastIdx = frames.length - 1;
         const last = frames[lastIdx];
@@ -2236,15 +2318,25 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
     // and the frame at the end of a single-point job, where no geometry follows
     // the analysis at all. Values are laid out by atom index, padded to the
     // frame's atom list so a view can read one by index without a second table.
+    //
+    // The anchor is a PRE-FILTER index: the table was recorded while every
+    // `Input orientation` block was still on the list. It must therefore be
+    // clamped to the pre-filter count and carried through the filter BEFORE it
+    // is clamped to the final list — clamping to the shorter post-filter list
+    // first landed on an index that had been dropped, backed the lookup up to a
+    // mid-file `Standard orientation`, and labelled the table with a geometry
+    // from the middle of the run.
     const chargeSets: LogChargeSet[] = [];
     if (frames.length > 0) {
+        const chargePreCount = frameRemap ? frameRemap.length : preDropFrameCount;
         for (const draft of charges.drafts) {
             let fr = draft.anchor > 0 ? draft.anchor - 1 : 0;
+            if (fr > chargePreCount - 1) fr = chargePreCount - 1;
+            const mapped = remapFrameIndex(frameRemap, fr, chargePreCount);
+            fr = mapped === undefined ? 0 : mapped;
+            // The trailing copy a scan/IRC prints after its summary is gone by
+            // now; a table anchored on it belongs to the structure before it.
             if (fr > frames.length - 1) fr = frames.length - 1;
-            if (frameRemap) {
-                while (fr > 0 && frameRemap[fr] < 0) fr--;
-                fr = frameRemap[fr] < 0 ? 0 : frameRemap[fr];
-            }
             const frameAtoms = frames[fr].atoms;
             const values: (number | null)[] = [];
             let covered = 0;
@@ -2264,14 +2356,28 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
         }
     }
 
+    // The orbitals the level diagram shows are the last SCF's, so they belong
+    // to the frame that SCF was computed at. Its index takes the same mapping
+    // as a charge table; a checkpoint's orbitals carry no frame.
+    const levels = orbitalLevelsOf(orbitals);
+    if (levels && typeof levels.frame === 'number') {
+        const preCount = frameRemap ? frameRemap.length : preDropFrameCount;
+        const mapped = remapFrameIndex(frameRemap, levels.frame, preCount);
+        levels.frame = mapped === undefined ? undefined : Math.min(mapped, frames.length - 1);
+    }
+
     // An IRC's frame list is its reaction path: reverse far end, transition
     // state, forward far end. The move happens after every frame-bound record
-    // is built so the path points, the run's TS and the charge tables can be
-    // carried across with it.
-    orderIrcFrames(frames, irc, scan, chargeSets);
+    // is built so the path points, the run's TS, the charge tables and the
+    // orbitals can be carried across with it.
+    orderIrcFrames(frames, irc, scan, chargeSets, levels);
+
+    // Frames a path claims are named by the row that lists them (`TS`, `R24`,
+    // `F0`), not by the block they were printed in. This runs after the move,
+    // because the indices are the final ones.
+    labelIrcFrames(frames, irc);
 
     const summary = jobs.list.filter(summaryHasData);
-    const levels = orbitalLevelsOf(orbitals);
     // A cavity object with nothing but its source is not a statement about the
     // file: no solvation model ran, so the panel must not claim one.
     const hasCavity = cavity.type !== undefined || cavity.solvent !== undefined ||

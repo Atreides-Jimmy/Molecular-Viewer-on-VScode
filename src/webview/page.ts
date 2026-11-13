@@ -370,6 +370,9 @@ export async function renderViewerPage(extensionUri: vscode.Uri, options: Viewer
             model: orbitals ? orbitals.model : '',
             canDraw: drawable,
             reason: reason,
+            // The frame whose SCF printed these eigenvalues, in the final frame
+            // list, so the card can take the view to the geometry it describes.
+            frame: orbitalLevels.frame,
             spins: orbitalLevels.spins.map(s => ({
                 label: s.label,
                 energies: s.energies,

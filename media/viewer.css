@@ -335,6 +335,7 @@ canvas{display:block}
 #opt-panel .pw-co{flex:0 0 62px;text-align:right;color:#9cdcfe}
 #opt-panel .pw-e{flex:1 1 auto;text-align:right;color:#d7dae0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #opt-panel .pw-f{flex:0 0 50px;text-align:right;color:#ffa94d}
+#opt-panel .pw-d{flex:0 0 50px;text-align:right;color:#6bb7ff}
 #opt-panel .pw-s{flex:0 0 16px;text-align:right;color:var(--vscode-descriptionForeground,#888)}
 #opt-panel .pw-head.pw-path{margin-top:8px;border-bottom:none;color:#ffd666}
 #opt-panel .pw-head.pw-path .pw-no{flex:0 0 auto;font-weight:bold}

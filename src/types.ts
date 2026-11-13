@@ -511,6 +511,11 @@ export interface OrbitalLevels {
     spins: OrbitalSpinLevels[];
     /** True when the file printed no beta block. */
     closedShell: boolean;
+    /** 0-based index of the frame whose SCF the eigenvalues describe, in the
+     *  final frame list. A log prints one dump per SCF and the panel draws the
+     *  last, so this is the geometry the run ended on; a checkpoint states no
+     *  frame (its orbitals belong to its one geometry). */
+    frame?: number;
 }
 
 export interface MolecularData {

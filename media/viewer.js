@@ -9527,13 +9527,18 @@ function convDrawTooltip(ctx,canvas){
 function steps_get(steps,i){return steps&&steps[i]?steps[i]:null}
 
 /** X-axis label of the idx-th plotted point. A scan or IRC series carries the
- *  name the parser gave the row (`F3`, `R12`, `TS`) or the point number the
- *  file stated; neither is the index (an IRC path starts at point 0, and a
- *  joined path runs reverse → TS → forward). An ordinary optimisation carries
- *  no name and keeps the step's position. */
+ *  name the parser gave the row (`F3`, `R12`, `TS`), a scan point carries the
+ *  value of the coordinate the file drove, or the point number the file stated;
+ *  none of them is the index (an IRC path starts at point 0, and a joined path
+ *  runs reverse → TS → forward). An ordinary optimisation carries no name and
+ *  keeps the step's position. */
 function pwPointTick(steps,i){
     var s=steps_get(steps,i);
     if(s&&s.label!=null)return String(s.label);
+    // The scan chart's x axis is the coordinate the file drove, so its ticks
+    // are the values the parameter table printed — the same numbers the list
+    // shows in its coordinate column.
+    if(s&&typeof s.coord==='number')return String(s.coord);
     return s&&typeof s.point==='number'?String(s.point):String(i+1);
 }
 
@@ -9634,6 +9639,13 @@ function drawConvergenceChart(canvas,steps,field,label,color,threshold,model,xLa
     // exactly that integer, so the two can never disagree).
     ctx.fillStyle='#ccc';ctx.font='10px sans-serif';ctx.textAlign='left';ctx.textBaseline='top';
     ctx.fillText(vbase==null?label:label+'  '+vbase+' +',padL,0);
+    // The ticks of a scan chart are the driven coordinate's values; naming the
+    // axis says which numbers they are (an optimisation passes none).
+    if(xLabel){
+        ctx.fillStyle='#888';ctx.textAlign='right';
+        ctx.fillText(xLabel,w-padR,0);
+        ctx.textAlign='left';
+    }
 
     // Grid + axis labels
     ctx.strokeStyle='rgba(255,255,255,0.12)';ctx.lineWidth=1;
@@ -9901,17 +9913,19 @@ function pathwayListHTML(){
             (coord?'<span class="pw-co">'+escapeHtml(label)+(coord.unit==='deg'?' (°)':' (Å)')+'</span>':'')+
             '<span class="pw-e">E (Hartree)</span>'+
             '<span class="pw-f">max F</span>'+
+            '<span class="pw-d">max D</span>'+
             '<span class="pw-s">n</span></div>';
         for(var i=0;i<SCAN.points.length;i++){
             var p=SCAN.points[i];
             var can=typeof p.frame==='number';
             html+='<div class="pw-row'+(can?' can':'')+(p.converged===false?' failed':'')+'"'+
-                (can?' data-fr="'+p.frame+'"':'')+
+                (can?' data-fr="'+p.frame+'"':'')+' data-point="'+p.point+'"'+
                 ' title="'+(can?'Show the optimized structure of this point':'The file holds no geometry for this point')+'">'+
                 '<span class="pw-no">'+p.point+'</span>'+
                 (coord?'<span class="pw-co">'+pwNum(p.coord)+'</span>':'')+
                 '<span class="pw-e">'+pwNum(p.energy)+'</span>'+
                 '<span class="pw-f">'+pwNum(p.maxForce)+'</span>'+
+                '<span class="pw-d">'+pwNum(p.maxDisplacement)+'</span>'+
                 '<span class="pw-s">'+(p.steps==null?'–':p.steps)+'</span></div>';
         }
         return html;
@@ -9942,13 +9956,23 @@ function pathwayListHTML(){
     return html;
 }
 
-/** Mark the row of the structure on screen, so the list and the 3D view agree. */
+/** Mark the row of the structure on screen, so the list and the 3D view agree.
+ *
+ * A scan row names its point as well as the frame the point converged on: an
+ * intermediate step of point 19 is a frame of its own, and the chart ring
+ * already follows the point that frame belongs to (`f.scanPoint`). Matching the
+ * point here is what keeps the list from going dark while the ring is lit. */
 function syncPathwayRows(){
     if(!optPanelEl)return;
+    var f=(MD.frames&&typeof currentFrame==='number')?MD.frames[currentFrame]:null;
+    var sp=(f&&typeof f.scanPoint==='number')?f.scanPoint:null;
     var rows=optPanelEl.querySelectorAll('.pw-row');
     for(var i=0;i<rows.length;i++){
         var fr=rows[i].getAttribute('data-fr');
-        rows[i].classList.toggle('on',fr!==null&&Number(fr)===currentFrame);
+        var pt=rows[i].getAttribute('data-point');
+        var on=fr!==null&&Number(fr)===currentFrame;
+        if(!on&&pt!==null&&sp!==null&&Number(pt)===sp)on=true;
+        rows[i].classList.toggle('on',on);
     }
 }
 
@@ -9962,6 +9986,13 @@ function buildPathwayPanel(){
         // one point per scan value instead of one per step.
         if(SCAN.points.some(function(p){return p.maxForce!=null||p.rmsForce!=null})){
             charts.push({title:'Force at the optimized geometry (max + rms)',kind:'force',points:SCAN.points,model:'scan'});
+        }
+        // The table's displacement rows belong to the step that arrived at the
+        // point, so they are drawn per point beside the forces — the same four
+        // numbers the convergence chart shows for an optimisation, read at the
+        // scan values instead of at the steps.
+        if(SCAN.points.some(function(p){return p.maxDisplacement!=null||p.rmsDisplacement!=null})){
+            charts.push({title:'Displacement of the last step (max + rms)',kind:'disp',points:SCAN.points,model:'scan'});
         }
     }else{
         var runs=ircRuns();
@@ -10056,9 +10087,20 @@ function renderPathwayCharts(){
         var pts=cv.__pwPoints||[];
         if(pts.length===0)continue;
         var model=cv.__pwModel||'frame';
+        // A scan's x axis is the coordinate the file drove; the ticks are its
+        // values and the axis title names it. An IRC path's ticks are the row
+        // names themselves (`R24` … `TS` … `F24`), so it needs no axis title.
+        var xl=(model==='scan'&&SCAN&&SCAN.coord)?SCAN.coord.label:'';
         if(cv.dataset.field==='energy'){
             cv.style.height='90px';
-            drawConvergenceChart(cv,pts,'energy','Energy (Hartree)','#3794ff',null,model,'Point');
+            drawConvergenceChart(cv,pts,'energy','Energy (Hartree)','#3794ff',null,model,xl);
+        }else if(cv.dataset.field==='disp'){
+            cv.style.height='110px';
+            // The scan point's own convergence targets: the displacement at a
+            // converged point is below these lines, exactly like the forces.
+            drawDualChart(cv,pts,['maxDisplacement','rmsDisplacement'],['Max Disp','RMS Disp'],['#6bb7ff','#b18cff'],
+                OPT_THRESHOLDS?OPT_THRESHOLDS.maxDisplacement:null,
+                OPT_THRESHOLDS?OPT_THRESHOLDS.rmsDisplacement:null,model,xl);
         }else{
             cv.style.height='110px';
             // The scan point's own convergence targets: the force at a converged
@@ -10066,7 +10108,7 @@ function renderPathwayCharts(){
             // without a legend of its own.
             drawDualChart(cv,pts,['maxForce','rmsForce'],['Max Force','RMS Force'],['#ff6b6b','#ffa94d'],
                 OPT_THRESHOLDS?OPT_THRESHOLDS.maxForce:null,
-                OPT_THRESHOLDS?OPT_THRESHOLDS.rmsForce:null,model,'Point');
+                OPT_THRESHOLDS?OPT_THRESHOLDS.rmsForce:null,model,xl);
         }
     }
     syncPathwayRows();
@@ -10179,6 +10221,17 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2,model,x
         ctx.fillStyle=colors[fi];
         ctx.fillRect(padL+fi*80,padT-12,8,2);
         ctx.fillText(labels[fi],padL+fi*80+10,padT-14);
+    }
+    // The axis name sits opposite the legend, on the title line, when the
+    // legend leaves room for it.
+    if(xLabel){
+        var xw=ctx.measureText(xLabel).width;
+        var legendEnd=padL+(fields.length-1)*80+18+ctx.measureText(labels[labels.length-1]).width;
+        if(w-padR-xw>legendEnd){
+            ctx.fillStyle='#888';ctx.textAlign='right';
+            ctx.fillText(xLabel,w-padR,0);
+            ctx.textAlign='left';
+        }
     }
     // Data lines + points (kept for the hover tooltip / selected-step mark)
     var series=[];
@@ -10871,6 +10924,36 @@ var SUMMARY=MD.summary||null;
 // never has to ask which file it is showing.
 var ORBITALS=MD.orbitals||null;
 var CAVITY=MD.cavity||null;
+/**
+ * Move the view to the geometry whose SCF printed the orbital energies.
+ *
+ * The level diagram describes the last SCF in the file, and that SCF belongs
+ * to one frame: the converged structure of an optimisation, the last point of
+ * a scan, or one end of an IRC path. Selecting the Orbitals tab is asking to
+ * read those orbitals, so it takes the view there — the same move choosing a
+ * charge scheme makes, and the undo history is carried across when both frames
+ * describe the same atom list.
+ */
+function orbitalJumpToFrame(){
+    if(!ORBITALS||typeof ORBITALS.frame!=='number')return false;
+    if(ORBITALS.frame===currentFrame)return false;
+    if(ORBITALS.frame<0||ORBITALS.frame>=totalFrames)return false;
+    var fromAtoms=MD.frames[currentFrame]&&MD.frames[currentFrame].atoms;
+    var toAtoms=MD.frames[ORBITALS.frame]&&MD.frames[ORBITALS.frame].atoms;
+    var keep=!!(fromAtoms&&toAtoms&&fromAtoms.length===toAtoms.length);
+    if(keep){
+        for(var i=0;i<fromAtoms.length;i++){
+            if(fromAtoms[i].element!==toAtoms[i].element){keep=false;break}
+        }
+    }
+    var keptUndo=keep?undoStack.slice():null;
+    switchFrame(ORBITALS.frame);
+    if(keptUndo){
+        undoStack=keptUndo;
+        updateUndoBtn();
+    }
+    return true;
+}
 // The geometry the file itself states, fingerprinted once. A molecular orbital
 // and a solvation cavity are properties of that geometry, so after an edit or an
 // import a new draw would picture atoms that are no longer on screen; the two
@@ -11305,6 +11388,10 @@ function propsTabsHtml(){
 function buildChargePanel(){
     if(!chargePanelEl||!propsAvailable())return;
     propTab=propsOpenTab();
+    // A file whose only electronic structure is its orbitals opens straight on
+    // that tab, and that is the same request as clicking it: take the view to
+    // the SCF the levels describe.
+    if(propTab==='mos')orbitalJumpToFrame();
     chargePanelEl.innerHTML=
         '<div class="chg-head"><span class="chg-title">⚛️ Electronic Structure</span><span class="chg-close">×</span></div>'+
         '<div class="chg-tabs">'+propsTabsHtml()+'</div>'+
@@ -11315,7 +11402,16 @@ function buildChargePanel(){
     for(var i=0;i<tabs.length;i++){
         tabs[i].addEventListener('click',function(){
             var id=this.getAttribute('data-tab');
-            if(!id||!propsTabHasData(id)||id===propTab)return;
+            if(!id||!propsTabHasData(id))return;
+            // Reading the orbital levels is asking for the SCF they came from:
+            // an optimisation's last SCF is a particular step, and in a scan,
+            // an IRC or a --Link1-- file that step is not the frame the file
+            // opened on. The jump is the same move a charge scheme makes.
+            var jumped=id==='mos'?orbitalJumpToFrame():false;
+            if(id===propTab){
+                if(jumped)renderPropsTab();
+                return;
+            }
             propTab=id;
             var all=chargePanelEl.querySelectorAll('.chg-tab');
             for(var k=0;k<all.length;k++)all[k].classList.toggle('on',all[k].getAttribute('data-tab')===id);
@@ -11471,9 +11567,18 @@ function propsMoHtml(){
     }
     if(ORBITALS.model)html+='<div class="chg-hint">'+chargeEsc(ORBITALS.model)+'</div>';
     // A log prints one eigenvalue dump per SCF; the panel draws the last, which
-    // for an optimisation is the converged geometry's. A job with one geometry
-    // needs no such warning, and saying it there would only be noise.
-    if(totalFrames>1)html+='<div class="chg-hint">Eigenvalues of the last SCF the file printed — not of the frame on screen.</div>';
+    // belongs to one geometry. The tab takes the view there when it is chosen,
+    // and this line keeps saying which frame that is if the user navigates away.
+    if(totalFrames>1){
+        var of=ORBITALS.frame;
+        if(typeof of==='number'){
+            html+='<div class="chg-hint">'+(of===currentFrame
+                ? 'Eigenvalues of the SCF computed at this frame ('+(of+1)+' of '+totalFrames+').'
+                : 'Eigenvalues of the SCF computed at frame '+(of+1)+' of '+totalFrames+', not of the frame on screen.')+'</div>';
+        }else{
+            html+='<div class="chg-hint">Eigenvalues of the last SCF the file printed — not of the frame on screen.</div>';
+        }
+    }
     if(!ORBITALS.canDraw)html+='<div class="chg-hint">'+chargeEsc(ORBITALS.reason||'')+'</div>';
     html+='<div class="orb-prog" id="surf-prog"><div class="bar" id="surf-bar"></div></div>'+
         '<div class="chg-note" id="surf-note"></div>'+
