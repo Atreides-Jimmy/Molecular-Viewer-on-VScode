@@ -1,4 +1,4 @@
-import { Atom, Bond, MolecularData, OptStep, NormalMode, SolventCavity, OrbitalLevels, OrbitalSpinLevels } from '../types';
+import { Atom, Bond, MolecularData, OptStep, NormalMode, SolventCavity, OrbitalLevels, OrbitalSpinLevels, ScanPoint, ScanResult, IrcResult, IrcPoint, IrcRun, IrcDirection, LogPathways } from '../types';
 
 const ATOMIC_NUMBER_MAP: { [key: number]: string } = {
     1: 'H', 2: 'He', 3: 'Li', 4: 'Be', 5: 'B', 6: 'C', 7: 'N', 8: 'O', 9: 'F', 10: 'Ne',
@@ -47,6 +47,13 @@ export interface LogFrame {
      *  IRC path point, a trajectory frame.
      *  [2026-11-12 | Atreides-Jimmy] Added for the step guide of feature 2. */
     optStep?: number;
+    /** The scan point this geometry belongs to (1-based), for a relaxed scan.
+     *  Every step of a point carries it, so the scan panel can mark the point
+     *  whose relaxation is on screen and not only its converged end.
+     *  [2026-11-12 | Atreides-Jimmy] Added with the Scan panel. */
+    scanPoint?: number;
+    /** The optimizer step within that scan point (1-based). */
+    scanStep?: number;
 }
 
 export interface GaussianLogResult {
@@ -67,6 +74,11 @@ export interface GaussianLogResult {
     /** The solvation cavity the file describes (type, solvent, area, volume).
      *  A log names no per-sphere radii; those are in the checkpoint. */
     cavity?: SolventCavity;
+    /** A relaxed scan and/or an IRC path the file holds. Both are sequences of
+     *  structures along one coordinate rather than an optimizer series, so the
+     *  page shows them in place of the convergence charts.
+     *  [2026-11-12 | Atreides-Jimmy] Added with the Scan and IRC panels. */
+    pathways?: LogPathways;
 }
 
 /**
@@ -504,6 +516,29 @@ const NBUSE_RE = /NBsUse=\s*(\d+)/;
 const JOB_CPU_RE = /Job cpu time:\s*(.+?)\s*\.?\s*$/;
 const ELAPSED_RE = /Elapsed time:\s*(.+?)\s*\.?\s*$/;
 
+// --- A relaxed surface scan and an IRC path -------------------------------
+// ` Step number   1 out of a maximum of   57 on scan point     1 out of    32`
+// The `on scan point` tail is what makes the table a scan point's step instead
+// of a step of one optimisation; a plain Berny run prints the line without it
+// and its tables keep the old meaning.
+const SCAN_STEP_RE = /Step number\s+(\d+)\s+out of a maximum of\s+(\d+)\s+on scan point\s+(\d+)\s+out of\s+(\d+)/;
+/** ` Point Number:   0          Path Number:   1` — an IRC point's own header. */
+const IRC_POINT_RE = /Point Number:\s*(\d+)\s+Path Number:\s*(\d+)/;
+/** One row of the Berny parameter table: name, definition, value, derivative. */
+const SCAN_PARAM_ROW_RE = /^!\s+([A-Za-z]+\d+)\s+([A-Za-z]\([\d,]+\))\s+(-?\d+(?:\.\d+)?)\s+(.*)$/;
+/** The derivative column of a scanned parameter. `Scan` alone, not `Scanning`. */
+const SCAN_MARK_RE = /^Scan\b/;
+/** `Summary of Optimized Potential Surface Scan (add -269.0 to energies):` */
+const SCAN_TABLE_BASE_RE = /\(add\s+([-+]?\d+(?:\.\d+)?)\s+to energies\)/i;
+/** A group's column header — the point numbers, and nothing else. */
+const SCAN_TABLE_HEAD_RE = /^\d+(\s+\d+)+$/;
+/** `Eigenvalues --    -0.65139  -0.65102 …` */
+const SCAN_TABLE_ENERGY_RE = /^Eigenvalues\s*-+\s+(.*)$/;
+/** `R2           3.09780   3.04780 …` — a parameter row of the summary. */
+const SCAN_TABLE_ROW_RE = /^([A-Za-z]+\d+)\s+(.*)$/;
+/** The summary packs negative values without a blank: `-168.89124-167.99169`. */
+const SCAN_TABLE_NUMBER_RE = /-?\d+\.\d+/g;
+
 /** The most atoms a charge table may address. A row that names an index past
  *  this is not a charge table (or not one this reader understands), and the
  *  table is refused rather than used to build an array of that length. */
@@ -895,6 +930,504 @@ function gaussianTitleOf(lines: string[]): string {
     return '';
 }
 
+/**
+ * One scan point while the single pass reads it.
+ *
+ * A relaxed scan is a series of *optimisations*, not a series of steps: each
+ * point relaxes everything but the driven coordinate, prints its own tables and
+ * ends on its own stationary point. The draft keeps the point's own numbers —
+ * its last table, the geometry that table describes and how many steps it took
+ * — so the finished series is one entry per point and never a 106-step
+ * "convergence" made of eight separate relaxations.
+ */
+interface ScanDraft {
+    /** 1-based scan point, as the file numbers it. */
+    point: number;
+    /** The step number the point's latest table carried. */
+    step: number;
+    /** How many tables the point printed. */
+    steps: number;
+    /** How many of the point's four convergence rows said `YES`. */
+    yes: number;
+    /** True when the file stated `Optimization completed.` for this point. */
+    converged: boolean;
+    /** PRE-FILTER index of the geometry of the point's last step, or -1. */
+    frame: number;
+    /** The point's last convergence table. */
+    last?: OptStep;
+}
+
+/** The internal coordinate a scan drives, as the file's parameter table names it. */
+interface ScanCoordInfo {
+    /** `R2`, `D13` — the name the summary table repeats. */
+    name: string;
+    /** `R(1,6)`, `D(4,3,5,6)` — the definition a reader recognises. */
+    label: string;
+    /** Angstrom for a bond length, degrees for an angle or a dihedral. */
+    unit: 'A' | 'deg';
+}
+
+/** The run's closing summary: the energy and the driven coordinate per point. */
+interface ScanTable {
+    /** Point number → energy in Hartree (the table's own base added back). */
+    energy: { [point: number]: number };
+    /** Parameter name → point number → value, in the file's own units. */
+    values: { [name: string]: { [point: number]: number } };
+}
+
+interface ScanState {
+    /** The point being read. */
+    cur: ScanDraft | null;
+    /** Finished points, in the order the file took them. */
+    list: ScanDraft[];
+    /** How many points the run set out to take, when its step line says so. */
+    total: number;
+    /** The coordinate(s) whose derivative column reads `Scan`. */
+    params: ScanCoordInfo[];
+    /** The closing summary table, when the run printed one. */
+    table: ScanTable | null;
+}
+
+/** One IRC path point, recorded when its geometry frame is built. */
+interface IrcDraft {
+    path: number;
+    point: number;
+    /** PRE-FILTER index of the frame holding that point's geometry. */
+    frame: number;
+    /** Which IRC calculation of the file this point belongs to (1-based):
+     *  a `--Link1--` file can run the analysis more than once, and each run is
+     *  one reaction path of its own. */
+    run: number;
+    /** Which half of the path, when the file says (a banner or its route card). */
+    dir?: IrcDirection;
+}
+
+/**
+ * Role a geometry block plays in the frame list, kept beside `frames` because
+ * the filter that drops the redundant blocks runs AFTER the pass and the labels
+ * are no longer a reliable statement of it (a scan point's geometry is labelled
+ * by its point, not by `Step`).
+ */
+interface FrameKinds {
+    /** True for an `Input orientation` block. */
+    input: boolean[];
+    /** True for a frame a scan point or an IRC path point claims. */
+    bound: boolean[];
+}
+
+/**
+ * Read the `! Initial Parameters !` block a Berny scan opens with and return
+ * the rows whose derivative column says `Scan` — the coordinate(s) the run
+ * drives.
+ *
+ *     ! R2    R(1,6)                  3.0978         Scan                            !
+ *
+ * The block is bounded by its own dashed rules, so the read stops at the first
+ * line that is neither a row nor a rule: a damaged file cannot make it swallow
+ * the geometry below.
+ */
+function readScanParameters(lines: string[], from: number): { params: ScanCoordInfo[]; endIdx: number } {
+    const params: ScanCoordInfo[] = [];
+    const limit = Math.min(lines.length, from + 4000);
+    let rows = 0;
+    let i = from + 1;
+    for (; i < limit; i++) {
+        const t = lines[i].trim();
+        if (t === '') break;
+        if (t.charAt(0) === '!') {
+            const m = SCAN_PARAM_ROW_RE.exec(t);
+            if (m) {
+                rows++;
+                if (SCAN_MARK_RE.test(m[4])) {
+                    const name = m[1];
+                    params.push({
+                        name,
+                        label: m[2],
+                        unit: name.charAt(0).toUpperCase() === 'R' ? 'A' : 'deg'
+                    });
+                }
+            }
+            continue;
+        }
+        if (t.charAt(0) !== '-') break;
+        // The rule above the first row opens the table; a rule after it closes.
+        if (rows > 0) { i++; break; }
+    }
+    return { params, endIdx: i };
+}
+
+/**
+ * Read the `Summary of Optimized Potential Surface Scan` table.
+ *
+ * The table is printed in groups of five points, each group repeating the
+ * parameter rows under its own column header:
+ *
+ *     Summary of Optimized Potential Surface Scan (add -269.0 to energies):
+ *                            1         2         3         4         5
+ *          Eigenvalues --    -0.65139  -0.65102  -0.65047  -0.64973  -0.64879
+ *                R2           3.09780   3.04780   2.99780   2.94780   2.89780
+ *
+ * Values are packed without a separating blank when two are negative
+ * (`-168.89124-167.99169`), so they are read by their decimal shape rather than
+ * by whitespace. The header's `add -269.0 to energies` base is put back, so an
+ * energy read here is a total energy like every other one in the viewer.
+ */
+function readScanTable(lines: string[], from: number): ScanTable {
+    const table: ScanTable = { energy: {}, values: {} };
+    const baseMatch = lines[from].match(SCAN_TABLE_BASE_RE);
+    const base = baseMatch ? parseFloat(baseMatch[1]) : 0;
+    let cols: number[] = [];
+    let rows = 0;
+    const limit = Math.min(lines.length, from + 40000);
+    for (let i = from + 1; i < limit; i++) {
+        const t = lines[i].trim();
+        if (t === '') break;
+        // A group's column header: the point numbers the rows below belong to.
+        if (SCAN_TABLE_HEAD_RE.test(t)) {
+            cols = t.split(/\s+/).map(Number);
+            continue;
+        }
+        if (cols.length === 0) break;
+        const eg = SCAN_TABLE_ENERGY_RE.exec(t);
+        if (eg) {
+            putScanValues(table.energy, cols, eg[1], base);
+            rows++;
+            continue;
+        }
+        const row = SCAN_TABLE_ROW_RE.exec(t);
+        if (!row) break;
+        const target = table.values[row[1]] || (table.values[row[1]] = {});
+        putScanValues(target, cols, row[2], 0);
+        rows++;
+    }
+    return table;
+}
+
+/** Lay the numbers of one summary row onto the points its column header named. */
+function putScanValues(target: { [point: number]: number }, cols: number[], text: string, offset: number): void {
+    const nums = text.match(SCAN_TABLE_NUMBER_RE);
+    if (!nums) return;
+    const n = Math.min(nums.length, cols.length);
+    for (let k = 0; k < n; k++) target[cols[k]] = parseFloat(nums[k]) + offset;
+}
+
+/**
+ * Where a PRE-FILTER frame index ended up after the input/standard filter.
+ * Undefined when the frame was dropped, which a caller treats as "no structure
+ * to point at" rather than as frame 0.
+ */
+function remapFrameIndex(remap: number[] | null, idx: number, preCount: number): number | undefined {
+    if (idx < 0 || idx >= preCount) return undefined;
+    if (!remap) return idx;
+    let k = idx;
+    while (k >= 0 && remap[k] < 0) k--;
+    return k < 0 ? undefined : remap[k];
+}
+
+/** The label of a scan point's geometry: `Point 3 · step 2 (Charge=1 Mult=1)`. */
+function scanFrameLabel(point: number, step: number, chargeMult: string): string {
+    return 'Point ' + point + ' · step ' + step + (chargeMult ? ' (' + chargeMult + ')' : '');
+}
+
+/** Two frames describe the same geometry, element for element. */
+function sameGeometry(a: Atom[], b: Atom[]): boolean {
+    if (a.length !== b.length) return false;
+    for (let k = 0; k < a.length; k++) {
+        if (a[k].element !== b[k].element) return false;
+        if (Math.abs(a[k].x - b[k].x) > 1e-6) return false;
+        if (Math.abs(a[k].y - b[k].y) > 1e-6) return false;
+        if (Math.abs(a[k].z - b[k].z) > 1e-6) return false;
+    }
+    return true;
+}
+
+/**
+ * Turn the scan drafts into the series the page draws, in frame-list indices.
+ *
+ * The two sources are combined rather than chosen: the tables give every point's
+ * energy, forces and geometry, and the closing summary gives the driven
+ * coordinate and a value for a point whose table the run never reached (a job
+ * that stopped early). A file whose tables are missing entirely — a scan read
+ * only through its summary, or a log whose head is gone — still yields its
+ * points, with the energies the summary states.
+ */
+function buildScanResult(st: ScanState, frames: LogFrame[], remap: number[] | null): ScanResult | undefined {
+    const preCount = remap ? remap.length : frames.length;
+    const info = st.params.length > 0 ? st.params[0] : null;
+    const points: ScanPoint[] = [];
+    for (const d of st.list) {
+        const p: ScanPoint = { point: d.point };
+        if (d.last) {
+            p.energy = d.last.energy;
+            p.maxForce = d.last.maxForce;
+            p.rmsForce = d.last.rmsForce;
+            p.maxDisplacement = d.last.maxDisplacement;
+            p.rmsDisplacement = d.last.rmsDisplacement;
+        }
+        if (p.energy == null && st.table && st.table.energy[d.point] != null) {
+            p.energy = st.table.energy[d.point];
+        }
+        if (d.steps > 0) p.steps = d.steps;
+        const fr = remapFrameIndex(remap, d.frame, preCount);
+        if (fr !== undefined) p.frame = fr;
+        // The point is converged when the file said so, and equally when all
+        // four of its last table's rows said YES: a run cut off before its
+        // "Optimization completed." line still states where it got to.
+        p.converged = d.converged || (d.last !== undefined && d.yes === 4);
+        if (info && st.table) {
+            const col = st.table.values[info.name];
+            if (col && col[d.point] != null) p.coord = col[d.point];
+        }
+        points.push(p);
+    }
+    // No table of its own: the run's summary still states its points.
+    if (points.length === 0 && st.table) {
+        const nums = Object.keys(st.table.energy).map(Number).sort((a, b) => a - b);
+        for (const n of nums) {
+            const p: ScanPoint = { point: n, energy: st.table.energy[n] };
+            if (info) {
+                const col = st.table.values[info.name];
+                if (col && col[n] != null) p.coord = col[n];
+            }
+            points.push(p);
+        }
+    }
+    if (points.length === 0) return undefined;
+    points.sort((a, b) => a.point - b.point);
+    const result: ScanResult = { points };
+    // A log whose head is gone has no step line to state the run's size; the
+    // summary's highest point number is then the size it actually reached.
+    let total = st.total;
+    if (total <= 0 && st.table) {
+        const nums = Object.keys(st.table.energy).map(Number);
+        if (nums.length > 0) total = Math.max.apply(null, nums);
+    }
+    if (total > 0) result.total = total;
+    if (info) result.coord = { label: info.label, unit: info.unit };
+    return result;
+}
+
+/** The path directions an `irc=(…)` route card asks for, in its own order. */
+function ircRouteDirections(sec: RouteSection): IrcDirection[] {
+    const dirs: IrcDirection[] = [];
+    for (const k of sec.keywords) {
+        if (k.name.toLowerCase() !== 'irc') continue;
+        for (const o of k.options) {
+            const v = o.toLowerCase();
+            if (v === 'forward' && dirs.indexOf('forward') < 0) dirs.push('forward');
+            else if (v === 'reverse' && dirs.indexOf('reverse') < 0) dirs.push('reverse');
+        }
+    }
+    return dirs;
+}
+
+/** Turn the IRC path points into the series the page draws.
+ *
+ * A path number is only unique inside its own IRC job: a `--Link1--` file that
+ * ran the analysis twice prints `Path Number: 1` again for the second run.
+ * Each run of consecutive drafts that keeps the same file-stated path number is
+ * therefore given its own series number — 1, 2, 3, … in file order. A single
+ * IRC job keeps its own numbers exactly (1, 2), and two jobs can never merge
+ * their points into one chart.
+ *
+ * The drafts are grouped by the run they belong to as well: the page joins one
+ * run's forward and reverse halves into ONE reaction path, and a file with two
+ * IRC jobs still gets two charts. The transition state the run started from is
+ * carried with it, so the joined curve has a single barrier between the two
+ * halves instead of two near-degenerate points where they meet. */
+function buildIrcResult(drafts: IrcDraft[], frames: LogFrame[], remap: number[] | null, runTs: { run: number; frame: number }[]): IrcResult | undefined {
+    if (drafts.length === 0) return undefined;
+    const preCount = remap ? remap.length : frames.length;
+    const points: IrcPoint[] = [];
+    const paths: { path: number; count: number; dir?: IrcDirection }[] = [];
+    const pointSeries: number[] = [];
+    let prevPath = -1;
+    let series = 0;
+    for (const d of drafts) {
+        if (d.path !== prevPath) {
+            prevPath = d.path;
+            series = paths.length + 1;
+            paths.push({ path: series, count: 1 });
+        } else {
+            paths[paths.length - 1].count++;
+        }
+        pointSeries.push(series);
+        if (d.dir && !paths[paths.length - 1].dir) paths[paths.length - 1].dir = d.dir;
+        const p: IrcPoint = { path: series, point: d.point };
+        const fr = remapFrameIndex(remap, d.frame, preCount);
+        if (fr !== undefined) {
+            p.frame = fr;
+            const e = frames[fr].energy;
+            if (e != null) p.energy = e;
+        }
+        points.push(p);
+    }
+
+    // One run per consecutive group of drafts. A run that computed both halves
+    // names each half; a file that stated neither direction still printed the
+    // halves in forward/reverse order, which is how they can be joined.
+    const runs: IrcRun[] = [];
+    let start = 0;
+    while (start < drafts.length) {
+        const runNo = drafts[start].run;
+        let end = start;
+        while (end < drafts.length && drafts[end].run === runNo) end++;
+        const runPathNumbers: number[] = [];
+        for (let k = start; k < end; k++) {
+            if (runPathNumbers.indexOf(pointSeries[k]) < 0) runPathNumbers.push(pointSeries[k]);
+        }
+        const runPaths: { path: number; count: number; dir?: IrcDirection }[] = [];
+        for (const pn of runPathNumbers) {
+            const meta = paths.filter(p => p.path === pn)[0];
+            if (meta) runPaths.push(meta);
+        }
+        if (runPaths.length === 2) {
+            const a = runPaths[0];
+            const b = runPaths[1];
+            if (!a.dir && !b.dir) { a.dir = 'forward'; b.dir = 'reverse'; }
+            else if (!a.dir && b.dir === 'reverse') a.dir = 'forward';
+            else if (!b.dir && a.dir === 'forward') b.dir = 'reverse';
+            else if (!a.dir && b.dir === 'forward') a.dir = 'reverse';
+            else if (!b.dir && a.dir === 'reverse') b.dir = 'forward';
+        }
+        const run: IrcRun = { paths: runPathNumbers };
+        const ts = runTs.filter(t => t.run === runNo)[0];
+        if (ts && (remap === null || remap[ts.frame] >= 0)) {
+            const fr = remapFrameIndex(remap, ts.frame, preCount);
+            const claimed = fr !== undefined && drafts.some(d => remapFrameIndex(remap, d.frame, preCount) === fr);
+            if (fr !== undefined && !claimed) {
+                run.tsFrame = fr;
+                const e = frames[fr].energy;
+                if (e != null) run.tsEnergy = e;
+            }
+        }
+        runs.push(run);
+        start = end;
+    }
+    return { points, paths, runs };
+}
+
+/**
+ * Order an IRC calculation's frames along its reaction path.
+ *
+ * The file prints the transition state first, then one half of the path and
+ * then the other, so its frame list begins in the middle of the reaction
+ * coordinate. The viewer plays frames in list order: it would start at the
+ * barrier and jump from one far end to the other when it crossed between the
+ * halves. A reaction path has a natural order — the reverse half from its far
+ * end to the barrier, the barrier itself, then the forward half away from it —
+ * and that is the order the IRC card lists. Putting the frames in that order
+ * makes frame 1 the leftmost structure, so opening the file shows the start of
+ * the path and Play runs it from one end to the other.
+ *
+ * A run that computed one direction keeps the barrier on the side the half
+ * starts from: a forward-only run begins at the barrier, a reverse-only one
+ * ends there. A file with several IRC jobs keeps each run's frames together
+ * where the run began. Every frame reference — the path points, each run's
+ * transition state, scan points and charge tables — is carried across the
+ * move, so a click on a path row, a charge map and the chart highlight still
+ * name the geometry they describe.
+ */
+function orderIrcFrames(
+    frames: LogFrame[],
+    irc: IrcResult | undefined,
+    scan: ScanResult | undefined,
+    charges: LogChargeSet[]
+): void {
+    if (!irc || irc.runs.length === 0 || frames.length < 2) return;
+
+    const members = new Set<number>();
+    const sequences: number[][] = [];
+    for (const run of irc.runs) {
+        let fwd: number | null = null;
+        let rev: number | null = null;
+        for (const pn of run.paths) {
+            const meta = irc.paths.filter(p => p.path === pn)[0];
+            if (!meta || !meta.dir) continue;
+            if (meta.dir === 'forward' && fwd === null) fwd = pn;
+            else if (meta.dir === 'reverse' && rev === null) rev = pn;
+        }
+        const seq: number[] = [];
+        const seen = new Set<number>();
+        const push = (fr: number | undefined): void => {
+            if (fr === undefined || fr < 0 || fr >= frames.length || seen.has(fr)) return;
+            seen.add(fr);
+            seq.push(fr);
+        };
+        const pointsOf = (pn: number): IrcPoint[] =>
+            irc.points.filter(p => p.path === pn);
+        if (rev !== null) {
+            // Point 0 is the end nearest the barrier; the far end is where the
+            // joined path starts.
+            const pts = pointsOf(rev).sort((a, b) => b.point - a.point);
+            for (const p of pts) push(p.frame);
+        }
+        push(run.tsFrame);
+        if (fwd !== null) {
+            const pts = pointsOf(fwd).sort((a, b) => a.point - b.point);
+            for (const p of pts) push(p.frame);
+        }
+        // A series the file neither named nor paired (an unusual payload with
+        // more than two paths) stays with its run, after the named halves,
+        // rather than being left behind.
+        const rest = irc.points
+            .filter(p => run.paths.indexOf(p.path) >= 0)
+            .sort((a, b) => a.path - b.path || a.point - b.point);
+        for (const p of rest) push(p.frame);
+        if (seq.length === 0) continue;
+        for (const fr of seq) members.add(fr);
+        sequences.push(seq);
+    }
+    if (sequences.length === 0 || members.size < 2) return;
+
+    // Each run is emitted where its first structure was; every frame outside
+    // the runs keeps its place. A run's frames are contiguous in the file, so
+    // this reorders the path without moving another job's frames around it.
+    const byAnchor = new Map<number, number[]>();
+    for (const seq of sequences) {
+        const anchor = Math.min(...seq);
+        if (byAnchor.has(anchor)) return;   // overlapping runs: leave the file alone
+        byAnchor.set(anchor, seq);
+    }
+    const next: LogFrame[] = [];
+    const newIndex: number[] = new Array(frames.length).fill(-1);
+    const placed = new Set<number>();
+    for (let k = 0; k < frames.length; k++) {
+        if (placed.has(k)) continue;
+        const seq = byAnchor.get(k);
+        if (seq) {
+            for (const fr of seq) {
+                if (placed.has(fr)) return;
+                placed.add(fr);
+                newIndex[fr] = next.length;
+                next.push(frames[fr]);
+            }
+        } else if (!members.has(k)) {
+            placed.add(k);
+            newIndex[k] = next.length;
+            next.push(frames[k]);
+        }
+    }
+    // Every frame must be accounted for; otherwise the list is left untouched
+    // rather than silently dropping or duplicating a structure.
+    if (next.length !== frames.length || newIndex.some(v => v < 0)) return;
+
+    for (const p of irc.points) {
+        if (typeof p.frame === 'number') p.frame = newIndex[p.frame];
+    }
+    for (const run of irc.runs) {
+        if (typeof run.tsFrame === 'number') run.tsFrame = newIndex[run.tsFrame];
+    }
+    if (scan) {
+        for (const p of scan.points) {
+            if (typeof p.frame === 'number') p.frame = newIndex[p.frame];
+        }
+    }
+    for (const c of charges) c.frame = newIndex[c.frame];
+    frames.length = 0;
+    for (const f of next) frames.push(f);
+}
+
 export function parseGaussianLog(content: string, onProgress?: (fraction: number) => void): GaussianLogResult {
     const lines = content.split(/\r?\n/);
     const lineTotal = lines.length || 1;
@@ -958,6 +1491,33 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
     /** Where the current job's frames begin, so an energy can never be bound to
      *  a frame the previous job of a `--Link1--` file printed. */
     let jobFrameStart = 0;
+    /** The relaxed scan being read: its points so far, the coordinate its
+     *  parameter table marks `Scan`, and the summary table it may close with. */
+    const scanState: ScanState = { cur: null, list: [], total: 0, params: [], table: null };
+    /** The IRC point whose geometry comes next, once its own header was read. */
+    let ircPending: { path: number; point: number; dir?: IrcDirection } | null = null;
+    /** The path number the last `Point Number` header stated. */
+    let ircPathNumber = 0;
+    /** The path whose starting geometry comes next, when the file announces a
+     *  half of the path by a banner instead of a point header: the reverse path
+     *  begins right after `Beginning calculation of the REVERSE path.` with a
+     *  geometry that carries no `Point Number` of its own. It is point 0. */
+    let ircStartPath: number | null = null;
+    /** The IRC calculation being read: a file may hold several. */
+    let ircRun = 0;
+    /** True once the current run has a start banner or a bound point, so a
+     *  geometry that follows a job boundary without a banner opens a new one. */
+    let ircRunOpen = false;
+    /** Which half the next path point belongs to, when the file says so. */
+    let ircDirection: IrcDirection | undefined = undefined;
+    /** The directions the current job's own route card states, if any. */
+    let jobIrcDirs: IrcDirection[] | null = null;
+    /** The transition-state frame each run starts from (PRE-FILTER indices). */
+    const ircRunTs: { run: number; frame: number }[] = [];
+    const ircDrafts: IrcDraft[] = [];
+    /** The role each frame block played, kept beside `frames` for the filter
+     *  that runs after the pass (labels no longer state it). */
+    const kinds: FrameKinds = { input: [], bound: [] };
 
     let i = 0;
     while (i < lines.length) {
@@ -1040,6 +1600,10 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
                     // Which kind of job the following tables belong to.
                     jobHasOpt = sec.hasOpt;
                     jobCardSeen = true;
+                    // The directions this job's own card states (an IRC run that
+                    // computed only one half leaves no direction banner, so its
+                    // card is the only place the file says which half it is).
+                    jobIrcDirs = ircRouteDirections(sec);
                     // A route card is the start of a job: the results and the
                     // population analysis that follow belong to it, not to the
                     // job whose card preceded them. This is the only boundary a
@@ -1055,6 +1619,17 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
                     // point) leaves its SCF energy pending; carrying it into the
                     // next job would stamp it onto that job's first geometry.
                     pendingEnergy = undefined;
+                    // A scan belongs to the job that ran it: the point still
+                    // open ends here rather than absorbing the next job's steps.
+                    if (scanState.cur) { scanState.list.push(scanState.cur); scanState.cur = null; }
+                    // An IRC path belongs to its job just as strictly: a point
+                    // header waiting for a geometry, an announced path start or a
+                    // path number from the previous job must not reach the next.
+                    ircPending = null;
+                    ircStartPath = null;
+                    ircPathNumber = 0;
+                    ircDirection = undefined;
+                    ircRunOpen = false;
                     jobFrameStart = frames.length;
                     i = j;
                     continue;
@@ -1098,16 +1673,31 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
             }
 
             if (atoms.length > 0) {
-                const label = isStandard
-                    ? `Step ${stdFrames + 1}${chargeMultLine ? ' (' + chargeMultLine + ')' : ''}`
-                    : `Input${chargeMultLine ? ' (' + chargeMultLine + ')' : ''}`;
+                const cmText = chargeMultLine ? ' (' + chargeMultLine + ')' : '';
+                // An IRC point states its own number BEFORE its geometry, so the
+                // block that follows is that point's structure — label, frame
+                // link and all. A path's starting geometry has no such header
+                // when a banner announced the path (`ircStartPath`): that block
+                // is point 0 of the announced path. Everything else is a step or
+                // the input pose.
+                const irc = ircPending ||
+                    (ircStartPath !== null ? { path: ircStartPath, point: 0, dir: ircDirection } : null);
+                const label = irc
+                    ? 'Path ' + irc.path + ' · point ' + irc.point + cmText
+                    : isStandard ? `Step ${stdFrames + 1}${cmText}` : 'Input' + cmText;
                 // Which optimizer step this geometry is: its own table comes
                 // AFTER the geometry (`Standard orientation` … `SCF Done` … the
                 // four rows), so the number it will take is the next one. A job
                 // whose tables are not a series (a Freq job re-reading the
                 // converged geometry, an IRC) stamps nothing, and the page then
                 // has no step to mark on those frames.
-                const stepOfFrame = (jobHasOpt || !jobCardSeen) ? optSteps.length + 1 : undefined;
+                //
+                // A scan's tables are not one series either: a point's geometry
+                // is stamped with that point's own step number when its table
+                // arrives (see the convergence-table branch), so from the first
+                // point on no frame claims a position in `optSteps`.
+                const stepOfFrame = (!irc && scanState.cur === null && (jobHasOpt || !jobCardSeen))
+                    ? optSteps.length + 1 : undefined;
                 frames.push({
                     atoms,
                     bonds: [],
@@ -1128,6 +1718,20 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
                     // left every frame without one. [2026-11-12 | Atreides-Jimmy]
                     energy: undefined
                 });
+                kinds.input.push(!isStandard);
+                // A frame an IRC point claims is never the redundant copy of a
+                // step: it is the point's only structure, so the filter below
+                // must keep it even if it is an `Input orientation` block.
+                kinds.bound.push(irc !== null);
+                if (irc) {
+                    if (!ircRunOpen) { ircRun++; ircRunOpen = true; }
+                    ircDrafts.push({
+                        path: irc.path, point: irc.point, frame: frames.length - 1,
+                        run: ircRun, dir: irc.dir
+                    });
+                    ircPending = null;
+                    ircStartPath = null;
+                }
                 if (isStandard) stdFrames++;
             }
             i++; // matches the previous outer-loop increment
@@ -1186,7 +1790,145 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
         let gateP = 0;
         while (gateP < line.length && line.charCodeAt(gateP) === 32) gateP++;
         const gateC = gateP < line.length ? line.charCodeAt(gateP) : 0;
+        // A Berny parameter table opens with `!    Initial Parameters    !`; its
+        // rows are the only place the file says WHICH coordinate a scan drives.
+        // The '!' is checked before the capital-letter gate, and the rows are
+        // read in one bounded block, so a coordinate row costs a char code test.
+        if (gateC === 33 && line.indexOf('Initial Parameters') >= 0) {
+            const block = readScanParameters(lines, i);
+            if (block.params.length > 0) scanState.params = block.params;
+            i = block.endIdx;
+            continue;
+        }
+        // The banner that opens an IRC calculation starts its path numbering
+        // afresh. It is printed with leading asterisks, so it is checked before
+        // the capital-letter gate; the forward path states its own
+        // `Point Number` header right below, which takes precedence.
+        if (line.indexOf('Start new reaction path') >= 0) {
+            ircPathNumber = 0;
+            // A new IRC calculation has its own path numbering AND its own
+            // transition state: the geometry printed above the banner is the
+            // barrier both halves start from. A run whose card names one
+            // direction only would otherwise hide which half it computed.
+            ircDirection = (jobIrcDirs && jobIrcDirs.length === 1) ? jobIrcDirs[0] : undefined;
+            ircRun++;
+            ircRunOpen = true;
+            const tsFrame = frames.length - 1;
+            if (tsFrame >= jobFrameStart && !ircDrafts.some(d => d.frame === tsFrame)) {
+                ircRunTs.push({ run: ircRun, frame: tsFrame });
+                // The path's start geometry is one of the structures the card
+                // shows, so the input-orientation filter must keep it even when
+                // an earlier job of a --Link1-- file printed an input pose.
+                kinds.bound[tsFrame] = true;
+            }
+            if (ircPending === null) ircStartPath = 1;
+            i++;
+            continue;
+        }
         if (gateC >= 65 && gateC <= 90) {
+
+            // --- A relaxed scan: which point the tables below belong to ---
+            // `Step number   1 out of a maximum of   57 on scan point  1 out of 32`
+            // The line precedes a point's first table, so the point is known by
+            // the time that table is read.
+            if (gateC === 83 && line.indexOf('Step number') >= 0) {
+                const sp = SCAN_STEP_RE.exec(line);
+                if (sp) {
+                    const point = parseInt(sp[3], 10);
+                    const stepNo = parseInt(sp[1], 10);
+                    if (!scanState.cur || scanState.cur.point !== point) {
+                        if (scanState.cur) scanState.list.push(scanState.cur);
+                        scanState.cur = {
+                            point, step: stepNo, steps: 0, yes: 0,
+                            converged: false, frame: -1
+                        };
+                    } else {
+                        scanState.cur.step = stepNo;
+                    }
+                    const total = parseInt(sp[4], 10);
+                    if (total > 0) scanState.total = total;
+                    i++;
+                    continue;
+                }
+            }
+
+            // --- The second half of an IRC path: its start geometry comes next ---
+            // The file prints no `Point Number` header for the reverse path's
+            // starting structure, so the banner itself names the point: it is
+            // point 0 of the next path. An explicit header still wins, since the
+            // binding below only uses this when nothing is pending.
+            if (line.indexOf('Beginning calculation of the') >= 0) {
+                const bd = /Beginning calculation of the (FORWARD|REVERSE) path/i.exec(line);
+                if (bd) ircDirection = bd[1].toLowerCase() === 'reverse' ? 'reverse' : 'forward';
+                // A file that skipped the start banner still opens its run here;
+                // the geometry above this line is that run's transition state.
+                if (!ircRunOpen) {
+                    ircRun++;
+                    ircRunOpen = true;
+                    const tsFrame = frames.length - 1;
+                    if (tsFrame >= jobFrameStart && !ircDrafts.some(d => d.frame === tsFrame)) {
+                        ircRunTs.push({ run: ircRun, frame: tsFrame });
+                        kinds.bound[tsFrame] = true;
+                    }
+                }
+                if (ircPending === null) ircStartPath = ircPathNumber + 1;
+                i++;
+                continue;
+            }
+
+            // --- End of a path, or of the whole IRC ---
+            // A point the run announced and then hit the step limit on never
+            // printed a geometry: its pending header must not claim the next
+            // path's start structure. The same holds when the calculation ends
+            // (normally or not), so all three markers drop the pending point.
+            // The announced path start is kept: a file that printed the reverse
+            // banner before its own closing line has already named where the
+            // next geometry belongs.
+            if (line.indexOf('Maximum number of steps reached') >= 0 ||
+                (line.indexOf('Calculation of') >= 0 && line.indexOf('path complete') >= 0) ||
+                line.indexOf('Reaction path calculation complete') >= 0) {
+                // `Calculation of FORWARD/REVERSE path complete.` names the half
+                // just finished. A run that printed no direction banner (a
+                // forward-only job normally prints none) is labelled from here.
+                const cd = /Calculation of (FORWARD|REVERSE) path complete/i.exec(line);
+                if (cd) {
+                    const dir: IrcDirection = cd[1].toLowerCase() === 'reverse' ? 'reverse' : 'forward';
+                    for (let d = ircDrafts.length - 1;
+                         d >= 0 && ircDrafts[d].path === ircPathNumber && !ircDrafts[d].dir; d--) {
+                        ircDrafts[d].dir = dir;
+                    }
+                }
+                ircPending = null;
+                i++;
+                continue;
+            }
+
+            // --- An IRC path point: the geometry below is that point's ---
+            if (line.indexOf('Point Number:') >= 0) {
+                const ip = IRC_POINT_RE.exec(line);
+                if (ip) {
+                    ircPathNumber = parseInt(ip[2], 10);
+                    ircStartPath = null;
+                    ircPending = { path: ircPathNumber, point: parseInt(ip[1], 10), dir: ircDirection };
+                    i++;
+                    continue;
+                }
+            }
+
+            // --- The scan point's own optimisation finished ---
+            if (gateC === 79 && line.indexOf('Optimization completed') >= 0) {
+                if (scanState.cur) scanState.cur.converged = true;
+                i++;
+                continue;
+            }
+
+            // --- The run's closing scan summary: coordinate and energy per point ---
+            if (gateC === 83 && line.indexOf('Summary of') >= 0 && line.indexOf('Surface Scan') >= 0) {
+                const table = readScanTable(lines, i);
+                if (Object.keys(table.energy).length > 0) scanState.table = table;
+                i += 1;
+                continue;
+            }
 
             // SCF Done:  E(RHF) =  -76.0107469158     A.U. after   10 cycles
             if (line.indexOf('SCF Done') >= 0) {
@@ -1315,11 +2057,17 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
             if (line.indexOf('ermination') >= 0) {
                 if (line.indexOf('Normal termination') >= 0) {
                     summaryOf(jobs).termination = 'normal';
+                    ircPending = null;
+                    ircStartPath = null;
                     i++;
                     continue;
                 }
                 if (line.indexOf('Error termination') >= 0) {
                     summaryOf(jobs).termination = 'error';
+                    // A run cut off after a `Point Number` header leaves that
+                    // header waiting; nothing may bind to it.
+                    ircPending = null;
+                    ircStartPath = null;
                     i++;
                     continue;
                 }
@@ -1354,9 +2102,19 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
             // a file that plainly holds a Berny run is an optimization whatever
             // its first lines say.
             const take = jobHasOpt || !jobCardSeen;
-            const step: OptStep | null = take ? { step: stepCounter + 1, energy: pendingEnergy } : null;
-            if (step) stepCounter++;
+            // A scan point's table is that point's step, not a step of one
+            // series: eight points of four steps each are eight relaxations of
+            // four steps, never a 32-step optimisation. The point takes its own
+            // table (and the geometry that table describes) and the file's
+            // series stays empty, which is what tells the page to draw the scan
+            // instead of a convergence curve.
+            const inScan = take && scanState.cur !== null;
+            const step: OptStep | null = take
+                ? { step: inScan && scanState.cur ? scanState.cur.step : stepCounter + 1, energy: pendingEnergy }
+                : null;
+            if (step && !inScan) stepCounter++;
             pendingEnergy = undefined;
+            let yes = 0;
 
             // Parse this block: 4 lines (Maximum Force, RMS Force, Maximum Displacement, RMS Displacement)
             for (let k = 0; k < 4 && i < lines.length; k++, i++) {
@@ -1374,8 +2132,31 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
                 } else if (cur.includes('RMS') && cur.includes('Displacement')) {
                     step.rmsDisplacement = val;
                 }
+                // The file's own verdict on that row, used for a scan point
+                // whose run was cut off before it could print "completed".
+                if (cur.indexOf('YES') >= 0) yes++;
             }
-            if (step) optSteps.push(step);
+            if (step) {
+                const cur = scanState.cur;
+                if (inScan && cur) {
+                    cur.steps++;
+                    cur.yes = yes;
+                    cur.last = step;
+                    cur.step = step.step;
+                    const fr = frames.length - 1;
+                    if (fr >= 0) {
+                        cur.frame = fr;
+                        const f = frames[fr];
+                        f.scanPoint = cur.point;
+                        f.scanStep = step.step;
+                        f.optStep = undefined;
+                        f.stepLabel = scanFrameLabel(cur.point, step.step, chargeMultLine);
+                        kinds.bound[fr] = true;
+                    }
+                } else {
+                    optSteps.push(step);
+                }
+            }
             continue;
         }
 
@@ -1387,8 +2168,13 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
     // "Input orientation" of step N+1 is the same molecular structure as "Standard orientation"
     // of step N, just in a different coordinate system (original input vs principal axes).
     // This creates visually redundant frames in the 3D viewer (which normalizes orientation).
-    const hasInput = frames.some(f => f.stepLabel.startsWith('Input'));
-    const hasStandard = frames.some(f => f.stepLabel.startsWith('Step'));
+    //
+    // The role is read from `kinds`, not from the label: a scan point's geometry
+    // is labelled by its point and an IRC point's by its path, and neither says
+    // which block it came from. A frame a scan point or an IRC point claims is
+    // kept whatever its block is — it is that point's only structure.
+    const hasInput = kinds.input.indexOf(true) >= 0;
+    const hasStandard = kinds.input.indexOf(false) >= 0;
     // Where each frame ended up after the filter, so a charge table recorded
     // against a pre-filter position still names the frame it describes.
     let frameRemap: number[] | null = null;
@@ -1398,7 +2184,7 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
         const remap: number[] = [];
         for (let k = 0; k < frames.length; k++) {
             const f = frames[k];
-            if (f.stepLabel.startsWith('Input')) {
+            if (kinds.input[k] && !kinds.bound[k]) {
                 if (inputSeen) { remap.push(-1); continue; }
                 inputSeen = true;
             }
@@ -1413,6 +2199,36 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
     if (frames.length === 0 && fallbackFrame) {
         frames.push(fallbackFrame);
     }
+
+    // The last scan point has no following point to close it.
+    if (scanState.cur) {
+        scanState.list.push(scanState.cur);
+        scanState.cur = null;
+    }
+    // A finished scan or IRC prints its converged geometry once more after its
+    // summary, with no table of its own: the block repeats the last point's
+    // structure and would end the frame list on a copy of the frame above it.
+    // It is dropped, so the list is exactly the steps the run took. Only an
+    // unbound trailing frame can go — every frame a point claims stays, and no
+    // link can name a frame that is not there.
+    if ((scanState.list.length > 0 || ircDrafts.length > 0) && frames.length > 1) {
+        const lastIdx = frames.length - 1;
+        const last = frames[lastIdx];
+        let claimed = last.scanPoint != null;
+        const preCount = frameRemap ? frameRemap.length : frames.length;
+        for (let d = 0; !claimed && d < ircDrafts.length; d++) {
+            if (remapFrameIndex(frameRemap, ircDrafts[d].frame, preCount) === lastIdx) claimed = true;
+        }
+        if (!claimed && sameGeometry(last.atoms, frames[lastIdx - 1].atoms)) {
+            frames.pop();
+        }
+    }
+    // The two coordinate-driven analyses, in the frame list's own indices. A
+    // file that holds neither leaves both undefined, which is what keeps the
+    // convergence panel on an ordinary optimisation.
+    const scan = buildScanResult(scanState, frames, frameRemap);
+    const irc = buildIrcResult(ircDrafts, frames, frameRemap, ircRunTs);
+    const pathways: LogPathways | undefined = (scan || irc) ? { scan, irc } : undefined;
 
     // Population analyses: a table describes the geometry printed before it
     // (Gaussian closes a step's SCF with its charges, then prints the next
@@ -1448,6 +2264,12 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
         }
     }
 
+    // An IRC's frame list is its reaction path: reverse far end, transition
+    // state, forward far end. The move happens after every frame-bound record
+    // is built so the path points, the run's TS and the charge tables can be
+    // carried across with it.
+    orderIrcFrames(frames, irc, scan, chargeSets);
+
     const summary = jobs.list.filter(summaryHasData);
     const levels = orbitalLevelsOf(orbitals);
     // A cavity object with nothing but its source is not a statement about the
@@ -1474,6 +2296,7 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
         charges: chargeSets.length > 0 ? chargeSets : undefined,
         summary: summary.length > 0 ? summary : undefined,
         orbitals: levels,
-        cavity: hasCavity ? cavity : undefined
+        cavity: hasCavity ? cavity : undefined,
+        pathways
     };
 }

@@ -327,6 +327,112 @@ export interface OptThresholds {
     rmsDisplacement?: number;
 }
 
+/**
+ * One point of a relaxed potential-energy-surface scan.
+ *
+ * A scan drives one internal coordinate through a series of values and lets the
+ * optimiser relax everything else at each of them, so a point is not an
+ * optimisation step: it is the *converged* geometry of one scan value, with the
+ * energy and the forces printed at that geometry. The intermediate steps a
+ * point took are counted (`steps`) and the frames are kept in the viewer, but
+ * the number that belongs to a point is the one its own optimisation ended on.
+ */
+export interface ScanPoint {
+    /** 1-based scan point, as the file numbers it. */
+    point: number;
+    /** Total energy of the optimized geometry, Hartree. */
+    energy?: number;
+    /** Largest force component at that geometry, Hartree/Bohr. */
+    maxForce?: number;
+    /** RMS force at that geometry, Hartree/Bohr. */
+    rmsForce?: number;
+    /** Largest displacement of the point's last step, Bohr. */
+    maxDisplacement?: number;
+    /** RMS displacement of the point's last step, Bohr. */
+    rmsDisplacement?: number;
+    /** Optimizer steps this point needed (absent when the file printed none). */
+    steps?: number;
+    /** 0-based index of the frame holding the point's optimized geometry. */
+    frame?: number;
+    /** True when the point's own optimisation reached its stationary point. */
+    converged?: boolean;
+    /** Value of the scanned coordinate at this point (see `ScanResult.coord`). */
+    coord?: number;
+}
+
+/** The scanned coordinate a run drives, as the file names it. */
+export interface ScanCoordinate {
+    /** `R(1,6)` or `D(4,3,5,6)` — the internal coordinate, as printed. */
+    label: string;
+    /** Angstrom for a bond length, degrees for an angle or a dihedral. */
+    unit: 'A' | 'deg';
+}
+
+/** A relaxed scan: its points, in the order the file took them. */
+export interface ScanResult {
+    points: ScanPoint[];
+    /** How many points the run set out to take, when it said so. */
+    total?: number;
+    /** The coordinate the scan drives, when the file names it. */
+    coord?: ScanCoordinate;
+}
+
+/** The half of an IRC path a sequence of points was computed along. */
+export type IrcDirection = 'forward' | 'reverse';
+
+/** One point of one IRC path. */
+export interface IrcPoint {
+    /** Path series, 1-based in file order: the file's own `Path Number` for a
+     *  single IRC job; sequential when a `--Link1--` file runs the analysis
+     *  twice and both runs would otherwise claim path 1. */
+    path: number;
+    /** 0-based point number on that path, as printed (`Point Number`). */
+    point: number;
+    /** Energy at that point, Hartree. */
+    energy?: number;
+    /** 0-based index of the frame holding the point's geometry. */
+    frame?: number;
+}
+
+/**
+ * One IRC calculation: the path halves it printed and the transition state the
+ * path starts from. A file can hold several (`--Link1--`), and each is shown as
+ * one joined reaction path rather than one chart per half.
+ */
+export interface IrcRun {
+    /** Path series numbers of this run, in the order the file printed them. */
+    paths: number[];
+    /** 0-based frame index of the transition-state geometry printed before the
+     *  path began, when the file printed one. It is the barrier both halves
+     *  start from, so the joined path passes through it once. */
+    tsFrame?: number;
+    /** Energy of that geometry, Hartree. */
+    tsEnergy?: number;
+}
+
+/** An intrinsic-reaction-coordinate run: every point of every path. */
+export interface IrcResult {
+    points: IrcPoint[];
+    /** One entry per path, in the order the file printed them. */
+    paths: { path: number; count: number; dir?: IrcDirection }[];
+    /** One entry per IRC calculation, in file order. */
+    runs: IrcRun[];
+}
+
+/**
+ * The two dimensional analyses a Gaussian output can carry beside its
+ * optimisation series: a relaxed scan and an IRC path.
+ *
+ * Both are sequences of *structures along a coordinate*, which is why they are
+ * carried together and shown instead of the convergence panel — the panel that
+ * plots optimiser steps would plot every step of every scan point as one
+ * series, which is not a convergence at all.
+ */
+export interface LogPathways {
+    scan?: ScanResult;
+    irc?: IrcResult;
+}
+
 export interface NormalMode {
     index: number;
     frequency: number;

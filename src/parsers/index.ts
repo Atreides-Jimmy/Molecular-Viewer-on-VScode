@@ -1,4 +1,4 @@
-import { MolecularData, AtomGroup, OptStep, NormalMode, OptThresholds, OrbitalLevels, SolventCavity } from '../types';
+import { MolecularData, AtomGroup, OptStep, NormalMode, OptThresholds, OrbitalLevels, SolventCavity, LogPathways } from '../types';
 import { parseGjf } from './gjfParser';
 import { parseXyz, parseXyzTrajectory, XyzFrame, XyzTrajectory } from './xyzParser';
 import { parseMol2 } from './mol2Parser';
@@ -87,6 +87,9 @@ export interface LogFileResult {
     // only a formatted checkpoint states the coefficients beside them.
     orbitals?: OrbitalLevels;
     cavity?: SolventCavity;
+    // A relaxed surface scan and/or an IRC path: sequences of structures along
+    // one coordinate, drawn in place of the convergence charts.
+    pathways?: LogPathways;
 }
 
 export interface ParseFileOptions {
@@ -526,7 +529,8 @@ export function parseLogFile(content: string, fileName?: string, onProgress?: (f
         charges: gResult.charges,
         summary: gResult.summary,
         orbitals: gResult.orbitals,
-        cavity: gResult.cavity
+        cavity: gResult.cavity,
+        pathways: gResult.pathways
     };
 }
 

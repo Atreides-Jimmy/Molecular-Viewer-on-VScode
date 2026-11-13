@@ -313,6 +313,32 @@ canvas{display:block}
 #opt-panel .opt-body{overflow-y:scroll;overflow-x:hidden;flex:1 1 auto;min-height:0;width:100%;box-sizing:border-box}
 #opt-panel canvas{display:block;width:100%;max-width:100%;margin:2px 0 6px}
 #opt-panel .opt-chart-title{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:4px}
+/* A card's own mark: 13 px of line art drawn in the ink of whatever it sits
+   in, so the Scan and IRC cards read the same beside a title and inside a chip
+   as the emoji chips do, and follow the theme without a second colour. */
+#opt-panel .pn-mark,#opt-reopen .pn-mark{vertical-align:-2px;margin-right:5px}
+#opt-panel .opt-sub{font-weight:normal;font-size:10px;color:var(--vscode-descriptionForeground,#888);margin-left:6px}
+/* The per-point list under a scan's or an IRC path's charts: one row per point,
+   the numbers the file stated, and a click that shows that structure. */
+#opt-panel .pw-head{display:flex;gap:5px;margin:7px 0 2px;padding:0 3px 2px;border-bottom:1px solid rgba(255,255,255,0.12);color:var(--vscode-descriptionForeground,#888);font-size:10px}
+#opt-panel .pw-row{display:flex;gap:5px;padding:1px 3px;border-radius:2px;font-family:monospace;font-size:10px;line-height:1.35}
+#opt-panel .pw-row.can{cursor:pointer}
+#opt-panel .pw-row.can:hover{background:rgba(255,255,255,0.09)}
+#opt-panel .pw-row.on{background:rgba(255,214,102,0.18);box-shadow:inset 2px 0 0 #ffd666}
+#opt-panel .pw-row.failed{opacity:0.62}
+/* The junction of a joined IRC path: the transition state both halves start
+   from. Its name and energy are tinted, so the barrier is findable in the list
+   without a second header row. */
+#opt-panel .pw-row.pw-ts .pw-no{color:#ffd666;font-weight:bold}
+#opt-panel .pw-row.pw-ts .pw-e{color:#ffd666}
+#opt-panel .pw-no{flex:0 0 20px;text-align:right;color:var(--vscode-descriptionForeground,#999)}
+#opt-panel .pw-co{flex:0 0 62px;text-align:right;color:#9cdcfe}
+#opt-panel .pw-e{flex:1 1 auto;text-align:right;color:#d7dae0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#opt-panel .pw-f{flex:0 0 50px;text-align:right;color:#ffa94d}
+#opt-panel .pw-s{flex:0 0 16px;text-align:right;color:var(--vscode-descriptionForeground,#888)}
+#opt-panel .pw-head.pw-path{margin-top:8px;border-bottom:none;color:#ffd666}
+#opt-panel .pw-head.pw-path .pw-no{flex:0 0 auto;font-weight:bold}
+#opt-panel .pw-head.pw-path .pw-e{color:var(--vscode-descriptionForeground,#888)}
 #opt-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
 #opt-reopen.show{display:block}
 #opt-reopen:hover{background:var(--vscode-button-background,#0e639c)}

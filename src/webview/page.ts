@@ -2,7 +2,7 @@
 // media/viewer.css, media/viewer.js) with a nonce, add this document's payload
 // as window.__MV_HOST__, and hand it to the panel.
 import * as vscode from 'vscode';
-import { Atom, AsymAtom, MolecularData, NormalMode, OptStep, OptThresholds, OrbitalLevels, SolventCavity } from '../types';
+import { Atom, AsymAtom, MolecularData, NormalMode, OptStep, OptThresholds, OrbitalLevels, SolventCavity, LogPathways } from '../types';
 import { FchkOrbitals, LogChargeSet, LogFrame, LogSummary, OrcaFrame, RouteSection } from '../parsers/index';
 import { BOND_PERCEPTION_SOURCE } from '../tools/bondPerception';
 import { BVS_SOURCE } from '../tools/bvs';
@@ -34,6 +34,8 @@ export interface ViewerPageOptions {
     orbitalLevels?: OrbitalLevels;
     orbitals?: FchkOrbitals;
     cavity?: SolventCavity;
+    /** A relaxed scan and/or an IRC path — drawn in place of the convergence charts. */
+    pathways?: LogPathways;
     onProgress?: (fraction: number, message?: string) => void;
 }
 
@@ -110,7 +112,7 @@ export async function renderViewerPage(extensionUri: vscode.Uri, options: Viewer
     const {
         data, frames = [], optSteps, normalModes, logSource, routes, vmdPayload,
         autoBeta = false, optThresholds, trajectoryFrames, charges, summary,
-        orbitalLevels, orbitals, cavity, onProgress
+        orbitalLevels, orbitals, cavity, pathways, onProgress
     } = options;
     const nonce = getNonce();
     onProgress?.(0, 'Reading the renderer');
@@ -186,6 +188,7 @@ export async function renderViewerPage(extensionUri: vscode.Uri, options: Viewer
         multiplicity?: number;
         energy?: number;
         optStep?: number;
+        scanPoint?: number;
     };
     const framesData: FramePayloadData[] = [];
     for (let fi = 0; fi < frames.length; fi++) {
@@ -208,7 +211,10 @@ export async function renderViewerPage(extensionUri: vscode.Uri, options: Viewer
             // orientation as its own block starts with a frame that repeats the
             // first step, so the charts cannot use the frame index as the step
             // index. [2026-11-12 | Atreides-Jimmy]
-            optStep: (f as { optStep?: number }).optStep
+            optStep: (f as { optStep?: number }).optStep,
+            // Which scan point a step belongs to, so the scan panel can mark the
+            // point whose relaxation is on screen. [2026-11-12 | Atreides-Jimmy]
+            scanPoint: (f as { scanPoint?: number }).scanPoint
         });
         // A 647-frame log is 650 000 atom objects; serialising them in one
         // synchronous loop holds the host for seconds. Only the view that
@@ -257,6 +263,33 @@ export async function renderViewerPage(extensionUri: vscode.Uri, options: Viewer
             atom1: b.atom1, atom2: b.atom2, order: b.order, shift: b.shift, valence: b.valence
         })),
         asymAtoms: (data.crystal.asymAtoms || []).map(crystalAsymPayload)
+    } : null;
+
+    // A relaxed scan and an IRC path: the structures along one coordinate, with
+    // the energy and forces of each. Every number is the file's own; a field the
+    // file did not print stays absent so the page can leave the cell empty
+    // rather than show a zero.
+    const pathwaysData = pathways ? {
+        scan: pathways.scan ? {
+            points: pathways.scan.points.map(p => ({
+                point: p.point, energy: p.energy, coord: p.coord,
+                maxForce: p.maxForce, rmsForce: p.rmsForce,
+                maxDisplacement: p.maxDisplacement, rmsDisplacement: p.rmsDisplacement,
+                steps: p.steps, frame: p.frame, converged: p.converged
+            })),
+            total: pathways.scan.total,
+            coord: pathways.scan.coord
+        } : null,
+        irc: pathways.irc ? {
+            points: pathways.irc.points.map(p => ({
+                path: p.path, point: p.point, energy: p.energy, frame: p.frame
+            })),
+            paths: pathways.irc.paths,
+            // One entry per IRC calculation: which path series it printed and
+            // the transition state they start from, so the page can join the
+            // two halves instead of drawing one chart per half.
+            runs: pathways.irc.runs
+        } : null
     } : null;
 
     const optStepsData = optSteps ? optSteps.map(s => ({
@@ -399,7 +432,7 @@ export async function renderViewerPage(extensionUri: vscode.Uri, options: Viewer
     // JSON spelling, which is valid JSON and stops the HTML parser from
     // seeing a tag; U+2028/U+2029 are escaped because they are line
     // terminators to a JavaScript parser.
-    const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, normalModes: normalModesData, optSource: logSource || null, optThresholds: optThresholdsData, routes: routesData, vmd: vmdData, charges: chargesData, summary: summaryData, orbitals: orbitalsData, cavity: cavityData, autoBeta: !!(autoBeta && !vmdData), hasExplicitBonds: !!data.hasExplicitBonds, warnings: data.warnings || [], mmParams: describeForceField(), trajectory: trajectoryData, trajectoryFrames: trajectoryFramesData })
+    const jsonData = JSON.stringify({ atoms: atomData, bonds: bondData, title: data.title, atomColors: atomColors, filePath: data.filePath || '', frames: framesData, gjfMeta: data.gjfMeta || null, charge: data.charge, multiplicity: data.multiplicity, atomGroups: atomGroupsData, crystal: crystalData, optSteps: optStepsData, pathways: pathwaysData, normalModes: normalModesData, optSource: logSource || null, optThresholds: optThresholdsData, routes: routesData, vmd: vmdData, charges: chargesData, summary: summaryData, orbitals: orbitalsData, cavity: cavityData, autoBeta: !!(autoBeta && !vmdData), hasExplicitBonds: !!data.hasExplicitBonds, warnings: data.warnings || [], mmParams: describeForceField(), trajectory: trajectoryData, trajectoryFrames: trajectoryFramesData })
         .replace(/</g, '\\u003c')
         .replace(/\u2028/g, '\\u2028')
         .replace(/\u2029/g, '\\u2029');

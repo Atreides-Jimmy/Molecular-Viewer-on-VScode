@@ -9208,6 +9208,40 @@ var routePanelEl=document.getElementById('route-panel');
 var routeReopenEl=document.getElementById('route-reopen');
 var OPT_STEPS=MD.optSteps||null;
 var OPT_SOURCE=MD.optSource||null;
+// ---------------------------------------------------------------------------
+// A relaxed scan and an IRC path are NOT convergence series: the first is one
+// optimised geometry per scan value, the second one geometry per path point.
+// Both are sequences of structures along a coordinate, so they replace the
+// convergence card (whose charts would plot every step of every scan point as
+// one series — 106 points for a 32-point scan, which is not a convergence at
+// all). Only one of the three can be on screen: the file decides.
+// ---------------------------------------------------------------------------
+var PATHWAYS=MD.pathways||null;
+var SCAN=(PATHWAYS&&PATHWAYS.scan&&PATHWAYS.scan.points&&PATHWAYS.scan.points.length)?PATHWAYS.scan:null;
+var IRC=(PATHWAYS&&PATHWAYS.irc&&PATHWAYS.irc.points&&PATHWAYS.irc.points.length)?PATHWAYS.irc:null;
+// A file that holds an IRC path has no scan points to show beside it, and one
+// that holds a scan has no IRC: the priority only matters for a --Link1-- file
+// that ran both, where the path is the later, more specific analysis.
+var OPT_MODE=IRC?'irc':(SCAN?'scan':((OPT_STEPS&&OPT_STEPS.length>0)?'opt':null));
+
+// Two marks for the two cards. Drawn rather than borrowed from an emoji font:
+// they have to read at 13 px beside the panel's title and inside its chip, and
+// they have to follow the theme's foreground colour (currentColor).
+//   Scan — samples of a potential along a coordinate: a baseline with a curve
+//   through four measured points.
+//   IRC  — the reaction coordinate itself: valley, barrier (the dashed height
+//   the path climbs), valley.
+var MARK_SCAN='<svg class="pn-mark" width="13" height="13" viewBox="0 0 16 16" aria-hidden="true" focusable="false">'+
+    '<path d="M1.8 13.7h12.4" stroke="currentColor" stroke-width="1" stroke-linecap="round" opacity="0.45"/>'+
+    '<path d="M2.6 10.6 6.1 6.5l3.1 1.9 4.2-5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>'+
+    '<circle cx="2.6" cy="10.6" r="1.25" fill="currentColor"/><circle cx="6.1" cy="6.5" r="1.25" fill="currentColor"/>'+
+    '<circle cx="9.2" cy="8.4" r="1.25" fill="currentColor"/><circle cx="13.4" cy="3.4" r="1.25" fill="currentColor"/>'+
+    '</svg>';
+var MARK_IRC='<svg class="pn-mark" width="13" height="13" viewBox="0 0 16 16" aria-hidden="true" focusable="false">'+
+    '<path d="M1.8 11.7c3 0 3.4-8.1 6.2-8.1s3.2 8.1 6.2 8.1" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>'+
+    '<path d="M8 1.4v2.2" stroke="currentColor" stroke-width="1.1" stroke-dasharray="1.2 1.2" opacity="0.7"/>'+
+    '<circle cx="1.8" cy="11.7" r="1.2" fill="currentColor"/><circle cx="14.2" cy="11.7" r="1.2" fill="currentColor"/>'+
+    '</svg>';
 // The convergence targets to draw as dashed guides. The file's own values win:
 // ORCA states its criteria (TolMAXG / TolRMSG / TolMAXD / TolRMSD) in every
 // optimization output, and a run told to converge tighter than the default must
@@ -9391,10 +9425,23 @@ function convTooltipValue(v,spanDec){
  *  with. A payload that carries no link (a trajectory built from frame
  *  energies) keeps the old index identity, and a step whose printed energy is
  *  not this frame's is never marked. */
-function convSelectedStep(steps){
+function convSelectedStep(steps,model){
     if(typeof currentFrame!=='number'||currentFrame<0)return -1;
     var f=MD.frames&&MD.frames[currentFrame];
     if(!f)return -1;
+    // A scan point and an IRC point name the frame that holds them, so the
+    // plotted index is read from the link rather than guessed from the frame
+    // number (a scan's frames are the steps of every point, not the points).
+    if(model==='scan'){
+        var sp=f.scanPoint;
+        if(typeof sp!=='number')return -1;
+        for(var q=0;q<steps.length;q++)if(steps[q].point===sp)return q;
+        return -1;
+    }
+    if(model==='frame'){
+        for(var q2=0;q2<steps.length;q2++)if(steps[q2].frame===currentFrame)return q2;
+        return -1;
+    }
     var e=f.energy;
     var k=(typeof f.optStep==='number')?f.optStep-1:currentFrame;
     var se=(k>=0&&k<steps.length)?steps[k].energy:null;
@@ -9437,7 +9484,18 @@ function convDrawTooltip(ctx,canvas){
     }
     if(!best)return false;
     var step=steps_get(geom.steps,best.i);
-    var lines=[(geom.xLabel||'Step')+' '+(best.i+1)];
+    // The point's own name when the series has one (a scan point, a half of an
+    // IRC path, the transition state), the plotted position otherwise (an
+    // optimisation step).
+    var xText;
+    if(step&&step.tip){
+        xText=step.tip;
+    }else if(step&&typeof step.point==='number'){
+        xText=(typeof step.path==='number'?'Path '+step.path+' · point ':'Point ')+step.point;
+    }else{
+        xText=(geom.xLabel||'Step')+' '+(best.i+1);
+    }
+    var lines=[xText];
     lines.push(best.name+' = '+convTooltipValue(best.v,best.dec));
     if(step&&step.energy!=null&&geom.field!=='energy')lines.push('Energy = '+convTooltipValue(step.energy,geom.energyDec));
     ctx.font='9px sans-serif';
@@ -9467,6 +9525,17 @@ function convDrawTooltip(ctx,canvas){
 
 /** Step object at idx, tolerating a missing steps array. */
 function steps_get(steps,i){return steps&&steps[i]?steps[i]:null}
+
+/** X-axis label of the idx-th plotted point. A scan or IRC series carries the
+ *  name the parser gave the row (`F3`, `R12`, `TS`) or the point number the
+ *  file stated; neither is the index (an IRC path starts at point 0, and a
+ *  joined path runs reverse → TS → forward). An ordinary optimisation carries
+ *  no name and keeps the step's position. */
+function pwPointTick(steps,i){
+    var s=steps_get(steps,i);
+    if(s&&s.label!=null)return String(s.label);
+    return s&&typeof s.point==='number'?String(s.point):String(i+1);
+}
 
 /** Repaint a chart with the current pointer state: the selected-step highlight,
  *  plus a tooltip when the pointer is close enough to a point. Every repaint
@@ -9527,9 +9596,9 @@ function convDrawState(ctx,canvas){
     convDrawTooltip(ctx,canvas);
 }
 
-function drawConvergenceChart(canvas,steps,field,label,color,threshold){
+function drawConvergenceChart(canvas,steps,field,label,color,threshold,model,xLabel){
     if(!canvas.__convRedraw){
-        canvas.__convRedraw=function(){drawConvergenceChart(canvas,steps,field,label,color,threshold)};
+        canvas.__convRedraw=function(){drawConvergenceChart(canvas,steps,field,label,color,threshold,model,xLabel)};
         convAttachHover(canvas);
     }
     var ctx=canvas.getContext('2d');
@@ -9549,7 +9618,7 @@ function drawConvergenceChart(canvas,steps,field,label,color,threshold){
     if(threshold!=null){vmin=Math.min(vmin,threshold);vmax=Math.max(vmax,threshold)}
     if(vmax-vmin<1e-12){vmax=vmin+Math.abs(vmin)*1e-6+1e-9}
     var n=steps.length;
-    var sel=steps.length?convSelectedStep(steps):-1;
+    var sel=steps.length?convSelectedStep(steps,model):-1;
 
     // --- Feature 1: decimal axis labels, integer part shown once -----------
     // Decimals come from the gridline step (span / 4) and the base is picked on
@@ -9577,7 +9646,7 @@ function drawConvergenceChart(canvas,steps,field,label,color,threshold){
     ctx.textAlign='center';ctx.textBaseline='top';
     for(g=0;g<n;g+=Math.max(1,Math.floor(n/6))){
         var x=padL+(n<=1?0:pw*g/(n-1));
-        ctx.fillText(String(g+1),x,padT+ph+2);
+        ctx.fillText(pwPointTick(steps,g),x,padT+ph+2);
     }
     // Threshold line
     if(threshold!=null){
@@ -9607,7 +9676,7 @@ function drawConvergenceChart(canvas,steps,field,label,color,threshold){
     for(i=0;i<pts.length;i++){
         ctx.beginPath();ctx.arc(pts[i].x,pts[i].y,2,0,Math.PI*2);ctx.fill();
     }
-    canvas.__convGeom={padL:padL,padT:padT,pw:pw,ph:ph,n:n,xLabel:'Step',yLabel:label,
+    canvas.__convGeom={padL:padL,padT:padT,pw:pw,ph:ph,n:n,xLabel:xLabel||'Step',yLabel:label,
         spanVal:vmax-vmin,field:field,steps:steps,
         series:[{label:label,color:color,pts:pts,dec:convSeriesDecimals(steps,field)}],selected:sel};
     convDrawState(ctx,canvas);
@@ -9618,6 +9687,9 @@ function drawConvergenceChart(canvas,steps,field,label,color,threshold){
  *  highlight (feature 2) always follows the 3D view.
  *  [2026-09-12 | Atreides-Jimmy] */
 function renderOptCharts(){
+    // A scan or an IRC path owns this card; its charts are drawn from its own
+    // points (see renderPathwayCharts).
+    if(OPT_MODE==='scan'||OPT_MODE==='irc'){renderPathwayCharts();return}
     if(!OPT_STEPS||OPT_STEPS.length===0)return;
     // Nothing to redraw while the panel is closed (its canvases have no layout
     // then); buildOptPanel draws them again once the panel is shown.
@@ -9639,6 +9711,7 @@ function renderOptCharts(){
 }
 
 function buildOptPanel(){
+    if(OPT_MODE==='scan'||OPT_MODE==='irc'){buildPathwayPanel();return}
     if(!OPT_STEPS||OPT_STEPS.length===0)return;
     var hasEnergy=OPT_STEPS.some(function(s){return s.energy!=null});
     var hasForce=OPT_STEPS.some(function(s){return s.maxForce!=null||s.rmsForce!=null});
@@ -9684,9 +9757,324 @@ function buildOptPanel(){
     layoutPanels();
 }
 
-function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
+// ---------------------------------------------------------------------------
+// The Scan and IRC cards.
+//
+// They take the convergence card's shell — the same panel element, the same
+// chip, the same resize handle — because a file holds one of the three subjects
+// and never two at once: optimizer steps, scan points, or path points. What
+// changes is what a point IS. A scan point is one optimised geometry per scan
+// value: the energy, the forces and the frame that holds that geometry. An IRC
+// point is one geometry per step along the path, with its energy. Neither is a
+// step of one optimisation, which is why neither is drawn as one.
+// ---------------------------------------------------------------------------
+
+/** Points of one IRC path, in the file's order. */
+function ircPathPoints(path){
+    var out=[];
+    for(var i=0;i<IRC.points.length;i++)if(IRC.points[i].path===path)out.push(IRC.points[i]);
+    return out;
+}
+
+/** The paths array entry of one series, with the direction the file stated. */
+function ircPathMeta(path){
+    for(var i=0;i<IRC.paths.length;i++)if(IRC.paths[i].path===path)return IRC.paths[i];
+    return null;
+}
+
+/** The IRC calculations of the file. A payload that carries no run grouping
+ *  (an older host) is treated as one run holding every path, which is what a
+ *  single IRC job is and what the join below expects. */
+function ircRuns(){
+    if(IRC.runs&&IRC.runs.length)return IRC.runs;
+    var all=[];
+    for(var i=0;i<IRC.paths.length;i++)all.push(IRC.paths[i].path);
+    return [{paths:all}];
+}
+
+/** A run's paths and the direction of each half. A file that stated no
+ *  direction still printed the forward half before the reverse one, which is
+ *  the order Gaussian writes them in. */
+function ircRunParts(run){
+    var paths=(run&&run.paths)||[];
+    var dirs=[];
+    for(var i=0;i<paths.length;i++){
+        var meta=ircPathMeta(paths[i]);
+        dirs.push(meta&&meta.dir?meta.dir:null);
+    }
+    if(paths.length===2){
+        if(!dirs[0]&&!dirs[1]){dirs[0]='forward';dirs[1]='reverse';}
+        else if(!dirs[0]&&dirs[1]==='reverse'){dirs[0]='forward';}
+        else if(!dirs[1]&&dirs[0]==='forward'){dirs[1]='reverse';}
+        else if(!dirs[0]&&dirs[1]==='forward'){dirs[0]='reverse';}
+        else if(!dirs[1]&&dirs[0]==='reverse'){dirs[1]='forward';}
+    }
+    return {paths:paths,dirs:dirs};
+}
+
+/** One plotted row of a joined path: the file's point plus the name the card
+ *  shows for it (`R24`, `TS`, `F0`) and the full tooltip. */
+function ircRunStep(pt,label,tip){
+    return {label:label,tip:tip,point:pt.point,path:pt.path,frame:pt.frame,energy:pt.energy};
+}
+
+/**
+ * One IRC calculation as ONE reaction path: the reverse half descending toward
+ * the transition state, the barrier the path starts from, then the forward half
+ * moving away from it. The two halves are computed from the same TS, so drawing
+ * them as separate charts put the barrier at the far right of one and the far
+ * left of the other. A run that computed one half only is drawn with exactly
+ * that half (plus the TS it belongs to), never with a mirrored copy: a forward
+ * half leaves the barrier, so the barrier comes first; a reverse half ends at
+ * the barrier, so its far end comes first. This is also the order the frames
+ * are stored in, so the first row is the structure the viewer opens on.
+ */
+function ircRunPoints(run){
+    var parts=ircRunParts(run);
+    var fwd=-1,rev=-1;
+    for(var i=0;i<parts.paths.length;i++){
+        if(parts.dirs[i]==='forward'&&fwd<0)fwd=i;
+        else if(parts.dirs[i]==='reverse'&&rev<0)rev=i;
+    }
+    var out=[];
+    var ts=typeof run.tsFrame==='number'
+        ? {label:'TS',tip:'Transition state',frame:run.tsFrame,energy:run.tsEnergy,ts:true}
+        : null;
+    var revPath=rev>=0?parts.paths[rev]:null;
+    var fwdPath=fwd>=0?parts.paths[fwd]:null;
+    if(revPath!==null){
+        var rp=ircPathPoints(revPath).slice();
+        // Point 0 is the end nearest the TS, so the reverse half is drawn from
+        // its far end back to the barrier.
+        rp.sort(function(a,b){return b.point-a.point});
+        for(var r=0;r<rp.length;r++)out.push(ircRunStep(rp[r],'R'+rp[r].point,'Reverse · point '+rp[r].point));
+    }
+    if(ts)out.push(ts);
+    if(fwdPath!==null){
+        var fp=ircPathPoints(fwdPath);
+        for(var f=0;f<fp.length;f++)out.push(ircRunStep(fp[f],'F'+fp[f].point,'Forward · point '+fp[f].point));
+    }
+    // A series the file neither named nor paired (an unusual payload with more
+    // than two paths): keep it after the named halves rather than dropping it.
+    for(var k=0;k<parts.paths.length;k++){
+        if(parts.paths[k]===revPath||parts.paths[k]===fwdPath)continue;
+        var pts=ircPathPoints(parts.paths[k]);
+        var dir=parts.dirs[k];
+        var pre=dir==='reverse'?'R':(dir==='forward'?'F':'');
+        for(var q=0;q<pts.length;q++){
+            var tip=dir?((dir==='reverse'?'Reverse':'Forward')+' · point '+pts[q].point)
+                :('Point '+pts[q].point);
+            out.push(ircRunStep(pts[q],pre+pts[q].point,tip));
+        }
+    }
+    return out;
+}
+
+/** How many path points a run printed, and which halves they came from. */
+function ircRunSubtitle(run){
+    var parts=ircRunParts(run);
+    var n=0,hasF=false,hasR=false;
+    for(var i=0;i<parts.paths.length;i++){
+        var meta=ircPathMeta(parts.paths[i]);
+        if(meta)n+=meta.count;
+        if(parts.dirs[i]==='forward')hasF=true;
+        else if(parts.dirs[i]==='reverse')hasR=true;
+    }
+    var dirs=hasF&&hasR?'forward + reverse':(hasF?'forward':(hasR?'reverse':''));
+    return n+' points'+(dirs?' · '+dirs:'');
+}
+
+/** A number as the file stated it — shortest round-trip form, no rounding (a
+ *  value printed as 0.000003 must not read 0.000000). */
+function pwNum(v){return v==null?'–':String(v)}
+
+/** The per-point list under the charts: the numbers a reader wants next to the
+ *  picture, one row per point, and a click that takes the view to that
+ *  structure. Rows a file gave no frame stay unclickable rather than lying. */
+function pathwayListHTML(){
+    var html;
+    if(OPT_MODE==='scan'){
+        var coord=SCAN.coord;
+        var label=coord?coord.label:'';
+        html='<div class="pw-head">'+
+            '<span class="pw-no">#</span>'+
+            (coord?'<span class="pw-co">'+escapeHtml(label)+(coord.unit==='deg'?' (°)':' (Å)')+'</span>':'')+
+            '<span class="pw-e">E (Hartree)</span>'+
+            '<span class="pw-f">max F</span>'+
+            '<span class="pw-s">n</span></div>';
+        for(var i=0;i<SCAN.points.length;i++){
+            var p=SCAN.points[i];
+            var can=typeof p.frame==='number';
+            html+='<div class="pw-row'+(can?' can':'')+(p.converged===false?' failed':'')+'"'+
+                (can?' data-fr="'+p.frame+'"':'')+
+                ' title="'+(can?'Show the optimized structure of this point':'The file holds no geometry for this point')+'">'+
+                '<span class="pw-no">'+p.point+'</span>'+
+                (coord?'<span class="pw-co">'+pwNum(p.coord)+'</span>':'')+
+                '<span class="pw-e">'+pwNum(p.energy)+'</span>'+
+                '<span class="pw-f">'+pwNum(p.maxForce)+'</span>'+
+                '<span class="pw-s">'+(p.steps==null?'–':p.steps)+'</span></div>';
+        }
+        return html;
+    }
+    html='';
+    var runs=ircRuns();
+    if(runs.length===1){
+        html+='<div class="pw-head">'+
+            '<span class="pw-no">#</span>'+
+            '<span class="pw-e">E (Hartree)</span></div>';
+    }
+    for(var k=0;k<runs.length;k++){
+        if(runs.length>1){
+            html+='<div class="pw-head pw-path">'+
+                '<span class="pw-no">Run '+(k+1)+'</span>'+
+                '<span class="pw-e">'+ircRunSubtitle(runs[k])+' · E (Hartree)</span></div>';
+        }
+        var steps=ircRunPoints(runs[k]);
+        for(var q=0;q<steps.length;q++){
+            var pt=steps[q];
+            var ok=typeof pt.frame==='number';
+            html+='<div class="pw-row'+(ok?' can':'')+(pt.ts?' pw-ts':'')+'"'+(ok?' data-fr="'+pt.frame+'"':'')+
+                ' title="'+(ok?(pt.ts?'Show the transition state':'Show this point of the path'):'The file holds no geometry for this point')+'">'+
+                '<span class="pw-no">'+pt.label+'</span>'+
+                '<span class="pw-e">'+pwNum(pt.energy)+'</span></div>';
+        }
+    }
+    return html;
+}
+
+/** Mark the row of the structure on screen, so the list and the 3D view agree. */
+function syncPathwayRows(){
+    if(!optPanelEl)return;
+    var rows=optPanelEl.querySelectorAll('.pw-row');
+    for(var i=0;i<rows.length;i++){
+        var fr=rows[i].getAttribute('data-fr');
+        rows[i].classList.toggle('on',fr!==null&&Number(fr)===currentFrame);
+    }
+}
+
+function buildPathwayPanel(){
+    var isScan=OPT_MODE==='scan';
+    var charts=[];
+    if(isScan){
+        charts.push({title:'Energy (Hartree)',kind:'energy',points:SCAN.points,model:'scan'});
+        // A scan point's table states the forces at the geometry it converged
+        // on, so the same four numbers the optimiser watched are drawn here —
+        // one point per scan value instead of one per step.
+        if(SCAN.points.some(function(p){return p.maxForce!=null||p.rmsForce!=null})){
+            charts.push({title:'Force at the optimized geometry (max + rms)',kind:'force',points:SCAN.points,model:'scan'});
+        }
+    }else{
+        var runs=ircRuns();
+        for(var k=0;k<runs.length;k++){
+            charts.push({
+                title:(runs.length>1?'Run '+(k+1)+' — ':'Reaction path — ')+'energy (Hartree)',
+                kind:'energy',points:ircRunPoints(runs[k]),model:'frame'
+            });
+        }
+    }
+    var body='';
+    for(var c=0;c<charts.length;c++){
+        body+='<div class="opt-chart-title">'+charts[c].title+'</div>'+
+            '<canvas data-field="'+charts[c].kind+'" data-pw="'+c+'"></canvas>';
+    }
+    body+=pathwayListHTML();
+    var mark=isScan?MARK_SCAN:MARK_IRC;
+    var sub;
+    if(isScan){
+        var total=SCAN.total||0;
+        sub=SCAN.points.length+(total>SCAN.points.length?' of '+total:'')+' points';
+    }else{
+        var runList=ircRuns();
+        if(runList.length>1){
+            var total=0;
+            for(var q=0;q<runList.length;q++){
+                var parts=ircRunParts(runList[q]);
+                for(var pq=0;pq<parts.paths.length;pq++){
+                    var meta=ircPathMeta(parts.paths[pq]);
+                    if(meta)total+=meta.count;
+                }
+            }
+            sub=runList.length+' runs · '+total+' points';
+        }else{
+            sub=ircRunSubtitle(runList[0]);
+        }
+    }
+    optPanelEl.innerHTML=
+        '<div class="opt-head"><span class="opt-title">'+mark+(isScan?'Scan':'IRC / Path')+
+        '<span class="opt-sub">'+sub+'</span></span>'+
+        '<span class="opt-close">×</span></div>'+
+        '<div class="opt-resize" id="opt-resize"></div>'+
+        '<div class="opt-body" id="opt-body">'+body+'</div>';
+    optPanelEl.__pwCharts=charts;
+    var canvases=optPanelEl.querySelectorAll('canvas');
+    for(var v=0;v<canvases.length&&v<charts.length;v++){
+        canvases[v].__pwPoints=charts[v].points;
+        canvases[v].__pwModel=charts[v].model;
+    }
+    optPanelEl.classList.add('show');
+    optReopenEl.classList.remove('show');
+    requestAnimationFrame(renderOptCharts);
+    optPanelEl.querySelector('.opt-close').addEventListener('click',function(){
+        optPanelEl.classList.remove('show');
+        optReopenEl.classList.add('show');
+        layoutPanels();
+    });
+    // A row names the frame that holds its structure; clicking it is the same
+    // move the frame arrows make.
+    var bodyEl=optPanelEl.querySelector('.opt-body');
+    bodyEl.addEventListener('click',function(e){
+        var row=e.target;
+        while(row&&row!==bodyEl&&!(row.className&&String(row.className).indexOf('pw-row')>=0))row=row.parentNode;
+        if(!row||row===bodyEl)return;
+        var fr=row.getAttribute('data-fr');
+        if(fr===null)return;
+        var idx=Number(fr);
+        if(isFinite(idx)&&idx>=0&&idx!==currentFrame)switchFrame(idx);
+    });
+    var resizeH=optPanelEl.querySelector('#opt-resize');
+    if(resizeH){
+        var dragging=false,startY=0,startH=0;
+        resizeH.addEventListener('mousedown',function(e){dragging=true;startY=e.clientY;startH=optPanelEl.offsetHeight;e.preventDefault();document.body.style.cursor='ns-resize'});
+        document.addEventListener('mousemove',function(e){
+            if(!dragging)return;
+            var nh=Math.max(120,Math.min(600,startH-(e.clientY-startY)));
+            optPanelEl.style.maxHeight=nh+'px';
+            renderOptCharts();
+        });
+        document.addEventListener('mouseup',function(){if(dragging){dragging=false;document.body.style.cursor='';layoutPanels()}});
+    }
+    layoutPanels();
+}
+
+/** Draw the two pathway cards' charts from the points each canvas was built
+ *  with, then mark the row of the structure on screen. */
+function renderPathwayCharts(){
+    if(!optPanelEl.classList.contains('show'))return;
+    var canvases=optPanelEl.querySelectorAll('canvas');
+    for(var i=0;i<canvases.length;i++){
+        var cv=canvases[i];
+        var pts=cv.__pwPoints||[];
+        if(pts.length===0)continue;
+        var model=cv.__pwModel||'frame';
+        if(cv.dataset.field==='energy'){
+            cv.style.height='90px';
+            drawConvergenceChart(cv,pts,'energy','Energy (Hartree)','#3794ff',null,model,'Point');
+        }else{
+            cv.style.height='110px';
+            // The scan point's own convergence targets: the force at a converged
+            // point is below these lines, which is what makes the chart readable
+            // without a legend of its own.
+            drawDualChart(cv,pts,['maxForce','rmsForce'],['Max Force','RMS Force'],['#ff6b6b','#ffa94d'],
+                OPT_THRESHOLDS?OPT_THRESHOLDS.maxForce:null,
+                OPT_THRESHOLDS?OPT_THRESHOLDS.rmsForce:null,model,'Point');
+        }
+    }
+    syncPathwayRows();
+}
+
+function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2,model,xLabel){
     if(!canvas.__convRedraw){
-        canvas.__convRedraw=function(){drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2)};
+        canvas.__convRedraw=function(){drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2,model,xLabel)};
         convAttachHover(canvas);
     }
     var ctx=canvas.getContext('2d');
@@ -9735,7 +10123,7 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
         return vmax-(vmax-vmin)*frac;
     }
     var n=steps.length;
-    var sel=convSelectedStep(steps);
+    var sel=convSelectedStep(steps,model);
     // [2026-09-12 | Atreides-Jimmy] The linear fallback now labels its ticks in
     // the same condensed decimal notation as the energy chart (feature 1); the
     // log axis keeps its log10 tick values by design.
@@ -9775,7 +10163,7 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
     ctx.textAlign='center';ctx.textBaseline='top';
     for(g=0;g<n;g+=Math.max(1,Math.floor(n/6))){
         var x=padL+(n<=1?0:pw*g/(n-1));
-        ctx.fillText(String(g+1),x,padT+ph+2);
+        ctx.fillText(pwPointTick(steps,g),x,padT+ph+2);
     }
     // Threshold lines
     [thresh1,thresh2].forEach(function(th,idx){
@@ -9815,7 +10203,7 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
     }
     // spanVal states how fine the data (not the log axis) is: it drives the
     // tooltip's decimal resolution, so it must come from the plotted values.
-    canvas.__convGeom={padL:padL,padT:padT,pw:pw,ph:ph,n:n,xLabel:'Step',yLabel:labels[0],
+    canvas.__convGeom={padL:padL,padT:padT,pw:pw,ph:ph,n:n,xLabel:xLabel||'Step',yLabel:labels[0],
         spanVal:Math.max.apply(null,allVals)-Math.min.apply(null,allVals),field:fields[0],steps:steps,
         series:series,selected:sel,energyDec:convSeriesDecimals(steps,'energy')};
     convDrawState(ctx,canvas);
@@ -11724,7 +12112,18 @@ if(chargeReopenEl)chargeReopenEl.addEventListener('click',function(){chargeReope
 if(summaryReopenEl)summaryReopenEl.addEventListener('click',function(){summaryReopen()});
 
 // Initial panel display — show reopen buttons only, don't auto-open panels
-if(OPT_STEPS&&OPT_STEPS.length>0){
+// The chip names the card that is actually there: a scan or an IRC path is not
+// a convergence, and a chip that said so would send the reader looking for a
+// series the file does not hold.
+if(OPT_MODE==='scan'){
+    optReopenEl.innerHTML=MARK_SCAN+'Scan';
+    optReopenEl.title='Scan points: the optimized structure, energy and forces of each scan value';
+    optReopenEl.classList.add('show');
+}else if(OPT_MODE==='irc'){
+    optReopenEl.innerHTML=MARK_IRC+'IRC / Path';
+    optReopenEl.title='IRC path points and their energies';
+    optReopenEl.classList.add('show');
+}else if(OPT_MODE==='opt'&&OPT_STEPS&&OPT_STEPS.length>0){
     optReopenEl.classList.add('show');
 }
 if(NORMAL_MODES&&NORMAL_MODES.length>0){

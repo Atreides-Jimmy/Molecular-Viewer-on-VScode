@@ -15,7 +15,7 @@ import { addHydrogens } from '../tools/addHydrogens';
 import { beginOptimization, MmHistoryPoint, MmOptimizeResult, MmSession } from '../tools/mmOptimizer';
 import { smilesTo3dSafe, validateSmiles } from '../tools/smilesTo3d';
 import { CavitySurfaceTask, GridQuality, OrbitalSurfaceTask, SurfaceTask } from '../tools/orbitalMesh';
-import { MolecularData, AtomGroup, OptStep, NormalMode, OptThresholds, VmdScene, OrbitalLevels, SolventCavity } from '../types';
+import { MolecularData, AtomGroup, OptStep, NormalMode, OptThresholds, VmdScene, OrbitalLevels, SolventCavity, LogPathways } from '../types';
 import {
     LoadProgress, decodeText, readFileWithProgress, LOAD_PROGRESS_MIN_BYTES,
     VIEW_PROGRESS_MIN_ATOMS, fileSize, wantsLoadProgress, yieldToHost, progressRange,
@@ -216,6 +216,9 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         // the level diagram can be drawn from these two, a surface cannot.
         let orbitalLevels: OrbitalLevels | undefined;
         let cavity: SolventCavity | undefined;
+        // A relaxed scan and/or an IRC path: structures along one coordinate,
+        // drawn in the convergence card's place.
+        let pathways: LogPathways | undefined;
         let vmdPayload: VmdPayload | undefined;
         let autoBeta = false;
 
@@ -299,6 +302,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             summary = logResult.summary;
             orbitalLevels = logResult.orbitals;
             cavity = logResult.cavity;
+            pathways = logResult.pathways;
             if (frames.length > 0) {
                 data = ensureBonds({
                     atoms: frames[0].atoms,
@@ -416,6 +420,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             summary = undefined;
             orbitalLevels = undefined;
             cavity = undefined;
+            pathways = undefined;
         }
 
         // The parse is synchronous, so a Cancel pressed while it ran could only
@@ -433,7 +438,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         // Formats whose parser has no line callback still finish the bar.
         parseRange?.(1, 'Preparing the document');
 
-        return new MolecularDocument(uri, data, frames, optSteps, normalModes, logSource, routes, vmdPayload, autoBeta, optThresholds, trajectoryFrames, charges, summary, undefined, cavity, orbitalLevels);
+        return new MolecularDocument(uri, data, frames, optSteps, normalModes, logSource, routes, vmdPayload, autoBeta, optThresholds, trajectoryFrames, charges, summary, undefined, cavity, orbitalLevels, pathways);
     }
 
     /**
@@ -685,6 +690,7 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                 orbitalLevels: document.orbitalLevels,
                 orbitals: document.orbitals,
                 cavity: document.cavity,
+                pathways: document.pathways,
                 onProgress: report
             }
         );
@@ -2151,7 +2157,13 @@ class MolecularDocument implements vscode.CustomDocument {
         /** The cavity the file states, spheres included when it lists them. */
         public readonly cavity?: SolventCavity,
         /** Energies and occupations only, for the level diagram. */
-        public readonly orbitalLevels?: OrbitalLevels
+        public readonly orbitalLevels?: OrbitalLevels,
+        /**
+         * A relaxed scan and/or an IRC path. One slot rather than two, because
+         * the page draws them in the same card as the convergence charts: what
+         * a file holds decides which of the three that card shows.
+         */
+        public readonly pathways?: LogPathways
     ) {}
 
     dispose(): void {}
