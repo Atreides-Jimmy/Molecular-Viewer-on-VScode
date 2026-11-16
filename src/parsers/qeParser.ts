@@ -1,11 +1,14 @@
-import { MolecularData } from '../types';
+import { MolecularData, StructureStep } from '../types';
 import { elementFromAtomName, normalizeElementSymbol } from '../tools/periodicTable';
+import { chooseTrajectoryFrameIndexes } from './trajectoryParser';
 import {
     BOHR_TO_ANGSTROM,
     buildPeriodicStructure,
     isUsableLattice,
     oneLineTitle,
-    Site
+    Site,
+    StepGeometry,
+    structureSteps
 } from './periodicUtils';
 
 /**
@@ -100,6 +103,13 @@ interface QeSystem {
      * one the file never stated; see `cardScale`.
      */
     alatStated: boolean;
+    /**
+     * The angle parameter a monoclinic or triclinic cell needs and the file
+     * never stated (`celldm(4)`, `celldm(5)`, `celldm(6)`), empty when the
+     * cell has everything it needs. QE falls back to a right angle, so the
+     * reader reports the shape change rather than drawing it silently.
+     */
+    missingAngle: string;
 }
 
 function readQeSystem(lines: string[]): QeSystem {
@@ -135,9 +145,14 @@ function readQeSystem(lines: string[]): QeSystem {
     let cosAC = numValue(map, 'cosac');
     let cosBC = numValue(map, 'cosbc');
     // QE's angle parameters are per-Bravais, not one fixed meaning: celldm(4)
-    // is cos(ab) for the monoclinic/trigonal lattices but cos(bc) for the
-    // triclinic one, while celldm(5) is cos(ac) and celldm(6) cos(ab). The
-    // mapping below is the one latgen.f90 uses (celldm2abc).
+    // is cos(ab) for the monoclinic cells with their unique axis along c
+    // (`12`, `13`) and for the trigonal cell, celldm(5) is cos(ac) for the
+    // monoclinic cells with their unique axis along b (`-12`, `-13`), and the
+    // triclinic cell uses all three the other way round (celldm(4) = cos(bc)).
+    // The mapping below is the one latgen.f90 reads — `IF (abs(celldm(5))>=1)
+    // ... a3(1) = celldm(1)*celldm(3)*celldm(5)` is the `-12`/`-13` branch —
+    // so the angle a monoclinic cell is missing is reported rather than
+    // silently replaced by a right angle.
     if (cosAB === undefined) {
         if (ibrav === 14) cosAB = celldm6;
         else if (ibrav === -12 || ibrav === -13) cosAB = 0;
@@ -155,8 +170,41 @@ function readQeSystem(lines: string[]): QeSystem {
         cosAC: cosAC !== undefined ? cosAC : 0,
         cosBC: cosBC !== undefined ? cosBC : 0,
         alat: aFromCelldm !== undefined ? aFromCelldm : a,
-        alatStated
+        alatStated,
+        /** The one cosine this ibrav needs and the file never stated. */
+        missingAngle: missingLatticeAngle(ibrav, map, celldm4, celldm5, celldm6)
     };
+}
+
+/**
+ * Which angle parameter the file leaves out, when it leaves one out.
+ *
+ * `12`/`13` and the trigonal `5`/`-5` build their cell from celldm(4),
+ * `-12`/`-13` from celldm(5), and the triclinic cell needs all three. With the
+ * value absent QE falls back to a right angle, which turns the cell the input
+ * asked for into another one. The name returned is the one the input should
+ * have stated, so the warning can say exactly which number is missing instead
+ * of showing a cell that silently changed shape.
+ */
+function missingLatticeAngle(
+    ibrav: number,
+    map: { [key: string]: string },
+    celldm4: number | undefined,
+    celldm5: number | undefined,
+    celldm6: number | undefined
+): string {
+    if (numValue(map, 'cosab') !== undefined || numValue(map, 'cosac') !== undefined ||
+        numValue(map, 'cosbc') !== undefined) {
+        return '';
+    }
+    if ((ibrav === 12 || ibrav === 13 || ibrav === 5 || ibrav === -5) && celldm4 === undefined) {
+        return 'celldm(4)';
+    }
+    if ((ibrav === -12 || ibrav === -13) && celldm5 === undefined) return 'celldm(5)';
+    if (ibrav === 14 && (celldm4 === undefined || celldm5 === undefined || celldm6 === undefined)) {
+        return celldm4 === undefined ? 'celldm(4)' : celldm5 === undefined ? 'celldm(5)' : 'celldm(6)';
+    }
+    return '';
 }
 
 /**
@@ -308,7 +356,20 @@ function cardScale(
     const { unit, alat: inline } = alignmentUnit(header);
     if (unit === 'bohr') return { factor: BOHR_TO_ANGSTROM };
     if (unit === 'angstrom') return { factor: 1 };
-    if (inline === null) return { factor: systemAlat };
+    if (inline === null) {
+        if (!alatStated) {
+            // The card is scaled by a lattice parameter the file never stated:
+            // QE would stop on this input, and the numbers are read with the
+            // 1 A stand-in. Saying so is what keeps a 1 A cell from looking
+            // like the cell the run used.
+            return {
+                factor: systemAlat,
+                warning: card + ' is in units of alat, and the file states no lattice parameter in &SYSTEM ' +
+                    '(celldm(1), A or alat): it is read with alat = ' + String(systemAlat) + ' A'
+            };
+        }
+        return { factor: systemAlat };
+    }
     if (!alatStated) {
         return {
             factor: inline,
@@ -459,6 +520,7 @@ export function parseQeInput(content: string): MolecularData {
     })();
 
     let lattice: number[][] | null = sys.ibrav === 0 ? null : latticeFromIbrav(sys);
+    let fromIbrav = lattice !== null;
 
     // A CELL_PARAMETERS block overrides the Bravais cell (ibrav 0 requires it).
     for (let i = 0; i < lines.length; i++) {
@@ -467,8 +529,24 @@ export function parseQeInput(content: string): MolecularData {
         for (const note of read.warnings) {
             if (warnings.indexOf(note) < 0) warnings.push(note);
         }
-        if (read.lattice) lattice = read.lattice;
-        else warnings.push('CELL_PARAMETERS is incomplete: the cell could not be read');
+        if (read.lattice) {
+            lattice = read.lattice;
+            fromIbrav = false;
+        } else {
+            warnings.push('CELL_PARAMETERS is incomplete: the cell could not be read');
+        }
+    }
+    if (fromIbrav && !sys.alatStated) {
+        // `ibrav` builds its vectors from a lattice parameter the file never
+        // stated, so the "cell" would be a 1 A cube drawn as if the run used
+        // it. QE refuses such an input; the viewer shows what it can and says
+        // which number is missing.
+        warnings.push('the Quantum ESPRESSO input states no lattice parameter (celldm(1), A or alat): ' +
+            'the Bravais cell is read with a = 1 A');
+    }
+    if (fromIbrav && sys.missingAngle !== '') {
+        warnings.push('ibrav = ' + sys.ibrav + ' states no ' + sys.missingAngle +
+            ': the cell is drawn with a 90 degree angle there');
     }
     if (!lattice) {
         return {
@@ -514,6 +592,9 @@ interface OutputGeometry {
     lattice: number[][] | null;
     sites: Site[];
     warnings: string[];
+    /** The geometries the output printed, when it printed more than one. */
+    steps: StructureStep[];
+    stepsInFile: number;
 }
 
 /** The crystal axes echoed by pw.x, in Angstrom. */
@@ -567,6 +648,28 @@ function parseOutputGeometry(content: string): OutputGeometry {
     const axes = readOutputAxes(lines);
     let lattice = axes.lattice;
 
+    // Every cell the run printed, with its line, so a coordinate block can be
+    // read in the cell it was computed in: a vc-relax prints a CELL_PARAMETERS
+    // block per BFGS step, not only in the final one.
+    const cells: { line: number; lattice: number[][] }[] = [];
+    const positionStarts: number[] = [];
+    for (let i = 0; i < lines.length; i++) {
+        if (/^\s*CELL_PARAMETERS\b/i.test(lines[i])) {
+            const read = readCellParameters(lines, i, axes.alat, true);
+            if (read.lattice) cells.push({ line: i, lattice: read.lattice });
+        } else if (/^\s*ATOMIC_POSITIONS\b/i.test(lines[i])) {
+            positionStarts.push(i);
+        }
+    }
+    const cellBefore = (line: number): number[][] | undefined => {
+        let found: number[][] | undefined;
+        for (const cell of cells) {
+            if (cell.line > line) break;
+            found = cell.lattice;
+        }
+        return found || axes.lattice || undefined;
+    };
+
     // The converged cell and coordinates, when the run relaxed. Both may be
     // present, or only the positions (a fixed-cell relax).
     let beginFinal = -1;
@@ -612,9 +715,44 @@ function parseOutputGeometry(content: string): OutputGeometry {
         }
     }
 
+    // A relax or an MD run prints one block per step: those are the document's
+    // frames. Each block is read in the cell printed above it, which is what
+    // makes a vc-relax draw the cell it had at that step.
+    let steps: StructureStep[] = [];
+    let stepsInFile = 0;
+    if (positionStarts.length > 1 && sites.length > 0) {
+        const natoms = sites.length;
+        const chosen = chooseTrajectoryFrameIndexes(positionStarts.length, natoms);
+        const geometries: StepGeometry[] = [];
+        const species: { [label: string]: string } = {};
+        for (const index of chosen) {
+            const line = positionStarts[index];
+            const read = readAtomicPositions(lines, line, axes.alat, true, species, 0);
+            if (read.rows.length !== natoms) continue;
+            geometries.push({
+                label: qeStepLabel(lines, line, index + 1),
+                sites: read.rows,
+                lattice: cellBefore(line)
+            });
+        }
+        const collected = structureSteps(geometries, natoms);
+        steps = collected.steps;
+        stepsInFile = collected.total;
+    }
+
     if (!lattice) warnings.push('the Quantum ESPRESSO output states no crystal axes: no cell to show');
     if (sites.length === 0) warnings.push('the Quantum ESPRESSO output states no coordinate table: no atoms to show');
-    return { lattice, sites, warnings };
+    return { lattice, sites, warnings, steps, stepsInFile };
+}
+
+/** The step a coordinate block belongs to, as the run numbered it. */
+function qeStepLabel(lines: string[], header: number, ordinal: number): string {
+    for (let i = header - 1; i >= 0 && i > header - 200; i--) {
+        if (/^\s*ATOMIC_POSITIONS\b/i.test(lines[i])) break;
+        const bfgs = /number of bfgs steps\s*=\s*(\d+)/i.exec(lines[i]);
+        if (bfgs) return 'BFGS step ' + bfgs[1];
+    }
+    return 'Step ' + ordinal;
 }
 
 export function parseQeOutput(content: string): MolecularData {
@@ -627,7 +765,14 @@ export function parseQeOutput(content: string): MolecularData {
             warnings: geometry.warnings.length > 0 ? geometry.warnings : ['no structure to show']
         };
     }
-    return buildPeriodicStructure(geometry.lattice, geometry.sites, title, geometry.warnings);
+    const data = buildPeriodicStructure(geometry.lattice, geometry.sites, title, geometry.warnings);
+    // A run that printed one block per ionic step is a trajectory, not one
+    // snapshot: the host gives these the same frame navigation a dump has.
+    if (geometry.steps.length > 1) {
+        data.steps = geometry.steps;
+        data.stepsInFile = geometry.stepsInFile;
+    }
+    return data;
 }
 
 export function isQeInput(content: string): boolean {

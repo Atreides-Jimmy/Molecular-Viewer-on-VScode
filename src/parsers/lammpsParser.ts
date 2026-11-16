@@ -218,14 +218,24 @@ export function lammpsTypeElements(content: string, units?: string): { [type: nu
 }
 
 interface AtomStyle {
-    kind: 'atomic' | 'charge' | 'full' | 'molecular';
+    /** The layout's own name, for a reader of this code; nothing branches on it. */
+    kind: string;
     /** Index of the x column in a split row. */
     x: number;
     /** Index of the type column (always 1 in the styles below). */
     type: number;
 }
 
-/** The layouts this reader knows by name; any other style is read by width. */
+/**
+ * The layouts this reader can name, as *(type column, x column)*.
+ *
+ * `x` is the column the first coordinate sits in, not the style's own name:
+ * every LAMMPS Atoms row starts with the atom ID, so what moves the
+ * coordinates is how many columns come after it. `sphere`, `ellipsoid` and
+ * `body` put their type second and two non-coordinate numbers after it, which
+ * is why their coordinates start at the fifth column — the column `full` also
+ * uses, though `full` puts its type third and a molecule id second.
+ */
 function atomStyleFromName(name: string): AtomStyle | null {
     if (name === 'atomic') return { kind: 'atomic', x: 2, type: 1 };
     if (name === 'charge') return { kind: 'charge', x: 3, type: 1 };
@@ -233,6 +243,15 @@ function atomStyleFromName(name: string): AtomStyle | null {
     // `id mol type x y z`: unlike `full`, molecular has no charge column, so
     // x is the fourth field, not the fifth.
     if (name === 'molecular' || name === 'bond' || name === 'angle') return { kind: 'molecular', x: 3, type: 2 };
+    // `id type diameter density x y z` (sphere), `id type ellipsoidflag density
+    // x y z` (ellipsoid), `id type bodyflag mass x y z` (body). Their two middle
+    // columns are numbers that are not coordinates, and the type is the second
+    // column — reading them as `full` mapped the diameter onto the type and
+    // relabelled the whole cell's elements.
+    if (name === 'sphere' || name === 'ellipsoid' || name === 'body') return { kind: name, x: 4, type: 1 };
+    // `id type q x y z mux muy muz` — the dipole moments follow the position,
+    // so the coordinates and the type are the `charge` layout's.
+    if (name === 'dipole') return { kind: 'dipole', x: 3, type: 1 };
     return null;
 }
 
@@ -240,29 +259,50 @@ function isIntegerToken(token: string | undefined): boolean {
     return token !== undefined && /^[+-]?\d+$/.test(token);
 }
 
+/** Whether a column reads as an atom type throughout: an integer it declares. */
+function columnIsType(rows: string[][], index: number, atomTypes: number | undefined): boolean {
+    if (rows.length === 0) return false;
+    for (const row of rows) {
+        if (!isIntegerToken(row[index])) return false;
+        const value = parseInt(row[index], 10);
+        if (!isFinite(value) || value < 1) return false;
+        if (atomTypes !== undefined && atomTypes > 0 && value > atomTypes) return false;
+    }
+    return true;
+}
+
 /**
  * Widths 6 and 9 hold either `id type q x y z [flags]` (charge) or
  * `id mol type x y z [flags]` (molecular). The coordinates start at column 3
- * in both, so only the type column differs. A fractional or non-positive
- * third column cannot be an atom type, and a value above the declared type
- * count says which column is the molecule index. When neither test decides,
- * charge wins: a molecular file states its style in the Atoms header or the
- * input script in practice, while integral ionic charges are common.
+ * in both, so only the type column differs: a molecular file's third column is
+ * its atom type, which is an integer the file's own `N atom types` bounds.
+ *
+ * Reading that column as a charge relabels every atom — the molecule id became
+ * the type — so the type column decides whenever it fits, and only a third
+ * column that cannot be a type (fractional, zero, negative or beyond the count)
+ * is read as a charge. A molecule id beyond the type count is the same
+ * evidence from the other side and outvotes a coincidentally integral charge
+ * column; the two readings are otherwise counted row by row.
  */
 function chargeOrMolecular(rows: string[][], atomTypes: number | undefined): AtomStyle {
-    let molecular = 0;
-    let charge = 0;
+    let typeColumn = 0;
+    let chargeColumn = 0;
+    let moleculeColumn = 0;
     for (const row of rows) {
-        const third = row[2];
-        if (!isIntegerToken(third)) { charge += 2; continue; }
-        const thirdValue = parseInt(third || '', 10);
-        if (thirdValue <= 0) { charge += 2; continue; }
-        if (atomTypes !== undefined && atomTypes > 0) {
-            if (parseInt(row[1] || '', 10) > atomTypes) molecular++;
-            if (thirdValue > atomTypes) charge++;
+        const third = row[2] !== undefined ? parseInt(row[2], 10) : NaN;
+        const thirdIsType = isIntegerToken(row[2]) && isFinite(third) && third >= 1 &&
+            !(atomTypes !== undefined && atomTypes > 0 && third > atomTypes);
+        if (thirdIsType) {
+            typeColumn++;
+            const second = row[1] !== undefined ? parseInt(row[1], 10) : NaN;
+            if (atomTypes !== undefined && atomTypes > 0 && isFinite(second) && second > atomTypes) {
+                moleculeColumn++;
+            }
+        } else {
+            chargeColumn++;
         }
     }
-    return molecular > charge
+    return typeColumn > chargeColumn || moleculeColumn > 0
         ? { kind: 'molecular', x: 3, type: 2 }
         : { kind: 'charge', x: 3, type: 1 };
 }
@@ -284,7 +324,18 @@ function atomStyleOf(header: string, rows: string[][], hint?: string, atomTypes?
     if (width >= 10) return { kind: 'full', x: 4, type: 2 };
     if (width === 9 || width === 6) return chargeOrMolecular(rows, atomTypes);
     if (width === 8) return { kind: 'atomic', x: 2, type: 1 };
-    if (width === 7) return { kind: 'full', x: 4, type: 2 };
+    if (width === 7) {
+        // `full` (`id mol type q x y z`) and `sphere`/`ellipsoid`/`body`
+        // (`id type … … x y z`) share their coordinate columns but not their
+        // type column. The file's own numbers decide: only a column whose
+        // values are types can be read as one, and the older `full` reading
+        // stands whenever it is possible at all.
+        const fullType = columnIsType(rows, 2, atomTypes);
+        const shellType = columnIsType(rows, 1, atomTypes);
+        return fullType || !shellType
+            ? { kind: 'full', x: 4, type: 2 }
+            : { kind: 'shell', x: 4, type: 1 };
+    }
     return { kind: 'atomic', x: 2, type: 1 };
 }
 
@@ -331,6 +382,22 @@ function readDataAtoms(lines: string[], start: number, styleHint?: string, atomT
         rows.push({ id, type, x, y, z });
     }
     return { rows, style, next: i };
+}
+
+/**
+ * The line index of the `Atoms` section, or -1.
+ *
+ * The header is the word alone (optionally followed by a `# style` comment),
+ * and the search starts below the title line: a data file's first line is free
+ * text, and one that reads `Atoms of the water box` used to be taken as the
+ * section, which made every atom of the file start one line early. The same
+ * rule `findBondSection` already applied.
+ */
+function findAtomsSection(lines: string[]): number {
+    for (let i = 1; i < lines.length; i++) {
+        if (/^Atoms(?:\s*#.*)?\s*$/i.test(lines[i].trim())) return i;
+    }
+    return -1;
 }
 
 /** The line index of the `Bonds` section, or -1. */
@@ -469,10 +536,7 @@ export function parseLammpsData(content: string, options?: LammpsParseOptions): 
         };
     }
 
-    let atomsSection = -1;
-    for (let i = 0; i < lines.length; i++) {
-        if (/^Atoms\b/i.test(lines[i].trim())) { atomsSection = i; break; }
-    }
+    const atomsSection = findAtomsSection(lines);
     if (atomsSection < 0) {
         return {
             atoms: [], bonds: [], title, hasExplicitBonds: false,
@@ -648,6 +712,10 @@ interface DumpFrame {
     tilt: [number, number, number];
     /** Whether the block held every atom its header declared. */
     complete: boolean;
+    /** Whether the block states a `type` column; a bare `id x y z` does not. */
+    typed: boolean;
+    /** Whether the block names its own elements. */
+    labelled: boolean;
 }
 
 interface DumpHeader {
@@ -707,8 +775,7 @@ function buildDumpFrame(lines: string[], header: DumpHeader, typeElements: { [ty
     const col = (names: string[]) => findColumn(columns, names);
     const cId = col(['id']);
     const cType = col(['type']);
-    const cElement = col(['element']);
-    // A dump may carry both wrapped (`x`) and scaled (`xs`) columns; one
+    const cElement = col(['element']);    // A dump may carry both wrapped (`x`) and scaled (`xs`) columns; one
     // consistent triple decides both the index and whether the numbers are
     // fractions. Picking each axis separately could read `x` as scaled just
     // because an unused `xs` column exists elsewhere in the header.
@@ -724,7 +791,8 @@ function buildDumpFrame(lines: string[], header: DumpHeader, typeElements: { [ty
         return {
             timestep: header.timestep, lattice: box.lattice, sites: [],
             xlo: box.xlo, xhi: box.xhi, ylo: box.ylo, yhi: box.yhi,
-            zlo: box.zlo, zhi: box.zhi, tilt: box.tilt, complete: false
+            zlo: box.zlo, zhi: box.zhi, tilt: box.tilt, complete: false,
+            typed: cType >= 0, labelled: cElement >= 0
         };
     }
     const cX = columns.indexOf(group.names[0]);
@@ -741,10 +809,15 @@ function buildDumpFrame(lines: string[], header: DumpHeader, typeElements: { [ty
         const py = parseFloat(parts[cY]);
         const pz = parseFloat(parts[cZ]);
         if (!isFinite(px) || !isFinite(py) || !isFinite(pz)) break;
-        const type = cType >= 0 ? parseInt(parts[cType], 10) : 1;
+        // A dump names its atoms by type; a block written without a `type`
+        // column (a `custom` dump of `id x y z`) states no type at all. Giving
+        // every atom type 1 pretended they were all the first type — and, with
+        // a companion data file, relabelled them all as that type's element.
+        // `0` is the "no type" value here, which reads as the dummy element.
+        const type = cType >= 0 ? parseInt(parts[cType], 10) : 0;
         const label = cElement >= 0 ? parts[cElement] : '';
         const element = (label ? normalizeElementSymbol(label) : undefined) ||
-            typeElements[type] || typeElementLabel(isFinite(type) ? type : 1);
+            (type > 0 ? typeElements[type] || typeElementLabel(type) : 'X');
         let x: number, y: number, z: number;
         if (xsScaled) {
             // A scaled coordinate is a fraction of the restricted box, and the
@@ -774,7 +847,8 @@ function buildDumpFrame(lines: string[], header: DumpHeader, typeElements: { [ty
         timestep: header.timestep, lattice: box.lattice, sites,
         xlo: box.xlo, xhi: box.xhi, ylo: box.ylo, yhi: box.yhi,
         zlo: box.zlo, zhi: box.zhi, tilt: box.tilt,
-        complete: sites.length === header.count
+        complete: sites.length === header.count,
+        typed: cType >= 0, labelled: cElement >= 0
     };
 }
 
@@ -814,6 +888,9 @@ export function parseLammpsDump(content: string, options?: LammpsParseOptions): 
     }
     if (!first.complete) {
         warnings.push('the frame at timestep ' + first.timestep + ' is incomplete: showing the atoms it held');
+    }
+    if (!first.typed && !first.labelled) {
+        warnings.push('the dump states no type or element column: every atom is read as the dummy element X');
     }
     if (!first.lattice || !isUsableLattice(first.lattice)) {
         return {
@@ -874,9 +951,22 @@ export function parseLammpsDumpTrajectory(
     const factor = factorRead === undefined ? 1 : factorRead;
     const typeElements = options && options.typeElements ? options.typeElements : {};
     const headers = scanDumpHeaders(lines, factor);
+    // The atom count every frame must share is the one most of them state. A
+    // dump written by two runs, or appended to after an interruption, can begin
+    // with a block of another length; taking the first header's count declared
+    // every complete frame that followed "a different atom count" and dropped
+    // them all, leaving the file with no frames at all.
+    const counts = new Map<number, number>();
+    for (const header of headers) counts.set(header.count, (counts.get(header.count) || 0) + 1);
+    let natoms = headers.length > 0 ? headers[0].count : 0;
+    let bestCount = 0;
+    for (const header of headers) {
+        const times = counts.get(header.count) || 0;
+        if (times > bestCount) { bestCount = times; natoms = header.count; }
+    }
     const result: LammpsDumpTrajectory = {
         frames: [],
-        natoms: headers.length > 0 ? headers[0].count : 0,
+        natoms,
         frameCount: headers.length,
         sampled: false,
         truncated: false,
@@ -936,6 +1026,13 @@ export function parseLammpsDumpTrajectory(
         const labels = Array.from(new Set(missing.map(s => s.element))).sort();
         result.warnings.push('atom type' + (labels.length === 1 ? ' ' : 's ') + labels.join(', ') +
             ' has no element column or companion data: read as typed labels');
+    }
+    if (result.frames.length > 0) {
+        const firstHeader = headers[result.frames[0].index];
+        const columns = firstHeader ? firstHeader.columns : [];
+        if (columns.indexOf('type') < 0 && columns.indexOf('element') < 0) {
+            result.warnings.push('the dump states no type or element column: every atom is read as the dummy element X');
+        }
     }
     return result;
 }

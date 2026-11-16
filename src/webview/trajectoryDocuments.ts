@@ -2,7 +2,7 @@
 // the page navigates and Diff/Import choose from.
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { Atom, Bond, MolecularData, TrajectoryInfo } from '../types';
+import { Atom, Bond, MolecularData, StructureStep, TrajectoryInfo } from '../types';
 import {
     ParseFileOptions, LammpsParseOptions, LammpsDumpTrajectory, TrajectoryFormat,
     parseFile, readBinaryTrajectory, lammpsLengthFactor, parseLammpsDumpTrajectory,
@@ -524,6 +524,48 @@ export async function loadDumpTrajectoryDocument(
         },
         warnings
     );
+}
+
+/**
+ * A multi-step output as the document the page navigates frame by frame.
+ *
+ * A CP2K molecular-dynamics run, an ABACUS `MD_dump` and a Quantum ESPRESSO
+ * output that prints a coordinate block per step state one system over time —
+ * exactly what a text dump states — so they open with the same frame list. The
+ * template (elements, colours and bonds) is the structure the reader chose,
+ * and each frame brings its own cell, which the page draws as that frame's box.
+ * A document that states a single geometry never reaches here.
+ */
+export function loadStructureStepsDocument(
+    fileName: string,
+    data: MolecularData,
+    steps: StructureStep[],
+    stepsInFile: number
+): TrajectoryDocument {
+    const natoms = data.atoms.length;
+    const warnings: string[] = data.warnings ? data.warnings.slice() : [];
+    const frames: TrajectoryFramePayload[] = [];
+    for (const step of steps) {
+        if (step.xyz.length !== natoms * 3) continue;
+        frames.push({ stepLabel: step.label, xyz: step.xyz, cell: step.lattice });
+    }
+    if (frames.length === 0) return emptyTrajectoryDocument(data.title, warnings);
+    const template = trajectoryTemplate(natoms, data.atoms.map(a => a.element), {
+        data,
+        name: fileName,
+        path: ''
+    });
+    warnings.push(...template.warnings);
+    if (stepsInFile > frames.length) {
+        warnings.push(stepsInFile + ' geometries in the file: showing ' + frames.length + ' sampled evenly');
+    }
+    return finishTrajectoryDocument(data.title, template, frames, {
+        format: 'steps',
+        source: fileName,
+        framesInFile: stepsInFile,
+        sampled: stepsInFile > frames.length,
+        truncated: false
+    }, warnings);
 }
 
 export interface PickedTextFrame {

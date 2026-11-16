@@ -518,6 +518,26 @@ export interface OrbitalLevels {
     frame?: number;
 }
 
+/**
+ * One geometry of a multi-step output, before the host turns it into a frame.
+ *
+ * A CP2K molecular-dynamics run, an ABACUS `MD_dump` and a Quantum ESPRESSO
+ * output that prints one `ATOMIC_POSITIONS` block per ionic step all describe
+ * one system over time. The parser keeps those geometries here — Cartesian
+ * coordinates only, because every frame of a document shares the elements and
+ * bonds of the structure itself — and the host gives them the frame list a
+ * binary trajectory already has. A file that states a single geometry carries
+ * no array at all, so nothing downstream changes for it.
+ */
+export interface StructureStep {
+    /** The step the file names (`MD step 12`, `Step 3`), for the frame list. */
+    label: string;
+    /** Cartesian coordinates in Angstrom, `3 * atoms.length` numbers. */
+    xyz: number[];
+    /** The cell that geometry was computed in, in Angstrom, when the file states one. */
+    lattice?: number[][];
+}
+
 export interface MolecularData {
     atoms: Atom[];
     bonds: Bond[];
@@ -562,6 +582,19 @@ export interface MolecularData {
      * the reader had to assume or leave out.
      */
     trajectory?: TrajectoryInfo;
+    /**
+     * The further geometries a multi-step output states, in file order, when it
+     * states more than one (a molecular-dynamics run, a variable-cell
+     * relaxation). Absent on every file whose geometry is one structure.
+     *
+     * `atoms` is the geometry the parser chose to show — the last complete step
+     * for CP2K and ABACUS, the converged block for Quantum ESPRESSO — and the
+     * host opens the first of these steps as frame 1, exactly as it does for a
+     * binary trajectory.
+     */
+    steps?: StructureStep[];
+    /** How many geometries the file holds, before the sampling above. */
+    stepsInFile?: number;
 }
 
 /** What a trajectory file contributes, beside the frames themselves. */

@@ -1,5 +1,6 @@
-import { Atom, CrystalData, MolecularData } from '../types';
+import { Atom, CrystalData, MolecularData, StructureStep } from '../types';
 import { cartToFrac, fracToCart, wrapFrac } from '../tools/crystalGeometry';
+import { chooseTrajectoryFrameIndexes } from './trajectoryParser';
 
 /** CODATA 2018 Bohr radius, the value every program below converts with. */
 export const BOHR_TO_ANGSTROM = 0.529177210903;
@@ -186,4 +187,82 @@ export function formatNumber(v: number, digits: number): string {
 export function oneLineTitle(text: string, fallback: string): string {
     const line = String(text || '').split(/\r?\n/).map(s => s.trim()).filter(s => s !== '')[0];
     return line || fallback;
+}
+
+/** One geometry a multi-step output states, with the cell it was computed in. */
+export interface StepGeometry {
+    label: string;
+    sites: Site[];
+    /** The cell that geometry was computed in, when the file states one. */
+    lattice?: number[][];
+}
+
+/** The Cartesian triples of a site list, in Angstrom. */
+export function sitesToXyz(sites: Site[], lattice: number[][] | null): number[] {
+    const xyz: number[] = [];
+    for (const site of sites) {
+        if (site.frac && lattice) {
+            const cart = fracToCart(site.frac, lattice);
+            xyz.push(cart[0], cart[1], cart[2]);
+        } else {
+            const cart = site.cart || [0, 0, 0];
+            xyz.push(cart[0], cart[1], cart[2]);
+        }
+    }
+    return xyz;
+}
+
+/** Two consecutive steps that state the same geometry, within a rounding error. */
+function sameStep(a: StructureStep, b: StructureStep): boolean {
+    if (a.xyz.length !== b.xyz.length) return false;
+    const la = a.lattice;
+    const lb = b.lattice;
+    if (!la !== !lb) return false;
+    if (la && lb) {
+        for (let i = 0; i < 3; i++) {
+            for (let j = 0; j < 3; j++) {
+                if (Math.abs(la[i][j] - lb[i][j]) > 1e-6) return false;
+            }
+        }
+    }
+    for (let i = 0; i < a.xyz.length; i++) {
+        if (Math.abs(a.xyz[i] - b.xyz[i]) > 1e-6) return false;
+    }
+    return true;
+}
+
+/**
+ * The geometries a multi-step output states, as the viewer's frames.
+ *
+ * A CP2K molecular-dynamics run, an ABACUS `MD_dump` and a Quantum ESPRESSO
+ * output that prints a coordinate block per step describe one system over
+ * time, which is what the page's frame list shows. Two things are done here so
+ * the three readers stay one shape: a geometry that repeats the one before it
+ * is not a frame (a variable-cell relaxation that converged in its first step
+ * prints the same block twice, and a file with one geometry must stay the
+ * structure it always was), and a long run is sampled evenly to the same limits
+ * a binary trajectory uses, so a 10 000-step dump does not become 10 000 copies
+ * of the cell in the page payload.
+ */
+export function structureSteps(
+    geometries: StepGeometry[],
+    natoms: number
+): { steps: StructureStep[]; total: number } {
+    if (natoms <= 0 || geometries.length < 2) return { steps: [], total: geometries.length };
+    const placed: StructureStep[] = [];
+    for (const geometry of geometries) {
+        if (geometry.sites.length !== natoms) continue;
+        const step: StructureStep = {
+            label: geometry.label,
+            xyz: sitesToXyz(geometry.sites, geometry.lattice || null),
+            lattice: geometry.lattice
+        };
+        const previous = placed.length > 0 ? placed[placed.length - 1] : undefined;
+        if (previous && sameStep(previous, step)) continue;
+        placed.push(step);
+    }
+    if (placed.length < 2) return { steps: [], total: placed.length };
+    const chosen = chooseTrajectoryFrameIndexes(placed.length, natoms);
+    const steps = chosen.map(index => placed[index]);
+    return { steps, total: placed.length };
 }

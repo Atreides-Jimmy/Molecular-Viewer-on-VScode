@@ -1,8 +1,9 @@
-import { MolecularData } from '../types';
+import { MolecularData, StructureStep } from '../types';
 import { elementFromAtomName, normalizeElementSymbol } from '../tools/periodicTable';
 import { cellToLatticeVectors, fracToCart } from '../tools/crystalGeometry';
 import { parseXyz } from './xyzParser';
 import { parsePdb } from './pdbParser';
+import { chooseTrajectoryFrameIndexes } from './trajectoryParser';
 import {
     BOHR_TO_ANGSTROM,
     buildMolecularStructure,
@@ -10,7 +11,8 @@ import {
     isUsableLattice,
     latticeToCellParams,
     oneLineTitle,
-    Site
+    Site,
+    structureSteps
 } from './periodicUtils';
 
 /**
@@ -135,7 +137,7 @@ function withElectronicState(data: MolecularData, charge: number | undefined, mu
 }
 
 /** The keywords CP2K accepts as parameters on a section's own line. */
-const SECTION_PARAMS = ['SCALED', 'UNIT', 'PERIODIC', 'A', 'B', 'C', 'ABC', 'ALPHA_BETA_GAMMA'];
+const SECTION_PARAMS = ['SCALED', 'UNIT', 'PERIODIC', 'A', 'B', 'C', 'ABC', 'ALPHA_BETA_GAMMA', 'MULTIPLE_UNIT_CELL'];
 
 /**
  * A section parameter written on the `&NAME` line (`&COORD SCALED`,
@@ -176,6 +178,16 @@ function sectionNumbers(key: string[] | undefined): number[] {
     return out;
 }
 
+/**
+ * The `&CELL` section as a lattice, or null when it states none.
+ *
+ * CP2K gives the cell in one of three spellings, and all three are read here:
+ * `A/B/C` as Cartesian vectors (the `h` matrix columns), `ABC` as the three
+ * edge *lengths* with `ALPHA_BETA_GAMMA` for the angles, and — the form this
+ * reader used to drop — one number per edge, which is the same length/angle
+ * cell spelled with `A`/`B`/`C`. A cell whose edges are stated but never read
+ * is what turned a periodic run into a molecule on screen.
+ */
 function cellLattice(sections: Cp2kSection[]): number[][] | null {
     const cell = lastSection(sections, 'CELL');
     if (!cell) return null;
@@ -195,18 +207,49 @@ function cellLattice(sections: Cp2kSection[]): number[][] | null {
     const aVec = sectionNumbers(sectionKey(cell, 'A'));
     const bVec = sectionNumbers(sectionKey(cell, 'B'));
     const cVec = sectionNumbers(sectionKey(cell, 'C'));
+    const angles = sectionNumbers(sectionKey(cell, 'ALPHA_BETA_GAMMA'));
+    const angleAt = (index: number): number => angles.length > index ? angles[index] : 90;
     if (aVec.length >= 3 && bVec.length >= 3 && cVec.length >= 3) {
         return scale([aVec.slice(0, 3), bVec.slice(0, 3), cVec.slice(0, 3)]);
     }
+    // One number per edge is an edge length, the `ABC` cell spelled with the
+    // per-vector keywords. Requiring three numbers each (the old test) read
+    // this cell as absent.
+    if (aVec.length === 1 && bVec.length === 1 && cVec.length === 1) {
+        return scale(cellToLatticeVectors(
+            aVec[0], bVec[0], cVec[0], angleAt(0), angleAt(1), angleAt(2)
+        ));
+    }
     const abc = sectionNumbers(sectionKey(cell, 'ABC'));
     if (abc.length >= 3) {
-        const angles = sectionNumbers(sectionKey(cell, 'ALPHA_BETA_GAMMA'));
-        const alpha = angles.length >= 1 ? angles[0] : 90;
-        const beta = angles.length >= 2 ? angles[1] : 90;
-        const gamma = angles.length >= 3 ? angles[2] : 90;
-        return scale(cellToLatticeVectors(abc[0], abc[1], abc[2], alpha, beta, gamma));
+        return scale(cellToLatticeVectors(abc[0], abc[1], abc[2], angleAt(0), angleAt(1), angleAt(2)));
+    }
+    // A single `ABC` value is the cubic shorthand for three equal edges.
+    if (abc.length === 1) {
+        return scale(cellToLatticeVectors(abc[0], abc[0], abc[0], angleAt(0), angleAt(1), angleAt(2)));
     }
     return null;
+}
+
+/**
+ * `MULTIPLE_UNIT_CELL`, the repetition of the cell the run actually used.
+ *
+ * CP2K's manual: it "specifies the numbers of repetition in space (X, Y, Z) of
+ * the defined cell, assuming it as a unit cell" and "affects only the CELL
+ * specification" — the coordinates keep their own multiple in
+ * `SUBSYS%TOPOLOGY`. Ignoring it drew a 2x2x2 supercell run as its base cell,
+ * so every periodic image the run saw was missing from the picture.
+ */
+function cellMultiples(sections: Cp2kSection[]): [number, number, number] {
+    const cell = lastSection(sections, 'CELL');
+    const values = sectionNumbers(cell ? sectionKey(cell, 'MULTIPLE_UNIT_CELL') : undefined);
+    const at = (index: number): number => {
+        const value = values.length === 1 ? values[0] : values[index];
+        if (value === undefined || !isFinite(value)) return 1;
+        const count = Math.floor(value);
+        return count >= 1 ? count : 1;
+    };
+    return [at(0), at(1), at(2)];
 }
 
 function isPeriodic(sections: Cp2kSection[]): boolean {
@@ -344,7 +387,17 @@ export function parseCp2kInput(content: string, options?: Cp2kParseOptions): Mol
         warnings.push('the CP2K input has no &COORD block: no atoms to show');
     }
 
-    const lattice = cellLattice(sections);
+    // The stated cell and the cell the run used are not the same when
+    // `MULTIPLE_UNIT_CELL` repeats it. A SCALED `&COORD` is a fraction of the
+    // *stated* cell (CP2K's topology multiple is a separate keyword), so the
+    // fractions are placed against that one and the periodic structure is
+    // built at the repeated cell.
+    const baseLattice = cellLattice(sections);
+    const multiples = cellMultiples(sections);
+    const repeated = multiples[0] !== 1 || multiples[1] !== 1 || multiples[2] !== 1;
+    const lattice = baseLattice && repeated
+        ? baseLattice.map((row, i) => row.map(v => v * multiples[i]))
+        : baseLattice;
     const periodic = lattice !== null && isPeriodic(sections);
     if (sites.length === 0) {
         return {
@@ -352,15 +405,25 @@ export function parseCp2kInput(content: string, options?: Cp2kParseOptions): Mol
             warnings: warnings.length > 0 ? warnings : ['the CP2K input has no atoms to show']
         };
     }
-    if (periodic && lattice && isUsableLattice(lattice)) {
-        return withElectronicState(buildPeriodicStructure(lattice, sites, title, warnings), statedCharge, statedMultiplicity);
+    if (periodic && lattice && baseLattice && isUsableLattice(lattice)) {
+        if (repeated) {
+            warnings.push('MULTIPLE_UNIT_CELL ' + multiples.join(' ') +
+                ': the cell is shown as the ' + multiples.join('x') + ' supercell the run used');
+        }
+        const placed = repeated
+            ? sites.map(s => s.frac
+                ? { element: s.element, label: s.label, ghost: s.ghost, cart: fracToCart(s.frac, baseLattice) }
+                : s)
+            : sites;
+        return withElectronicState(buildPeriodicStructure(lattice, placed, title, warnings), statedCharge, statedMultiplicity);
     }
-    if (lattice && !periodic) {
+    if (baseLattice && !periodic) {
         // PERIODIC NONE: the ABC box is a bounding box, not a cell. SCALED
         // coordinates are fractions of that box, so they still need converting
-        // before the molecule is drawn without a lattice.
+        // before the molecule is drawn without a lattice. The repetition is
+        // part of the periodic machinery, so the box is the one stated.
         const molecular = sites.map(s => s.frac
-            ? { element: s.element, label: s.label, ghost: s.ghost, cart: fracToCart(s.frac, lattice) }
+            ? { element: s.element, label: s.label, ghost: s.ghost, cart: fracToCart(s.frac, baseLattice) }
             : s);
         return withElectronicState(buildMolecularStructure(molecular, title, warnings), statedCharge, statedMultiplicity);
     }
@@ -383,6 +446,60 @@ interface Cp2kOutGeometry {
     sites: Site[];
     periodic: boolean;
     warnings: string[];
+    /** The geometries the run printed, when it printed more than one. */
+    steps: StructureStep[];
+    stepsInFile: number;
+}
+
+/**
+ * One `ATOMIC COORDINATES IN …` table, read from the row after its header.
+ *
+ * The table CP2K prints is `Atom Kind Element Z X Y Z Z(eff) Mass` with an
+ * unlabeled atomic-number column after the element; a table without that column
+ * (some versions, older print sections) is `Atom Kind Element X Y Z Z(eff)
+ * Mass`. Reading x from the atomic number would put every atom at Z=8/14 of its
+ * real place.
+ */
+function readCp2kCoordinateTable(lines: string[], header: number): Site[] {
+    const match = /ATOMIC COORDINATES IN\s+(ANGSTROM|A\.U\.|BOHR)/i.exec(lines[header]);
+    if (!match) return [];
+    const factor = /angstrom/i.test(match[1]) ? 1 : BOHR_TO_ANGSTROM;
+    const rows: Site[] = [];
+    for (let j = header + 1; j < lines.length; j++) {
+        const line = lines[j].trim();
+        if (line === '') {
+            if (rows.length > 0) break;
+            continue;
+        }
+        const parts = line.split(/\s+/);
+        let xCol = 3;
+        if (parts.length >= 9 && /^\d+$/.test(parts[3] || '')) xCol = 4;
+        if (parts.length < xCol + 3) {
+            if (rows.length > 0) break;
+            continue;
+        }
+        const index = parseInt(parts[0], 10);
+        const x = parseFloat(parts[xCol]);
+        const y = parseFloat(parts[xCol + 1]);
+        const z = parseFloat(parts[xCol + 2]);
+        if (!isFinite(index) || !isFinite(x) || !isFinite(y) || !isFinite(z)) {
+            if (rows.length > 0) break;
+            continue;
+        }
+        const element = normalizeElementSymbol(parts[2]) || elementFromAtomName(parts[2]) || parts[2];
+        rows.push({ element, cart: [x * factor, y * factor, z * factor], label: parts[2] });
+    }
+    return rows;
+}
+
+/** The step a coordinate table belongs to, as the run numbered it. */
+function cp2kStepLabel(lines: string[], header: number, ordinal: number): string {
+    for (let i = header - 1; i >= 0 && i > header - 120; i--) {
+        if (/ATOMIC COORDINATES IN/i.test(lines[i])) break;
+        const m = /MD\|\s*Step number\s+(\d+)/i.exec(lines[i]);
+        if (m) return 'MD step ' + m[1];
+    }
+    return 'Step ' + ordinal;
 }
 
 function parseCp2kOutputGeometry(content: string): Cp2kOutGeometry {
@@ -390,12 +507,19 @@ function parseCp2kOutputGeometry(content: string): Cp2kOutGeometry {
     const warnings: string[] = [];
     let lattice: number[][] | null = null;
     let periodic = true;
+    /** Every complete a/b/c group with the line it ended on. */
+    const cells: { line: number; lattice: number[][] }[] = [];
+    /** The header line of every coordinate table, in file order. */
+    const tableStarts: number[] = [];
 
-    // A run over several steps repeats the cell; the last complete a/b/c
-    // group is the final geometry. Requiring the group to arrive in order
-    // keeps a truncated final print from mixing vectors of two cells.
+    // A run over several steps repeats the cell and the coordinate table; one
+    // pass collects both, because a table belongs to the last cell printed
+    // above it. Requiring an a/b/c group to arrive in order keeps a truncated
+    // print from mixing the vectors of two cells.
     let current: number[][] = [];
-    for (const line of lines) {
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (/ATOMIC COORDINATES IN\s+(ANGSTROM|A\.U\.|BOHR)/i.test(line)) tableStarts.push(i);
         const m = /CELL\|\s*Vector\s+([abc])\s*\[(angstrom|bohr)\]:\s*([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)/i.exec(line);
         if (m) {
             const unit = m[2].toLowerCase();
@@ -407,6 +531,7 @@ function parseCp2kOutputGeometry(content: string): Cp2kOutGeometry {
             else if (letter === 'c' && current.length === 2) {
                 current.push(vector);
                 lattice = current;
+                cells.push({ line: i, lattice: current });
                 current = [];
             } else current = [];
             continue;
@@ -417,41 +542,43 @@ function parseCp2kOutputGeometry(content: string): Cp2kOutGeometry {
 
     // The last coordinate table is the geometry the run finished with.
     let sites: Site[] = [];
-    for (let i = lines.length - 1; i >= 0 && sites.length === 0; i--) {
-        const header = /ATOMIC COORDINATES IN\s+(ANGSTROM|A\.U\.|BOHR)/i.exec(lines[i]);
-        if (!header) continue;
-        const factor = /angstrom/i.test(header[1]) ? 1 : BOHR_TO_ANGSTROM;
-        const rows: Site[] = [];
-        for (let j = i + 1; j < lines.length; j++) {
-            const line = lines[j].trim();
-            if (line === '') {
-                if (rows.length > 0) break;
-                continue;
-            }
-            const parts = line.split(/\s+/);
-            // The table CP2K prints is `Atom Kind Element Z X Y Z Z(eff) Mass`
-            // with an unlabeled atomic-number column after the element; a
-            // table without that column (some versions, older print sections)
-            // is `Atom Kind Element X Y Z Z(eff) Mass`. Reading x from the
-            // atomic number would put every atom at Z=8/14 of its real place.
-            let xCol = 3;
-            if (parts.length >= 9 && /^\d+$/.test(parts[3] || '')) xCol = 4;
-            if (parts.length < xCol + 3) {
-                if (rows.length > 0) break;
-                continue;
-            }
-            const index = parseInt(parts[0], 10);
-            const x = parseFloat(parts[xCol]);
-            const y = parseFloat(parts[xCol + 1]);
-            const z = parseFloat(parts[xCol + 2]);
-            if (!isFinite(index) || !isFinite(x) || !isFinite(y) || !isFinite(z)) {
-                if (rows.length > 0) break;
-                continue;
-            }
-            const element = normalizeElementSymbol(parts[2]) || elementFromAtomName(parts[2]) || parts[2];
-            rows.push({ element, cart: [x * factor, y * factor, z * factor], label: parts[2] });
+    let shownTable = -1;
+    for (let t = tableStarts.length - 1; t >= 0 && sites.length === 0; t--) {
+        const rows = readCp2kCoordinateTable(lines, tableStarts[t]);
+        if (rows.length > 0) {
+            sites = rows;
+            shownTable = t;
         }
-        if (rows.length > 0) sites = rows;
+    }
+
+    // A molecular-dynamics run (or a cell optimisation) prints one table per
+    // step: those are the document's frames, not a single snapshot. Each one
+    // belongs to the last cell printed above it, which is the cell it was
+    // computed in.
+    let steps: StructureStep[] = [];
+    let stepsInFile = 0;
+    if (tableStarts.length > 1 && sites.length > 0) {
+        const natoms = sites.length;
+        const chosen = chooseTrajectoryFrameIndexes(tableStarts.length, natoms);
+        const cellFor = (line: number): number[][] | undefined => {
+            let found: number[][] | undefined;
+            for (const cell of cells) {
+                if (cell.line > line) break;
+                found = cell.lattice;
+            }
+            return found || lattice || undefined;
+        };
+        const geometries = chosen.map(index => {
+            const rows = index === shownTable ? sites : readCp2kCoordinateTable(lines, tableStarts[index]);
+            return {
+                label: cp2kStepLabel(lines, tableStarts[index], index + 1),
+                sites: rows,
+                lattice: periodic ? cellFor(tableStarts[index]) : undefined
+            };
+        });
+        const collected = structureSteps(geometries, natoms);
+        steps = collected.steps;
+        stepsInFile = collected.total;
     }
 
     if (!lattice) warnings.push('the CP2K output states no cell vectors: the structure is read as a molecule');
@@ -463,7 +590,7 @@ function parseCp2kOutputGeometry(content: string): Cp2kOutGeometry {
     } else if (lattice && !isUsableLattice(lattice)) {
         warnings.push('the CP2K output cell vectors are degenerate: the structure is read as a molecule');
     }
-    return { lattice, sites, periodic, warnings };
+    return { lattice, sites, periodic, warnings, steps, stepsInFile };
 }
 
 export function parseCp2kOutput(content: string): MolecularData {
@@ -476,10 +603,16 @@ export function parseCp2kOutput(content: string): MolecularData {
             warnings: geometry.warnings
         };
     }
-    if (geometry.lattice && geometry.periodic && isUsableLattice(geometry.lattice)) {
-        return buildPeriodicStructure(geometry.lattice, geometry.sites, title, geometry.warnings);
+    const data = geometry.lattice && geometry.periodic && isUsableLattice(geometry.lattice)
+        ? buildPeriodicStructure(geometry.lattice, geometry.sites, title, geometry.warnings)
+        : buildMolecularStructure(geometry.sites, title, geometry.warnings);
+    // A run that printed one table per step is a trajectory, not one snapshot:
+    // the host gives these the folder's frame navigation.
+    if (geometry.steps.length > 1) {
+        data.steps = geometry.steps;
+        data.stepsInFile = geometry.stepsInFile;
     }
-    return buildMolecularStructure(geometry.sites, title, geometry.warnings);
+    return data;
 }
 
 export function isCp2kOutput(content: string): boolean {

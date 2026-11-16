@@ -26,8 +26,8 @@ import {
 } from './payloads';
 import { buildParseOptions, applySetupWarnings, readToolFile } from './parseSetup';
 import {
-    loadBinaryTrajectoryDocument, loadDumpTrajectoryDocument, parseTextTrajectoryFrames,
-    pickTextTrajectoryFrame, latticeCellParameters, PickedTextFrame
+    loadBinaryTrajectoryDocument, loadDumpTrajectoryDocument, loadStructureStepsDocument,
+    parseTextTrajectoryFrames, pickTextTrajectoryFrame, latticeCellParameters, PickedTextFrame
 } from './trajectoryDocuments';
 import { loadStructureFile, loadFchkStructure } from './structureLoader';
 import { buildVmdMoleculePayload, resolveVmdSource, readEggMetadata, EggMeta } from './vmdPayload';
@@ -403,6 +403,20 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             if (ext === 'pdb' || ext === 'ent') {
                 autoBeta = hasScalarChannel(textContent, data.atoms);
             }
+        }
+        // A reader that states several geometries (a CP2K molecular-dynamics
+        // output, an ABACUS `MD_dump`, a Quantum ESPRESSO relax or MD) describes
+        // one system over time: the document gets the frame navigation a text
+        // dump already has, and each frame brings the cell it was computed in. A
+        // file whose reader states one geometry keeps the crystal path it had.
+        const statedSteps = data.steps;
+        if (!trajectoryDocument && statedSteps && statedSteps.length > 1 && data.atoms.length > 0) {
+            const document = loadStructureStepsDocument(
+                fileName, data, statedSteps, data.stepsInFile || statedSteps.length
+            );
+            data = document.data;
+            trajectoryFrames = document.trajectoryFrames;
+            trajectoryDocument = true;
         }
         } catch (err) {
             // A Cancel on a scene load is not a parse error: it must abort the
