@@ -9,7 +9,7 @@ import {
     isLammpsInput, isLammpsData, isLammpsDump,
     isCp2kInput, isAbacusInput, isAbinitInput, scanAbacusInput, scanAbinitXyzfile,
     scanOrcaXyzfile, scanLammpsInput, parseLammpsInputHints, lammpsTypeElements,
-    deepmdFirstBox, parseDeepmdTypes, parseDeepmdTypeMap
+    deepmdFirstBox, deepmdBoxFrames, parseDeepmdTypes, parseDeepmdTypeMap
 } from '../parsers/index';
 import { decodeText, readFileWithProgress } from './loading';
 
@@ -674,8 +674,14 @@ export async function buildParseOptions(
         const boxFile = await readCompanion(dir, 'box.raw') || await readCompanion(dir, 'box.npy');
         if (boxFile) {
             const np = boxFile.name.toLowerCase().endsWith('.npy');
-            const box = deepmdFirstBox(np ? '' : decodeText(boxFile.bytes), np ? boxFile.bytes : undefined);
+            const boxText = np ? '' : decodeText(boxFile.bytes);
+            const box = deepmdFirstBox(boxText, np ? boxFile.bytes : undefined);
             if (box) deepmd.box = box;
+            // The box holds one row per frame, so its row count is what tells a
+            // `(natoms, 3)` coordinate array (a single frame) from `(frames, 3)`
+            // when `type.raw` is missing.
+            const boxFrames = deepmdBoxFrames(boxText, np ? boxFile.bytes : undefined);
+            if (boxFrames > 0) deepmd.framesHint = boxFrames;
         }
         for (const root of roots) {
             if (!deepmd.types) {

@@ -15,6 +15,18 @@
 
 // ===== Cell =====
 
+/**
+ * Volume below which a 3x3 lattice is no cell at all, in A^3 per that lattice's
+ * own length unit.
+ *
+ * Every reader that decides "is this a cell?" reads this value: a cell whose
+ * volume is indistinguishable from zero has no periodic images to search and no
+ * density to compute, and two readers disagreeing on the cut (1e-8 here, 1e-9
+ * there) accepted a box one of them then failed to invert. 1e-8 A^3 is below
+ * any cell a program writes (a 0.002 A cube), so nothing real is rejected.
+ */
+export const CELL_VOLUME_EPSILON = 1e-8;
+
 export function cellToLatticeVectors(a: number, b: number, c: number, alpha: number, beta: number, gamma: number): number[][] {
     const rad = Math.PI / 180;
     const ar = alpha * rad;

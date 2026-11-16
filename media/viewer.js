@@ -589,6 +589,14 @@ function updateMolInfo(){
         var styleText=Object.keys(styles).map(function(k){return k+'×'+styles[k]}).join(', ');
         html+='<br>VMD script: '+vm.reps.length+' rep'+(vm.reps.length===1?'':'s')+(styleText?' ('+styleText+')':'');
         html+='<br>Colour: '+VMD.colorScaleMethod;
+        // The material a representation names is part of the recipe the script
+        // states. Nothing is drawn differently for it (every material is opaque
+        // here), so the panel is where it is visible: a script that asks for
+        // Glass says so, instead of the field being parsed and then dropped.
+        var mats={};
+        vm.reps.forEach(function(r){var m=(r.material||'').trim();if(!m||/^opaque$/i.test(m))return;mats[m]=(mats[m]||0)+1});
+        var matText=Object.keys(mats).map(function(k){return k+'×'+mats[k]}).join(', ');
+        if(matText)html+='<br>Material: '+escapeHtml(matText);
         if(vm.segments.length)html+='<br>Surfaces: '+vm.segments.length;
         var warns=(VMD.warnings||[]).concat(vm.warnings||[]);
         if(warns.length)html+='<br><span style="color:#e8a33d">⚠ '+warns.length+' script warning'+(warns.length===1?'':'s')+'</span>';
@@ -8567,7 +8575,11 @@ function clamp01(v){
     if(!isFinite(v))return 0;
     return v<0?0:v>1?1:v;
 }
-function scalarColor(v,vmin,vmax){
+// The optional `method` is the script's `color scale method`: BGR is the same
+// ramp with red and blue exchanged, exactly as the reference renderer draws it.
+// The page itself always colours by RGB (it has no script to ask), and the
+// parameter is here so the two copies of this function stay identical.
+function scalarColor(v,vmin,vmax,method){
     var t;
     if(!isFinite(vmin)||!isFinite(vmax)||vmax===vmin){t=0}
     else{
@@ -8586,6 +8598,7 @@ function scalarColor(v,vmin,vmax){
         b=clamp01(GRADIENT_BASE+GRADIENT_RATE*(t-0.5));
     }
     var hex=function(x){var n=Math.round(x*255);if(!isFinite(n))n=0;if(n<0)n=0;if(n>255)n=255;var s=n.toString(16).toUpperCase();return s.length<2?'0'+s:s};
+    if(String(method||'').trim().toUpperCase()==='BGR')return '#'+hex(b)+hex(g)+hex(r);
     return '#'+hex(r)+hex(g)+hex(b);
 }
 var betaColorOn=false;
