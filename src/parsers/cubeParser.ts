@@ -1,4 +1,5 @@
 import { Atom, CrystalData, MolecularData } from '../types';
+import { isUsableLattice } from './periodicUtils';
 
 const BOHR_TO_ANGSTROM = 0.52917721067;
 
@@ -72,21 +73,29 @@ export function parseCube(content: string): MolecularData {
     const voxelLines: number[][] = [];
     const voxelCounts: number[] = [];
     for (let i = 0; i < 3; i++) {
-        const parts = lines[3 + i].trim().split(/\s+/).map(Number);
+        const parts = (lines[3 + i] || '').trim().split(/\s+/).map(Number);
         voxelCounts.push(parts[0]);
         voxelLines.push([parts[1] || 0, parts[2] || 0, parts[3] || 0]);
     }
 
-    const voxelValid = voxelLines.every(v => v.every(isValidNumber)) &&
+    // A grid axis is a whole number of voxels, and the cell is those counts
+    // times the step vectors. A count of 0 or a negative one — VESTA writes `0`
+    // on a grid line it never filled, and a truncated file leaves the field
+    // empty — multiplies its vector away and leaves a cell with no volume at
+    // all, in which every fractional coordinate is undefined. Such a grid is
+    // not a cell, and the reader says so instead of building one.
+    const voxelCountsValid = voxelCounts.every(n => isValidNumber(n) && Math.trunc(n) === n && n > 0);
+    const voxelValid = voxelCountsValid &&
+        voxelLines.every(v => v.every(isValidNumber)) &&
         voxelLines.some(v => v.some(x => Math.abs(x) > 1e-10));
 
-    // Cube convention: NATOMS > 0 means Bohr, NATOMS < 0 means Angstrom
-    let isBohr = declaredNatoms > 0;
-    if (voxelValid) {
-        const maxVoxel = Math.max(...voxelLines.flat().map(Math.abs));
-        const maxCoordAbs = 50;
-        if (maxVoxel > maxCoordAbs * 0.5) isBohr = false;
-    }
+    // Cube convention: NATOMS > 0 means Bohr, NATOMS < 0 means Angstrom. The
+    // sign is the file's own statement and is the only thing consulted — the
+    // size heuristic that used to override it (a step vector longer than 25 was
+    // taken as Angstrom) read a *coarse* Bohr grid as Angstrom, because 30 Bohr
+    // between points is ordinary for a large cell, and shrank the whole
+    // structure by 0.529 without a word.
+    const isBohr = declaredNatoms > 0;
 
     const lengthFactor = isBohr ? BOHR_TO_ANGSTROM : 1.0;
     // The header's origin is the first voxel of the grid, in the same frame as
@@ -101,11 +110,25 @@ export function parseCube(content: string): MolecularData {
 
     let lattice: number[][] | null = null;
     if (voxelValid) {
-        lattice = voxelLines.map((v, i) => [
+        const grid = voxelLines.map((v, i) => [
             v[0] * voxelCounts[i] * lengthFactor,
             v[1] * voxelCounts[i] * lengthFactor,
             v[2] * voxelCounts[i] * lengthFactor
         ]);
+        // Three positive counts are not yet a cell: the step vectors can be
+        // coplanar (a slab written without its third direction), and such a
+        // lattice has no volume either. The check every other reader uses is
+        // the same one here.
+        if (isUsableLattice(grid)) {
+            lattice = grid;
+        } else {
+            warnings.push('the cube grid vectors do not span a cell (they are coplanar or zero): ' +
+                'the cell is not built from the grid');
+        }
+    } else if (!voxelCountsValid) {
+        warnings.push('the cube grid lines do not state three positive whole voxel counts (' +
+            voxelCounts.map(n => isFinite(n) ? String(n) : '?').join(', ') +
+            '): the cell is not built from the grid');
     }
 
     const atoms: Atom[] = [];
@@ -124,11 +147,13 @@ export function parseCube(content: string): MolecularData {
         const parts = line.split(/\s+/);
         // An atom row is `Z charge x y z`; a grid-data row is a list of
         // floating-point values. Requiring an integer Z keeps a truncated atom
-        // table from turning grid data into ghost atoms.
+        // table from turning grid data into ghost atoms. The row may carry more
+        // than five fields — some writers append a label or a comment column —
+        // and the extra ones are simply not part of the record.
         const atomicNumber = Number(parts[0]);
-        const isAtomRow = parts.length === 5 &&
+        const isAtomRow = parts.length >= 5 &&
             Number.isInteger(atomicNumber) && Math.abs(atomicNumber) <= 118 &&
-            parts.slice(1).every(p => isValidNumber(Number(p)));
+            parts.slice(1, 5).every(p => isValidNumber(Number(p)));
         if (!isAtomRow) break; // grid data starts here: the atom table was cut short
 
         rowsRead++;

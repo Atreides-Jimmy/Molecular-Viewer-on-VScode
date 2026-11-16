@@ -52,6 +52,60 @@ function isElementSymbolLine(tokens: string[]): boolean {
         normalizeElementSymbol(t) !== undefined || /^(x|bq|du|dummy|\*)$/i.test(t));
 }
 
+/**
+ * How many further structures follow the coordinates that were just read.
+ *
+ * Every frame of a POSCAR states its coordinate mode on a line of its own
+ * (`Direct` or `Cartesian`), and a frame's velocity block states one too — the
+ * two are told apart by what comes before: a velocity header follows exactly
+ * `atomCount` numeric rows, a frame's mode line follows the counts line.
+ */
+function framesAfter(lines: string[], from: number, atomCount: number): number {
+    let i = from;
+    // The velocity block of the frame just read: a mode line followed by one
+    // row per atom. It is the one mode line that can follow coordinates
+    // directly, and the run of rows before it is behind the scan, so it is
+    // stepped over explicitly rather than recognised by the run.
+    let j = i;
+    while (j < lines.length && lines[j].trim() === '') j++;
+    if (j < lines.length && /^(cartesian|direct)\s*$/i.test(lines[j].trim())) {
+        let rows = 0;
+        let k = j + 1;
+        while (k < lines.length && rows < atomCount) {
+            const text = lines[k].trim();
+            if (text === '') { k++; continue; }
+            const parts = text.split(/\s+/);
+            if (parts.length < 3 || parts.slice(0, 3).some(p => !isFinite(parseFloat(p)))) break;
+            rows++;
+            k++;
+        }
+        if (rows === atomCount && atomCount > 0) i = k;
+    }
+
+    let frames = 0;
+    let numericRun = 0;
+    for (; i < lines.length; i++) {
+        const text = lines[i].trim();
+        if (text === '') {
+            numericRun = 0;
+            continue;
+        }
+        if (/^(cartesian|direct)\s*$/i.test(text)) {
+            // A later frame's velocity header follows exactly `atomCount` rows
+            // and is not a frame; its coordinate-mode line follows the counts
+            // line and is.
+            if (numericRun !== atomCount) frames++;
+            numericRun = 0;
+            continue;
+        }
+        const parts = text.split(/\s+/);
+        const numeric = parts.length >= 3 &&
+            parts.slice(0, 3).every(p => isFinite(parseFloat(p)));
+        numericRun = numeric ? numericRun + 1 : 0;
+    }
+    return frames;
+}
+
 export function parseVasp(content: string): MolecularData {
     const lines = content.split(/\r?\n/);
 
@@ -149,12 +203,47 @@ export function parseVasp(content: string): MolecularData {
         lineIdx++;
 
         const countLine = lines[lineIdx] !== undefined ? lines[lineIdx].trim() : '';
-        const countTokens = countLine.split(/\s+/).filter(t => t !== '').map(Number);
-        if (countTokens.length === elementTypes.length && countTokens.every(n => !isNaN(n) && n >= 0)) {
-            elementCounts = countTokens;
-            declaredTotal = countTokens.reduce((s, n) => s + n, 0);
+        const countTokens = countLine.split(/\s+/).filter(t => t !== '');
+        // A counts line is a list of bare integers: no sign, no decimal point.
+        // That is what tells it from a coordinate row, and the distinction is
+        // what keeps the two from being read as each other — a `0.0 0.0 0.0`
+        // row is not a counts line, and a `1 1` counts line is not a site at
+        // (1, 1, …). The line must also state at least one site: an all-zero
+        // list is not a POSCAR's contents.
+        const countsReadable = countTokens.length > 0 &&
+            countTokens.every(t => /^\d+$/.test(t)) &&
+            countTokens.some(t => parseInt(t, 10) > 0);
+        if (countsReadable) {
+            const counts = countTokens.map(t => parseInt(t, 10));
+            const species = elementTypes.length;
+            declaredTotal = counts.reduce((s, n) => s + n, 0);
+            if (counts.length === species) {
+                elementCounts = counts;
+            } else if (counts.length < species) {
+                // Fewer numbers than species: the species without a count have
+                // no sites, which is a legal POSCAR (`1 0 1`).
+                elementCounts = counts.slice();
+                while (elementCounts.length < species) elementCounts.push(0);
+                warnings.push('the atom counts line states ' + counts.length + ' number' +
+                    (counts.length === 1 ? '' : 's') + ' for ' + species +
+                    ' species: the species it does not count are read as empty');
+            } else {
+                // More numbers than species: the extra sites belong to species
+                // the symbol line never named. Dropping them would lose atoms
+                // the file counts, so they are read as the dummy element.
+                elementCounts = counts.slice();
+                while (elementTypes.length < counts.length) elementTypes.push('X');
+                warnings.push('the atom counts line states ' + counts.length + ' numbers for ' +
+                    species + ' species: the extra ' + (counts.length - species) +
+                    ' site group' + (counts.length - species === 1 ? ' is' : 's are') +
+                    ' read as the dummy element X');
+            }
             lineIdx++;
         } else {
+            // The counts line is missing or unreadable, so the cursor stays on
+            // it: that row is a coordinate row when it carries decimals, and
+            // reading it is right. Leaving the count unknown means the sites
+            // cannot be split between the species, and saying so is the point.
             warnings.push('atom counts line missing or unreadable: every site is read as the dummy element X');
             elementTypes = [];
         }
@@ -162,11 +251,10 @@ export function parseVasp(content: string): MolecularData {
         // VASP 4 wrote a counts line without symbol names. The counts still
         // say how many sites follow, so the layout is recoverable; only the
         // elements are unknown, and saying so is the point.
-        const countTokens = line6Tokens.map(Number);
-        if (countTokens.length > 0 &&
-            countTokens.every(n => !isNaN(n) && n >= 0 && n % 1 === 0) &&
-            countTokens.some(n => n > 0)) {
-            symbolCountsMissing = countTokens.reduce((s, n) => s + n, 0);
+        const countTokens = line6Tokens.filter(t => /^\d+$/.test(t));
+        if (countTokens.length === line6Tokens.length && countTokens.length > 0 &&
+            countTokens.some(t => parseInt(t, 10) > 0)) {
+            symbolCountsMissing = countTokens.reduce((s, t) => s + parseInt(t, 10), 0);
             declaredTotal = symbolCountsMissing;
             lineIdx++;
         }
@@ -215,6 +303,8 @@ export function parseVasp(content: string): MolecularData {
     let atomIndex = 0;
     let elementTypeIdx = 0;
     let elementRemaining = elementCounts[0] || 0;
+    // Where the coordinate table ended, for the multi-frame check below.
+    let coordEnd = lineIdx;
 
     for (let i = lineIdx; i < lines.length && elementTypeIdx < elementTypes.length; i++) {
         const line = lines[i].trim();
@@ -267,12 +357,14 @@ export function parseVasp(content: string): MolecularData {
 
         // Occupancy follows the selective flags (VASP 5) or the coordinates
         // (VASP 4); reading it as a flag would drop a partially occupied site
-        // to full occupancy without a trace.
+        // to full occupancy without a trace. Zero is a value, not a defect: a
+        // site written with occupancy 0 is a vacancy the file still lists, and
+        // refusing it promoted every vacancy to a full atom.
         let occupancy = 1;
         const occIndex = selective ? 6 : 3;
         if (parts.length > occIndex) {
             const occ = parseFloat(parts[occIndex]);
-            if (isFinite(occ) && occ > 0 && occ <= 1.0001) occupancy = occ;
+            if (isFinite(occ) && occ >= 0 && occ <= 1.0001) occupancy = occ;
         }
 
         atoms.push({
@@ -285,6 +377,7 @@ export function parseVasp(content: string): MolecularData {
         });
         atomIndex++;
         elementRemaining--;
+        coordEnd = i + 1;
     }
 
     // A truncated coordinate table is a fact about the file, not a reason to
@@ -293,6 +386,15 @@ export function parseVasp(content: string): MolecularData {
     if (declaredTotal > atoms.length) {
         warnings.push('the POSCAR declares ' + declaredTotal + ' sites but only ' + atoms.length +
             ' coordinate row' + (atoms.length === 1 ? ' was' : 's were') + ' readable');
+    }
+
+    // A POSCAR states one geometry, but a file that concatenates several (a
+    // CONTCAR history, a hand-assembled relaxation) was read as its first and
+    // said nothing, which looks exactly like a file that held one.
+    const extraFrames = framesAfter(lines, coordEnd, atoms.length);
+    if (extraFrames > 0) {
+        warnings.push('the file holds ' + (extraFrames + 1) + ' structures (a POSCAR states one): ' +
+            'the first is shown');
     }
 
     const cellParams = latticeToCellParams(lattice);

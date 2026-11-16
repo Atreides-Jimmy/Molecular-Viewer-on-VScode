@@ -523,6 +523,19 @@ export interface MolecularData {
     bonds: Bond[];
     title: string;
     hasExplicitBonds: boolean;
+    /**
+     * Bonds the file states *beside* the table `bonds` holds, where the table
+     * is not the whole truth about the structure.
+     *
+     * A PDB's `SSBOND` records are the case this exists for: they name a
+     * disulfide by residue, not the structure's bond list, so they must be
+     * added to what bond perception finds instead of replacing it — stating
+     * them as `hasExplicitBonds` would have claimed the file lists every bond,
+     * and a protein would have opened with two bonds. `ensureBonds` merges them
+     * over the perceived set and clears the field, so nothing downstream ever
+     * sees a half-stated structure.
+     */
+    statedBonds?: Bond[];
     filePath?: string;
     gjfMeta?: GjfMeta;
     charge?: number;

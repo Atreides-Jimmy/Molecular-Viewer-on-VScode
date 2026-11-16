@@ -153,18 +153,22 @@ function normaliseElement(raw: string): string {
  * table lookup missing. A polymer CIF is the common case for that shape.
  *
  * So a two-letter label is read as a PDB atom name — the element is its first
- * letter — with two exceptions:
+ * letter — with three exceptions:
  *
  *   - a lowercase second letter (`Ca`, `Zn`, `Cl`) spells a two-letter symbol
  *     outright, so it is read as one;
  *   - the file's own type column, when it states a symbol somewhere, settles
  *     the ambiguity: a file that declares `Ca` and never `C` means calcium by
- *     `CA`. This is what keeps a partially typed inorganic CIF correct.
+ *     `CA`. This is what keeps a partially typed inorganic CIF correct;
+ *   - a label column that numbers every site (`CU1`, `NA1`, `CO1`) is naming
+ *     elements, not PDB atom names, and there the two-letter symbol is right.
+ *     Reading those by their first letter turned three metals into carbon,
+ *     nitrogen and carbon — organics the file never contained.
  *
  * A first letter that is not an element (`Z` in `ZN`) falls back to the
  * two-letter symbol, so `ZN1` still reads as zinc.
  */
-function elementFromLabel(raw: string, declared: { [sym: string]: boolean }): string {
+function elementFromLabel(raw: string, declared: { [sym: string]: boolean }, indexed: boolean): string {
     const s = String(raw === undefined || raw === null ? '' : raw).trim();
     if (s === '' || s === '?' || s === '.') return '';
     const m = /[A-Za-z]{1,2}/.exec(s);
@@ -180,9 +184,34 @@ function elementFromLabel(raw: string, declared: { [sym: string]: boolean }): st
     const two = normalizeElementSymbol(letters.charAt(0) + second.toLowerCase()) || '';
     if (two && declared[two] && !(one && declared[one])) return two;
     if (one && declared[one] && !(two && declared[two])) return one;
+    if (indexed && two) return two;
     // PDB atom name — `CA` is C-alpha, `HG` is H-gamma — unless the first letter
     // is not an element at all.
     return one || two;
+}
+
+/**
+ * Whether a site loop names its sites `element + serial` (`CU1`, `NA1`, `O1`)
+ * rather than by PDB atom name (`CA`, `CD1`, `HG`).
+ *
+ * The label column's own shape is the only evidence a file without a type
+ * column offers. A CIF written by a crystal tool numbers every site
+ * (`CU1 O1 O2 C1 H1`); a polymer CIF names the backbone the way the PDB does,
+ * and most of its labels carry no serial at all (`N`, `CA`, `C`, `O`, `CB`).
+ * The ratio over the whole column separates the two without betting on any
+ * single label — which is what a per-label guess had to do.
+ */
+function indexedLabelStyle(loop: CifLoop, labelCol: number): boolean {
+    if (labelCol < 0) return false;
+    let indexed = 0;
+    let total = 0;
+    for (const row of loop.rows) {
+        const label = (row[labelCol] || '').trim();
+        if (label === '' || isMissingValue(label)) continue;
+        total++;
+        if (/^[A-Za-z]{1,2}\d/.test(label)) indexed++;
+    }
+    return total > 0 && indexed / total >= 0.8;
 }
 
 /** Every element a site loop's type column states, for `elementFromLabel`. */
@@ -363,10 +392,21 @@ function tokenize(content: string): CifBlock[] {
         const start = cur.col;
         const ch = text.charAt(start);
         if (ch === "'" || ch === '"') {
-            const end = text.indexOf(ch, start + 1);
-            if (end >= 0) {
-                cur.col = end + 1;
-                return { kind: 'value', text: text.substring(start + 1, end) };
+            // A quoted value ends at the same quote *followed by a blank or by
+            // the end of the line* — that is the delimiter CIF defines. Ending
+            // it at the first occurrence of the quote cut `'O'Brien'` in half:
+            // the value became `O`, and what followed (`Brien'`) was re-read as
+            // further values, which shifted every column of that row.
+            let end = start + 1;
+            while (end <= text.length) {
+                const hit = text.indexOf(ch, end);
+                if (hit < 0) break;
+                const next = hit + 1 < text.length ? text.charAt(hit + 1) : '';
+                if (next === '' || isBlankChar(next)) {
+                    cur.col = hit + 1;
+                    return { kind: 'value', text: text.substring(start + 1, hit) };
+                }
+                end = hit + 1;
             }
         } else if (ch === ';' && text.substring(0, start).trim() === '') {
             // A text field: this line to the next line that opens with a `;`.
@@ -471,12 +511,14 @@ function tokenize(content: string): CifBlock[] {
 
             // ----- the key list -----
             // Keys may share the keyword's line and may run over several lines.
-            // A value that follows a key *on the key's own line* is a `_key
-            // value` item rather than a loop header, which is how this reader
-            // has always read such a line: the pair is handed back to the line
-            // reader and the loop keeps the keys of the lines above it.
-            let abandoned = false;
+            // A value on a key's own line is either the loop's first record (a
+            // complete loop is legal on a single line: `loop_ _a _b 1 2`) or the
+            // `_key value` spelling some writers use for a one-row loop. Which
+            // one it is cannot be known here — it is known once the body has
+            // been read: the item spelling never completes a record, because
+            // the next key follows before the row is full.
             let lastKey: CifCursor = { line: cur.line, col: cur.col };
+            let bodyStartsInline = false;
             while (true) {
                 skipGap(cur);
                 if (cur.line >= lines.length) break;
@@ -487,13 +529,9 @@ function tokenize(content: string): CifBlock[] {
                     loop.keys.push(tok.text);
                     continue;
                 }
-                const inlineItem = loop.keys.length > 0 && before.line === lastKey.line;
-                cur.line = inlineItem ? lastKey.line : before.line;
-                cur.col = inlineItem ? lastKey.col : before.col;
-                if (inlineItem) {
-                    loop.keys.pop();
-                    abandoned = true;
-                }
+                bodyStartsInline = loop.keys.length > 0 && before.line === lastKey.line;
+                cur.line = before.line;
+                cur.col = before.col;
                 break;
             }
 
@@ -503,7 +541,7 @@ function tokenize(content: string): CifBlock[] {
             // per line and discarded the rest of the line, so a compact table
             // (`1 2 3 4` for two keys) lost half its rows, and a record wrapped
             // over two lines came out short and took the whole loop with it.
-            if (!abandoned && loop.keys.length > 0) {
+            if (loop.keys.length > 0) {
                 const width = loop.keys.length;
                 let row: string[] = [];
                 while (true) {
@@ -528,6 +566,20 @@ function tokenize(content: string): CifBlock[] {
                 // so its consumer can count it as the short row it is instead
                 // of the structure quietly losing an atom.
                 if (row.length > 0) loop.rows.push(row);
+
+                // The body never filled a record and it started on the last
+                // key's line: that is the `_key value` spelling, not a loop.
+                // Handing the key and its value back to the line reader is what
+                // keeps a one-row loop written as items readable — and it no
+                // longer costs a legal single-line loop, whose record does
+                // complete here.
+                const completed = loop.rows.some(r => r.length === width);
+                if (bodyStartsInline && !completed) {
+                    loop.keys.pop();
+                    loop.rows.length = 0;
+                    cur.line = lastKey.line;
+                    cur.col = lastKey.col;
+                }
             }
 
             if (loop.keys.length > 0) data.loops.push(loop);
@@ -752,7 +804,8 @@ interface CifRawAtom {
     element: string;
     label: string;
     frac: number[];
-    occupancy: number;
+    /** The file's occupancy, or undefined when it states none (`?`, `.`). */
+    occupancy?: number;
     disorderGroup?: string;
     uAniso?: AnisoTensor;
 }
@@ -1446,12 +1499,16 @@ export function parseCif(content: string): MolecularData {
     const minCols = cols.length > 0 ? Math.max(...cols) + 1 : 0;
     let skipped = 0;
     let unknownElements = 0;
+    let zeroOccupancy = 0;
 
     // The elements the file's own type column states, so a row that leaves it
     // empty can be read against what the rest of the same column says. Built on
     // the first row that needs it: a file whose column is complete (the usual
     // case) never pays for the pass.
     let declaredElements: { [sym: string]: boolean } | null = null;
+    // And how the label column itself names its sites, for the same rows: a
+    // numbered column names elements, an atom-name column does not.
+    let indexedLabels: boolean | null = null;
 
     for (const row of atomLoop.rows) {
         if (row.length < minCols) { skipped++; continue; }
@@ -1467,7 +1524,8 @@ export function parseCif(content: string): MolecularData {
         let named = normaliseElement(typeSym);
         if (!named) {
             if (declaredElements === null) declaredElements = declaredElementsOf(atomLoop, typeCol);
-            named = elementFromLabel(label, declaredElements);
+            if (indexedLabels === null) indexedLabels = indexedLabelStyle(atomLoop, labelCol);
+            named = elementFromLabel(label, declaredElements, indexedLabels);
         }
         const element = named || 'X';
         const xv = parseNumber(row[xCol]);
@@ -1475,7 +1533,14 @@ export function parseCif(content: string): MolecularData {
         const zv = parseNumber(row[zCol]);
         if (xv === null || yv === null || zv === null) { skipped++; continue; }
         if (named === '') unknownElements++;
-        const occupancy = occCol >= 0 ? (parseNumber(row[occCol]) ?? 1) : 1;
+        // An occupancy the file does not state is *unknown*, not full: `?` and
+        // `.` are CIF's two spellings of "no value", and reading them as 1 made
+        // a structure whose occupancies were never refined claim every site was
+        // fully occupied. Zero is a value, and it means the site is not there —
+        // a row kept at occupancy 0 put an atom the file says is absent into
+        // the picture, the formula and the electron count.
+        const occupancy = occCol >= 0 ? parseNumber(row[occCol]) : null;
+        if (occupancy !== null && occupancy <= 0) { zeroOccupancy++; continue; }
         const groupRaw = disorderCol >= 0 ? (row[disorderCol] || '').trim() : '';
         // `?` and `.` both mean "no group": a file that marks none must not
         // grow a group called "?" that the panel would offer to filter.
@@ -1485,11 +1550,20 @@ export function parseCif(content: string): MolecularData {
         // The join is by site label, the dictionary's own key. A site whose
         // label is empty cannot be named by the aniso table and keeps none.
         const uAniso = label.trim() !== '' ? aniso.byLabel[label.trim()] : undefined;
-        rawAtoms.push({ element, label, frac, occupancy, disorderGroup, uAniso });
+        rawAtoms.push({
+            element, label, frac,
+            occupancy: occupancy === null ? undefined : occupancy,
+            disorderGroup, uAniso
+        });
     }
     if (skipped > 0) {
         warnings.push(skipped + ' atom site' + (skipped === 1 ? '' : 's') +
             ' skipped: the row is short or its coordinates are not numbers');
+    }
+    if (zeroOccupancy > 0) {
+        warnings.push(zeroOccupancy + ' atom site' + (zeroOccupancy === 1 ? '' : 's') +
+            ' state an occupancy of zero: ' + (zeroOccupancy === 1 ? 'it is' : 'they are') +
+            ' not part of the structure and ' + (zeroOccupancy === 1 ? 'is' : 'are') + ' left out');
     }
     if (unknownElements > 0) {
         warnings.push(unknownElements + ' atom site' + (unknownElements === 1 ? '' : 's') +
@@ -1635,7 +1709,11 @@ export function parseCif(content: string): MolecularData {
         atoms,
         bonds: [],
         title,
-        hasExplicitBonds: false,
+        // A file whose own `_geom_bond` table supplied bonds has stated them,
+        // exactly like a PDB's `CONECT` records: the flag says so, so the
+        // loader merges that table instead of treating the structure as one
+        // with no bond information at all.
+        hasExplicitBonds: bondTable.bonds.length > 0,
         warnings,
         crystal
     };

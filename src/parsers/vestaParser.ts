@@ -1,5 +1,6 @@
 import { Atom, AsymAtom, CrystalData, MolecularData } from '../types';
 import { normalizeElementSymbol } from '../tools/periodicTable';
+import { lookupSpaceGroupOps } from '../tools/spaceGroupTable';
 import {
     applySymOp,
     cellToLatticeVectors,
@@ -82,12 +83,32 @@ function vestaElement(raw: string): string | undefined {
     return undefined;
 }
 
+/**
+ * Whether a `GROUP` row's third field is a Hermann-Mauguin symbol.
+ *
+ * The field is meant to hold one (`P 1`, `P 21/c`, `P a -3`, `R -3 c:r`), so a
+ * name has to start with a lattice letter and consist of nothing but the
+ * letters, digits and separators the symbols are written with. Anything else is
+ * a damaged or truncated row, and keeping it would put a string in the cell
+ * panel that names no group at all.
+ */
+function isHermannMauguin(name: string): boolean {
+    const s = name.trim();
+    if (s === '') return false;
+    if (!/^[PABCIFR]\b/i.test(s) && !/^[PABCIFR][a-z0-9\-\/]/i.test(s)) return false;
+    return /^[A-Za-z0-9\s\-\/:._]+$/.test(s);
+}
+
 export function parseVesta(content: string): MolecularData {
     const lines = content.split(/\r?\n/);
     const warnings: string[] = [];
 
     let title = 'VESTA Structure';
     let spaceGroup: string | undefined;
+    // The number the `GROUP` row states beside the name, and a name the row
+    // carried that is not one — both are checked against the table below.
+    let groupNumber = 0;
+    let badGroupName = '';
     let cellParams: { a: number; b: number; c: number; alpha: number; beta: number; gamma: number } | null = null;
     const vestaAtoms: VestaAtom[] = [];
     const vestaSymOps: SymOp[] = [];
@@ -112,8 +133,19 @@ export function parseVesta(content: string): MolecularData {
             i++;
             if (i < lines.length) {
                 const parts = lines[i].trim().split(/\s+/);
-                if (parts.length >= 3) {
-                    spaceGroup = parts.slice(2).join(' ');
+                // The row is `number  Z  symbol`: the space-group number, the
+                // number of formula units, then the Hermann-Mauguin symbol,
+                // which may carry spaces of its own (`P a -3`, `P 21/c`).
+                const number = parseInt(parts[0], 10);
+                const symbol = parts.slice(2).join(' ');
+                groupNumber = isFinite(number) && number >= 1 && number <= 230 ? number : 0;
+                // A name is only kept when it is one: a truncated or damaged
+                // row used to become a group string of whatever was left, and
+                // the panel then named a space group the file never stated.
+                if (isHermannMauguin(symbol)) {
+                    spaceGroup = symbol;
+                } else if (parts.length >= 3) {
+                    badGroupName = symbol;
                 }
             }
             i++;
@@ -263,8 +295,13 @@ export function parseVesta(content: string): MolecularData {
     // ----- expand -----
     const baseAtoms: Atom[] = [];
     const asymAtoms: AsymAtom[] = [];
-    const nearMisses: { label: string; dist: number }[] = [];
+    const nearMisses: { label: string; dist: number; otherLabel?: string; crossSite?: boolean }[] = [];
     const index = createNearIndex();
+    // Which listed site each placed atom came from. It is what separates a
+    // special position folding an image onto itself (normal and silent) from
+    // two different sites landing on the same point — a row, its occupancy and
+    // its label would otherwise vanish without a trace.
+    const siteOf: number[] = [];
 
     for (let siteIdx = 0; siteIdx < vestaAtoms.length; siteIdx++) {
         const site = vestaAtoms[siteIdx];
@@ -276,18 +313,30 @@ export function parseVesta(content: string): MolecularData {
 
             const near = index.find(cx, cy, cz);
             if (near) {
-                // Landing exactly on an existing atom is what symmetry does to
-                // a site on a special position. Landing *near* one means two
-                // sites the file lists separately are being folded together,
-                // which is the case the tolerance exists for and the only one
-                // the user needs to hear about.
-                if (near.dist > EXACT_MERGE) {
+                // Landing on an atom of the *same* site is what symmetry does
+                // to a site on a special position. Landing on another site
+                // means two rows the file lists separately are being folded
+                // into one, and the second row's occupancy and position leave
+                // the cell — that is reported whether the overlap is exact or
+                // merely close, and the message names both rows.
+                const otherSite = siteOf[near.index];
+                const crossSite = otherSite !== undefined && otherSite !== siteIdx;
+                if (crossSite) {
+                    const other = vestaAtoms[otherSite];
+                    nearMisses.push({
+                        label: site.label || site.element + (siteIdx + 1),
+                        dist: near.dist,
+                        crossSite: true,
+                        otherLabel: other.label || other.element + (otherSite + 1)
+                    });
+                } else if (near.dist > EXACT_MERGE) {
                     nearMisses.push({ label: site.label || site.element + (siteIdx + 1), dist: near.dist });
                 }
                 continue;
             }
 
             index.add(cx, cy, cz);
+            siteOf.push(siteIdx);
             baseAtoms.push({
                 element: site.element,
                 x: cx, y: cy, z: cz,
@@ -320,12 +369,43 @@ export function parseVesta(content: string): MolecularData {
     }
     for (let k = 0; k < nearMisses.length && k < MAX_MERGE_WARNINGS; k++) {
         const m = nearMisses[k];
-        warnings.push('site ' + m.label + ': an image ' + m.dist.toFixed(3) +
-            ' A from an existing atom was merged into it');
+        if (m.crossSite) {
+            warnings.push('site ' + m.label + ': its image ' + m.dist.toFixed(3) +
+                ' A from site ' + m.otherLabel + ' was merged into it; ' +
+                'the second site and its occupancy are not in the unit-cell list');
+        } else {
+            warnings.push('site ' + m.label + ': an image ' + m.dist.toFixed(3) +
+                ' A from an existing atom was merged into it');
+        }
     }
     if (nearMisses.length > MAX_MERGE_WARNINGS) {
         warnings.push('and ' + (nearMisses.length - MAX_MERGE_WARNINGS) +
             ' more images merged into an atom less than 0.1 A away');
+    }
+
+    // ----- the space group the file names -----
+    // `GROUP` states the number and the symbol, and the operations above are
+    // what the picture is actually built from. A name the table does not know,
+    // or one whose number disagrees with its own symbol, describes a group the
+    // file contradicts itself about; drawing is unaffected (the file's own
+    // operations win) but the panel must not present the name as fact.
+    if (badGroupName !== '') {
+        warnings.push('the GROUP record does not state a space-group symbol (' + badGroupName +
+            '): it is not shown as one');
+    }
+    if (spaceGroup !== undefined) {
+        const hit = lookupSpaceGroupOps(spaceGroup, cellParams);
+        if (hit === null) {
+            warnings.push('the GROUP record names ' + spaceGroup +
+                ', which the built-in space-group table does not know: the cell is drawn from the file\'s own operations');
+        } else if (groupNumber > 0 && hit.number !== groupNumber) {
+            warnings.push('the GROUP record names ' + spaceGroup + ' (No. ' + hit.number +
+                ') beside the number ' + groupNumber + ': the cell is drawn from the file\'s own operations');
+        } else if (parsedSymOps.length !== hit.ops.length) {
+            warnings.push('the GROUP record names ' + spaceGroup + ', whose ' + hit.ops.length +
+                ' operation' + (hit.ops.length === 1 ? '' : 's') + ' expand a cell, but the file lists ' +
+                parsedSymOps.length + ': the file\'s operations are used');
+        }
     }
 
     const crystal: CrystalData = {
@@ -333,6 +413,9 @@ export function parseVesta(content: string): MolecularData {
         latticeVectors: lattice,
         spaceGroup,
         symmetryOps,
+        // The operations are the file's own table, so a save-back or a diff can
+        // say where the cell came from — the same provenance a CIF carries.
+        symmetrySource: parsedSymOps.length > 0 && vestaSymOps.length > 0 ? 'file' : undefined,
         baseAtoms,
         baseBonds: [],
         asymAtoms
