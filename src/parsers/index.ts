@@ -700,5 +700,15 @@ export function tryAutoParse(content: string, fileName: string = '', options?: P
         return parseGjf(content);
     }
 
-    return parseXyz(content);
+    // Nothing matched. The plain-XYZ reader is the last resort — a file whose
+    // first line is an atom count has already taken it — and it used to hand
+    // back an empty structure with no explanation, which reads exactly like a
+    // file that was read and found to have no atoms. Saying that no format was
+    // recognised is the one useful thing left to report.
+    const fallback = parseXyz(content);
+    if (fallback.atoms.length === 0 && (!fallback.warnings || fallback.warnings.length === 0)) {
+        fallback.warnings = ['no structure was recognised in this file: it holds no coordinate table, ' +
+            'no trajectory frame and no output of a program this viewer reads'];
+    }
+    return fallback;
 }

@@ -117,17 +117,17 @@ A script also works as the comparison side of **Structure Diff**, using the scri
 
 | Format | Extensions | What is read |
 |--------|------------|--------------|
-| Gaussian input | `.gjf` `.gjf03` `.gjf09` `.gjf16` `.com` | Link 0, route, title, charge/multiplicity, coordinates, connect section, fixed-atom notation; a multi-line route section is preserved on save, a missing charge/multiplicity line is reported instead of consuming the first atom, a multi-job `--Link1--` file reports that only the first structure is shown, and an aromatic bond is written as the real order `1.5` in the connect section |
+| Gaussian input | `.gjf` `.gjf03` `.gjf09` `.gjf16` `.com` | Link 0, route, title, charge/multiplicity, coordinates, connect section, fixed-atom notation; a multi-line route section is preserved on save, a missing charge/multiplicity line is reported instead of consuming the first atom, a multi-fragment charge line is summed for the whole system (a `0,1` spelling is accepted), a Z-matrix input is recognized and reported instead of drawing its reference numbers as coordinates, a multi-job `--Link1--` file reports that only the first structure is shown, and an aromatic bond is written as the real order `1.5` in the connect section |
 | XYZ | `.xyz` | Standard XYZ; multi-frame trajectories (including ORCA `_trj.xyz`) with frame navigation and convergence when every frame has an energy; a truncated final frame is dropped, and a block shorter than its declared count is reported |
-| MOL2 | `.mol2` | ATOM and BOND sections, aromatic `ar` bonds |
+| MOL2 | `.mol2` | ATOM and BOND sections, aromatic `ar` bonds; the type column is a SYBYL type, so only a real element symbol becomes one (`C.3` → `C`, `Du` → a dummy point) and a pseudo-atom such as `LP`, `Any`, `Het` or `Hal` is reported instead of being drawn as an element |
 | MDL Mol | `.mol` | V2000 and V3000 CTfiles: three header lines (a file written with only a title is accepted too), fixed-column or spaced atoms/bonds, aromatic bond type, `*`/`LP`/query atoms as dummy points |
 | Gaussian log | `.log` | Optimisation trajectories, SCF energies, convergence, relaxed-scan and IRC points, harmonic frequencies, per-atom charges from the population analysis, the orbital eigenvalues of the last SCF, the solvation cavity the model describes, and a job summary; xtb trajectories are detected automatically |
-| Gaussian formatted checkpoint | `.fchk` `.fch` | Atoms, every per-atom population whose name ends in *charges*, orbital energies and occupations, the contraction basis, the PCM cavity spheres, the energies and the RMS force. The file is streamed, so an 850 MB checkpoint opens without ever becoming a string: the MO coefficient block is skipped by line count and one orbital is read back as a contiguous run when it is drawn. The same streaming reader serves direct open, Import, Structure Diff and VMD scenes, and a charge table with unreadable slots is shown as partial (`n/total`) instead of being dropped |
-| ORCA input | `.inp` | `* xyz … *` and `* xyzfile` (opens the external XYZ it names), `%coords` blocks, Bohr/Å units |
-| ORCA output | `.out` | Cartesian coordinates in Å or a.u., cycles and final geometry, charge/multiplicity, convergence tolerances, frequencies/IR, route line; format detected by content |
+| Gaussian formatted checkpoint | `.fchk` `.fch` | Atoms, every per-atom population whose name ends in *charges*, orbital energies and occupations (a closed shell holds two electrons per level; an unrestricted or ROHF file keeps its beta channel, so a broken-symmetry UHF/UKS singlet is not read as a closed shell), the contraction basis, the PCM cavity spheres, the energies and the RMS force. The file is streamed, so an 850 MB checkpoint opens without ever becoming a string: the MO coefficient block is skipped by line count and one orbital is read back as a contiguous run when it is drawn. The same streaming reader serves direct open, Import, Structure Diff and VMD scenes, and a charge table with unreadable slots is shown as partial (`n/total`) instead of being dropped |
+| ORCA input | `.inp` | `* xyz … *` and `* xyzfile` (opens the external XYZ it names), `%coords` blocks including their own `Charge`/`Mult`, Bohr/Å units |
+| ORCA output | `.out` | Cartesian coordinates in Å or a.u., cycles and final geometry, charge/multiplicity, convergence tolerances, frequencies/IR, route line; a compound run keeps every job's frames and charge while its convergence series, route card and normal modes come from the job they belong to; format detected by content |
 | Turbomole | `.coord` | `$coord` (Bohr → Å; `$coord angs` kept in Å), `$chrg`, `$spin`/`$mult` |
 | PDB | `.pdb` `.ent` | ATOM/HETATM, element (element column, or atom-name column alignment so a protein `CA` stays carbon), occupancy, B-factor scalar, CONECT with a bond order stated by a repeated serial, duplicate serials, and the `CRYST1` unit cell read from its fixed columns (or from the tokens when a collapsed line shifts them; a zero cell and the 1 Å placeholder are refused) — the cell makes the file a crystal, so periodic bonds, supercells and the cell editor work, while the space group it states is reported without being applied to the coordinates |
-| MOPAC | `.mop` `.mopac` `.dat` `.out` `.log` | Input: internal coordinates, Å/Bohr auto-detection, CHARGE and MS, Cartesian fallback. Output: the final `CARTESIAN COORDINATES` table, including serial-numbered rows; detected by content |
+| MOPAC | `.mop` `.mopac` `.dat` `.out` `.log` | Input: Cartesian geometry in Å (the per-coordinate 0/1 optimisation flags are read as flags, not as a unit, and a bare `C x y z` row is accepted), internal coordinates reported rather than misread, CHARGE and MS. Output: the final `CARTESIAN COORDINATES` table, including serial-numbered rows; detected by content |
 | xtb | `.log` `.out` `.xyz` `.trj` | Optimisation trajectory (`xtbopt.log`/`xtb.trj`) with frame navigation and gradient norms; a run log's `final structure:` block is read as the final geometry |
 | VMD TCL | `.tcl` | Display recipe with molecules, representations, colours, selections, surfaces and egg metadata |
 | CIF | `.cif` | Cell, space group and symmetry operations, fractional/Cartesian sites, occupancy, asymmetric unit, `_geom_bond`; CIF 1.1, 1.2 and 2 tags |
@@ -401,17 +401,17 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 | 格式 | 扩展名 | 读取内容 |
 |------|--------|----------|
-| Gaussian 输入 | `.gjf` `.gjf03` `.gjf09` `.gjf16` `.com` | Link 0、route、标题、电荷/多重度、坐标、connect 段、固定原子写法；多行 route 在另存时完整保留，缺少电荷/多重度行时会提示而不是吞掉第一个原子；多任务 `--Link1--` 文件会提示只显示第一个结构；芳香键在 connect 段按真实键级 `1.5` 写出 |
+| Gaussian input | `.gjf` `.gjf03` `.gjf09` `.gjf16` `.com` | Link 0、route、标题、电荷/多重度、坐标、connect 段、固定原子写法；多行 route 在另存时完整保留，缺少电荷/多重度行时会提示而不是吞掉第一个原子；多片段电荷行按总电荷求和（`0,1` 这种逗号写法也接受）；Z-matrix（内坐标）输入会被识别并提示，而不是把参考序号当坐标画出来；多任务 `--Link1--` 文件会提示只显示第一个结构；芳香键在 connect 段按真实键级 `1.5` 写出 |
 | XYZ | `.xyz` | 标准 XYZ；多帧轨迹（含 ORCA `_trj.xyz`）支持帧导航，每帧都带能量时显示收敛信息；被截断的末帧会被丢弃，原子块少于声明数量时会警告 |
-| MOL2 | `.mol2` | ATOM 与 BOND 段、芳香 `ar` 键 |
+| MOL2 | `.mol2` | ATOM 与 BOND 段、芳香 `ar` 键；类型列是 SYBYL 类型，只有真实元素符号才会变成元素（`C.3` → `C`、`Du` → 占位点），`LP`、`Any`、`Het`、`Hal` 这类伪原子会被报告而不是当成元素画出来 |
 | MDL Mol | `.mol` | V2000 与 V3000 CTfile：三行头部（只写了标题的旧文件也能读）、定宽或空格分隔的原子/键表、芳香键类型、`*`/`LP`/查询原子按哑点处理 |
 | Gaussian 日志 | `.log` | 优化轨迹、SCF 能量、收敛、柔性扫描与 IRC 路径、谐振频率、布居分析给出的逐原子电荷、最后一个 SCF 的轨道本征值、溶剂化模型描述的空腔，以及任务摘要；xtb 轨迹会自动识别 |
 | Gaussian 格式化检查点 | `.fchk` `.fch` | 原子、名称以 *charges* 结尾的逐原子布居、轨道能量与占据、收缩基组、PCM 空腔球、能量与 RMS 力。文件是流式读取的，850 MB 也不会先变成一个字符串：轨道系数块按行数跳过，画某个轨道时再按连续区间读回。直接打开、Import、结构 Diff 与 VMD 场景共用这一流式读取；有不可读槽位的电荷表按部分数据（`n/total`）显示，而不是整张丢弃 |
-| ORCA 输入 | `.inp` | `* xyz … *` 与 `* xyzfile`（打开其指向的外部 XYZ）、`%coords` 块、Bohr/Å 单位 |
-| ORCA 输出 | `.out` | Å 或 a.u. 的笛卡尔坐标、每个循环与最终几何、电荷/多重度、收敛容差、频率/IR、route 行；按内容识别格式 |
+| ORCA 输入 | `.inp` | `* xyz … *` 与 `* xyzfile`（打开其指向的外部 XYZ）、`%coords` 块（含块内自己的 `Charge`/`Mult`）、Bohr/Å 单位 |
+| ORCA 输出 | `.out` | Å 或 a.u. 的笛卡尔坐标、每个循环与最终几何、电荷/多重度、收敛容差、频率/IR、route 行；多作业文件保留每个作业的几何与电荷，而收敛序列、route 卡片与简正模式取自各自所属的作业；按内容识别格式 |
 | Turbomole | `.coord` | `$coord`（Bohr → Å；`$coord angs` 保持 Å）、`$chrg`、`$spin`/`$mult` |
 | PDB | `.pdb` `.ent` | ATOM/HETATM、元素（元素列，或按原子名列位判定，蛋白 `CA` 不会被当成钙）、占据率、B 因子标量、CONECT（重复序号表示多重键）、重复序号，以及按 `CRYST1` 固定列读出的晶胞（列位被压掉时改按数字词元读取；零晶胞与 1 Å 占位晶胞会被拒绝）——有晶胞即按晶体打开，周期键、超胞与晶胞编辑可用；文件声明的空间群只作显示，不会套用到坐标上 |
-| MOPAC | `.mop` `.mopac` `.dat` `.out` `.log` | 输入：内坐标、Å/Bohr 自动识别、CHARGE 与 MS、笛卡尔坐标回退。输出：最后的 `CARTESIAN COORDINATES` 表（含序号列），按内容识别 |
+| MOPAC | `.mop` `.mopac` `.dat` `.out` `.log` | 输入：Å 笛卡尔坐标（每个坐标后的 0/1 优化标记按标记读取，不再当作单位；裸 `C x y z` 行也接受）、内坐标会被明确报告而不是误读、CHARGE 与 MS。输出：最后的 `CARTESIAN COORDINATES` 表（含序号列），按内容识别 |
 | xtb | `.log` `.out` `.xyz` `.trj` | 优化轨迹（`xtbopt.log`/`xtb.trj`）支持帧导航与梯度范数；运行日志中的 `final structure:` 块作为最终几何读取 |
 | VMD TCL | `.tcl` | 显示配方：分子、表示、颜色、选择、曲面与 egg 元数据 |
 | CIF | `.cif` | 晶胞、空间群与对称操作、分数/笛卡尔位点、占据率、不对称单元、`_geom_bond`；支持 CIF 1.1、1.2 与 2 标签 |

@@ -1,28 +1,6 @@
 import { Atom, Bond, MolecularData } from '../types';
 import { elementFromZ, normalizeElementSymbol } from '../tools/periodicTable';
 
-const ATOMIC_NUMBER_TO_ELEMENT: { [key: number]: string } = {
-    1: 'H', 2: 'He', 3: 'Li', 4: 'Be', 5: 'B', 6: 'C', 7: 'N', 8: 'O', 9: 'F', 10: 'Ne',
-    11: 'Na', 12: 'Mg', 13: 'Al', 14: 'Si', 15: 'P', 16: 'S', 17: 'Cl', 18: 'Ar', 19: 'K', 20: 'Ca',
-    21: 'Sc', 22: 'Ti', 23: 'V', 24: 'Cr', 25: 'Mn', 26: 'Fe', 27: 'Co', 28: 'Ni', 29: 'Cu', 30: 'Zn',
-    31: 'Ga', 32: 'Ge', 33: 'As', 34: 'Se', 35: 'Br', 36: 'Kr', 37: 'Rb', 38: 'Sr', 39: 'Y', 40: 'Zr',
-    41: 'Nb', 42: 'Mo', 43: 'Tc', 44: 'Ru', 45: 'Rh', 46: 'Pd', 47: 'Ag', 48: 'Cd', 49: 'In', 50: 'Sn',
-    51: 'Sb', 52: 'Te', 53: 'I', 54: 'Xe', 55: 'Cs', 56: 'Ba', 57: 'La', 58: 'Ce', 59: 'Pr', 60: 'Nd',
-    61: 'Pm', 62: 'Sm', 63: 'Eu', 64: 'Gd', 65: 'Tb', 66: 'Dy', 67: 'Ho', 68: 'Er', 69: 'Tm', 70: 'Yb',
-    71: 'Lu', 72: 'Hf', 73: 'Ta', 74: 'W', 75: 'Re', 76: 'Os', 77: 'Ir', 78: 'Pt', 79: 'Au', 80: 'Hg',
-    81: 'Tl', 82: 'Pb', 83: 'Bi', 84: 'Po', 85: 'At', 86: 'Rn'
-};
-
-function parseMopacElement(token: string): string {
-    const num = parseInt(token, 10);
-    if (!isNaN(num) && num > 0 && ATOMIC_NUMBER_TO_ELEMENT[num]) {
-        return ATOMIC_NUMBER_TO_ELEMENT[num];
-    }
-    const elem = token.charAt(0).toUpperCase() + token.slice(1).toLowerCase();
-    if (/^[A-Za-z]{1,2}$/.test(elem)) return elem;
-    return 'C';
-}
-
 interface MopacOutputRow {
     element: string;
     ghost: boolean;
@@ -67,6 +45,66 @@ function mopacOutputRow(line: string): MopacOutputRow | undefined {
     const z = parseFloat(parts[at + 3]);
     if (!isFinite(x) || !isFinite(y) || !isFinite(z)) return undefined;
     return { element: element.element, ghost: element.ghost, x, y, z };
+}
+
+/**
+ * One row of a MOPAC *input* atom list (`MOPAC` geometry section of a
+ * `.mop`/`.dat` input).
+ *
+ * The classic spelling puts an optimisation flag after each coordinate —
+ * `C -4.1918 1 2.5617 0 1.3518 1`, where a `0` means "optimise this
+ * coordinate" and a `1` means "hold it fixed". Those flags are NOT a unit
+ * marker: reading a `0` as "Bohr" scaled that coordinate by 0.529 (a molecule
+ * whose atoms were all frozen came back at 0.529 of its size) and a mixed flag
+ * set mixed two units inside one structure, which no shape survived.
+ * A MOPAC geometry block is stated in Å, so no unit is derived from it.
+ *
+ * A bare `C x y z` row (no flags) is legal as well and used to be dropped,
+ * because the reader looked for the coordinates in the three odd columns of
+ * the flagged form. Both shapes are read positionally now.
+ */
+function mopacInputRow(line: string): MopacOutputRow | undefined {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 4) return undefined;
+    const upper = parts[0].toUpperCase();
+    let element: { element: string; ghost: boolean } | undefined;
+    if (upper === 'X' || upper === 'XX') {
+        element = { element: 'X', ghost: true };
+    } else if (!/^\d+$/.test(parts[0])) {
+        // An input row names the element; a leading number would be an output
+        // table's serial, which this reader does not take.
+        const sym = normalizeElementSymbol(parts[0]);
+        if (sym) element = { element: sym, ghost: false };
+    }
+    if (!element) return undefined;
+
+    const num = (t: string | undefined): number => (t === undefined ? NaN : parseFloat(t));
+    // `x f y f z f` — the flags sit between the coordinates, one per axis.
+    const flagged = parts.length >= 7 &&
+        isMopacFlag(parts[2]) && isMopacFlag(parts[4]) && isMopacFlag(parts[6]);
+    // `x y z f f f` — the same three flags written as a group after the
+    // coordinates, which some writers produce. A row that matches neither is
+    // an internal-coordinate (Z-matrix) row and is left to the caller.
+    const grouped = !flagged && parts.length >= 7 &&
+        isMopacNumber(parts[1]) && isMopacNumber(parts[2]) && isMopacNumber(parts[3]) &&
+        isMopacFlag(parts[4]) && isMopacFlag(parts[5]) && isMopacFlag(parts[6]);
+    const x = num(parts[1]);
+    const y = flagged ? num(parts[3]) : num(parts[2]);
+    const z = flagged ? num(parts[5]) : num(parts[3]);
+    if (!isFinite(x) || !isFinite(y) || !isFinite(z)) return undefined;
+    if (parts.length >= 7 && !flagged && !grouped) return undefined;
+    if (parts.length === 5 || parts.length === 6) return undefined;
+    return { element: element.element, ghost: element.ghost, x, y, z };
+}
+
+/** `0` / `1` — MOPAC's per-coordinate optimisation flag. */
+function isMopacFlag(token: string): boolean {
+    return token === '0' || token === '1';
+}
+
+/** A token that parses as a coordinate (used only to tell the two row shapes apart). */
+function isMopacNumber(token: string): boolean {
+    return /^[-+]?(?:\d+\.?\d*|\.\d+)(?:[EeDd][-+]?\d+)?$/.test(token);
 }
 
 export function parseMopac(content: string): MolecularData {
@@ -165,40 +203,13 @@ export function parseMopac(content: string): MolecularData {
     }
 
     for (const cl of coordLines) {
-        const parts = cl.split(/\s+/);
-        if (parts.length < 4) continue;
-
-        const elem = parseMopacElement(parts[0]);
-        const xVal = parseFloat(parts[1]);
-        const yVal = parseFloat(parts[3]);
-        const zVal = parseFloat(parts[5]);
-
-        if (isNaN(xVal) || isNaN(yVal) || isNaN(zVal)) continue;
-        let x: number, y: number, z: number;
-        const xLabel = parts.length > 2 ? parts[2] : '';
-        const yLabel = parts.length > 4 ? parts[4] : '';
-        const zLabel = parts.length > 6 ? parts[6] : '';
-
-        const isAngstrom = xLabel.toUpperCase() === '1' || xLabel.toUpperCase() === 'A' || xLabel === 'Å';
-        const isBohr = xLabel.toUpperCase() === '0' || xLabel.toUpperCase() === 'B';
-
-        if (isAngstrom) {
-            x = xVal; y = yVal; z = zVal;
-        } else if (isBohr) {
-            x = xVal * 0.529177249;
-            y = yVal * 0.529177249;
-            z = zVal * 0.529177249;
-        } else {
-            x = xVal; y = yVal; z = zVal;
-        }
+        const row = mopacInputRow(cl);
+        if (!row) continue;
 
         // MOPAC's dummy atom is `XX` (and `X` on newer versions); both resolve
         // to the element `X` here, which is the viewer's dummy spelling.
-        const atom: Atom = { element: elem, x, y, z, index: atomIndex };
-        if (elem === 'X' || elem === 'Xx' || elem === 'XX') {
-            atom.element = 'X';
-            atom.ghost = true;
-        }
+        const atom: Atom = { element: row.element, x: row.x, y: row.y, z: row.z, index: atomIndex };
+        if (row.ghost) atom.ghost = true;
         atoms.push(atom);
         atomIndex++;
     }

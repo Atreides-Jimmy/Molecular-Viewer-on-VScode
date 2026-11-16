@@ -677,7 +677,15 @@ class FchkScan {
             cartesianD: this.cartesianD,
             cartesianF: this.cartesianF
         };
-        const closed = this.nBeta === this.nAlpha &&
+        // A closed shell is a file with ONE set of orbitals. Equal alpha and
+        // beta electron counts do not prove it: a broken-symmetry UHF/UKS
+        // singlet also has nAlpha === nBeta and states multiplicity 1, and
+        // reading it as closed shell threw its beta orbitals away and forced
+        // two electrons into every alpha level. The checkpoint states the spin
+        // kind by storing a second set of MO coefficients (and its own orbital
+        // energies), so the presence of that channel is what decides.
+        const hasBetaChannel = this.betaLayout !== undefined || this.betaEnergies.length > 0;
+        const closed = !hasBetaChannel && this.nBeta === this.nAlpha &&
             (this.multiplicity === undefined || this.multiplicity === 1) && this.irohf === 0;
         const spins: FchkOrbitalSpin[] = [];
         if (this.alphaEnergies.length > 0) {
@@ -753,12 +761,14 @@ function highestAngularMomentum(types: number[]): number {
  * beta electrons`, never an occupation vector, so the vector is rebuilt from
  * the counts:
  *
- *  - closed shell (`nAlpha === nBeta`, singlet, not ROHF): the first `nAlpha`
- *    orbitals hold two electrons, the rest none;
+ *  - closed shell (`nAlpha === nBeta`, singlet, not ROHF, no beta channel):
+ *    the first `nAlpha` orbitals hold two electrons, the rest none;
  *  - unrestricted: each spin's first `nAlpha`/`nBeta` orbitals hold one;
  *  - ROHF: the first `nBeta` alpha orbitals are the doubly occupied pair, the
- *    remaining `nAlpha - nBeta` are singly occupied, and beta holds `nBeta`
- *    pairs — the standard ROHF occupation, which is what `IROHF` means.
+ *    remaining `nAlpha - nBeta` are singly occupied, and the beta channel lists
+ *    the same pairs holding ONE beta electron each — writing 2 there counted
+ *    every paired beta electron twice, since the alpha row already states the
+ *    pair.
  */
 function occupationsOf(count: number, nAlpha: number, nBeta: number, closed: boolean, beta: boolean, rohf: boolean): number[] {
     const out = new Array<number>(count).fill(0);
@@ -767,10 +777,13 @@ function occupationsOf(count: number, nAlpha: number, nBeta: number, closed: boo
         return out;
     }
     if (rohf) {
-        for (let i = 0; i < Math.min(count, nBeta); i++) out[i] = 2;
-        if (!beta) {
-            for (let i = nBeta; i < Math.min(count, nAlpha); i++) out[i] = 1;
+        if (beta) {
+            // One electron per occupied beta spin orbital.
+            for (let i = 0; i < Math.min(count, nBeta); i++) out[i] = 1;
+            return out;
         }
+        for (let i = 0; i < Math.min(count, nBeta); i++) out[i] = 2;
+        for (let i = nBeta; i < Math.min(count, nAlpha); i++) out[i] = 1;
         return out;
     }
     const occupied = beta ? nBeta : nAlpha;

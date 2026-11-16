@@ -624,11 +624,16 @@ interface ChargeDraft {
     values: (number | null)[];
     /** Frames on the list when the table ended — the geometry it describes. */
     anchor: number;
+    /** Which job printed it (1-based). Two jobs of a `--Link1--` file can print
+     *  the same scheme for different structures, and they are both kept. */
+    job: number;
 }
 
-/** The charge tables of the job being read. */
+/** The charge tables of the file, in printed order. */
 interface ChargeState {
     drafts: ChargeDraft[];
+    /** The job being read, 1-based: a route card opens a new one. */
+    job: number;
 }
 
 /** The headline results of every job in the file, and the one being filled. */
@@ -678,15 +683,17 @@ function noteEnergy(st: SummaryState, label: string, value: number, scf: number)
 
 /** Record one charge table, replacing an earlier table of the same scheme in
  *  the same job: a population analysis printed at every step keeps the last
- *  one, which is the geometry the run ended on. */
+ *  one, which is the geometry the run ended on. A table of ANOTHER job is a
+ *  different structure's analysis and is kept, not replaced — a `--Link1--`
+ *  file that analysed both jobs used to lose every table but the last. */
 function noteChargeTable(st: ChargeState, label: string, values: (number | null)[], anchor: number): void {
     for (let k = 0; k < st.drafts.length; k++) {
-        if (st.drafts[k].label === label) {
-            st.drafts[k] = { label: label, values: values, anchor: anchor };
+        if (st.drafts[k].label === label && st.drafts[k].job === st.job) {
+            st.drafts[k] = { label: label, values: values, anchor: anchor, job: st.job };
             return;
         }
     }
-    st.drafts.push({ label: label, values: values, anchor: anchor });
+    st.drafts.push({ label: label, values: values, anchor: anchor, job: st.job });
 }
 
 /**
@@ -1526,7 +1533,7 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
     // the helpers below rather than variables closed over by them: this loop
     // visits every line of the file, and a function that captures its state
     // makes the engine reach for a context object on each access inside it.
-    const charges: ChargeState = { drafts: [] };
+    const charges: ChargeState = { drafts: [], job: 0 };
     const jobs: SummaryState = { list: [], cur: null };
     /** The eigenvalue dumps of the job being read (the last one wins). */
     const orbitals: OrbitalState = { last: null, cur: null };
@@ -1658,7 +1665,13 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
                     // `--Link1--` file states, and the first card of a file
                     // finds nothing to close.
                     jobs.cur = null;
-                    charges.drafts.length = 0;
+                    // The tables already read belong to the job that printed
+                    // them and stay: a `--Link1--` file that analysed two jobs
+                    // gave the panel only the last one's schemes, although the
+                    // earlier tables still name a frame that is on the list.
+                    // The job counter is what keeps a later table of the same
+                    // scheme from overwriting an earlier job's.
+                    charges.job++;
                     orbitals.last = null;
                     orbitals.cur = null;
                     clearCavity(cavity);
@@ -1688,7 +1701,18 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
         // --- Harmonic frequencies section (parsed inline; the LAST section wins) ---
         if (line.includes('Harmonic frequencies') && line.includes('cm**-1')) {
             const res = parseModesFromHeader(lines, i);
-            modes = res.modes.length > 0 ? res.modes : undefined;
+            // A mode's displacement list is one 3-vector per atom of the
+            // geometry the section was printed for — the structure above it, not
+            // whatever the file ends on. A matrix cut short (or a section that
+            // belongs to another job) gives lists of the wrong length, and those
+            // modes cannot be animated on any structure: they are dropped, and a
+            // section that yields nothing usable does not replace the set an
+            // earlier job printed.
+            const atomCount = frames.length > 0 ? frames[frames.length - 1].atoms.length : 0;
+            const usable = atomCount > 0
+                ? res.modes.filter(m => m.displacements.length === 0 || m.displacements.length === atomCount)
+                : res.modes;
+            if (usable.length > 0) modes = usable;
             i = res.endIdx;
             continue;
         }
@@ -2329,6 +2353,8 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
     const chargeSets: LogChargeSet[] = [];
     if (frames.length > 0) {
         const chargePreCount = frameRemap ? frameRemap.length : preDropFrameCount;
+        /** The job each table came from, parallel to `chargeSets`. */
+        const chargeJobs: number[] = [];
         for (const draft of charges.drafts) {
             let fr = draft.anchor > 0 ? draft.anchor - 1 : 0;
             if (fr > chargePreCount - 1) fr = chargePreCount - 1;
@@ -2353,6 +2379,36 @@ export function parseGaussianLog(content: string, onProgress?: (fraction: number
                 complete: frameAtoms.length > 0 && covered === frameAtoms.length,
                 frame: fr
             });
+            chargeJobs.push(draft.job);
+        }
+        // The panel describes the structure the file ends on, so the LAST job's
+        // tables are the ones its dropdown opens on; the earlier jobs' tables
+        // follow, each still naming its own frame. Within one job the printed
+        // order is kept. A `--Link1--` file that analysed two jobs therefore
+        // offers both schemes, and a scheme that appears in two jobs says which
+        // one it belongs to instead of showing twice under one name.
+        if (chargeSets.length > 1) {
+            const order = chargeSets.map((_s, k) => k);
+            order.sort((a, b) => (chargeJobs[b] - chargeJobs[a]) || (a - b));
+            const sortedSets = order.map(k => chargeSets[k]);
+            const sortedJobs = order.map(k => chargeJobs[k]);
+            chargeSets.length = 0;
+            for (const s of sortedSets) chargeSets.push(s);
+            chargeJobs.length = 0;
+            for (const j of sortedJobs) chargeJobs.push(j);
+        }
+        // Two jobs can print the same scheme for different structures; the
+        // label says which job it belongs to rather than showing twice under
+        // one name. A single-job file keeps the file's own wording.
+        const distinctJobs = new Set(chargeJobs);
+        if (distinctJobs.size > 1) {
+            const counts = new Map<string, number>();
+            for (const s of chargeSets) counts.set(s.label, (counts.get(s.label) || 0) + 1);
+            for (let k = 0; k < chargeSets.length; k++) {
+                if ((counts.get(chargeSets[k].label) || 0) > 1) {
+                    chargeSets[k].label = chargeSets[k].label + ' (job ' + Math.max(1, chargeJobs[k]) + ')';
+                }
+            }
         }
     }
 

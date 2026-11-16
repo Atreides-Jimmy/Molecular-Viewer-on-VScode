@@ -1,5 +1,6 @@
 import { Atom, Bond, MolecularData } from '../types';
 import { ghostFromLabel } from '../tools/ghostAtoms';
+import { normalizeElementSymbol } from '../tools/periodicTable';
 
 export function parseMol2(content: string): MolecularData {
     const lines = content.split(/\r?\n/);
@@ -23,6 +24,9 @@ export function parseMol2(content: string): MolecularData {
     // `atomIndex` alone stays continuous across blocks.
     let idToIndex: { [id: number]: number } = {};
     let unresolvedBonds = 0;
+    /** SYBYL types that name no element (`LP`, `Any`, …), for the warning. */
+    const skippedTypes = new Set<string>();
+    let skippedRows = 0;
 
     while (i < lines.length) {
         const line = lines[i].trim();
@@ -41,16 +45,28 @@ export function parseMol2(content: string): MolecularData {
                     // Tripos writes a dummy atom with the type `Du`; the type
                     // field is also the only place a ghost can be named here,
                     // since a MOL2 atom line has no separate ghost marker.
-                    const elementRaw = parts[5].split('.')[0];
+                    // The field is a SYBYL TYPE, not an element: `C.3`, `N.pl3`
+                    // and `Cl` name one, but `LP` (a lone pair), `Any`, `Het`,
+                    // `Hal` and a bare `X` name a query or a pseudo-atom. Taking
+                    // the field verbatim made "Lp" and "Any" elements the
+                    // viewer then drew and valence-solved as atoms; only a real
+                    // symbol is accepted now, and the rest are counted so the
+                    // file's own defect is reported.
+                    const rawType = parts[5];
+                    const elementRaw = rawType.split('.')[0];
                     const ghost = ghostFromLabel(elementRaw);
-                    const element = ghost
-                        ? ghost.element
-                        : elementRaw.charAt(0).toUpperCase() + elementRaw.slice(1).toLowerCase();
+                    const element = ghost ? ghost.element : normalizeElementSymbol(elementRaw);
+                    if (!element) {
+                        skippedTypes.add(elementRaw);
+                        skippedRows++;
+                        i++;
+                        continue;
+                    }
                     const x = parseFloat(parts[2]);
                     const y = parseFloat(parts[3]);
                     const z = parseFloat(parts[4]);
 
-                    if (element && !isNaN(x) && !isNaN(y) && !isNaN(z)) {
+                    if (!isNaN(x) && !isNaN(y) && !isNaN(z)) {
                         const atom: Atom = { element, x, y, z, index: atomIndex };
                         if (ghost) atom.ghost = true;
                         atoms.push(atom);
@@ -114,6 +130,14 @@ export function parseMol2(content: string): MolecularData {
     }
 
     const warnings: string[] = [];
+    if (skippedTypes.size > 0) {
+        const names = Array.from(skippedTypes);
+        const shown = names.slice(0, 4).join(', ') + (names.length > 4 ? ', …' : '');
+        warnings.push(skippedRows + ' atom row' + (skippedRows === 1 ? '' : 's') +
+            ' whose SYBYL type names no element (' + shown + ') ' +
+            (skippedRows === 1 ? 'was' : 'were') + ' left out: a lone pair or a query atom is not an atom ' +
+            'the viewer can draw');
+    }
     if (unresolvedBonds > 0) {
         warnings.push(unresolvedBonds + ' bond' + (unresolvedBonds === 1 ? '' : 's') +
             ' name an atom id the file does not list: those bonds were left out');
