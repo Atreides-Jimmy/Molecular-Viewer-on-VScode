@@ -6281,6 +6281,45 @@ document.getElementById('reset-btn').addEventListener('click',function(){
     updateTransform();
 });
 var undoStack=[];var MAX_UNDO=50;
+// History belongs to one structure on screen. A snapshot holds a whole frame's
+// atom list, so applying one on another frame would write the wrong coordinates
+// into the wrong step — which is why a switch used to throw the stack away and
+// with it every edit made before navigating. Instead the stack is parked under
+// the frame it was made on and taken up again when the user comes back.
+//
+// The parked histories are bounded by atoms, not by frames: six frames of a
+// 5000-atom trajectory would otherwise hold three hundred copies of it. Oldest
+// goes first, and a single parked history is always kept whatever its size.
+var UNDO_PARK_MAX_ATOMS=120000;
+var undoParked={};
+function undoFrameKey(){
+    return (VMD&&VMD.molecules.length>1?('m'+vmdMolIdx):'m0')+'/f'+currentFrame;
+}
+function undoParkedAtoms(){
+    var total=0;
+    for(var k in undoParked){
+        if(!undoParked.hasOwnProperty(k))continue;
+        var stack=undoParked[k];
+        for(var i=0;i<stack.length;i++)total+=stack[i].atomCount||0;
+    }
+    return total;
+}
+function parkUndoHistory(key){
+    if(!key)return;
+    if(undoStack.length>0)undoParked[key]=undoStack;
+    else delete undoParked[key];
+    undoStack=[];
+    var keys=Object.keys(undoParked);
+    while(keys.length>1&&undoParkedAtoms()>UNDO_PARK_MAX_ATOMS){
+        delete undoParked[keys.shift()];
+    }
+    updateUndoBtn();
+}
+function adoptUndoHistory(key){
+    undoStack=(key&&undoParked[key])?undoParked[key]:[];
+    if(key)delete undoParked[key];
+    updateUndoBtn();
+}
 // What a saved file's title line says about where the structure came from and
 // what was done to it (the functions that build and record it are at "Save
 // provenance", next to doSave). Declared here, with the other view state, so it
@@ -6288,6 +6327,14 @@ var undoStack=[];var MAX_UNDO=50;
 var PROV_PREFIX='MV: ';   // our own marker, so re-saving a file never stacks lines
 var PROV_MAX=190;         // characters — a title line, not a paragraph
 var provSource=provBaseName(MD.filePath);
+// Where this session last wrote the structure, and in which format. The two
+// are separate from MD.filePath on purpose: that one is the file that was
+// *opened* — it is what the provenance line names — while these follow the
+// last write, so a Save As starts beside the file just written and a later
+// Save re-writes that same file instead of asking for a name again.
+var savePath=(typeof MD.filePath==='string')?MD.filePath:'';
+var saveFormat='';
+var saveRequestFormat='';   // format of the write now in flight, see saveResult
 var provMerged=[];        // files merged into this structure, in order
 var provEdits=[];         // [{k,n}] — what changed it, in the order it happened
 var provModes={};         // mode index -> {freq,scale}: displacement kept in the geometry
@@ -6309,6 +6356,16 @@ function pushUndo(symmetryState){
     // Atoms would keep using the explicit-bonds (deletion-only) path on what
     // is an auto-detected structure again.
     var snap={hasExplicitBonds:!!MD.hasExplicitBonds,prov:provClone()};
+    // The electronic state is part of what an edit can change: an import onto
+    // an empty canvas adopts the file's charge and multiplicity, so a snapshot
+    // that restored the atoms but not those two would leave the panel (and the
+    // bonds perceived from it) describing a structure that is gone. The flags
+    // say whether a value was stated at all — `undefined` is "the file does not
+    // say", which is not the same as zero and one.
+    snap.charge=MD.charge;
+    snap.multiplicity=MD.multiplicity;
+    snap.hasCharge=(typeof MD.charge==='number');
+    snap.hasMult=(typeof MD.multiplicity==='number');
     if(CRY){
         // A crystal's picture is a pure function of three things — the base
         // cell, its bonds and the bounds — so those three are the snapshot, and
@@ -6350,9 +6407,19 @@ function pushUndo(symmetryState){
         snap.atoms=JSON.parse(JSON.stringify(MD.atoms));
         snap.bonds=JSON.parse(JSON.stringify(MD.bonds));
     }
+    // What this snapshot costs, for the budget the parked histories are held
+    // to (see undoParked): a crystal stores its base cell, a molecule its atoms.
+    snap.atomCount=CRY?(snap.baseAtoms?snap.baseAtoms.length:0):snap.atoms.length;
     undoStack.push(snap);
     if(undoStack.length>MAX_UNDO)undoStack.shift();
     updateUndoBtn();
+    // The editor's dirty state follows this one history: an edit is what makes
+    // the document modified, and the editor's own Save is what clears it. The
+    // depth is what tells a snapshot that a gesture takes back from an edit.
+    // `typeof` because the bridge is installed with the rest of the page and
+    // this block is also exercised on its own (the verification harnesses cut
+    // pushUndo out and run it against a stub), where no editor is listening.
+    if(typeof markEdited==='function')markEdited(undoStack.length);
 }
 function updateUndoBtn(){var b=document.getElementById('undo-btn');if(b)b.disabled=undoStack.length===0}
 function doUndo(){
@@ -6372,6 +6439,10 @@ function doUndo(){
     vdEnd();
     var snap=undoStack.pop();
     MD.hasExplicitBonds=!!snap.hasExplicitBonds;
+    // The snapshot's electronic state comes back with its geometry: an atom
+    // list and the charge it was perceived with are one state.
+    MD.charge=snap.hasCharge?snap.charge:undefined;
+    MD.multiplicity=snap.hasMult?snap.multiplicity:undefined;
     // The provenance belongs to the geometry: an undone edit is not in the
     // structure any more, so its clause comes off the title with it.
     provRestore(snap.prov);
@@ -6453,7 +6524,7 @@ function doUndo(){
     }
 }
 document.getElementById('undo-btn').addEventListener('click',doUndo);
-document.getElementById('save-btn').addEventListener('click',doSave);
+document.getElementById('save-btn').addEventListener('click',function(){doSave()});
 document.getElementById('snap-btn').addEventListener('click',openSnapshotDialog);
 document.getElementById('import-btn').addEventListener('click',function(){
     if(diffMode){modeInfoEl.textContent='Import is not available in diff mode';return}
@@ -6549,6 +6620,255 @@ var diffStatsExpanded=true;
 var diffLabelLeft=document.getElementById('diff-label');
 var diffLabelRight=document.getElementById('diff-label-right');
 
+// ===== What the editor asks for =====
+//
+// The structure being edited lives in this page, so the editor's own commands —
+// Save, Save As, Revert, Undo — arrive as messages and are answered the same
+// way. Nothing is recorded as done until the host says it wrote a file: a save
+// the user dismisses leaves the document modified, which is what makes the
+// close prompt mean something rather than a courtesy.
+var hostSavePending=false;   // the editor is waiting for this save's answer
+var editTimer=0;
+
+/**
+ * One edit that survived the gesture that made it.
+ *
+ * This is what marks the document modified in the editor, shows its close
+ * prompt and gives the editor's Undo command something to call. The message is
+ * held back one turn of the event loop because a gesture can take its own
+ * snapshot back — a rotation drag that never moved pushes a snapshot and pops
+ * it again in the same call stack — and by then the stack depth says whether
+ * the edit really happened.
+ */
+function markEdited(depth){
+    if(editTimer)return;
+    editTimer=setTimeout(function(){
+        editTimer=0;
+        if(undoStack.length<depth)return;
+        vscodeApi.postMessage({command:'edit'});
+    },0);
+}
+
+/**
+ * The editor's Save: Ctrl+S, Save All, or the Save button of the close prompt.
+ *
+ * Once this session has written a file, that pair — format and path — is
+ * written again: the user already chose both, and asking a second time turns
+ * "save, then close" into a two-dialog operation. Before the first write there
+ * is nothing to re-write, so the format dialog opens exactly as the toolbar's
+ * Save As opens it.
+ */
+function hostSaveRequest(){
+    hostSavePending=true;
+    var outcome;
+    if(saveFormat&&savePath)outcome=doSave({format:saveFormat,targetPath:savePath});
+    else outcome=doSave();
+    if(outcome==='failed')postSaveCancelled();
+}
+
+// ===== What a window reload keeps =====
+//
+// A custom editor's edits live in the page, so the editor cannot save them by
+// itself: the page hands its state over, the host stores it beside VS Code's
+// own backups, and hands it back when the same file is reopened after a reload.
+// The state is the viewer's own — atoms and bonds with their ghosts, orders and
+// occupations, the electronic state, the cell — not a file in any format, so
+// nothing is lost to a round trip through XYZ.
+//
+// The structure on screen is always kept; frames edited earlier in the session
+// travel with it while they fit in the budget, because a trajectory that was
+// annotated frame by frame is a lot of atoms and a backup is not a save.
+var SESSION_FRAME_ATOM_BUDGET=500000;
+function buildSession(){
+    var s={
+        v:1,
+        title:MD.title||'',
+        frame:currentFrame,
+        charge:(typeof MD.charge==='number')?MD.charge:null,
+        multiplicity:(typeof MD.multiplicity==='number')?MD.multiplicity:null,
+        hasExplicitBonds:!!MD.hasExplicitBonds,
+        atoms:MD.atoms,
+        bonds:MD.bonds
+    };
+    if(VMD&&VMD.molecules.length>1)s.molecule=vmdMolIdx;
+    if(CRY){
+        // A crystal's picture is a function of the base cell, its bonds, the
+        // bounds and the cell parameters; storing the displayed supercell would
+        // store the same atoms many times over and still not say what to
+        // rebuild from.
+        s.crystal={
+            baseAtoms:CRY.baseAtoms,
+            baseBonds:CRY.baseBonds,
+            fileBonds:CRY.fileBonds||null,
+            bondsDetected:!!CRY.bondsDetected,
+            disorderFilter:CRY.disorderFilter||null,
+            disorderOccNormalize:!!disorderOccNormalize,
+            cell:{a:CRY.a,b:CRY.b,c:CRY.c,alpha:CRY.alpha,beta:CRY.beta,gamma:CRY.gamma,
+                latticeVectors:CRY.latticeVectors},
+            bounds:{aMin:boundary.aMin,aMax:boundary.aMax,bMin:boundary.bMin,
+                bMax:boundary.bMax,cMin:boundary.cMin,cMax:boundary.cMax}
+        };
+    }
+    // Frames edited earlier in the session: only a trajectory stores them
+    // explicitly (TRAJ_FRAMES[idx].atoms); a log frame's edits are its own
+    // atoms. They are kept while the budget allows, oldest last.
+    if(TRAJ_FRAMES){
+        var budget=SESSION_FRAME_ATOM_BUDGET-MD.atoms.length;
+        var edits=[];
+        for(var fi=0;fi<TRAJ_FRAMES.length&&budget>0;fi++){
+            var tf=TRAJ_FRAMES[fi];
+            if(!tf||!tf.atoms||fi===currentFrame)continue;
+            if(tf.atoms.length>budget)continue;
+            budget-=tf.atoms.length;
+            edits.push({frame:fi,atoms:tf.atoms,bonds:tf.bonds||[]});
+        }
+        if(edits.length>0)s.trajectoryEdits=edits;
+    }
+    return s;
+}
+
+/**
+ * Put a session back on top of the freshly parsed file.
+ *
+ * Every field is checked before anything is touched: a session that does not
+ * describe a structure must leave the file's own view exactly as it was, which
+ * is why this returns false instead of half-applying. The structure is written
+ * into the frame it came from as well, so navigating away and back shows what
+ * the user was looking at rather than the file's own copy of that step.
+ */
+function applyRestoreSession(s){
+    if(!s||s.v!==1||!s.atoms||s.atoms.length===0)return false;
+    var i,k;
+    for(i=0;i<s.atoms.length;i++){
+        var a=s.atoms[i];
+        if(!a||typeof a.element!=='string'||a.element==='')return false;
+        if(typeof a.x!=='number'||typeof a.y!=='number'||typeof a.z!=='number')return false;
+        if(a.x-a.x!==0||a.y-a.y!==0||a.z-a.z!==0)return false;
+    }
+    var n=s.atoms.length;
+    var atoms=s.atoms.map(function(rec,idx){
+        var copy={};
+        for(var key in rec){if(rec.hasOwnProperty(key))copy[key]=rec[key]}
+        copy.index=idx;
+        return copy;
+    });
+    var bonds=[];
+    var srcBonds=s.bonds||[];
+    for(i=0;i<srcBonds.length;i++){
+        var b=srcBonds[i];
+        if(!b||typeof b.atom1!=='number'||typeof b.atom2!=='number')continue;
+        if(b.atom1<0||b.atom2<0||b.atom1>=n||b.atom2>=n||b.atom1===b.atom2)continue;
+        bonds.push({atom1:b.atom1,atom2:b.atom2,order:(typeof b.order==='number'&&isFinite(b.order))?b.order:1});
+    }
+    var frame=(typeof s.frame==='number'&&s.frame>=0&&s.frame<totalFrames)?s.frame:0;
+    var crystal=s.crystal;
+    if(CRY&&crystal&&crystal.baseAtoms&&crystal.baseAtoms.length>0){
+        CRY.baseAtoms=crystal.baseAtoms;
+        CRY.baseBonds=crystal.baseBonds||[];
+        CRY.fileBonds=crystal.fileBonds||null;
+        CRY.bondsDetected=!!crystal.bondsDetected;
+        CRY.disorderFilter=crystal.disorderFilter||null;
+        disorderOccNormalize=crystal.disorderOccNormalize!==false;
+        if(crystal.cell){
+            CRY.a=crystal.cell.a;CRY.b=crystal.cell.b;CRY.c=crystal.cell.c;
+            CRY.alpha=crystal.cell.alpha;CRY.beta=crystal.cell.beta;CRY.gamma=crystal.cell.gamma;
+            CRY.latticeVectors=crystal.cell.latticeVectors;
+            computeCrystalInv();
+        }
+        if(crystal.bounds){
+            boundary.aMin=crystal.bounds.aMin;boundary.aMax=crystal.bounds.aMax;
+            boundary.bMin=crystal.bounds.bMin;boundary.bMax=crystal.bounds.bMax;
+            boundary.cMin=crystal.bounds.cMin;boundary.cMax=crystal.bounds.cMax;
+            syncBndInputs();
+        }
+    }
+    currentFrame=frame;
+    MD.atoms=atoms;
+    MD.bonds=bonds;
+    MD.charge=(typeof s.charge==='number')?s.charge:undefined;
+    MD.multiplicity=(typeof s.multiplicity==='number')?s.multiplicity:undefined;
+    MD.hasExplicitBonds=!!s.hasExplicitBonds;
+    if(typeof s.title==='string'&&s.title!=='')MD.title=s.title;
+    // A script's scene shows one molecule at a time. The session names the one
+    // it was made on, so the restored structure goes back onto that molecule —
+    // not onto whichever the script happens to list first.
+    if(VMD&&VMD.molecules.length>1&&typeof s.molecule==='number'&&
+        s.molecule>=0&&s.molecule<VMD.molecules.length){
+        vmdMolIdx=s.molecule;
+        var vm=VMD.molecules[vmdMolIdx];
+        if(vm){
+            vm.atoms=atoms.map(function(rec){var copy={};for(var key in rec){if(rec.hasOwnProperty(key))copy[key]=rec[key]}return copy});
+            vm.bonds=bonds;
+            vm.charge=MD.charge;
+            vm.multiplicity=MD.multiplicity;
+            vm.hasExplicitBonds=MD.hasExplicitBonds;
+        }
+        updateMolLabel();
+    }
+    // The frame keeps what was restored: a later visit reads the frame's own
+    // records, and they would otherwise still be the file's.
+    if(!CRY){
+        if(TRAJ_FRAMES){
+            if(s.trajectoryEdits){
+                for(i=0;i<s.trajectoryEdits.length;i++){
+                    var te=s.trajectoryEdits[i];
+                    if(!te||typeof te.frame!=='number'||!TRAJ_FRAMES[te.frame]||!te.atoms)continue;
+                    TRAJ_FRAMES[te.frame].atoms=te.atoms;
+                    TRAJ_FRAMES[te.frame].bonds=te.bonds||[];
+                }
+            }
+            if(TRAJ_FRAMES[frame]){
+                TRAJ_FRAMES[frame].atoms=atoms;
+                TRAJ_FRAMES[frame].bonds=bonds;
+            }
+        }else if(MD.frames&&MD.frames[frame]){
+            MD.frames[frame].atoms=atoms;
+            MD.frames[frame].bonds=bonds;
+        }
+    }
+    updateFrameInfo();
+    if(CRY){
+        rebuildCrystal();
+        if(typeof syncCellPanel==='function')syncCellPanel();
+    }
+    rebuildScene();
+    updateMolInfo();
+    reframeView();
+    return true;
+}
+
+// ===== The file changed on disk =====
+//
+// The page draws the copy it parsed when the tab opened. The host watches the
+// file and says when it changed, but never reloads on its own: an optimisation
+// log is rewritten every few seconds and a prompt per change would be noise.
+// The notice carries the one action that matters, and Reload asks the host to
+// read the file again (which rebuilds this page from the new content).
+var fileNoticeEl=null;
+function showFileNotice(text,canReload){
+    if(!fileNoticeEl)fileNoticeEl=document.getElementById('file-notice');
+    if(!fileNoticeEl)return;
+    var t=document.getElementById('file-notice-text');
+    if(t)t.textContent=text;
+    var btn=document.getElementById('file-notice-reload');
+    if(btn)btn.style.display=canReload?'':'none';
+    fileNoticeEl.classList.add('show');
+}
+function hideFileNotice(){
+    if(!fileNoticeEl)fileNoticeEl=document.getElementById('file-notice');
+    if(fileNoticeEl)fileNoticeEl.classList.remove('show');
+}
+(function(){
+    var btn=document.getElementById('file-notice-reload');
+    if(btn)btn.addEventListener('click',function(){
+        hideFileNotice();
+        modeInfoEl.textContent='Reloading the file from disk...';
+        vscodeApi.postMessage({command:'reloadRequest'});
+    });
+    var close=document.getElementById('file-notice-close');
+    if(close)close.addEventListener('click',function(){hideFileNotice()});
+})();
+
 window.addEventListener('message',function(event){
     var msg=event.data;
     // A message the host did not shape must not throw here and take the rest
@@ -6582,6 +6902,46 @@ window.addEventListener('message',function(event){
         applySurfaceResult(msg);
     }else if(msg.command==='surfaceDone'){
         applySurfaceDone(msg);
+    }else if(msg.command==='saveResult'){
+        // The host reports what it actually wrote. Only then does the page
+        // adopt the path, so a dialog that was dismissed leaves the identity of
+        // the document where it was — and the next Save As still points at the
+        // file the user last chose.
+        hostSavePending=false;
+        if(msg.ok&&typeof msg.path==='string'&&msg.path!==''){
+            savePath=msg.path;
+            if(saveRequestFormat)saveFormat=saveRequestFormat;
+            saveRequestFormat='';
+            modeInfoEl.textContent='Saved: '+provBaseName(msg.path);
+        }else{
+            saveRequestFormat='';
+            modeInfoEl.textContent=MODE_INFO[currentMode]||currentMode;
+        }
+    }else if(msg.command==='hostSave'){
+        hostSaveRequest();
+    }else if(msg.command==='hostSaveTo'){
+        // The editor's own Save As: the destination is already chosen, so only
+        // the content is missing and its format comes from the file name.
+        hostSavePending=true;
+        var outcome=doSave({format:typeof msg.format==='string'?msg.format:'xyz'});
+        if(outcome==='failed')postSaveCancelled();
+    }else if(msg.command==='hostUndo'){
+        // The editor's Undo command, routed to the one history the page keeps.
+        // It is the same call the page's own Ctrl+Z makes.
+        doUndo();
+    }else if(msg.command==='hostRedo'){
+        // The viewer has one stack and no redo, exactly as its own keyboard
+        // shortcut does; the editor's Redo is answered with nothing rather than
+        // with an edit the page cannot reproduce.
+    }else if(msg.command==='hostSession'){
+        vscodeApi.postMessage({command:'session',session:buildSession()});
+    }else if(msg.command==='fileChanged'){
+        // The notice names the consequence, not the event: reading the file
+        // again replaces every edit made in this tab.
+        showFileNotice(msg.deleted
+            ?'The file was deleted on disk. This view still shows the copy it opened.'
+            :'The file changed on disk. Reloading replaces the edits made in this view.',
+            !msg.deleted);
     }
 });
 
@@ -6650,12 +7010,28 @@ function importStructure(msg){
         MD.atoms.push(item);
     }
     // Importing onto an empty canvas is not combining two structures: what is on
-    // screen is the imported file, so its own electronic state is adopted. An
-    // import beside an existing structure leaves the state alone — the combined
-    // system's total is not something either file stated.
+    // screen is the imported file, so its own electronic state is adopted.
+    //
+    // An import beside an existing structure is a combination, and its charge
+    // adds: the two blocks are placed apart and share no electrons, so the
+    // structure on screen carries the sum of what was there and what arrived.
+    // Dropping the incoming charge (what this used to do) left the panel, MM and
+    // Add H working from a total that described only half of the picture.
+    //
+    // A multiplicity does not add — two open shells can couple either way — so
+    // the combined value is the sum of the unpaired electrons, the high-spin
+    // limit, and only when both sides state one. A side that states none leaves
+    // the number where it was, and the host's note says why.
+    var addCharge=(typeof msg.charge==='number'&&isFinite(msg.charge))?msg.charge:null;
+    var addMult=(typeof msg.multiplicity==='number'&&isFinite(msg.multiplicity)&&msg.multiplicity>=1)?msg.multiplicity:null;
     if(N0===0){
-        if(typeof msg.charge==='number')MD.charge=msg.charge;
-        if(typeof msg.multiplicity==='number')MD.multiplicity=msg.multiplicity;
+        if(addCharge!==null)MD.charge=addCharge;
+        if(addMult!==null)MD.multiplicity=addMult;
+    }else{
+        if(addCharge!==null&&typeof MD.charge==='number'&&isFinite(MD.charge))MD.charge=MD.charge+addCharge;
+        if(addMult!==null&&typeof MD.multiplicity==='number'&&isFinite(MD.multiplicity)&&MD.multiplicity>=1){
+            MD.multiplicity=(MD.multiplicity-1)+(addMult-1)+1;
+        }
     }
     // --- Bonds ---
     // The imported part's bonds are the host's answer: it perceived them
@@ -6682,7 +7058,8 @@ function importStructure(msg){
     if(camDist<need){camDist=need;camera.position.set(0,0,camDist);camera.lookAt(0,0,0)}
     needsRender=true;
     provAddSource(msg.fileName);
-    modeInfoEl.textContent='Imported '+newAtoms.length+' atoms from '+(msg.fileName||'file')+' - placed beside the existing structure';
+    modeInfoEl.textContent='Imported '+newAtoms.length+' atoms from '+(msg.fileName||'file')+' - placed beside the existing structure'+
+        (msg.note?' ('+msg.note+')':'');
 }
 
 // ===== Fragment clipboard (Ctrl+C / Ctrl+X / Ctrl+V) =====
@@ -8969,6 +9346,9 @@ function keepTrajectoryFrame(idx){
 }
 function switchFrame(idx){
     if(idx<0||idx>=totalFrames)return;
+    // The history on screen belongs to the frame on screen, and it is taken up
+    // again when that frame is visited next (see parkUndoHistory).
+    var undoFromKey=undoFrameKey();
     // A trajectory is one system over time, and its frames are read against
     // each other: the centre the first frame was framed with is kept while the
     // frames play. Re-centring on every frame's own atoms would slide a cell
@@ -9067,7 +9447,12 @@ function switchFrame(idx){
         VMD.activeSegments=[];
         setVmdNavEnabled(false);
     }
-    undoStack.length=0;updateUndoBtn();
+    // A frame keeps its own undo history: the stack is parked with the frame
+    // being left and the incoming frame's is taken up, so an edit made three
+    // steps ago can still be undone after navigating back to it — and a
+    // snapshot of one frame can never be applied to another.
+    parkUndoHistory(undoFromKey);
+    adoptUndoHistory(undoFrameKey());
     // A selection names atoms of the frame being left. Every frame switch
     // clears it, not only one inside a comparison: keeping the numbers would
     // silently select the atoms that happen to hold the same indices in the
@@ -9111,6 +9496,9 @@ function switchMolecule(idx){
     if(!VMD||idx<0||idx>=VMD.molecules.length||idx===vmdMolIdx)return;
     if(diffMode){modeInfoEl.textContent='Molecule switching is not available in diff mode';return}
     if(CRY){modeInfoEl.textContent='Molecule switching is not available for crystal structures';return}
+    // The history belongs to the molecule on screen; it is parked under that
+    // molecule's key and taken up again when the user comes back to it.
+    var undoFromKey=undoFrameKey();
     // Same rule as a frame change: every writer of the current structure ends
     // before it is replaced (see switchFrame), a displacement session included.
     if(vibActive||vibPaused)stopVibration();
@@ -9144,7 +9532,10 @@ function switchMolecule(idx){
     // the new molecule would stay highlighted and Delete / Select / Rotate
     // would act on atoms nobody picked.
     resetSelection();
-    undoStack.length=0;updateUndoBtn();
+    // Same rule as a frame: the history belongs to the molecule it was made on.
+    // The key carries the molecule index, so switching back restores it.
+    parkUndoHistory(undoFromKey);
+    adoptUndoHistory(undoFrameKey());
     resetRotAxisState();
     if(currentMode==='mmOpt'){mmLastResult=null;refreshMmPanel()}
     rebuildScene();
@@ -11551,8 +11942,19 @@ function bindPropsCavity(){
     syncSurfaceStatus();
 }
 // --- the orbital tab --------------------------------------------------
+// Whether the spin channel on show has a coefficient block to draw from. The
+// host answers this per channel: a UHF checkpoint can carry one block and not
+// the other, and asking for a surface on the empty one used to travel to the
+// host, fail there, and come back as an error — while the panel still showed
+// the Draw button and kept its `reason` hidden. An absent flag (an older
+// payload) keeps the old behaviour, which the host's own check still guards.
+function orbitalSpinDrawable(idx){
+    var sp=ORBITALS.spins[idx];
+    return !!(sp&&sp.drawable!==false);
+}
 function propsMoHtml(){
     var sp=ORBITALS.spins[orbitalSpin]||ORBITALS.spins[0];
+    var spinOk=orbitalSpinDrawable(ORBITALS.spins[orbitalSpin]?orbitalSpin:0);
     var html='';
     if(ORBITALS.spins.length>1){
         html+='<div class="chg-row"><label class="chg-lab" for="orb-spin">Spin</label><select id="orb-spin" class="chg-sel">';
@@ -11572,7 +11974,7 @@ function propsMoHtml(){
     html+='<div class="orb-nav orb-jump"><label class="chg-lab" for="orb-jump">MO #</label>'+
         '<input type="number" id="orb-jump" class="orb-num" min="1" max="'+sp.energies.length+'" step="1" placeholder="1–'+sp.energies.length+'" title="Jump to an orbital by its number (1 = the first one the file prints)">'+
         '<button type="button" id="orb-go" title="Move the list to this orbital">Go</button></div>';
-    if(ORBITALS.canDraw){
+    if(ORBITALS.canDraw&&spinOk){
         html+='<div class="orb-ctl"><label class="chg-lab" for="orb-iso">Isovalue</label>'+
             '<input type="number" id="orb-iso" class="orb-num" value="'+orbitalIso+'" step="0.005" min="0.0005" max="0.5" title="Contour value in atomic units — the usual GaussView default is 0.02">'+
             '<select id="orb-q" class="chg-sel orb-q" title="Grid spacing: a finer grid follows the surface more closely and costs more">'+
@@ -11581,6 +11983,13 @@ function propsMoHtml(){
             '<option value="fine"'+(orbitalQuality==='fine'?' selected':'')+'>Fine</option></select></div>';
         html+='<div class="chg-btns"><button id="orb-draw" class="chg-go" type="button" title="Compute the selected orbitals and draw both lobes">Draw</button>'+
             '<button id="orb-clear" class="chg-go" type="button" title="Remove every orbital surface">Clear</button></div>';
+    }else if(ORBITALS.canDraw){
+        // The other channel can still be drawn: say which one cannot, instead of
+        // hiding the whole panel or letting the request fail host-side. Clear
+        // stays, because a surface drawn from the other channel is still on the
+        // screen and this channel is where the user is looking.
+        html+='<div class="chg-hint">'+chargeEsc(sp.label)+' carries no coefficient block in this checkpoint, so its orbitals cannot be drawn; switch the spin channel to draw the one that has coefficients.</div>';
+        html+='<div class="chg-btns"><button id="orb-clear" class="chg-go" type="button" title="Remove every orbital surface">Clear</button></div>';
     }
     if(ORBITALS.model)html+='<div class="chg-hint">'+chargeEsc(ORBITALS.model)+'</div>';
     // A log prints one eigenvalue dump per SCF; the panel draws the last, which
@@ -11643,7 +12052,7 @@ function orbListHtml(){
         var occ=sp.occupations[i];
         var key=orbitalSpin+':'+i;
         var cls='orb-row'+(i===win.homo?' homo':'')+(i===win.lumo?' lumo':'')+(i===orbitalJumpTarget?' jump':'');
-        var box=ORBITALS.canDraw?'<input type="checkbox" class="orb-pick" data-key="'+key+'"'+(orbitalSel[key]?' checked':'')+
+        var box=(ORBITALS.canDraw&&orbitalSpinDrawable(orbitalSpin))?'<input type="checkbox" class="orb-pick" data-key="'+key+'"'+(orbitalSel[key]?' checked':'')+
             (Object.keys(orbitalSel).length>=MO_MAX_DRAW&&!orbitalSel[key]?' disabled':'')+'>':'';
         html+='<label class="'+cls+'">'+box+
             '<span class="orb-n">'+(i+1)+'</span>'+
@@ -11879,11 +12288,20 @@ function surfaceGeometryCurrent(){
 }
 function requestOrbitalSurfaces(){
     var picked=selectedOrbitals();
-    if(picked.length===0){
-        var note=chargePanelEl?chargePanelEl.querySelector('#surf-note'):null;
-        if(note)note.textContent='Select one to ten orbitals first.';
+    // A selection can outlive a change of what the file offers (it is kept per
+    // spin and orbital, so a channel that cannot be drawn may still hold keys).
+    // Only the drawable channels travel; if none is left, the note says why
+    // instead of a request the host has to refuse.
+    var drawable=picked.filter(function(o){return orbitalSpinDrawable(o.spin)});
+    if(drawable.length===0){
+        var noSpin=picked.length>0;
+        var noteEl=chargePanelEl?chargePanelEl.querySelector('#surf-note'):null;
+        if(noteEl)noteEl.textContent=noSpin
+            ?'The selected orbitals belong to a spin channel without a coefficient block, so they cannot be drawn.'
+            :'Select one to ten orbitals first.';
         return;
     }
+    picked=drawable;
     if(!surfaceGeometryCurrent())return;
     surfaceError='';
     // A new run replaces the picture from its first orbital on; clearing here is
@@ -16015,7 +16433,10 @@ function xrdExport(){
     var stem=base;
     var dot=base.lastIndexOf('.');
     if(dot>0)stem=base.substring(0,dot);
-    vscodeApi.postMessage({command:'saveFile',content:out.join('\n')+'\n',suggestedName:stem+'.xy',extension:'.xy',filePath:MD.filePath||''});
+    // A data export, not the structure: it goes through its own message so the
+    // path it is written to never becomes the document's save target (a later
+    // Ctrl+S would otherwise write the structure into the .xy file).
+    vscodeApi.postMessage({command:'saveDataFile',content:out.join('\n')+'\n',suggestedName:stem+'.xy',extension:'.xy',filePath:savePath||''});
 }
 (function(){
     var openBtn=document.getElementById('xrd-open');
@@ -18055,10 +18476,10 @@ function gjfBondOrder(order){
     if(!isFinite(o)||o<=0)o=1;
     return o.toFixed(1);
 }
-function doSave(){
-    if(!MD.atoms||MD.atoms.length===0){alert('No atoms to save');return}
-    for(var ci=0;ci<MD.atoms.length;ci++){var ca=MD.atoms[ci];if(isNaN(ca.x)||isNaN(ca.y)||isNaN(ca.z)){alert('Atom '+(ci+1)+' has invalid coordinates (NaN). Cannot save.');return}}
-    if(CRY&&!CRY_INV){alert('Crystal lattice is degenerate (zero determinant). Cannot save crystal formats.');return}
+function doSave(hostRequest){
+    if(!MD.atoms||MD.atoms.length===0){alert('No atoms to save');return 'failed'}
+    for(var ci=0;ci<MD.atoms.length;ci++){var ca=MD.atoms[ci];if(isNaN(ca.x)||isNaN(ca.y)||isNaN(ca.z)){alert('Atom '+(ci+1)+' has invalid coordinates (NaN). Cannot save.');return 'failed'}}
+    if(CRY&&!CRY_INV){alert('Crystal lattice is degenerate (zero determinant). Cannot save crystal formats.');return 'failed'}
     try{
     // One PDB coordinate column (8 characters, 3 decimals). A value too large
     // for the column loses decimals rather than shifting the columns after it:
@@ -18497,7 +18918,19 @@ function doSave(){
     }
     }catch(err){
         alert('Failed to generate save content: '+(err&&err.message?err.message:String(err)));
-        return;
+        return 'failed';
+    }
+
+    // A save the editor asked for already knows its format (the format this
+    // session last wrote, or the extension of the file the editor's own Save As
+    // chose), so it takes the content straight out of the same builder the
+    // dialog's Save button uses and posts it — no dialog, and a write identical
+    // to the one the dialog would have produced.
+    if(hostRequest&&hostRequest.format){
+        var picked=contentFor(hostRequest.format);
+        if(!picked)return 'failed';
+        sendSaveFile(picked,hostRequest.targetPath||'');
+        return 'sent';
     }
 
     // Saving a displaced structure is exactly what the feature is for, so the
@@ -18581,14 +19014,20 @@ function doSave(){
     }
     if(fmtSelEl)fmtSelEl.addEventListener('change',syncSaveRows);
     syncSaveRows();
-    document.getElementById('m-ok').addEventListener('click',function(){
-        var fmt=document.getElementById('m-fmt').value;
+    // The content one format asks for, built once and used by both callers: the
+    // dialog's Save button, and a save the editor asked for (Ctrl+S, the close
+    // prompt, the tab's Save As). One builder, so the two can never disagree
+    // about what a format holds.
+    function contentFor(fmt){
         var content,ext;
         // The suggestion keeps the source file's identity: a water.xyz file
         // saved as a Gaussian input is offered as water.gjf, not as a fixed
-        // molecule_modified name that loses which structure this is. The
-        // separator is built once so this stays readable inside the page.
-        var srcPath=String(MD.filePath||'');
+        // molecule_modified name that loses which structure this is. It follows
+        // the last written file, so a second save of that file is one Enter.
+        // The separator is built once so this stays readable inside the page.
+        // (`typeof`: a page without the save identity — the save harnesses run
+        // this block alone — falls back to the file that was opened.)
+        var srcPath=String(typeof savePath==='string'?savePath:(MD.filePath||''));
         var fsSlash=String.fromCharCode(47),bsSlash=String.fromCharCode(92);
         var srcCut=Math.max(srcPath.lastIndexOf(fsSlash),srcPath.lastIndexOf(bsSlash));
         var srcFile=srcPath.substring(srcCut+1);
@@ -18634,16 +19073,45 @@ function doSave(){
         }
         }catch(err){
             alert('Failed to generate save content: '+(err&&err.message?err.message:String(err)));
-            return;
+            return null;
         }
         // The extension is the content's own format, not the filter the save
         // dialog happened to show: the host uses it to correct a name typed
         // without an extension and to question one that contradicts the
         // content. STRU has no extension of its own and sends ''.
-        vscodeApi.postMessage({command:'saveFile',content:content,suggestedName:suggestName+ext,extension:ext,filePath:MD.filePath||''});
+        return {content:content,ext:ext,suggestedName:suggestName+ext,format:fmt};
+    }
+    document.getElementById('m-ok').addEventListener('click',function(){
+        var picked=contentFor(document.getElementById('m-fmt').value);
+        if(!picked)return;
+        sendSaveFile(picked,'');
         hideModal();
     });
-    document.getElementById('m-cancel').addEventListener('click',function(){hideModal()});
+    document.getElementById('m-cancel').addEventListener('click',function(){
+        hideModal();
+        // A dialog dismissed while the editor is waiting for a save is the
+        // answer: nothing was written, and the document stays modified.
+        if(hostSavePending)postSaveCancelled();
+    });
+}
+
+/**
+ * Post the content one format produced; the host decides where it goes.
+ *
+ * The dialog's Save carries no target (the host asks for a name), while a save
+ * the editor asked for carries the path this session last wrote, which the host
+ * writes without a dialog. It sits right after doSave so the save verification
+ * harnesses — which cut doSave out by its markers — exercise this exact post.
+ */
+function sendSaveFile(picked,targetPath){
+    saveRequestFormat=picked.format||'';
+    var msg={command:'saveFile',content:picked.content,suggestedName:picked.suggestedName,extension:picked.ext,filePath:savePath||''};
+    if(targetPath)msg.targetPath=targetPath;
+    vscodeApi.postMessage(msg);
+}
+function postSaveCancelled(){
+    hostSavePending=false;
+    vscodeApi.postMessage({command:'saveCancelled'});
 }
 
 // ===== Crystal export: the unit cell, and the cluster cut out of it =====
@@ -20334,12 +20802,15 @@ document.addEventListener('keydown',function(e){
                 // button, keeping the format already chosen.
                 var fmtEl=document.getElementById('m-fmt'),okEl=document.getElementById('m-ok');
                 if(fmtEl&&okEl){e.preventDefault();okEl.click();return}
-                // Any other dialog is replaced: doSave's showModal dismisses
-                // it through its own Cancel first, so a measurement preview
-                // is put back instead of being committed by the Save.
-                if(!editable){e.preventDefault();doSave();return}
+                // Any other dialog is replaced: the save dialog's showModal
+                // dismisses it through its own Cancel first, so a measurement
+                // preview is put back instead of being committed by the Save.
+                if(!editable){e.preventDefault();hostSaveRequest();return}
             }else if(!editable){
-                e.preventDefault();doSave();return;
+                // The same call the editor's own Ctrl+S makes (see
+                // hostSaveRequest): the file this session last wrote is written
+                // again, and until there is one the format dialog opens.
+                e.preventDefault();hostSaveRequest();return;
             }
         }else if(lk==='a'||e.code==='KeyA'){
             // Select every atom. Outside a text field the page has no use for
@@ -20755,6 +21226,19 @@ function renderFrame(w,h){
         camera.updateProjectionMatrix();
         camera.position.set(0,0,camDist);
         renderer.render(scene,camera);
+    }
+}
+// A window that was closed with unsaved edits reopens on them: the host read
+// the backup this page wrote and hands it back here. It is applied last, once
+// every panel and every frame is in place, so all it has to do is replace the
+// structure and rebuild — and a session that does not validate leaves the
+// file's own view untouched, with the reason on the info panel.
+if(MD.restore){
+    var restoredOk=false;
+    try{restoredOk=applyRestoreSession(MD.restore)}catch(e){restoredOk=false}
+    if(!restoredOk){
+        MD.warnings=(MD.warnings||[]).concat('the unsaved edits of this file could not be restored from the editor backup: the file itself is shown');
+        updateMolInfo();
     }
 }
 animate();

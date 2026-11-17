@@ -1,6 +1,6 @@
 // Payload shapes exchanged between the host and the webview page, and the
 // element colours both sides use.
-import { MolecularData, NormalMode, OptStep, OptThresholds } from '../types';
+import { MolecularData, NormalMode, OptStep, OptThresholds, LogPathways } from '../types';
 import { LogFrame, OrcaFrame, RouteSection, LogChargeSet, LogSummary } from '../parsers/index';
 
 export const ATOM_COLORS: { [key: string]: string } = {
@@ -142,6 +142,9 @@ export interface LoadedStructure {
      *  `LogChargeSet` / `LogSummary`); absent for every other format. */
     charges?: LogChargeSet[];
     summary?: LogSummary[];
+    /** A relaxed scan and/or an IRC path: the structures along one coordinate,
+     *  which take the convergence card's place. */
+    pathways?: LogPathways;
     logSource?: string;
     error?: string;
 }

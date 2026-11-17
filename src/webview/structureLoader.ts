@@ -141,6 +141,11 @@ export async function loadStructureFile(uri: vscode.Uri): Promise<LoadedStructur
             optThresholds: logResult.optThresholds,
             charges: logResult.charges,
             summary: logResult.summary,
+            // A relaxed scan or an IRC path is a sequence of structures the
+            // file states, not a series of optimizer steps: the page draws
+            // them in the convergence card's place, so they travel with the
+            // rest of what a log states.
+            pathways: logResult.pathways,
             logSource: logResult.source
         };
     }

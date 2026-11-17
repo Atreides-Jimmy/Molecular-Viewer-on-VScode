@@ -183,6 +183,22 @@ export function postImportCopies(webview: vscode.Webview, fileName: string,
             count + ' copies.');
     }
     const block = buildImportBlock(atoms, bonds, count);
+    // The electronic state of the block, which is not simply the fragment's
+    // value repeated: N copies of a singly charged ion are N times the charge,
+    // while N copies of a doublet have 2N open shells that can couple several
+    // ways — a total multiplicity the file does not state. So the charge is
+    // multiplied, the multiplicity is stated only when the copies cannot
+    // differ (a closed shell stays a closed shell, and a single copy is the
+    // fragment itself), and the page is told why a number is missing instead of
+    // being handed one that describes something else.
+    const totalCharge = typeof charge === 'number' ? charge * count : undefined;
+    let totalMultiplicity: number | undefined;
+    if (typeof multiplicity === 'number' && multiplicity >= 1) {
+        totalMultiplicity = count === 1 || multiplicity === 1 ? multiplicity : undefined;
+    }
+    const note = typeof multiplicity === 'number' && multiplicity > 1 && count > 1
+        ? count + ' copies of a multiplicity-' + multiplicity + ' fragment: the combined spin state is not stated by the file'
+        : undefined;
     webview.postMessage({
         command: 'importResult',
         cancelled: false,
@@ -195,7 +211,8 @@ export function postImportCopies(webview: vscode.Webview, fileName: string,
         // combined system with the charge of whatever was already open. Every
         // copy carries the fragment's charge, so the block's total is that
         // charge times the number of copies.
-        charge: typeof charge === 'number' ? charge * count : undefined,
-        multiplicity: multiplicity
+        charge: totalCharge,
+        multiplicity: totalMultiplicity,
+        note: note
     });
 }

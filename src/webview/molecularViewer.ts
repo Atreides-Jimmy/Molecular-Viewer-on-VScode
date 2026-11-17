@@ -107,14 +107,126 @@ const SAVE_EXTENSIONLESS_NAMES: { [extension: string]: string[] } = {
     '.vasp': ['poscar', 'contcar']
 };
 
-export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvider<MolecularDocument> {
+/**
+ * The bridge between a document and the panel showing it.
+ *
+ * A custom editor's save, revert and backup methods are handed a document and
+ * nothing else, while the content being edited lives in the page: these are the
+ * few calls the provider needs from the panel that owns one.
+ */
+interface EditorPanel {
+    document: MolecularDocument;
+    post(message: { [key: string]: unknown }): void;
+    /**
+     * Save what the page holds. `dialog` opens the page's own format dialog
+     * (or re-writes the format and path it last exported, see the page's
+     * `hostSave`); `path` builds content for the extension the editor's own
+     * dialog chose and writes it there. Resolves the written path, or
+     * undefined when the user backed out (which keeps the document dirty).
+     */
+    save(request: { mode: 'dialog' } | { mode: 'path'; target: vscode.Uri; format: string }): Promise<string | undefined>;
+    /** The page's hot-exit state (see `backupCustomDocument`). */
+    session(): Promise<unknown>;
+    /** Rebuild the page from the document's current content. */
+    reload(): Promise<void>;
+    dispose(): void;
+}
+
+/** The extensions a system Save As can carry, mapped to the content builder
+ *  that writes them. An extension this table does not know falls back to the
+ *  viewer's own default (a plain `.xyz`), which every reader can open. */
+const SAVE_AS_FORMATS: { [extension: string]: string } = {
+    '.xyz': 'xyz',
+    '.extxyz': 'extxyz',
+    '.gjf': 'gjf',
+    '.com': 'gjf',
+    '.gjf03': 'gjf',
+    '.gjf09': 'gjf',
+    '.gjf16': 'gjf',
+    '.cif': 'cif',
+    '.vasp': 'vasp',
+    '.poscar': 'vasp',
+    '.contcar': 'vasp',
+    '.cube': 'cube',
+    '.vesta': 'vesta',
+    '.coord': 'coord',
+    '.mol2': 'mol2',
+    '.mol': 'mol',
+    '.pdb': 'pdb',
+    '.ent': 'pdb',
+    '.mop': 'mop',
+    '.abi': 'abi',
+    '.gro': 'gro',
+    '.lmp': 'lmp',
+    '.data': 'lmp',
+    '.pwi': 'qe',
+    '.in': 'qe',
+    '.inp': 'orca'
+};
+
+export class MolecularViewerProvider implements vscode.CustomEditorProvider<MolecularDocument> {
+    /** The panel showing each open document (one, see the registration). */
+    private readonly panels = new Map<MolecularDocument, EditorPanel>();
+    private readonly changeEmitter = new vscode.EventEmitter<vscode.CustomDocumentEditEvent<MolecularDocument>>();
+    /**
+     * Fired once per edit the page makes, so the editor knows the document is
+     * modified, offers the close prompt, and routes its own Undo/Redo commands
+     * back into the page's history. The page keeps the undo stack; the two
+     * callbacks are how the editor's commands reach it.
+     */
+    readonly onDidChangeCustomDocument = this.changeEmitter.event;
+
     constructor(private readonly context: vscode.ExtensionContext) {}
+
+    dispose(): void {
+        this.changeEmitter.dispose();
+        for (const panel of this.panels.values()) panel.dispose();
+        this.panels.clear();
+    }
 
     async openCustomDocument(
         uri: vscode.Uri,
-        _openContext: vscode.CustomDocumentOpenContext,
+        openContext: vscode.CustomDocumentOpenContext,
         token: vscode.CancellationToken
     ): Promise<MolecularDocument> {
+        const document = await this.openDocument(uri, token);
+        // A window that was closed with unsaved edits hands back the backup the
+        // page wrote (see `backupCustomDocument`). It is applied by the page on
+        // top of the freshly parsed file, so a backup that cannot be read only
+        // costs the edits — never the document.
+        if (openContext.backupId) {
+            const session = await this.readBackup(openContext.backupId);
+            if (session) {
+                document.restoreSession = session;
+            } else {
+                document.data.warnings = (document.data.warnings || []).concat(
+                    'the unsaved edits of this file could not be restored from the editor backup: the file itself is shown');
+            }
+        }
+        return document;
+    }
+
+    /** Read the JSON session a previous window wrote, or undefined. */
+    private async readBackup(backupId: string): Promise<unknown> {
+        try {
+            const text = decodeText(await vscode.workspace.fs.readFile(vscode.Uri.parse(backupId)));
+            const parsed = JSON.parse(text);
+            // `v` names the shape; a session of another version is not guessed
+            // at, because half-applied structure state is worse than none.
+            return parsed && parsed.v === 1 && Array.isArray(parsed.atoms) ? parsed : undefined;
+        } catch {
+            return undefined;
+        }
+    }
+
+    /**
+     * Read and parse one document, dispatching on its name.
+     *
+     * Everything below this branch works on a file already in memory (or on a
+     * checkpoint streamed by its own reader), so the dispatch has to happen
+     * before either.
+     */
+    private async openDocument(uri: vscode.Uri, token: vscode.CancellationToken): Promise<MolecularDocument> {
         if (token.isCancellationRequested) throw new vscode.CancellationError();
         const fileName = uri.path.split('/').pop() || 'unknown.xyz';
         const ext0 = fileName.toLowerCase().split('.').pop() || '';
@@ -132,6 +244,74 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         }
         return withLoadProgress('Molecular Viewer: opening ' + fileName, token, (progress, isCancelled) =>
             this.readDocument(uri, fileName, size, token, progress, isCancelled));
+    }
+
+    /**
+     * The editor's Save (Ctrl+S, Save All, the close prompt's Save) and Save As.
+     *
+     * Both write through the page, because the page is where the structure is:
+     * Save re-uses the last format the user exported (or asks for one), and
+     * Save As honours the extension of the file the editor's own dialog chose.
+     * A cancelled dialog rejects with `CancellationError`, which is how the
+     * editor is told the save did not happen and the document stays dirty.
+     */
+    async saveCustomDocument(document: MolecularDocument, _cancellation: vscode.CancellationToken): Promise<void> {
+        const panel = this.panels.get(document);
+        if (!panel) throw new Error('the viewer is not showing this document, so there is nothing to save from it');
+        const written = await panel.save({ mode: 'dialog' });
+        if (!written) throw new vscode.CancellationError();
+    }
+
+    async saveCustomDocumentAs(document: MolecularDocument, destination: vscode.Uri, _cancellation: vscode.CancellationToken): Promise<void> {
+        const panel = this.panels.get(document);
+        if (!panel) throw new Error('the viewer is not showing this document, so there is nothing to save from it');
+        const name = destination.path.split('/').pop() || '';
+        const dot = name.lastIndexOf('.');
+        const ext = dot > 0 ? name.substring(dot).toLowerCase() : '';
+        const format = SAVE_AS_FORMATS[ext] || 'xyz';
+        const written = await panel.save({ mode: 'path', target: destination, format: format });
+        if (!written) throw new vscode.CancellationError();
+    }
+
+    async revertCustomDocument(document: MolecularDocument, token: vscode.CancellationToken): Promise<void> {
+        const fresh = await this.openDocument(document.uri, token);
+        document.setContent(fresh);
+        const panel = this.panels.get(document);
+        if (panel) await panel.reload();
+    }
+
+    /**
+     * Hot exit: keep what the page holds when the window is closed with unsaved
+     * edits.
+     *
+     * The session is the page's own state — the structure on screen with its
+     * electronic state, and the frames that were edited — not a file in any
+     * format, so nothing is lost to a round trip through XYZ. The page writes
+     * it, the host only stores it beside VS Code's own backups; a window that
+     * reopens the file reads it back (see `openCustomDocument`).
+     *
+     * A document with no panel (a tab whose webview is gone) has no state to
+     * back up, and says so rather than pretending the edits are safe.
+     */
+    async backupCustomDocument(
+        document: MolecularDocument,
+        context: vscode.CustomDocumentBackupContext,
+        _cancellation: vscode.CancellationToken
+    ): Promise<vscode.CustomDocumentBackup> {
+        const panel = this.panels.get(document);
+        const session = panel ? await panel.session() : undefined;
+        if (!session) throw new Error('the viewer is not showing this document, so its edits cannot be backed up');
+        const target = context.destination;
+        if (target.scheme === 'file') {
+            // The parent of the suggested backup path is not guaranteed to
+            // exist (the API says so); creating it costs one call.
+            await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(target.fsPath)));
+        }
+        await vscode.workspace.fs.writeFile(target, new TextEncoder().encode(JSON.stringify(session)));
+        return {
+            id: target.toString(),
+            delete: () => { void vscode.workspace.fs.delete(target, { useTrash: false }).then(undefined, () => undefined); }
+        };
     }
 
     /**
@@ -281,6 +461,16 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             normalModes = loaded.normalModes;
             routes = loaded.routes;
             logSource = loaded.logSource;
+            // The first molecule of a scene can be a program output, and a
+            // scene is otherwise the only way that file is read. Everything
+            // the file states about it travels, not only its geometry: the
+            // Summary and Charges cards, the convergence thresholds and the
+            // scan/IRC card all read the fields below, and a script naming a
+            // Gaussian log used to open with none of them.
+            optThresholds = loaded.optThresholds;
+            charges = loaded.charges;
+            summary = loaded.summary;
+            pathways = loaded.pathways;
             if (!vmdPayload) {
                 // Legacy path only: with a resolved scene the payload carries the
                 // colours, and it is the one that decides them.
@@ -599,8 +789,10 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         optSteps?: OptStep[];
         normalModes?: NormalMode[];
         routes?: RouteSection[];
+        optThresholds?: OptThresholds;
         charges?: LogChargeSet[];
         summary?: LogSummary[];
+        pathways?: LogPathways;
         logSource?: string;
     }> {
         const payload: VmdPayload = {
@@ -670,8 +862,10 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             optSteps: first.optSteps,
             normalModes: first.normalModes,
             routes: first.routes,
+            optThresholds: first.optThresholds,
             charges: first.charges,
             summary: first.summary,
+            pathways: first.pathways,
             logSource: first.logSource
         };
     }
@@ -686,6 +880,17 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         };
 
         if (token.isCancellationRequested) return;
+        // The panel outlives this call, and a closed tab must not be posted to
+        // (an assignment or a message to a disposed webview throws).
+        let disposed = false;
+        const post = (message: { [key: string]: unknown }): void => {
+            if (disposed) return;
+            try {
+                webviewPanel.webview.postMessage(message);
+            } catch {
+                disposed = true;
+            }
+        };
         const buildHtml = (report?: (fraction: number, message?: string) => void) => renderViewerPage(
             this.context.extensionUri,
             {
@@ -705,31 +910,37 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
                 orbitals: document.orbitals,
                 cavity: document.cavity,
                 pathways: document.pathways,
+                restoreSession: document.restoreSession,
                 onProgress: report
             }
         );
         // A large trajectory is serialised into the page's payload atom by atom;
         // that can take a moment after the document itself is ready, and the
-        // page's own loading line only appears once the HTML is assigned.
-        let viewAtoms = document.data.atoms.length;
-        for (const frame of document.frames) viewAtoms += frame.atoms.length;
-        if (document.trajectoryFrames) {
-            for (const frame of document.trajectoryFrames) viewAtoms += Math.floor(frame.xyz.length / 3);
-        }
-        const html = viewAtoms >= VIEW_PROGRESS_MIN_ATOMS
-            ? await vscode.window.withProgress({
-                location: vscode.ProgressLocation.Notification,
-                title: 'Molecular Viewer: preparing the 3D view',
-                cancellable: false
-            }, async (progress) => {
-                const report = progressRange(progress, 0, 100);
-                report(0, 'Building the scene (' + viewAtoms + ' atoms)');
-                await yieldToHost();
-                const page = await buildHtml(report);
-                report(1, 'Ready');
-                return page;
-            })
-            : await buildHtml();
+        // page's own loading line only appears once the HTML is assigned. The
+        // same wrapper serves the first build and a reload, so a re-read of a
+        // big file reports the same way the first read did.
+        const renderPage = async (): Promise<string> => {
+            let viewAtoms = document.data.atoms.length;
+            for (const frame of document.frames) viewAtoms += frame.atoms.length;
+            if (document.trajectoryFrames) {
+                for (const frame of document.trajectoryFrames) viewAtoms += Math.floor(frame.xyz.length / 3);
+            }
+            return viewAtoms >= VIEW_PROGRESS_MIN_ATOMS
+                ? await vscode.window.withProgress({
+                    location: vscode.ProgressLocation.Notification,
+                    title: 'Molecular Viewer: preparing the 3D view',
+                    cancellable: false
+                }, async (progress) => {
+                    const report = progressRange(progress, 0, 100);
+                    report(0, 'Building the scene (' + viewAtoms + ' atoms)');
+                    await yieldToHost();
+                    const page = await buildHtml(report);
+                    report(1, 'Ready');
+                    return page;
+                })
+                : await buildHtml();
+        };
+        const html = await renderPage();
         // Reading the renderer is asynchronous; if the editor was closed in
         // the meantime, assigning html throws "Webview is disposed" and the
         // extension log fills with a failure the user never caused.
@@ -738,6 +949,116 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             webviewPanel.webview.html = html;
         } catch {
             return;
+        }
+
+        // --- The editor's own channels: save, revert, backup, undo/redo ---
+        //
+        // What is being edited lives in the page, so each of these is a message
+        // into it and an answer back. A save the editor asked for waits for that
+        // answer: the page's dialog decides whether anything was written, and a
+        // save nobody answers must not hang the close that triggered it.
+        let saveWaiter: { resolve: (written: string | undefined) => void } | null = null;
+        let saveTimer: NodeJS.Timeout | undefined;
+        /** Where a host-requested save has to go (the editor's Save As target). */
+        let forcedSaveTarget: vscode.Uri | undefined;
+        const finishSave = (written: string | undefined): void => {
+            if (saveTimer) {
+                clearTimeout(saveTimer);
+                saveTimer = undefined;
+            }
+            forcedSaveTarget = undefined;
+            const waiter = saveWaiter;
+            saveWaiter = null;
+            if (waiter) waiter.resolve(written);
+        };
+        let sessionWaiter: ((session: unknown) => void) | null = null;
+        let sessionTimer: NodeJS.Timeout | undefined;
+        const finishSession = (session: unknown): void => {
+            if (sessionTimer) {
+                clearTimeout(sessionTimer);
+                sessionTimer = undefined;
+            }
+            const waiter = sessionWaiter;
+            sessionWaiter = null;
+            if (waiter) waiter(session);
+        };
+        /** Paths this panel wrote, and when: a save through the viewer is not
+         *  "the file changed on disk" to the watcher below. */
+        const selfWrites = new Map<string, number>();
+        const reloadPage = async (): Promise<void> => {
+            const page = await renderPage();
+            if (disposed || token.isCancellationRequested) return;
+            try {
+                webviewPanel.webview.html = page;
+            } catch {
+                disposed = true;
+            }
+        };
+        const bridge: EditorPanel = {
+            document,
+            post,
+            save: (request) => new Promise<string | undefined>((resolve) => {
+                if (saveWaiter) finishSave(undefined);
+                forcedSaveTarget = request.mode === 'path' ? request.target : undefined;
+                // The waiter is in place before the page is asked: an answer
+                // that arrives at once (a page that has nothing to save) must
+                // find someone to resolve.
+                saveWaiter = { resolve };
+                post(request.mode === 'path'
+                    ? { command: 'hostSaveTo', format: request.format }
+                    : { command: 'hostSave' });
+                // A page that never answers (a webview that failed to start)
+                // cancels the save instead of leaving the editor waiting.
+                saveTimer = setTimeout(() => finishSave(undefined), 5 * 60 * 1000);
+            }),
+            session: () => new Promise<unknown>((resolve) => {
+                if (sessionWaiter) finishSession(undefined);
+                sessionWaiter = resolve;
+                post({ command: 'hostSession' });
+                sessionTimer = setTimeout(() => finishSession(undefined), 10 * 1000);
+            }),
+            reload: reloadPage,
+            dispose: () => {
+                finishSave(undefined);
+                finishSession(undefined);
+            }
+        };
+        this.panels.set(document, bridge);
+
+        // --- The file on disk ---
+        //
+        // The view holds a parsed copy of the file, so another program -- a job
+        // still appending to its own log, an editor, a script -- can change the
+        // file while the page shows the version it opened. The watcher never
+        // reloads on its own: an optimisation log changes every few seconds and
+        // a prompt per change would be noise. It tells the page, and the page
+        // shows one notice with a Reload button.
+        let fileWatcher: vscode.FileSystemWatcher | undefined;
+        let noticeTimer: NodeJS.Timeout | undefined;
+        if (document.uri.scheme === 'file' && document.uri.fsPath) {
+            const watched = document.uri.fsPath;
+            const announce = (deleted: boolean): void => {
+                if (disposed) return;
+                const written = selfWrites.get(watched);
+                if (written !== undefined && Date.now() - written < 2000) return;
+                if (noticeTimer) clearTimeout(noticeTimer);
+                noticeTimer = setTimeout(() => {
+                    noticeTimer = undefined;
+                    post({ command: 'fileChanged', deleted: deleted });
+                }, 300);
+            };
+            try {
+                fileWatcher = vscode.workspace.createFileSystemWatcher(
+                    new vscode.RelativePattern(vscode.Uri.file(path.dirname(watched)), path.basename(watched))
+                );
+                fileWatcher.onDidChange(() => announce(false));
+                fileWatcher.onDidCreate(() => announce(false));
+                fileWatcher.onDidDelete(() => announce(true));
+            } catch {
+                // A scheme or a workspace that cannot be watched keeps the
+                // behaviour it had: the view shows the copy it opened.
+                fileWatcher = undefined;
+            }
         }
 
         // The panel's Molecular Mechanics run (at most one at a time). The pump
@@ -1088,6 +1409,18 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
         };
 
         webviewPanel.onDidDispose(() => {
+            disposed = true;
+            // Whatever the editor was waiting for can no longer be answered.
+            bridge.dispose();
+            if (this.panels.get(document) === bridge) this.panels.delete(document);
+            if (fileWatcher) {
+                fileWatcher.dispose();
+                fileWatcher = undefined;
+            }
+            if (noticeTimer) {
+                clearTimeout(noticeTimer);
+                noticeTimer = undefined;
+            }
             mmDiscardRun('replaced');
             // A surface run in flight has nowhere to post its meshes; stopping
             // it here is what keeps a closed tab from finishing a second of
@@ -1103,51 +1436,72 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
             // (null, a string) must not throw before its own case runs.
             if (!message || typeof message !== 'object' || typeof message.command !== 'string') return;
             switch (message.command) {
-                case 'saveFile':
+                case 'saveFile': {
+                    // One write route for every save: the toolbar's dialog, a
+                    // silent re-write of the path the page last exported, and
+                    // the editor's Save As target all end in writePageContent.
+                    const written = await this.writePageContent(message, document.uri, forcedSaveTarget);
+                    if (written) {
+                        selfWrites.set(written.fsPath, Date.now());
+                        // The page keeps the path: the next Save As starts
+                        // beside the file just written, and a later Save
+                        // re-writes it without a dialog.
+                        post({ command: 'saveResult', ok: true, path: written.fsPath });
+                    } else {
+                        post({ command: 'saveResult', ok: false });
+                    }
+                    // A save the editor asked for is answered either way; a
+                    // dismissed dialog leaves the document dirty.
+                    if (saveWaiter) finishSave(written ? written.fsPath : undefined);
+                    break;
+                }
+                // A data file the page exported (the powder pattern's
+                // two-column text): written through the same route, but it is
+                // not the structure, so it does not become the document's save
+                // target and no save is reported back.
+                case 'saveDataFile':
+                    await this.writePageContent(message, document.uri);
+                    break;
+                // The page could not produce content for a save the editor
+                // asked for (a dismissed dialog, an unavailable format): the
+                // editor is told so, and the document stays modified.
+                case 'saveCancelled':
+                    if (saveWaiter) finishSave(undefined);
+                    break;
+                // One message per edit that survives: it is what marks the
+                // document modified, shows the close prompt and gives the
+                // editor's own Undo/Redo commands something to call.
+                case 'edit':
+                    this.changeEmitter.fire({
+                        document,
+                        label: typeof message.label === 'string' && message.label ? message.label : 'Edit structure',
+                        undo: () => post({ command: 'hostUndo' }),
+                        redo: () => post({ command: 'hostRedo' })
+                    });
+                    break;
+                // The page's state for a hot-exit backup (see
+                // backupCustomDocument).
+                case 'session':
+                    if (sessionWaiter) finishSession(message.session);
+                    break;
+                // The page's own Reload button. Reading the file again is
+                // exactly the editor's Revert, and going through it is what
+                // also clears the modified state this page's edits created —
+                // reloading by hand would leave a clean page behind a tab that
+                // still claims to be edited.
+                case 'reloadRequest':
                     try {
-                        // The page is the only sender, but content that is not
-                        // text would be encoded as "[object Object]" and leave
-                        // a file that no reader can open.
-                        if (typeof message.content !== 'string') {
-                            vscode.window.showErrorMessage('Save failed: the page sent no file content.');
-                            break;
-                        }
-                        const uri = await vscode.window.showSaveDialog({
-                            defaultUri: this.saveDialogUri(message.filePath, message.suggestedName, 'molecule.xyz', document.uri),
-                            filters: {
-                                'XYZ Files': ['xyz'],
-                                'Gaussian Input': ['gjf'],
-                                'CIF Files': ['cif'],
-                                'VASP POSCAR': ['vasp', 'poscar', 'contcar'],
-                                'Gaussian Cube': ['cube'],
-                                'VESTA': ['vesta'],
-                                'Turbomole Coord': ['coord'],
-                                'ORCA Input': ['inp'],
-                                'MOL2': ['mol2'],
-                                'MDL Mol': ['mol'],
-                                'PDB': ['pdb'],
-                                'MOPAC': ['mop'],
-                                'ABACUS STRU': ['STRU'],
-                                'ABINIT Input': ['abi'],
-                                'CP2K Input': ['inp'],
-                                'Quantum ESPRESSO Input': ['in', 'pwi'],
-                                'LAMMPS Data': ['lmp', 'data'],
-                                'GROMACS': ['gro'],
-                                'Extended XYZ': ['xyz'],
-                                // The powder XRD panel exports a two-column
-                                // 2theta/intensity text file.
-                                'XY Data': ['xy', 'dat'],
-                                'All Files': ['*']
-                            }
-                        });
-                        if (uri) {
-                            const target = await this.resolveSaveTarget(uri, message.extension);
-                            if (!target) break;
-                            await vscode.workspace.fs.writeFile(target, new TextEncoder().encode(message.content));
-                            vscode.window.showInformationMessage('Saved: ' + target.fsPath);
-                        }
+                        await vscode.commands.executeCommand('workbench.action.files.revert');
                     } catch (e: any) {
-                        vscode.window.showErrorMessage('Save failed: ' + (e.message || e));
+                        // A host without the command still gets the reload; the
+                        // tab keeps its dot, which the user can clear by saving.
+                        try {
+                            const fresh = await this.openDocument(document.uri, new vscode.CancellationTokenSource().token);
+                            document.setContent(fresh);
+                            await reloadPage();
+                        } catch (e2: any) {
+                            vscode.window.showErrorMessage('Reload failed: ' + (e2 && e2.message ? e2.message : e2));
+                        }
                     }
                     break;
                 // A PNG snapshot travels as base64: a webview message is the
@@ -2098,6 +2452,80 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
     }
 
     /**
+     * Write what the page produced.
+     *
+     * Three callers, one write: the toolbar's Save As (a dialog with the
+     * page's own format filters), a save the editor asked for where the page
+     * chose to re-write the file it last exported (a target, no dialog), and
+     * the editor's Save As (a target the editor's own dialog chose). The
+     * written path goes back to the page, which is what makes the next Save As
+     * start beside the file just written instead of beside the file opened.
+     */
+    private async writePageContent(
+        message: { content?: unknown; extension?: unknown; suggestedName?: unknown; filePath?: unknown; targetPath?: unknown },
+        documentUri: vscode.Uri,
+        forcedTarget?: vscode.Uri
+    ): Promise<vscode.Uri | undefined> {
+        try {
+            // The page is the only sender, but content that is not text would
+            // be encoded as "[object Object]" and leave a file that no reader
+            // can open.
+            if (typeof message.content !== 'string') {
+                vscode.window.showErrorMessage('Save failed: the page sent no file content.');
+                return undefined;
+            }
+            let target = forcedTarget;
+            if (!target) {
+                // A path the page already holds from an earlier save is
+                // written as it stands: the format was chosen then, and asking
+                // again would only repeat the dialog.
+                const known = typeof message.targetPath === 'string' ? message.targetPath : '';
+                if (known) {
+                    target = vscode.Uri.file(known);
+                } else {
+                    const uri = await vscode.window.showSaveDialog({
+                        defaultUri: this.saveDialogUri(message.filePath, message.suggestedName, 'molecule.xyz', documentUri),
+                        filters: {
+                            'XYZ Files': ['xyz'],
+                            'Gaussian Input': ['gjf'],
+                            'CIF Files': ['cif'],
+                            'VASP POSCAR': ['vasp', 'poscar', 'contcar'],
+                            'Gaussian Cube': ['cube'],
+                            'VESTA': ['vesta'],
+                            'Turbomole Coord': ['coord'],
+                            'ORCA Input': ['inp'],
+                            'MOL2': ['mol2'],
+                            'MDL Mol': ['mol'],
+                            'PDB': ['pdb'],
+                            'MOPAC': ['mop'],
+                            'ABACUS STRU': ['STRU'],
+                            'ABINIT Input': ['abi'],
+                            'CP2K Input': ['inp'],
+                            'Quantum ESPRESSO Input': ['in', 'pwi'],
+                            'LAMMPS Data': ['lmp', 'data'],
+                            'GROMACS': ['gro'],
+                            'Extended XYZ': ['xyz'],
+                            // The powder XRD panel exports a two-column
+                            // 2theta/intensity text file.
+                            'XY Data': ['xy', 'dat'],
+                            'All Files': ['*']
+                        }
+                    });
+                    if (!uri) return undefined;
+                    target = await this.resolveSaveTarget(uri, message.extension);
+                    if (!target) return undefined;
+                }
+            }
+            await vscode.workspace.fs.writeFile(target, new TextEncoder().encode(message.content));
+            vscode.window.showInformationMessage('Saved: ' + target.fsPath);
+            return target;
+        } catch (e: any) {
+            vscode.window.showErrorMessage('Save failed: ' + (e && e.message ? e.message : e));
+            return undefined;
+        }
+    }
+
+    /**
      * Write the PNG the page captured.
      *
      * The page sends base64 without a data-URL prefix, because that is what a
@@ -2149,36 +2577,75 @@ export class MolecularViewerProvider implements vscode.CustomReadonlyEditorProvi
 class MolecularDocument implements vscode.CustomDocument {
     constructor(
         public readonly uri: vscode.Uri,
-        public readonly data: MolecularData,
-        public readonly frames: (LogFrame | OrcaFrame)[] = [],
-        public readonly optSteps?: OptStep[],
-        public readonly normalModes?: NormalMode[],
-        public readonly logSource?: string,
-        public readonly routes?: RouteSection[],
-        public readonly vmdPayload?: VmdPayload,
-        public readonly autoBeta: boolean = false,
-        public readonly optThresholds?: OptThresholds,
-        public readonly trajectoryFrames?: TrajectoryFramePayload[],
-        public readonly charges?: LogChargeSet[],
-        public readonly summary?: LogSummary[],
+        public data: MolecularData,
+        public frames: (LogFrame | OrcaFrame)[] = [],
+        public optSteps?: OptStep[],
+        public normalModes?: NormalMode[],
+        public logSource?: string,
+        public routes?: RouteSection[],
+        public vmdPayload?: VmdPayload,
+        public autoBeta: boolean = false,
+        public optThresholds?: OptThresholds,
+        public trajectoryFrames?: TrajectoryFramePayload[],
+        public charges?: LogChargeSet[],
+        public summary?: LogSummary[],
         /**
          * The orbitals a checkpoint carries, coefficients included. Held on the
          * document rather than on the payload: the coefficient block is a
          * scalar product of the basis size, and the page never needs it — a
          * surface arrives as a mesh (see `pumpSurfaces`).
          */
-        public readonly orbitals?: FchkOrbitals,
+        public orbitals?: FchkOrbitals,
         /** The cavity the file states, spheres included when it lists them. */
-        public readonly cavity?: SolventCavity,
+        public cavity?: SolventCavity,
         /** Energies and occupations only, for the level diagram. */
-        public readonly orbitalLevels?: OrbitalLevels,
+        public orbitalLevels?: OrbitalLevels,
         /**
          * A relaxed scan and/or an IRC path. One slot rather than two, because
          * the page draws them in the same card as the convergence charts: what
          * a file holds decides which of the three that card shows.
          */
-        public readonly pathways?: LogPathways
+        public pathways?: LogPathways,
+        /**
+         * What the page held when the window was closed with unsaved edits —
+         * the structure on screen, the electronic state and the frames that
+         * were edited. Absent unless VS Code handed a backup id back to
+         * `openCustomDocument`, in which case the page applies it instead of
+         * showing the file's first frame.
+         */
+        public restoreSession?: unknown
     ) {}
+
+    /**
+     * Take on another read of the same file, in place.
+     *
+     * A panel holds this object, not a snapshot of its fields: a revert and the
+     * external-change reload both re-read the file and then rebuild the page
+     * from the same document, so the new content has to land on the instance
+     * the panel already has.
+     */
+    setContent(other: MolecularDocument): void {
+        this.data = other.data;
+        this.frames = other.frames;
+        this.optSteps = other.optSteps;
+        this.normalModes = other.normalModes;
+        this.logSource = other.logSource;
+        this.routes = other.routes;
+        this.vmdPayload = other.vmdPayload;
+        this.autoBeta = other.autoBeta;
+        this.optThresholds = other.optThresholds;
+        this.trajectoryFrames = other.trajectoryFrames;
+        this.charges = other.charges;
+        this.summary = other.summary;
+        this.orbitals = other.orbitals;
+        this.cavity = other.cavity;
+        this.orbitalLevels = other.orbitalLevels;
+        this.pathways = other.pathways;
+        // A re-read is the file as it is now: the backup that was applied when
+        // the tab opened belongs to the previous reading and must not be put
+        // back on top of a revert or a reload.
+        this.restoreSession = undefined;
+    }
 
     dispose(): void {}
 }

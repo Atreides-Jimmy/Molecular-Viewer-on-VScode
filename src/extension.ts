@@ -6,6 +6,9 @@ import { MolecularData } from './types';
 
 export function activate(context: vscode.ExtensionContext) {
     const provider = new MolecularViewerProvider(context);
+    // The provider owns the panels' event emitter and their message bridges, so
+    // it is disposed with the extension rather than left to the process exit.
+    context.subscriptions.push(provider);
 
     context.subscriptions.push(
         vscode.window.registerCustomEditorProvider(
