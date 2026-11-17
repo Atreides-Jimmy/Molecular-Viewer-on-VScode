@@ -27,6 +27,17 @@
  * distance real chemistry produces, so a placement that is already sane comes
  * through it untouched.
  *
+ * What a centre is missing is read from its element *and its formal charge*
+ * when the caller states one (`charge` on the atom record): an anion is one
+ * bond short of its neutral valence and a cation one bond long, so `[O-]` with
+ * its single bond is complete while a neutral O with one bond gains a hydrogen.
+ * Without a stated charge the neutral empirical valence is used, exactly as
+ * before, so a structure that carries no charge information completes the way
+ * it always did. A centre whose neighbours do not all have usable coordinates
+ * is left alone and counted: a direction that cannot be read is a hydrogen
+ * that cannot be placed, and guessing one would put it on top of the atom
+ * whose position is missing.
+ *
  * Contract (the one the parsers keep): a structured result, never throws,
  * never mutates its input, no randomness — one structure always yields one
  * answer.
@@ -35,6 +46,7 @@
 import {
     empiricalBondAngle,
     empiricalBondLength,
+    empiricalChargedValence,
     empiricalValence,
     empiricalVdwRadius,
 } from './smilesTo3d';
@@ -67,6 +79,14 @@ const ANGLE_TOLERANCE_DEG = 0.02;
 const PLANAR_ANGLE_SUM_DEG = 350.0;
 const LINEAR_ANGLE_DEG = 160.0;
 const TRIGONAL_ANGLE_DEG = 115.0;
+/**
+ * How much shorter than the single bond of its own element pair a bond must be
+ * before it counts as evidence of a π centre (Å). An aromatic C–C is 0.15 Å
+ * shorter, a C–N 0.13, a C–O 0.07, a C–S 0.09; a saturated ring's bonds are the
+ * single bond itself (0.00–0.01). 0.06 separates the two without letting a
+ * strained single bond (cyclopropane, 0.03) through.
+ */
+const SHORT_BOND_MARGIN = 0.06;
 /** Direction candidates of the greedy start (deterministic Fibonacci sphere). */
 const DIRECTION_CANDIDATES = 64;
 /** Non-bonded clash: below this fraction of the van der Waals sum the hydrogen moves away. */
@@ -120,6 +140,12 @@ export interface AddHydrogensResult {
     overValent: SkippedAtomInfo[];
     /** Selected atoms of elements the empirical table does not cover. */
     unknownValence: number;
+    /**
+     * Centres left alone because a bonded neighbour has no usable coordinates:
+     * the bond direction that would place the hydrogen is unknown, and a guess
+     * would land on the atom whose position is missing.
+     */
+    unknownGeometry: number;
     /** Selected entries that were not usable indices or had no usable coordinates. */
     invalid: number;
     /** Hydrogens the structure had no room for (a non-bonded contact would have been shorter than a bond). */
@@ -151,6 +177,7 @@ export function addHydrogens(rawAtoms: unknown, rawBonds: unknown, rawSelected: 
         centres: 0,
         overValent: [],
         unknownValence: 0,
+        unknownGeometry: 0,
         invalid: 0,
         notPlaced: 0,
         truncated: false,
@@ -182,14 +209,20 @@ function placeHydrogens(rawAtoms: unknown, rawBonds: unknown, rawSelected: unkno
     const xs: number[] = new Array(n);
     const ys: number[] = new Array(n);
     const zs: number[] = new Array(n);
+    const charges: number[] = new Array(n);
     const usable: boolean[] = new Array(n);
     for (let i = 0; i < n; i++) {
-        const a = src[i] as { element?: unknown; x?: unknown; y?: unknown; z?: unknown } | null;
+        const a = src[i] as { element?: unknown; x?: unknown; y?: unknown; z?: unknown; charge?: unknown } | null;
         elements[i] = normaliseElement(a ? a.element : '');
         xs[i] = toNumber(a ? a.x : undefined);
         ys[i] = toNumber(a ? a.y : undefined);
         zs[i] = toNumber(a ? a.z : undefined);
         usable[i] = Number.isFinite(xs[i]) && Number.isFinite(ys[i]) && Number.isFinite(zs[i]);
+        // A formal charge is optional: a structure that carries none keeps the
+        // neutral completion it had before, and one that carries it is read
+        // with the valence its charge implies.
+        const charge = toNumber(a ? a.charge : undefined);
+        charges[i] = Number.isFinite(charge) ? clampCharge(charge) : 0;
     }
 
     // Adjacency and total valence from the bonds the caller already has.
@@ -236,10 +269,35 @@ function placeHydrogens(rawAtoms: unknown, rawBonds: unknown, rawSelected: unkno
             continue;
         }
         const el = elements[idx];
-        const target = empiricalValence(el);
-        if (!(target > 0)) {
+        // A neighbour whose coordinates are missing makes the centre's shape
+        // unknown: every bond direction would be read without it and the
+        // hydrogen could land where that atom belongs. Left alone and counted.
+        let neighbourMissing = false;
+        for (let k = 0; k < adj[idx].length; k++) {
+            if (!usable[adj[idx][k]]) {
+                neighbourMissing = true;
+                break;
+            }
+        }
+        if (neighbourMissing) {
+            out.unknownGeometry++;
+            continue;
+        }
+        const neutral = empiricalValence(el);
+        if (!(neutral > 0)) {
             // No empirical valence for this element: completing it would be a guess.
             out.unknownValence++;
+            continue;
+        }
+        const target = charges[idx] !== 0
+            ? empiricalChargedValence(el, charges[idx])
+            : neutral;
+        if (target < 1) {
+            // 电荷把目标价态压到 0 (F⁻、O²⁻、Cl⁻): 该中心已是完整离子, 没有氢可补;
+            // 若它还挂着键, 那是超过该离子价态的超价中心, 归到 overValent 里。
+            if (valence[idx] > 1e-9) {
+                out.overValent.push({ index: idx, element: el, valence: valence[idx], target: target });
+            }
             continue;
         }
         const v = valence[idx];
@@ -247,8 +305,8 @@ function placeHydrogens(rawAtoms: unknown, rawBonds: unknown, rawSelected: unkno
         if (hybrid === SP3) {
             // A bond list that states no order at all — PDB `CONECT`, a Gaussian
             // `connect` section — reads as a set of single bonds, and the shape
-            // of the centre is then the only evidence there is.
-            const shaped = hybridizationFromShape(idx, adj, adjOrders, el, xs, ys, zs, usable);
+            // and bond lengths of the centre are then the only evidence there is.
+            const shaped = hybridizationFromShape(idx, adj, adjOrders, el, xs, ys, zs, usable, elements);
             if (shaped >= 0) {
                 hybrid = shaped;
             }
@@ -385,9 +443,12 @@ function hybridizationOf(orders: number[], neighbourConjugated: boolean, element
  * completes it with a hydrogen the molecule does not have: a benzene CH gains
  * one, and so does an amide carbonyl carbon. The shape is the evidence those
  * files do carry — a three-coordinate carbon whose three angles make a full turn
- * is planar (sp2, three σ bonds) and a two-coordinate one at 180° is linear
- * (sp, two σ bonds) — so it is consulted only when no bond order was stated,
- * and only for carbon, the element whose deficit is counted in σ bonds.
+ * is planar (sp2, three σ bonds), a two-coordinate one at 180° is linear
+ * (sp, two σ bonds) — and for a two-coordinate centre the bond lengths decide
+ * between the two readings the angle cannot separate (an aromatic CH and a wide
+ * methylene of a large ring both sit near 120°). It is consulted only when no
+ * bond order was stated, and only for carbon, the element whose deficit is
+ * counted in σ bonds.
  *
  * Returns -1 when the shape has nothing to say, so the caller keeps the
  * order-based answer.
@@ -400,7 +461,8 @@ function hybridizationFromShape(
     xs: number[],
     ys: number[],
     zs: number[],
-    usable: boolean[]
+    usable: boolean[],
+    elements: string[]
 ): number {
     if (element !== 'C') {
         return -1;
@@ -438,9 +500,14 @@ function hybridizationFromShape(
         // A PDB refined from X-ray data carries no hydrogens at all, so an
         // aromatic carbon appears with its two ring bonds and nothing else:
         // two bonds at a trigonal angle are an sp2 centre one hydrogen short,
-        // not a methylene. A tetrahedral centre — including a small ring's
-        // methylene, whose angle is smaller still — stays below this.
-        if (angle >= TRIGONAL_ANGLE_DEG) {
+        // not a methylene. The angle alone cannot carry that verdict — a
+        // methylene of a large saturated ring (cyclooctane, 117°) is just as
+        // wide — so the *bond lengths* decide: an aromatic C–C is ~0.15 Å
+        // shorter than the single bond this engine's own table states, and a
+        // saturated ring's two bonds are the single bond. The angle stays as
+        // the second witness, so a tetrahedral centre (including a small
+        // ring's methylene, whose angle is smaller still) never passes.
+        if (angle >= TRIGONAL_ANGLE_DEG && shortHeavyBonds(centre, list, xs, ys, zs, elements)) {
             return SP2;
         }
         return -1;
@@ -450,8 +517,37 @@ function hybridizationFromShape(
     return sum >= PLANAR_ANGLE_SUM_DEG ? SP2 : -1;
 }
 
-/** True when a neighbour carries a multiple bond of its own — an amide/phosphoramide centre. */
-function neighbourConjugated(centre: number, adj: number[][], adjOrders: number[][]): boolean {
+/**
+ * The centre's bonds to heavy neighbours are all shorter than the single bond
+ * the engine's table states for their element pair — the bond-length evidence
+ * that a two-coordinate carbon is a π centre (aromatic ring, conjugated chain)
+ * and not a saturated one. Bond lengths are the only witness that separates a
+ * planar aromatic CH (1.39 Å) from a wide methylene of a large saturated ring
+ * (1.54 Å, 117°): the angles are the same.
+ *
+ * A bond to hydrogen never counts: an sp² C–H and an sp³ C–H are the same
+ * length, and a ring carbon refined from X-ray data shows only its heavy
+ * skeleton anyway. At least one heavy bond must be present to make the call.
+ */
+function shortHeavyBonds(centre: number, list: number[], xs: number[], ys: number[], zs: number[],
+                         elements: string[]): boolean {
+    let heavy = 0;
+    for (let k = 0; k < list.length; k++) {
+        const j = list[k];
+        if (elements[j] === 'H') {
+            continue;
+        }
+        const single = empiricalBondLength(elements[centre], elements[j], 1);
+        const d = Math.hypot(xs[j] - xs[centre], ys[j] - ys[centre], zs[j] - zs[centre]);
+        if (!(single - d > SHORT_BOND_MARGIN)) {
+            return false;
+        }
+        heavy += 1;
+    }
+    return heavy > 0;
+}
+
+/** True when a neighbour carries a multiple bond of its own — an amide/phosphoramide centre. */function neighbourConjugated(centre: number, adj: number[][], adjOrders: number[][]): boolean {
     for (let k = 0; k < adj[centre].length; k++) {
         const j = adj[centre][k];
         for (let m = 0; m < adj[j].length; m++) {
@@ -519,6 +615,18 @@ function hydrogenDeficit(element: string, target: number, orders: number[], hybr
         }
     }
     return best;
+}
+
+/** A formal charge is read as a whole number inside the range the table can answer. */
+function clampCharge(charge: number): number {
+    const q = Math.round(charge);
+    if (q < -4) {
+        return -4;
+    }
+    if (q > 4) {
+        return 4;
+    }
+    return q;
 }
 
 /** X–H length inside a band that keeps a corrupt table entry from breaking the view. */
@@ -1018,7 +1126,8 @@ function toIndex(value: unknown, n: number): number {
 function describe(out: AddHydrogensResult): string {
     if (out.atoms.length === 0) {
         const reasons: string[] = [];
-        if (out.centres === 0 && out.overValent.length === 0 && out.unknownValence === 0 && out.invalid === 0 && out.notPlaced === 0) {
+        if (out.centres === 0 && out.overValent.length === 0 && out.unknownValence === 0 &&
+            out.unknownGeometry === 0 && out.invalid === 0 && out.notPlaced === 0) {
             return 'Add H: nothing to complete in the selection';
         }
         if (out.notPlaced > 0) {
@@ -1029,6 +1138,9 @@ function describe(out: AddHydrogensResult): string {
         }
         if (out.unknownValence > 0) {
             reasons.push(out.unknownValence + ' atom(s) of elements with no empirical valence');
+        }
+        if (out.unknownGeometry > 0) {
+            reasons.push(out.unknownGeometry + ' atom(s) with a neighbour that has no usable coordinates');
         }
         if (out.invalid > 0) {
             reasons.push(out.invalid + ' invalid selection/coordinate entr' + (out.invalid === 1 ? 'y' : 'ies'));
@@ -1045,6 +1157,9 @@ function describe(out: AddHydrogensResult): string {
     }
     if (out.unknownValence > 0) {
         notes.push(out.unknownValence + ' skipped (no empirical valence)');
+    }
+    if (out.unknownGeometry > 0) {
+        notes.push(out.unknownGeometry + ' skipped (a neighbour has no usable coordinates)');
     }
     if (out.invalid > 0) {
         notes.push(out.invalid + ' invalid');

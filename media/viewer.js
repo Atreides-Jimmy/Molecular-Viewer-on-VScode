@@ -6908,7 +6908,11 @@ function startAddHydrogens(){
     modeInfoEl.textContent='Add H: completing '+hSel.length+' selected atom(s)...';
     vscodeApi.postMessage({
         command:'addHydrogens',
-        atoms:MD.atoms.map(function(a){return{element:isGhostAtom(a)?'X':a.element,x:a.x,y:a.y,z:a.z}}),
+        // A formal charge, when the structure has one, is what decides whether a
+        // centre is complete ([O-] with one bond) or one hydrogen short (O with
+        // one bond); it travels with the atom so the engine does not have to
+        // assume every centre is neutral.
+        atoms:MD.atoms.map(function(a){return{element:isGhostAtom(a)?'X':a.element,x:a.x,y:a.y,z:a.z,charge:(typeof a.charge==='number'?a.charge:undefined)}}),
         bonds:MD.bonds.map(function(b){return{atom1:b.atom1,atom2:b.atom2,order:b.order}}),
         selected:hSel,
         requestId:reqSeq,
@@ -7178,7 +7182,7 @@ function startCrystalAddHydrogens(){
     modeInfoEl.textContent='Add H: completing '+anchors.length+' selected site'+(anchors.length===1?'':'s')+'...';
     vscodeApi.postMessage({
         command:'addHydrogens',
-        atoms:cluster.atoms.map(function(a){return{element:a.element,x:a.x,y:a.y,z:a.z}}),
+        atoms:cluster.atoms.map(function(a){return{element:a.element,x:a.x,y:a.y,z:a.z,charge:(typeof a.charge==='number'?a.charge:undefined)}}),
         bonds:cluster.bonds.map(function(b){return{atom1:b.atom1,atom2:b.atom2,order:b.order}}),
         selected:cluster.anchors.map(function(a){return a.node}),
         requestId:reqSeq,
