@@ -30,7 +30,10 @@
  * without disturbing it — and it is also why the energy reported back is the
  * energy of the mobile subsystem's own terms: every term that involves at least
  * one mobile atom is summed, a term between two fixed atoms is omitted because
- * it cannot change and would only add a constant.
+ * it cannot change and would only add a constant. A selection that names
+ * nothing is the whole structure, in both entry points of this module; the
+ * panel refuses to send one, so the meaning only ever decides what a direct
+ * caller gets.
  *
  * The optimiser is a preconditioned conjugate-gradient descent. Each mobile
  * atom's gradient is scaled by the inverse of its own stiffness (the bond and
@@ -48,24 +51,31 @@
  * Deliberate restraints, all of them there to keep a bad or unusual input from
  * being "improved" into a worse one:
  *
- *   - an angle whose current value is more than 30 degrees off its theoretical
- *     target carries no force at all, so a strained ring (cyclopropane's 60
- *     degree internal angle) is left exactly as drawn instead of being pulled
- *     open against the bonds that hold it;
- *   - a torsion is only set up where four non-hydrogen atoms define it, so a
- *     methyl group's rotation stays free (the angle and non-bonded terms
- *     already settle it) and only a chain's backbone and a planar group's
- *     conjugation are actually restrained;
+ *   - an angle whose current value is more than 30 degrees *compressed* below
+ *     its theoretical target carries no force at all, so a strained ring
+ *     (cyclopropane's 60 degree internal angle) is left exactly as drawn
+ *     instead of being pulled open against the bonds that hold it; the window
+ *     is wider on the other side (60 degrees), because an over-wide drawing is
+ *     not a clash but something to pull back;
+ *   - a torsion is only set up where a heavy atom flanks each end of the
+ *     central bond, so a methyl group's rotation stays free (the angle and
+ *     non-bonded terms already settle it) and only a chain's backbone and a
+ *     planar group's conjugation are actually restrained — except on a bond
+ *     that carries a planarity term of its own (double, aromatic, conjugated),
+ *     where a hydrogen is a legitimate fourth atom and the only one a terminal
+ *     =CH2 or -NH2 has: dropping those dropped the alkene's and the amide's
+ *     planarity with them;
  *   - the non-bonded term is switched off smoothly over the 2 Å inside the
- *     cutoff (6 → 8 Å at the default, settable 5–12 Å) (a bare
+ *     cutoff (6 → 8 Å at the default, settable 4–14 Å) (a bare
  *     cutoff would leave a step of its energy at the boundary, and a pair
  *     crossing it would stall a line search), excludes bonded and 1-3 pairs,
  *     scales a 1-4 pair to half, and is continued by its tangent below 0.2 σ
  *     so that a pile-up of atoms stays finite while still being pushed apart;
- *     a 1-3 pair that comes inside 0.45 of its van der Waals sum is re-admitted
- *     as pure repulsion, because an angle squeezed that far sits in the angle
- *     term's capped window and two neighbours would otherwise be free to
- *     collapse onto each other;
+ *     a 1-3 pair is carried in the list whether or not it is close enough to
+ *     contribute yet, and is re-admitted as pure repulsion once it comes inside
+ *     0.45 of its van der Waals sum, because an angle squeezed that far sits in
+ *     the angle term's capped window and two neighbours would otherwise be free
+ *     to collapse onto each other;
  *   - the whole call is bounded by atom count, step count and wall-clock time.
  *
  * Contract: a structured result, never throws, never mutates its input, no
@@ -87,11 +97,22 @@ const DEFAULT_MAX_ITERATIONS = 500;
 const DEFAULT_TIME_BUDGET_MS = 5000;
 /** Convergence: largest per-atom force component, kcal/(mol·Å). */
 const DEFAULT_GRADIENT_TOL = 0.05;
+/** The convergence target a caller may ask for. A force is never exactly zero,
+ *  and a target of 1 kcal/(mol·Å) is no convergence at all — the panel's loosest
+ *  choice is 0.4, so the clamp sits a little above it. */
+const GRADIENT_TOL_MIN = 1e-4;
+const GRADIENT_TOL_MAX = 1.0;
 /** Consecutive accepted steps gaining less than this are a plateau (kcal/mol). */
 const ENERGY_PLATEAU = 1e-7;
 const PLATEAU_STEPS = 6;
 /** Largest distance one atom may travel in one accepted step (Å). */
 const MAX_STEP = 0.15;
+/** The step cap a caller may ask for (Å). Below the floor the search stalls,
+ *  above the ceiling one accepted step can tear a structure apart — the cap is
+ *  a *distance*, not a prefactor, so nothing else may scale it up (see the
+ *  line search in MmSession.iterate). */
+const MAX_STEP_MIN = 0.01;
+const MAX_STEP_MAX = 0.5;
 /** Step prefactor: starts here, grows on accepted steps, halves on rejected. */
 const LAMBDA_START = 1.0;
 const LAMBDA_MAX = 4.0;
@@ -110,6 +131,11 @@ const LINEAR_ANGLE_RAD = Math.PI - 1e-6;
 /** Non-bonded term: the pair is switched off here. Settable per run (the panel
  *  offers 5-12 Å); the default is the value every earlier release used. */
 const DEFAULT_CUTOFF = 8.0;
+/** The cutoff range a caller may ask for (Å). The pair list is built past the
+ *  cutoff whatever it is, so the range only has to stay inside a distance at
+ *  which a cell list still pays off. */
+const CUTOFF_MIN = 4.0;
+const CUTOFF_MAX = 14.0;
 /** The taper starts this far inside the cutoff, so a pair reaches zero exactly
  *  at the cutoff. Fixed width, so every cutoff keeps the same smooth shoulder. */
 const DEFAULT_TAPER_WIDTH = 2.0;
@@ -123,19 +149,20 @@ const VDW_REBUILD_DRIFT = 0.5;
 /** A 1-3 pair (two atoms sharing a neighbour) is re-admitted as pure repulsion
  *  inside this fraction of its van der Waals sum — see buildNonbondedList. The
  *  term switches OFF exactly here and reaches full strength at
- *  `CLASH_1_3_FULL`, so entering the pair list at this boundary adds no energy
- *  and no force: a bare membership test injected ~(1/0.45)^12·ε ≈ 1.1e4·ε the
- *  moment a rebuilt list happened to catch a pair just inside it.
+ *  `CLASH_1_3_FULL`, so a pair that comes into the window adds no energy and no
+ *  force at the crossing: a bare membership test injected ~(1/0.45)^12·ε ≈
+ *  1.1e4·ε the moment a rebuilt list happened to catch a pair just inside it.
  *
- *  The list window is wider than the switch so a rebuild sees the pair before
- *  it reaches the strong part of the well. */
+ *  Every 1-3 pair within the list's reach is carried, whether or not it is
+ *  close enough to contribute yet: the list is rebuilt only after an atom has
+ *  drifted half an ångström, and a membership test at build time could not know
+ *  that a pair already inside the well was about to be pushed into a clash — a
+ *  pair that was two ångströms apart when the list was built and collided
+ *  before the next rebuild had no repulsion at all, which is the one case the
+ *  guard exists for. */
 const CLASH_1_3_FRACTION = 0.45;
 /** Where the 1-3 clash term reaches full strength (fraction of σ). */
 const CLASH_1_3_FULL = 0.35;
-/** How far past the switch a 1-3 pair is still carried in the list. Beyond
- *  `CLASH_1_3_FRACTION` the term is exactly zero, so this only decides when the
- *  pair starts being watched, never what it contributes. */
-const CLASH_1_3_WINDOW = 0.6;
 /** A 1-4 pair (three bonds apart) counts at this fraction of full strength. */
 const FOURTEEN_SCALE = 0.5;
 /** σ/r ceiling: keeps a pile-up finite instead of Infinity/NaN. */
@@ -240,13 +267,13 @@ const LJ_DEFAULT = 0.10;
  * derived here from the elements and bond orders alone: every bond shifts a
  * little charge from the less electronegative atom to the more electronegative
  * one, weighted by the Pauling electronegativity difference and, lightly, by the
- * bond order, and the whole set is then shifted so the structure is neutral. No
- * formal charges are needed — a bondless ion pair simply stays neutral. The
- * interaction is a Coulomb term with a distance-dependent dielectric ε_r = r, so
- * it is short-ranged (∝ 1/r²) and needs no cut-off of its own: it rides the same
- * non-bonded pair list, the same taper, excludes bonded and 1-3 pairs and halves
- * a 1-4 pair, exactly as the Lennard-Jones term does. A tangent continuation
- * below MIN_DISTANCE_RATIO·σ keeps a pile-up finite.
+ * bond order, and an atom no bond reaches takes the formal charge of the ion it
+ * then is (see IONIC_CHARGE and computeCharges). The interaction is a Coulomb
+ * term with a distance-dependent dielectric ε_r = r, so it is short-ranged
+ * (∝ 1/r²) and needs no cut-off of its own: it rides the same non-bonded pair
+ * list, the same taper, excludes bonded and 1-3 pairs and halves a 1-4 pair,
+ * exactly as the Lennard-Jones term does. A tangent continuation below
+ * MIN_DISTANCE_RATIO·σ keeps a pile-up finite.
  */
 const COULOMB_K = 332.0637;
 const CHARGE_TRANSFER = 0.16;
@@ -258,8 +285,28 @@ const ELECTRONEGATIVITY: { [el: string]: number } = {
     Sc: 1.36, Ti: 1.54, V: 1.63, Cr: 1.66, Mn: 1.55, Fe: 1.83, Co: 1.88,
     Ni: 1.91, Cu: 1.90, Zn: 1.65, Zr: 1.33, Nb: 1.60, Mo: 2.16, Ru: 2.20,
     Rh: 2.28, Pd: 2.20, Ag: 1.93, Cd: 1.69, Pt: 2.28, Au: 2.54, Hg: 2.00,
+    Y: 1.22, Tc: 1.90, Hf: 1.30, Ta: 1.50, W: 2.36, Re: 1.90, Os: 2.20,
+    Ir: 2.20, Tl: 1.62, Pb: 2.33, Bi: 2.02, Po: 2.00,
+    La: 1.10, Ce: 1.12, Pr: 1.13, Nd: 1.14, Pm: 1.13, Sm: 1.17, Eu: 1.20,
+    Gd: 1.20, Tb: 1.20, Dy: 1.22, Ho: 1.23, Er: 1.24, Tm: 1.25, Yb: 1.10,
+    Lu: 1.27,
 };
 const ELECTRONEGATIVITY_DEFAULT = 2.20;
+
+/**
+ * The formal charge of a *bondless* atom, by element: the ion an atom with no
+ * bond in the structure can only be. Only elements that appear as an ion in
+ * practice are listed — an unbonded carbon, oxygen or noble gas is a fragment,
+ * not an ion, and keeps a charge of zero. The list is what makes a salt pair
+ * (or a lone counter-ion next to a bonded complex) carry a Coulomb term at all
+ * (see computeCharges); it never touches a bonded atom, so no structure that
+ * reads correctly today changes.
+ */
+const IONIC_CHARGE: { [el: string]: number } = {
+    Li: 1, Na: 1, K: 1, Rb: 1, Cs: 1, Fr: 1,
+    Be: 2, Mg: 2, Ca: 2, Sr: 2, Ba: 2, Ra: 2,
+    F: -1, Cl: -1, Br: -1, I: -1, At: -1,
+};
 /** Bond-order weighting of a bond's charge transfer (by classified order). */
 function chargeTransferScale(order: number): number {
     if (order >= 3) {
@@ -290,6 +337,11 @@ const POLARIZABILITY: { [el: string]: number } = {
     Sc: 17.8, Ti: 14.6, V: 12.4, Cr: 11.6, Mn: 9.4, Fe: 8.4, Co: 7.5,
     Ni: 6.8, Cu: 6.2, Zn: 5.75, Zr: 12.5, Nb: 10.8, Mo: 9.6, Ru: 8.6,
     Rh: 7.5, Pd: 6.6, Ag: 6.5, Cd: 6.4, Pt: 6.2, Au: 5.8, Hg: 5.7,
+    Y: 24.0, Tc: 9.0, Hf: 16.0, Ta: 13.1, W: 11.1, Re: 9.6, Os: 8.5,
+    Ir: 7.6, Tl: 7.6, Pb: 6.8, Bi: 7.4, Po: 6.8,
+    La: 31.1, Ce: 29.6, Pr: 28.2, Nd: 26.8, Pm: 25.6, Sm: 24.4, Eu: 23.1,
+    Gd: 22.0, Tb: 21.0, Dy: 20.0, Ho: 19.1, Er: 18.3, Tm: 17.5, Yb: 16.8,
+    Lu: 16.2,
 };
 const POLARIZABILITY_DEFAULT = 1.0;
 const POL_K = 17.24;
@@ -323,11 +375,22 @@ const HBOND_ANGLE_OFF = (120.0 * Math.PI) / 180.0;
  * approximation of the trigonal-bipyramidal ideal). The metal–ligand distances
  * are left to the ordinary bond term, which already uses the empirical target
  * this shell is measured with.
+ *
+ * The table is the whole d block, the lanthanides and the post-transition
+ * metals a structure may name as a centre (Pb, Bi), not just the first-row
+ * elements: a centre the table does not know is bent toward the generic angle
+ * default instead of its own coordination geometry, which is the one thing the
+ * coordination term exists to prevent.
  */
 const METALS: { [el: string]: boolean } = {
     Sc: true, Ti: true, V: true, Cr: true, Mn: true, Fe: true, Co: true,
-    Ni: true, Cu: true, Zn: true, Zr: true, Nb: true, Mo: true, Ru: true,
-    Rh: true, Pd: true, Ag: true, Cd: true, Pt: true, Au: true, Hg: true,
+    Ni: true, Cu: true, Zn: true, Y: true, Zr: true, Nb: true, Mo: true,
+    Tc: true, Ru: true, Rh: true, Pd: true, Ag: true, Cd: true, Hf: true,
+    Ta: true, W: true, Re: true, Os: true, Ir: true, Pt: true, Au: true,
+    Hg: true, Pb: true, Bi: true,
+    La: true, Ce: true, Pr: true, Nd: true, Pm: true, Sm: true, Eu: true,
+    Gd: true, Tb: true, Dy: true, Ho: true, Er: true, Tm: true, Yb: true,
+    Lu: true,
 };
 /** d⁸ metals that prefer a square-planar four-coordinate geometry. */
 const SQUARE_PLANAR_METALS: { [el: string]: boolean } = {
@@ -368,11 +431,14 @@ export interface MmOptimizeResult {
     energyAfter: number;
     /** Accepted geometry steps. */
     iterations: number;
-    /** Largest / RMS per-atom force at the final geometry, kcal/(mol·Å). */
+    /** Largest / RMS per-atom force at the final geometry, kcal/(mol·Å): both
+     *  are measured at the coordinates above, not recalled from an earlier
+     *  point of the search. */
     maxGrad: number;
     rmsGrad: number;
     /** Largest distance any atom travelled (Å). */
     maxMove: number;
+    /** True when the geometry above is the one that meets the force target. */
     converged: boolean;
     /** Why the run stopped: 'gradient' | 'energy' | 'iterations' | 'time' | 'step'. */
     stopReason: string;
@@ -391,9 +457,11 @@ export interface MmOptimizeOptions {
     maxIterations?: number;
     /** Wall-clock budget in ms (10–60000). */
     timeBudgetMs?: number;
-    /** Convergence: largest per-atom force component, kcal/(mol·Å). */
+    /** Convergence: largest per-atom force component, kcal/(mol·Å), 1e-4–1. */
     gradientTol?: number;
-    /** Largest distance one atom may travel in one accepted step (Å). */
+    /** Largest distance one atom may travel in one accepted step (Å), 0.01–0.5.
+     *  A distance, not a prefactor: nothing scales it up, so it is the most any
+     *  atom moves in one accepted step. */
     maxStep?: number;
     /** Include the Lennard-Jones non-bonded term (default true). */
     nonbonded?: boolean;
@@ -431,8 +499,11 @@ export interface MmPreset {
  * exactly the module's own defaults and the two others are the same knobs moved
  * together, the heavier terms switched in as the level rises:
  *
- *   low     bonds and angles only (every distance- and dihedral-dependent term
- *           off), a wide convergence target and a short budget — a rough
+ *   low     bonds and angles only — every distance-dependent term off and every
+ *           dihedral-angle term off, the out-of-plane restraint included (it is
+ *           a plane constraint, i.e. a dihedral in disguise, and leaving it on
+ *           made "bonds and angles only" a promise the run did not keep) — with
+ *           a wide convergence target and a short budget: a rough
  *           pre-optimisation before a real calculation;
  *   medium  the full geometric field — Lennard-Jones, the light Coulomb term and
  *           the hydrogen-bond term — at the module's own defaults, i.e. the
@@ -449,7 +520,7 @@ export const MM_PRESETS: MmPreset[] = [
         key: 'low',
         label: 'Low — quick pre-optimisation',
         options: {
-            nonbonded: false, torsions: false, impropers: true,
+            nonbonded: false, torsions: false, impropers: false,
             electrostatic: false, hbond: false, coordination: false, polarization: false,
             cutoff: 6,
             gradientTol: 0.4, maxIterations: 120, timeBudgetMs: 1500, maxStep: 0.30,
@@ -608,7 +679,19 @@ function sym(raw: unknown): string {
     if (s.length === 0) {
         return '';
     }
-    return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+    const el = s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+    // Deuterium and tritium are hydrogen: a structure written with D or T in
+    // place of H must bond, bend, stretch and hydrogen-bond exactly like H, and
+    // every table here would otherwise fall through to its default for a name
+    // it does not know (a D would take the generic van der Waals radius and the
+    // generic well depth, and would not even count as a hydrogen for the
+    // torsion, the donor walk or the hydrogen-bond term).
+    return el === 'D' || el === 'T' ? 'H' : el;
+}
+
+/** True for a hydrogen in any of its isotope spellings. */
+function isHydrogenElement(el: string): boolean {
+    return el === 'H' || el === 'D' || el === 'T';
 }
 
 function isFinite3(x: unknown, y: unknown, z: unknown): boolean {
@@ -675,6 +758,14 @@ function electronegativity(el: string): number {
 }
 
 function polarizabilityOf(el: string): number {
+    // A ghost atom (`X`) is a position, not a particle — the same reason its
+    // Lennard-Jones well is zero. Its polarisability is what carries the
+    // *induced-dipole* attraction, so leaving it at the table default let a
+    // counterpoise ghost pull a nearby ion towards itself through a term that
+    // has nothing to polarise.
+    if (el === 'X') {
+        return 0;
+    }
     const v = POLARIZABILITY[el];
     return v === undefined ? POLARIZABILITY_DEFAULT : v;
 }
@@ -690,8 +781,21 @@ function isMetal(el: string): boolean {
 
 /**
  * Partial charges from the elements and bond orders alone: each bond shifts a
- * little charge toward its more electronegative end, and the whole set is then
- * shifted so the structure is neutral (an ion pair with no bonds stays neutral).
+ * little charge toward its more electronegative end, and an atom the bond list
+ * does not reach at all is given the formal charge of the ion it then is.
+ *
+ * The bond transfer conserves the total by construction — every shift adds to
+ * one end exactly what it takes from the other — so a bonded structure was
+ * already neutral and the unconditional "shift everything by the mean" this
+ * used to do was dead arithmetic (a no-op on a sum that is zero). What it could
+ * not do was give an *ion* a charge: a structure whose parts the bond list does
+ * not connect (a salt written as two ions, a lone counter-ion) left every q at
+ * zero and the Coulomb term with nothing to compute. The ionic table below is
+ * what a bondless atom of an element that only ever appears as an ion is worth,
+ * and whatever that adds to the total is taken back from the bonded skeleton —
+ * so a carboxylate with a sodium reads as −1 and +1 rather than as two neutral
+ * fragments, while a set of ions with no bonds at all keeps its own formal
+ * charges (there is nothing to neutralise it against).
  */
 function computeCharges(
     elements: string[],
@@ -699,8 +803,11 @@ function computeCharges(
     n: number
 ): Float64Array {
     const q = new Float64Array(n);
+    const bonded = new Uint8Array(n);
     for (let b = 0; b < bonds.length; b++) {
         const bond = bonds[b];
+        bonded[bond.i] = 1;
+        bonded[bond.j] = 1;
         // d > 0 when the first atom is the more electronegative one, and the
         // charge moves toward it: that atom gains electron density (goes negative).
         const d = CHARGE_TRANSFER *
@@ -709,13 +816,34 @@ function computeCharges(
         q[bond.i] -= d;
         q[bond.j] += d;
     }
+    let bondedCount = 0;
+    for (let i = 0; i < n; i++) {
+        if (bonded[i] === 0) {
+            const z = IONIC_CHARGE[elements[i]];
+            if (z !== undefined) {
+                q[i] = z;
+            }
+        } else {
+            bondedCount++;
+        }
+    }
+    if (bondedCount === 0) {
+        return q;
+    }
     let sum = 0.0;
     for (let i = 0; i < n; i++) {
         sum += q[i];
     }
-    const mean = n > 0 ? sum / n : 0.0;
-    for (let i = 0; i < n; i++) {
-        q[i] -= mean;
+    // The residue can only come from the ionic assignments above (the transfers
+    // cancel exactly), and it is the bonded part of the structure that carries
+    // the counter-charge.
+    if (sum !== 0.0) {
+        const share = sum / bondedCount;
+        for (let i = 0; i < n; i++) {
+            if (bonded[i] === 1) {
+                q[i] -= share;
+            }
+        }
     }
     return q;
 }
@@ -750,8 +878,25 @@ function coordinationIdeal(el: string, cn: number): { kind: number; theta0: numb
  * centre of another element can still own a lone pair that keeps it bent
  * (SO2's 119° with two S=O bonds), and the element is the only thing that tells
  * the two cases apart here.
+ *
+ * The coordination number decides whether a double bond makes a *plane*. A
+ * centre with three or more σ-neighbours has no room for an unhybridised p
+ * orbital across the whole shell unless it is a genuine π centre, and for the
+ * elements below that is not what a "double bond" means: a sulfoxide, a
+ * phosphine oxide, a sulfone and a chlorate all carry one or more short
+ * terminal-oxygen bonds and are pyramidal, their extra bonds being dative/π*
+ * descriptions rather than a second half-bond in the plane. Reading them as sp2
+ * bent them toward 106° and — at three neighbours — added an out-of-plane term
+ * that forced the pyramid flat, which is the one thing an MM run must not do to
+ * a tetrahedral phosphorus or sulfur. So a multiple bond only reaches sp2 when
+ * the centre is two-coordinate, or three-coordinate of an element whose
+ * three-coordinate π centres really are planar.
  */
-function hybridisationOf(orders: number[], element: string): number {
+const PLANAR_SP2_ELEMENTS: { [el: string]: boolean } = {
+    B: true, C: true, N: true, O: true,
+};
+
+function hybridisationOf(orders: number[], element: string, degree: number): number {
     let max = 0;
     let multiple = 0;
     for (let i = 0; i < orders.length; i++) {
@@ -765,27 +910,76 @@ function hybridisationOf(orders: number[], element: string): number {
     if (max >= 2.5) {
         return 2;
     }
-    if (element === 'C' && multiple >= 2 && orders.length === 2) {
+    if (element === 'C' && multiple >= 2 && degree === 2) {
         return 2;
     }
     if (max >= 1.25) {
+        if (degree >= 4) {
+            return 0;
+        }
+        if (degree >= 3 && !PLANAR_SP2_ELEMENTS[element]) {
+            return 0;
+        }
         return 1;
     }
     return 0;
 }
 
-/** Index of the first neighbour of `atom` that is not `skip` (or -1). */
-function firstOtherNeighbour(nb: number[][], atom: number, skip: number): number {
+/**
+ * The lone-pair donor elements whose *three-coordinate* centre is part of the π
+ * system it hangs off: an amide, a carbamate, an aniline, a hydrazide. Their
+ * nitrogen is planar and its bond to the carbonyl or the ring is conjugated,
+ * which the bond list alone cannot say — the C–N bond is written single, so the
+ * ordinary reading gave the nitrogen the sp3 target (106.5°) and a pyramid with
+ * no out-of-plane term at all.
+ *
+ * Only nitrogen is listed. A two-coordinate oxygen's own angle is already the
+ * table's sp3 value and it never gets an out-of-plane term, so promoting it
+ * would trade a 4° error for a 15° one; a sulfur or phosphorus oxide is
+ * pyramidal (see hybridisationOf above), and promoting those would undo the
+ * rule that keeps them so.
+ */
+function isConjugatedDonor(el: string): boolean {
+    return el === 'N';
+}
+
+/**
+ * The atom that defines one end of a dihedral on the bond `atom`–`skip`: a
+ * heavy neighbour is always preferred to a hydrogen, and a hydrogen is only
+ * offered when the atom has no other neighbour at all.
+ *
+ * The old reader took the *first* neighbour that was not `skip`, so whether a
+ * torsion existed at all depended on the order the bonds happened to arrive in:
+ * an amide nitrogen whose hydrogen came first in the list lost its dihedral
+ * although a carbon was right there. The preference is what makes the answer
+ * independent of that order; the fallback is what lets a terminal =CH2 or an
+ * -NH2 be described at all (the caller takes the hydrogen only for a bond that
+ * carries a planarity term of its own).
+ */
+function torsionPartner(
+    nb: number[][],
+    isH: Uint8Array,
+    atom: number,
+    skip: number
+): { index: number; hydrogen: boolean } | null {
     const list = nb[atom];
     if (!list) {
-        return -1;
+        return null;
     }
+    let fallback = -1;
     for (let i = 0; i < list.length; i++) {
-        if (list[i] !== skip) {
-            return list[i];
+        const m = list[i];
+        if (m === skip) {
+            continue;
+        }
+        if (isH[m] === 0) {
+            return { index: m, hydrogen: false };
+        }
+        if (fallback < 0) {
+            fallback = m;
         }
     }
-    return -1;
+    return fallback >= 0 ? { index: fallback, hydrogen: true } : null;
 }
 
 /**
@@ -842,7 +1036,7 @@ function buildField(
         const el = elements[i];
         polarizability[i] = polarizabilityOf(el);
         isAcceptor[i] = isDonorAcceptorElement(el) ? 1 : 0;
-        isHydrogen[i] = el === 'H' ? 1 : 0;
+        isHydrogen[i] = isHydrogenElement(el) ? 1 : 0;
     }
     // A hydrogen bonded to exactly one N/O/F is a donor hydrogen; the donor is
     // that neighbour, which the hydrogen-bond angle window is measured through.
@@ -853,6 +1047,37 @@ function buildField(
         const list = nb[i];
         if (list.length === 1 && isDonorAcceptorElement(elements[list[0]])) {
             donorOf[i] = list[0];
+        }
+    }
+
+    // ---- hybridisation, once for every centre ----
+    // Every distance- and plane-dependent term reads this one array: the angle
+    // target, the torsion family and the out-of-plane restraint must agree on
+    // what a centre is, and reading it twice is how a 3-coordinate centre ends
+    // up with an sp2 angle and no plane (or the other way round).
+    const hyb = new Int8Array(n);
+    for (let i = 0; i < n; i++) {
+        hyb[i] = hybridisationOf(nbOrders[i], elements[i], nb[i].length);
+    }
+    // A nitrogen whose bonds are all single but which hangs off a π centre is
+    // part of that π system — an amide, a carbamate, an aniline — and is
+    // planar, with a bond to the π centre that is conjugated. The bond list says
+    // "all single", so this is the only place the resonance can show up; the
+    // bond orders themselves are not rewritten (a bond term is a distance, and
+    // the C–N length of an amide is the single-bond length it was read as).
+    for (let i = 0; i < n; i++) {
+        if (hyb[i] !== 0 || !isConjugatedDonor(elements[i])) {
+            continue;
+        }
+        const list = nb[i];
+        if (list.length < 2 || list.length > 3) {
+            continue;
+        }
+        for (let a = 0; a < list.length; a++) {
+            if (hyb[list[a]] >= 1) {
+                hyb[i] = 1;
+                break;
+            }
         }
     }
 
@@ -883,10 +1108,10 @@ function buildField(
         if (flags.coordination && isMetal(elements[c])) {
             continue;
         }
-        const hyb = hybridisationOf(nbOrders[c], elements[c]);
-        const theta0 = (empiricalBondAngle(elements[c], hyb) * Math.PI) / 180.0;
+        const h = hyb[c];
+        const theta0 = (empiricalBondAngle(elements[c], h) * Math.PI) / 180.0;
         const linear = list.length === 2 && theta0 >= LINEAR_ANGLE_RAD;
-        const k = angleForce(elements[c]) * HYBRIDISATION_ANGLE_SCALE[hyb];
+        const k = angleForce(elements[c]) * HYBRIDISATION_ANGLE_SCALE[h];
         for (let a = 0; a < list.length - 1; a++) {
             for (let b2 = a + 1; b2 < list.length; b2++) {
                 const i = list[a];
@@ -903,21 +1128,31 @@ function buildField(
     }
 
     // ---- torsion ----
-    // Only four non-hydrogen atoms define one, and a triple bond has none.
-    const isH: boolean[] = [];
-    for (let i = 0; i < n; i++) {
-        isH.push(elements[i] === 'H');
-    }
+    // A dihedral needs one flanking atom at each end of its central bond, and a
+    // triple bond has none. Both flanks are preferred to be heavy, so a methyl
+    // group's rotation stays free; a bond that carries a planarity term of its
+    // own (double, aromatic, conjugated) takes a hydrogen when that is all an
+    // end has, because a terminal =CH2 and an -NH2 on a ring have no other
+    // fourth atom and dropping their dihedral drops the planarity with it.
     for (let b = 0; flags.torsions && b < bonds.length; b++) {
         const bond = bonds[b];
         const j = bond.i;
         const k = bond.j;
-        if (bond.order >= 2.5 || isH[j] || isH[k]) {
+        if (bond.order >= 2.5 || isHydrogen[j] === 1 || isHydrogen[k] === 1) {
             continue;
         }
-        const na = firstOtherNeighbour(nb, j, k);
-        const nc = firstOtherNeighbour(nb, k, j);
-        if (na < 0 || nc < 0 || isH[na] || isH[nc]) {
+        const endA = torsionPartner(nb, isHydrogen, j, k);
+        const endC = torsionPartner(nb, isHydrogen, k, j);
+        if (!endA || !endC) {
+            continue;
+        }
+        const na = endA.index;
+        const nc = endC.index;
+        if (na === nc) {
+            // A three-membered ring: both flanks are its third atom, so the two
+            // plane normals are parallel and the dihedral is a constant — a
+            // term that can never do work, but would add a constant to the
+            // energy (and a bogus entry to the term count).
             continue;
         }
         // A dihedral's energy depends on all four of its atoms, so a term is
@@ -927,8 +1162,8 @@ function buildField(
         if (!mobile[na] && !mobile[j] && !mobile[k] && !mobile[nc]) {
             continue;
         }
-        const hybJ = hybridisationOf(nbOrders[j], elements[j]);
-        const hybK = hybridisationOf(nbOrders[k], elements[k]);
+        const hybJ = hyb[j];
+        const hybK = hyb[k];
         let terms: TorsionTerm | null = null;
         if (bond.order >= 1.75) {
             // A double bond: two-fold, so both cis and trans are minima — the
@@ -943,9 +1178,16 @@ function buildField(
             continue;
         } else if (hybJ === 1 || hybK === 1) {
             // A single bond touching an sp2 centre: conjugated, prefers planar
-            // (this is what keeps a vinyl or a biphenyl group coplanar).
+            // (this is what keeps a vinyl, a biphenyl or an amide group
+            // coplanar).
             terms = { i: na, j: j, k: k, l: nc, n: 2, phase: 0, v: CONJUGATED_TORSION_BARRIER };
         } else {
+            if (endA.hydrogen || endC.hydrogen) {
+                // A plain three-fold torsion with a hydrogen at one end is a
+                // methyl (or -OH, -NH2) rotation: left free on purpose, the
+                // angle and non-bonded terms already settle it.
+                continue;
+            }
             const v = 0.5 * (torsionBarrier(elements[j]) + torsionBarrier(elements[k]));
             terms = { i: na, j: j, k: k, l: nc, n: 3, phase: Math.PI / 3.0, v: v };
         }
@@ -961,7 +1203,7 @@ function buildField(
         if (list.length !== 3) {
             continue;
         }
-        if (hybridisationOf(nbOrders[c], elements[c]) !== 1) {
+        if (hyb[c] !== 1) {
             continue;
         }
         const i = list[0];
@@ -1011,7 +1253,8 @@ function buildField(
     // the same exclusions.
     const anyDistance = flags.nonbonded || flags.electrostatic || flags.hbond || flags.polarization;
     const nonbondedOut = anyDistance
-        ? buildNonbondedList(x, y, z, elements, nb, mobile, n, settings.listCutoff)
+        ? buildNonbondedList(x, y, z, elements, nb, mobile, n, settings.listCutoff,
+            flags.hbond ? donorOf : null)
         : [];
 
     return {
@@ -1064,8 +1307,17 @@ function pairRelation(nb: number[][], bonded: Set<number>[], i: number, j: numbe
 /**
  * Every non-bonded pair within `listCutoff` (the run's cutoff plus the buffer
  * that keeps the list valid between rebuilds) that involves a mobile atom,
- * with the 1-4 pair scale already folded into its strength. Bonded and 1-3
- * pairs are skipped (their chemistry is carried by the bond and angle terms).
+ * with the 1-4 pair scale already folded into its strength. Bonded pairs are
+ * skipped (their chemistry is carried by the bond term) and 1-3 pairs are
+ * carried as a pure-repulsion guard (see CLASH_1_3_FRACTION).
+ *
+ * A pair is also live when neither of its two atoms may move but a hydrogen
+ * bond reaches it: the D–H···A term is a three-atom term, and its energy moves
+ * with the donor even when the hydrogen and the acceptor are both fixed. The
+ * pair list only held pairs with a mobile end, so a run that was given just the
+ * donor had no hydrogen-bond term at all — the plain Lennard-Jones pair then
+ * pushed the hydrogen away from its partner instead of holding it in the well,
+ * which is how a partial optimisation could tear a hydrogen bond apart.
  */
 function buildNonbondedList(
     x: Float64Array,
@@ -1075,7 +1327,8 @@ function buildNonbondedList(
     nb: number[][],
     mobile: boolean[],
     n: number,
-    listCutoff: number
+    listCutoff: number,
+    donorOf: Int32Array | null
 ): NonbondedTerm[] {
     const bonded: Set<number>[] = [];
     for (let i = 0; i < n; i++) {
@@ -1153,24 +1406,21 @@ function buildNonbondedList(
                         const epsilon = Math.sqrt(ljEpsilon(elements[i]) * ljEpsilon(elements[j]));
                         const sigma = empiricalVdwRadius(elements[i]) + empiricalVdwRadius(elements[j]);
                         if (rel === 1) {
-                            // A 1-3 pair is carried by its angle term and normally
-                            // excluded — but not at clash range: an angle squeezed
-                            // past the point where no exclusion can be physical
-                            // (a hydrogen pushed onto its neighbour's hydrogen by a
-                            // drag, say) would otherwise sit in the angle term's
-                            // capped, force-free window and could collapse onto the
-                            // atom. Inside this fraction of the van der Waals sum the
-                            // pair comes back as pure repulsion, which can only ever
-                            // push the two apart.
-                            //
-                            // The window is deliberately wider than the switch in
-                            // the energy below: a pair enters the list where its
-                            // contribution is already zero, so a rebuilt list can
-                            // never add a finite jump at the moment it is rebuilt.
-                            const r = Math.sqrt(rx * rx + ry * ry + rz * rz);
-                            if (!(r < CLASH_1_3_WINDOW * sigma)) {
-                                continue;
-                            }
+                            // A 1-3 pair is carried by its angle term, and the
+                            // angle term has a window in which it exerts no
+                            // force at all (a strained ring is left as drawn) —
+                            // so an angle squeezed past the point where no
+                            // exclusion can be physical (a hydrogen pushed onto
+                            // its neighbour's hydrogen by a drag, say) would sit
+                            // in exactly the force-free window and the two atoms
+                            // would be free to collapse onto each other. Every
+                            // such pair is therefore carried as pure repulsion,
+                            // whether or not it is close enough to contribute
+                            // yet: what it contributes is decided by the smooth
+                            // switch in the energy (zero above `off`, full
+                            // strength below `on`), so carrying a distant pair
+                            // adds nothing, and carrying a near one can only push
+                            // the two apart.
                             out.push({ i: i, j: j, epsilon: epsilon, sigma: sigma, scale: 1.0, repulsionOnly: true });
                             continue;
                         }
@@ -1181,6 +1431,74 @@ function buildNonbondedList(
                             sigma: sigma,
                             scale: rel === 2 ? FOURTEEN_SCALE : 1.0,
                         });
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- pairs a hydrogen bond needs but no mobile atom owns ----
+    // The D–H···A term depends on three atoms, so it is live as soon as the
+    // *donor* may move even when the hydrogen and the acceptor are both fixed.
+    // Those pairs are added by a second sweep rather than by widening the first
+    // one: the first sweep's rule (a pair belongs to its lower mobile end) is
+    // what every other term's ordering depends on, and a pair added here has
+    // neither end mobile, so the two sweeps cannot overlap.
+    if (donorOf !== null) {
+        for (let h = 0; h < n; h++) {
+            if (mobile[h] || donorOf[h] < 0 || !mobile[donorOf[h]]) {
+                continue;
+            }
+            const cx = cellOf[h * 3];
+            const cy = cellOf[h * 3 + 1];
+            const cz = cellOf[h * 3 + 2];
+            for (let dx = -1; dx <= 1; dx++) {
+                for (let dy = -1; dy <= 1; dy++) {
+                    for (let dz = -1; dz <= 1; dz++) {
+                        const key = (cx + dx) + ',' + (cy + dy) + ',' + (cz + dz);
+                        const bucket = cells.get(key);
+                        if (!bucket) {
+                            continue;
+                        }
+                        for (let q = 0; q < bucket.length; q++) {
+                            const a = bucket[q];
+                            if (a === h || mobile[a] || !isDonorAcceptorElement(elements[a])) {
+                                // Only a pair the hydrogen bond itself can use is
+                                // worth carrying: an H···H pair with no acceptor
+                                // in it would add the pair's own Lennard-Jones
+                                // between two fixed atoms — an energy that cannot
+                                // move and that the module's accounting
+                                // deliberately leaves out.
+                                continue;
+                            }
+                            const rx = x[h] - x[a];
+                            const ry = y[h] - y[a];
+                            const rz = z[h] - z[a];
+                            if (rx * rx + ry * ry + rz * rz > cut2) {
+                                continue;
+                            }
+                            const rel = pairRelation(nb, bonded, h, a);
+                            if (rel < 2) {
+                                // Bonded or 1-3: the first sweep already carries
+                                // whatever such a pair is worth, and a hydrogen
+                                // bond across one bond is not a contact.
+                                continue;
+                            }
+                            // The pair carries the plain Lennard-Jones and Coulomb
+                            // terms as well as the well it enables. Those two do
+                            // not move with the donor — they are a constant of
+                            // this run, present in `energyBefore` and
+                            // `energyAfter` alike — while the well, whose value
+                            // the reported difference turns on, could not exist
+                            // without the pair.
+                            out.push({
+                                i: h,
+                                j: a,
+                                epsilon: Math.sqrt(ljEpsilon(elements[h]) * ljEpsilon(elements[a])),
+                                sigma: empiricalVdwRadius(elements[h]) + empiricalVdwRadius(elements[a]),
+                                scale: rel === 2 ? FOURTEEN_SCALE : 1.0,
+                            });
+                        }
                     }
                 }
             }
@@ -1708,8 +2026,15 @@ function evaluate(
                         const rho = HBOND_R0 / r;
                         const rho10 = Math.pow(rho, 10);
                         const wellShape = 5.0 * rho10 * rho * rho - 6.0 * rho10;
-                        const well = term.scale * HBOND_EPSILON * wellShape * switchValue;
-                        const dWell = term.scale * HBOND_EPSILON *
+                        // The well replaces the pair's Lennard-Jones inside the
+                        // window; the 1-4 half-scale belongs to the Lennard-Jones
+                        // part of that exchange (it is what the blend subtracts),
+                        // not to the hydrogen bond itself — a contact that meets
+                        // the distance *and* angle window is the same well
+                        // whether its two atoms are three bonds apart or none,
+                        // and halving it only made such a bond easier to break.
+                        const well = HBOND_EPSILON * wellShape * switchValue;
+                        const dWell = HBOND_EPSILON *
                             ((60.0 * HBOND_R0 * (rho10 / rho - rho10 * rho)) / (r * r) * switchValue +
                                 wellShape * dSwitch);
                         const c = well - ljContribution;
@@ -1834,7 +2159,10 @@ function readInput(rawAtoms: unknown, rawBonds: unknown, rawSelected: unknown): 
         seen.add(idx);
         selected.push(idx);
     }
-    return { n: n, elements: elements, x: x, y: y, z: z, bonds: bonds, selected: selected, invalid: invalid };
+    return {
+        n: n, elements: elements, x: x, y: y, z: z, bonds: bonds,
+        selected: selected, invalid: invalid, usable: usable,
+    };
 }
 
 /** Result of a single-point evaluation (the force field's public access). */
@@ -1877,12 +2205,12 @@ function readOptions(rawOptions: unknown): MMResolvedOptions {
         'nonbonded' | 'torsions' | 'impropers' | 'electrostatic' | 'hbond' |
         'coordination' | 'polarization'): unknown =>
         o[key] !== undefined ? o[key] : base[key];
-    const cutoff = num(pick('cutoff'), DEFAULT_CUTOFF, 4, 14);
+    const cutoff = num(pick('cutoff'), DEFAULT_CUTOFF, CUTOFF_MIN, CUTOFF_MAX);
     return {
         maxIterations: Math.trunc(num(pick('maxIterations'), DEFAULT_MAX_ITERATIONS, 1, 100000)),
         timeBudgetMs: num(pick('timeBudgetMs'), DEFAULT_TIME_BUDGET_MS, 10, 60000),
-        gradientTol: num(pick('gradientTol'), DEFAULT_GRADIENT_TOL, 1e-6, 1000),
-        maxStep: num(pick('maxStep'), MAX_STEP, 0.005, 2.0),
+        gradientTol: num(pick('gradientTol'), DEFAULT_GRADIENT_TOL, GRADIENT_TOL_MIN, GRADIENT_TOL_MAX),
+        maxStep: num(pick('maxStep'), MAX_STEP, MAX_STEP_MIN, MAX_STEP_MAX),
         cutoff: cutoff,
         taperStart: cutoff - DEFAULT_TAPER_WIDTH,
         listCutoff: cutoff + LIST_BUFFER,
@@ -2015,6 +2343,8 @@ interface MmInput {
     bonds: { i: number; j: number; order: number }[];
     selected: number[];
     invalid: number;
+    /** Per atom: it has finite coordinates, so it can be named or moved. */
+    usable: boolean[];
 }
 
 /** The working geometry and the buffers one search pass writes. */
@@ -2117,6 +2447,11 @@ export class MmSession {
     private bestEnergy: number;
     private bestMaxForce = 0.0;
     private bestRmsForce = 0.0;
+    /** True while the three readings above were measured at exactly `best*`
+     *  against the pair list in hand (see measureBest). A rebuild of the pair
+     *  list clears it: the numbers are then still the ones that were measured,
+     *  but no longer the numbers this geometry has now. */
+    private bestMeasured = false;
 
     constructor(input: MmInput, settings: MMResolvedOptions) {
         const n = input.n;
@@ -2191,6 +2526,7 @@ export class MmSession {
         this.bestEnergy = this.energy;
         this.bestMaxForce = this.maxForce;
         this.bestRmsForce = this.rmsForce;
+        this.bestMeasured = true;
         this.pushPoint();
     }
 
@@ -2295,7 +2631,7 @@ export class MmSession {
         if (this.pauseStarted === 0) {
             this.pauseStarted = Date.now();
         }
-        this.adoptBestGeometry();
+        this.measureBest(false);
     }
 
     /**
@@ -2306,10 +2642,18 @@ export class MmSession {
      * this geometry would compare an energy against a basis it never had. The
      * force reading is taken at the adopted point, so the numbers quoted by a
      * pause are the numbers the next step starts from.
+     *
+     * `whenFinished` is what tells the two callers apart. A pause is about a run
+     * that will go on, so a run that has already stopped is left alone. An
+     * answer is not: it has to quote the numbers of the geometry it returns
+     * whatever state the run is in, and a stored reading taken against a pair
+     * list that has since been rebuilt is how one answer came to describe two
+     * structures — an energy measured before a rebuild beside forces measured
+     * after it, and both beside coordinates nothing had re-read.
      */
-    private adoptBestGeometry(): void {
+    private measureBest(whenFinished: boolean): void {
         const n = this.atomCount;
-        if (this.done || this.isEmptyField()) {
+        if (this.isEmptyField() || (this.done && !whenFinished)) {
             return;
         }
         const x = this.work.x;
@@ -2322,19 +2666,24 @@ export class MmSession {
                 break;
             }
         }
-        if (!moved) {
+        if (!moved && this.bestMeasured) {
+            // Already on the reported geometry, measured against the list in
+            // hand: re-doing it would only recompute the same numbers.
             return;
         }
-        for (let i = 0; i < n; i++) {
-            x[i] = this.bestX[i];
-            y[i] = this.bestY[i];
-            z[i] = this.bestZ[i];
+        if (moved) {
+            for (let i = 0; i < n; i++) {
+                x[i] = this.bestX[i];
+                y[i] = this.bestY[i];
+                z[i] = this.bestZ[i];
+            }
         }
         if (this.settings.flags.nonbonded || this.settings.flags.electrostatic ||
             this.settings.flags.hbond || this.settings.flags.polarization) {
             this.field.nonbonded = buildNonbondedList(
                 x, y, z, this.elements, buildNeighbourLists(this.bonds, n), this.mobile, n,
-                this.settings.listCutoff);
+                this.settings.listCutoff,
+                this.field.modes.hbond ? this.field.donorOf : null);
             this.field.counts.nonbonded = this.field.nonbonded.length;
             this.work.drift.fill(0.0);
         }
@@ -2347,6 +2696,7 @@ export class MmSession {
         this.bestEnergy = this.energy;
         this.bestMaxForce = this.maxForce;
         this.bestRmsForce = this.rmsForce;
+        this.bestMeasured = true;
         this.lastEnergy = this.energy;
         this.plateau = 0;
     }
@@ -2382,16 +2732,31 @@ export class MmSession {
             this.iterate();
             used++;
         }
+        // Whatever is reported below is one measurement of one geometry: a
+        // chunk is read as "where the run stands", so an energy taken before a
+        // pair-list rebuild must not be posted beside coordinates read after it.
+        this.measureBest(true);
         return {
             step: this.iterations,
             energy: this.bestEnergy,
             maxGrad: this.bestMaxForce,
             rmsGrad: this.bestRmsForce,
             done: this.done,
-            converged: this.converged,
+            converged: this.isConverged(),
             stopReason: this.stopReason,
             coords: this.coords(),
         };
+    }
+
+    /**
+     * True when the run stopped on the force target *and* the geometry it
+     * reports is the one that meets it. The two used to be read separately: the
+     * flag came from the point the search stood on when it stopped, the force
+     * from the best geometry it had seen — and a rebuild between the two left an
+     * answer that said "converged" beside a force above the tolerance.
+     */
+    private isConverged(): boolean {
+        return this.converged && this.bestMaxForce <= this.settings.gradientTol;
     }
 
     /**
@@ -2507,7 +2872,15 @@ export class MmSession {
                 scaledMax = len;
             }
         }
-        const trustScale = scaledMax > this.settings.maxStep ? this.settings.maxStep / scaledMax : 1.0;
+        // The largest prefactor the cap still allows. It is a property of the
+        // direction, not of the attempt, so it is computed once here — and it is
+        // what keeps the step cap a *distance*: the prefactor grows on accepted
+        // steps (up to LAMBDA_MAX) and the cap is the one number that may not be
+        // exceeded, so the factor is clamped by the cap rather than multiplied
+        // into it. Taking the cap as a trust radius and then scaling by the
+        // prefactor allowed a step of up to 4 × maxStep — 0.6 Å an atom at the
+        // default, which is a different molecule.
+        const maxFactor = scaledMax > 0.0 ? this.settings.maxStep / scaledMax : 1.0;
 
         // A trial step: the preconditioned descent direction inside that trust
         // radius, line-searched by halving until the energy actually drops.
@@ -2518,14 +2891,16 @@ export class MmSession {
                 trialY[i] = y[i];
                 trialZ[i] = z[i];
             }
+            // The prefactor the line search is currently on, held inside the cap.
+            const factor = work.lambda < maxFactor ? work.lambda : maxFactor;
             let moved = 0.0;
             for (let i = 0; i < n; i++) {
                 if (!mobile[i]) {
                     continue;
                 }
-                const dx = -work.lambda * trustScale * precondition[i] * dirX[i];
-                const dy = -work.lambda * trustScale * precondition[i] * dirY[i];
-                const dz = -work.lambda * trustScale * precondition[i] * dirZ[i];
+                const dx = -factor * precondition[i] * dirX[i];
+                const dy = -factor * precondition[i] * dirY[i];
+                const dz = -factor * precondition[i] * dirZ[i];
                 trialX[i] = x[i] + dx;
                 trialY[i] = y[i] + dy;
                 trialZ[i] = z[i] + dz;
@@ -2604,9 +2979,13 @@ export class MmSession {
         const anyDistance = this.settings.flags.nonbonded || this.settings.flags.electrostatic ||
             this.settings.flags.hbond || this.settings.flags.polarization;
         if (anyDistance && driftMax >= VDW_REBUILD_DRIFT) {
+            // The list about to be replaced is the basis of the numbers on
+            // record, so they stop describing this geometry the moment it goes.
+            this.bestMeasured = false;
             field.nonbonded = buildNonbondedList(
                 x, y, z, this.elements, buildNeighbourLists(this.bonds, n), mobile, n,
-                this.settings.listCutoff);
+                this.settings.listCutoff,
+                field.modes.hbond ? field.donorOf : null);
             field.counts.nonbonded = field.nonbonded.length;
             for (let i = 0; i < n; i++) {
                 drift[i] = 0.0;
@@ -2638,6 +3017,10 @@ export class MmSession {
                 this.bestY[i] = y[i];
                 this.bestZ[i] = z[i];
             }
+            // Measured here, at exactly these coordinates, against the list in
+            // hand: this is the one place the answer's numbers are refreshed
+            // without a re-evaluation.
+            this.bestMeasured = true;
         }
 
         // A converging run keeps gaining less and less; stop when the gain has
@@ -2659,11 +3042,19 @@ export class MmSession {
      * The complete answer, valid at any time — after convergence, after a budget
      * ran out, or halfway through (which is what a pause reports). The geometry
      * returned is the lowest-energy geometry the run accepted (the input when
-     * nothing improved on it), together with the force reading taken at that
-     * same geometry — so paused and completed answers can never describe two
+     * nothing improved on it), together with the energy, the forces and the
+     * convergence state *measured at that geometry with the pair list it has
+     * now* — so an answer, a pause and a progress chunk can never describe two
      * different structures.
      */
     finish(): MmOptimizeResult {
+        // The numbers are re-read here rather than recalled: the stored reading
+        // is only valid against the pair list it was taken with, and a rebuild
+        // between the last accepted step and this call leaves it describing a
+        // geometry the answer no longer stands on. This is cheap when nothing
+        // changed (measureBest is a no-op while the reading is current) and it
+        // is the whole of the guarantee above when something did.
+        this.measureBest(true);
         const indices: number[] = [];
         const coords: number[][] = [];
         let maxMove = 0.0;
@@ -2683,8 +3074,9 @@ export class MmSession {
             }
         }
         const energy = this.bestEnergy;
+        const converged = this.isConverged();
         const stopText: { [key: string]: string } = {
-            gradient: 'converged',
+            gradient: converged ? 'converged' : 'force target met at an earlier point',
             energy: 'energy converged',
             iterations: 'step budget reached',
             time: 'time budget reached',
@@ -2706,7 +3098,7 @@ export class MmSession {
             maxGrad: this.bestMaxForce,
             rmsGrad: this.bestRmsForce,
             maxMove: maxMove,
-            converged: this.converged,
+            converged: converged,
             stopReason: this.stopReason,
             counts: this.field.counts,
             invalid: this.invalidCount,
@@ -2752,8 +3144,22 @@ export function beginOptimization(
         return { session: null, result: refused };
     }
     if (input.selected.length === 0) {
-        refused.message = 'Molecular Mechanics: select at least one atom to optimise';
-        return { session: null, result: refused };
+        // An empty selection is the whole structure — the same statement
+        // `evaluateForceField` reads it as, and the only meaning that keeps the
+        // two entry points of one module saying the same thing about the same
+        // argument (this one used to refuse what the other one accepted, so
+        // "no selection" was either "everything" or "nothing" depending on which
+        // function a caller happened to reach for). The panel never gets here:
+        // it asks for a selection before it starts a run.
+        for (let i = 0; i < n; i++) {
+            if (input.usable[i]) {
+                input.selected.push(i);
+            }
+        }
+        if (input.selected.length === 0) {
+            refused.message = 'Molecular Mechanics: no atom of the structure has coordinates';
+            return { session: null, result: refused };
+        }
     }
     if (input.selected.length > MAX_MOBILE_ATOMS) {
         refused.message = 'Molecular Mechanics: ' + input.selected.length +
@@ -2844,22 +3250,38 @@ export function describeForceField(): MmFieldDescription {
     const kC = bondK(1.912, 1.912, 1.20);
     const angleLow = Math.min(ANGLE_FORCE.H, ANGLE_FORCE.Si) * HYBRIDISATION_ANGLE_SCALE[0];
     const angleHigh = Math.max(ANGLE_FORCE.O, ANGLE_FORCE.N) * HYBRIDISATION_ANGLE_SCALE[2];
+    // Every number below is read off the constant it describes, so the panel
+    // cannot print a window, a cutoff or a barrier the optimiser does not use:
+    // the text and the code drifting apart is what the sentence is for.
+    const barrierLow = Math.min(...Object.keys(TORSION_BARRIER).map((e) => TORSION_BARRIER[e]));
+    const barrierHigh = Math.max(DOUBLE_TORSION_BARRIER, AROMATIC_TORSION_BARRIER);
+    const epsLow = Math.min(...Object.keys(LJ_EPSILON).map((e) => LJ_EPSILON[e]));
+    const epsHigh = Math.max(...Object.keys(LJ_EPSILON).map((e) => LJ_EPSILON[e]));
+    const compressedDeg = Math.round((ANGLE_CAP_COMPRESSED_RAD * 180.0) / Math.PI);
+    const openDeg = Math.round((ANGLE_CAP_OPEN_RAD * 180.0) / Math.PI);
     const dflt = ' (default)';
     return {
         name: FF_NAME,
         lines: [
             'Bond stretch k = ' + CHARGE_K.toFixed(2) + '·Z₁Z₂/r₀³ ≈ ' + Math.round(kLow) + '–' +
             Math.round(kHigh) + ' kcal/(mol·Å²) (' + Math.round(kC) + ' for C=C); angle bend towards the ' +
-            'element\'s sp/sp²/sp³ target (k = ' + Math.round(angleLow) + '–' + Math.round(angleHigh) +
-            ' kcal/(mol·rad²), no force beyond 30° off)',
-            'Torsion 3-fold staggered / 2-fold planar (V = 0.4–8), improper at three-coordinate sp² ' +
-            'centres, Lennard-Jones σ = the van der Waals radii, ε = 0.044–0.21 kcal/mol, switched off ' +
-            'between ' + (DEFAULT_CUTOFF - DEFAULT_TAPER_WIDTH).toFixed(1) + ' and ' +
-            DEFAULT_CUTOFF.toFixed(1) + ' Å at the default cutoff (settable, 5–12 Å)',
+            'element\'s sp³/sp²/sp target by coordination number (k = ' + Math.round(angleLow) + '–' +
+            Math.round(angleHigh) + ' kcal/(mol·rad²); no force when compressed more than ' + compressedDeg +
+            '° below the target, or opened more than ' + openDeg + '° above it)',
+            'Torsion 3-fold staggered / 2-fold planar (V = ' + barrierLow + '–' + barrierHigh +
+            '), improper at three-coordinate sp² centres and at a conjugated N, Lennard-Jones σ = the sum ' +
+            'of the van der Waals radii, ε = ' + epsLow + '–' + epsHigh + ' kcal/mol, tapered over the ' +
+            DEFAULT_TAPER_WIDTH.toFixed(1) + ' Å inside the cutoff (switched off between ' +
+            (DEFAULT_CUTOFF - DEFAULT_TAPER_WIDTH).toFixed(1) + ' and ' + DEFAULT_CUTOFF.toFixed(1) +
+            ' Å at the default cutoff, settable ' + CUTOFF_MIN.toFixed(0) + '–' + CUTOFF_MAX.toFixed(0) +
+            ' Å); bonded pairs excluded, a 1-4 pair at half strength, a 1-3 pair re-admitted as pure ' +
+            'repulsion below ' + CLASH_1_3_FRACTION.toFixed(2) + ' σ',
             'Light electrostatics: partial charges from the Pauling electronegativity difference ' +
-            '(weighted by bond order, neutralised per structure), Coulomb with a distance-dependent ' +
-            'dielectric εᵣ = r; hydrogen bond: a 10-12 well over a donor–H···acceptor contact ' +
-            '(N/O/F) inside ≈1.6–2.8 Å and a D–H···A window of ≈120°–150°',
+            '(weighted by bond order; a bondless ion keeps its formal charge), Coulomb with a ' +
+            'distance-dependent dielectric εᵣ = r; hydrogen bond: a 10-12 well over a donor–H···acceptor ' +
+            'contact (N/O/F) inside ≈' + HBOND_DIST_ON.toFixed(1) + '–' + HBOND_DIST_OFF.toFixed(1) +
+            ' Å and a D–H···A window of ≈' + Math.round((HBOND_ANGLE_OFF * 180.0) / Math.PI) + '°–' +
+            Math.round((HBOND_ANGLE_ON * 180.0) / Math.PI) + '°',
             'Metal coordination (high): ligand–metal–ligand angles toward the ideal geometry of the ' +
             'metal\'s coordination number; polarisation (high): a damped induced-dipole attraction ∝ 1/r⁴',
             'Restrained optimisation: only the selected atoms move, but every fixed atom still pulls on ' +
