@@ -171,8 +171,9 @@ export class MolecularViewerProvider implements vscode.CustomEditorProvider<Mole
     /**
      * Fired once per edit the page makes, so the editor knows the document is
      * modified, offers the close prompt, and routes its own Undo/Redo commands
-     * back into the page's history. The page keeps the undo stack; the two
-     * callbacks are how the editor's commands reach it.
+     * back into the page's history. The page keeps that history — the undo
+     * stack plus the redo stack its undo steps fill; the two callbacks are how
+     * the editor's commands reach it.
      */
     readonly onDidChangeCustomDocument = this.changeEmitter.event;
 

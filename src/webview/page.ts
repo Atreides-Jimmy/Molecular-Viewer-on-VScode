@@ -548,6 +548,7 @@ ${viewerCss.trimEnd()}
 <button class="tbtn" id="beta-btn">Color by Beta</button>
 <button class="tbtn" id="egg-btn">Eggs</button>
 <button class="tbtn" id="undo-btn" disabled>Undo</button>
+<button class="tbtn" id="redo-btn" disabled>Redo</button>
 <button class="tbtn" id="save-btn">Save As</button>
 <button class="tbtn" id="snap-btn">PNG</button>
 <button class="tbtn" id="reset-btn">Reset View</button>

@@ -269,15 +269,7 @@ function crystalUseDeclaredSymmetry(){
     if(vibActive||vibPaused)stopVibration();
     if(moveDragActive||moveKeyActive||fragRotActive)stopMoveSession();
     if(bakeActive)endBakeSession();
-    pushUndo({
-        ops:CRY.symmetryOps.slice(),
-        source:CRY.symmetrySource,
-        asymAtoms:JSON.parse(JSON.stringify(CRY.asymAtoms||[])),
-        fileBonds:CRY.fileBonds?JSON.parse(JSON.stringify(CRY.fileBonds)):undefined,
-        bondsDetected:!!CRY.bondsDetected,
-        check:CRY.symmetryCheck,
-        alternative:CRY.symmetryAlternative
-    });
+    pushUndo(captureSymmetryState());
     CRY.baseAtoms=alt.baseAtoms;
     CRY.asymAtoms=alt.asymAtoms;
     CRY.symmetryOps=alt.ops;
@@ -4332,6 +4324,11 @@ var currentMode='view';
 var panelMinState={crystal:false,egg:false,view:false,bake:false,select:false,neigh:false,rotate:false,xrd:false,cav:false};
 var selectedAtoms=[];
 var originalCoords=null;
+// The snapshot a measurement dialog pushed when it opened. Its Cancel and its
+// untouched OK drop *that* snapshot, not whatever happens to be newest by then:
+// an Import reply can land while the dialog is open and push an edit of its own
+// on top, and that edit must keep its step.
+var originalSnap=null;
 var modalCallback=null;
 
 // ===== Move Atoms mode interactions =====
@@ -4563,7 +4560,7 @@ function endMoveDrag(){
     moveDragActive=false;
     moveDragOrig=null;
     // A Ctrl+click without any displacement pushes a redundant snapshot — drop it.
-    if(!moveDragMoved&&undoStack.length>0){undoStack.pop();updateUndoBtn()}
+    if(!moveDragMoved)dropUndoSnapshot()
     // Re-detect connectivity once on release (not per frame during the drag).
     if(moveDragMoved){provMark('translate',1);refreshMovedBondsAndMeshes();}
     else refreshVmdSurfaces();
@@ -4574,7 +4571,7 @@ function endFragRot(){
     if(!fragRotActive)return;
     fragRotActive=false;
     // A Ctrl+click without any rotation pushes a redundant snapshot — drop it.
-    if(!fragRotMoved&&undoStack.length>0){undoStack.pop();updateUndoBtn()}
+    if(!fragRotMoved)dropUndoSnapshot()
     // Re-detect connectivity once on release (not per frame during the drag).
     if(fragRotMoved){provMark('rotate',1);refreshMovedBondsAndMeshes();}
     else refreshVmdSurfaces();
@@ -6255,9 +6252,15 @@ function commitRotAngle(newAngle){
         if(restoreRotSessionBase())rebuildCrystal();
         rebuildScene();
         // Remove all undo snapshots pushed by this rotation session (tagged
-        // with rotAngle) so Reset reverts the whole session at once.
+        // with rotAngle) so Reset reverts the whole session at once. Steps the
+        // session already walked back sit on the redo stack with the same tag;
+        // they are cleared first, while they are still distinguishable from a
+        // pre-session future that a dropped snapshot may bring back.
+        while(redoStack.length>0&&redoStack[redoStack.length-1].rotAngle!=null){
+            redoStack.pop();
+        }
         while(undoStack.length>0&&undoStack[undoStack.length-1].rotAngle!=null){
-            undoStack.pop();
+            dropUndoSnapshot();
         }
         updateUndoBtn();
         resetRotAxisState();
@@ -6280,7 +6283,14 @@ document.getElementById('reset-btn').addEventListener('click',function(){
     }
     updateTransform();
 });
-var undoStack=[];var MAX_UNDO=50;
+var undoStack=[];var redoStack=[];var MAX_UNDO=50;
+// Redo is the same history walked from its other end: an undo moves the state
+// it leaves onto redoStack, a redo moves it back, and an edit that follows an
+// undo starts a new branch and drops the future it replaced. Both stacks hold
+// the same kind of snapshot and share the 50-step cap, and the parked
+// histories below carry them together, so a frame's redo steps come back with
+// its undo steps.
+//
 // History belongs to one structure on screen. A snapshot holds a whole frame's
 // atom list, so applying one on another frame would write the wrong coordinates
 // into the wrong step — which is why a switch used to throw the stack away and
@@ -6292,32 +6302,62 @@ var undoStack=[];var MAX_UNDO=50;
 // goes first, and a single parked history is always kept whatever its size.
 var UNDO_PARK_MAX_ATOMS=120000;
 var undoParked={};
+var redoParked={};
 function undoFrameKey(){
     return (VMD&&VMD.molecules.length>1?('m'+vmdMolIdx):'m0')+'/f'+currentFrame;
+}
+function parkedStackAtoms(stack){
+    var total=0;
+    for(var i=0;i<stack.length;i++){
+        total+=stack[i].atomCount||0;
+        // A snapshot that an edit pushed after an undo carries the redo branch
+        // it displaced (see pushUndo), and that branch is parked — and held in
+        // memory — with it. Counting only the stack's own snapshots would let a
+        // parked history keep almost twice the budget it is bounded to.
+        if(stack[i].redoBefore)total+=parkedStackAtoms(stack[i].redoBefore);
+    }
+    return total;
 }
 function undoParkedAtoms(){
     var total=0;
     for(var k in undoParked){
         if(!undoParked.hasOwnProperty(k))continue;
-        var stack=undoParked[k];
-        for(var i=0;i<stack.length;i++)total+=stack[i].atomCount||0;
+        total+=parkedStackAtoms(undoParked[k]);
+    }
+    for(var r in redoParked){
+        if(!redoParked.hasOwnProperty(r))continue;
+        total+=parkedStackAtoms(redoParked[r]);
     }
     return total;
 }
 function parkUndoHistory(key){
     if(!key)return;
-    if(undoStack.length>0)undoParked[key]=undoStack;
-    else delete undoParked[key];
-    undoStack=[];
+    // An undo history that reached the base has an empty undo stack and a
+    // non-empty redo stack; parking only the undo half would silently drop
+    // exactly the steps the user could walk forward again.
+    if(undoStack.length>0||redoStack.length>0){
+        undoParked[key]=undoStack;
+        redoParked[key]=redoStack;
+    }else{
+        delete undoParked[key];
+        delete redoParked[key];
+    }
+    undoStack=[];redoStack=[];
     var keys=Object.keys(undoParked);
     while(keys.length>1&&undoParkedAtoms()>UNDO_PARK_MAX_ATOMS){
-        delete undoParked[keys.shift()];
+        var old=keys.shift();
+        delete undoParked[old];
+        delete redoParked[old];
     }
     updateUndoBtn();
 }
 function adoptUndoHistory(key){
     undoStack=(key&&undoParked[key])?undoParked[key]:[];
-    if(key)delete undoParked[key];
+    redoStack=(key&&redoParked[key])?redoParked[key]:[];
+    if(key){
+        delete undoParked[key];
+        delete redoParked[key];
+    }
     updateUndoBtn();
 }
 // What a saved file's title line says about where the structure came from and
@@ -6339,18 +6379,30 @@ var provMerged=[];        // files merged into this structure, in order
 var provEdits=[];         // [{k,n}] — what changed it, in the order it happened
 var provModes={};         // mode index -> {freq,scale}: displacement kept in the geometry
 
-function pushUndo(symmetryState){
-    // An edit is about to change the structure; anything computed from the old
-    // one (an Add H request in flight) is now stale. The counter lives on the
-    // structure itself so every path that can carry it does (see Add H).
-    MD.structureRevision=(MD.structureRevision||0)+1;
-    // Every coordinate edit opens with a snapshot. An open manual displacement
-    // is a *pending* rewrite of the whole structure — its next slider move would
-    // put every atom back onto base + amplitude — so it is closed here, once,
-    // for every edit path at the one door they all pass through. The geometry it
-    // produced stays exactly as it is, and the snapshot below therefore captures
-    // the displaced structure the edit is about to change.
-    if(vdActive&&!vdSuppress)vdCommit();
+// The symmetry half of a crystal snapshot, read from the page as it is now.
+// Only a symmetry switch changes it, so only the two directions of such a
+// switch pay for the copy (see buildUndoSnapshot and walkHistory).
+function captureSymmetryState(){
+    if(!CRY)return undefined;
+    return {
+        ops:CRY.symmetryOps.slice(),
+        source:CRY.symmetrySource,
+        asymAtoms:JSON.parse(JSON.stringify(CRY.asymAtoms||[])),
+        fileBonds:CRY.fileBonds?JSON.parse(JSON.stringify(CRY.fileBonds)):undefined,
+        bondsDetected:!!CRY.bondsDetected,
+        check:CRY.symmetryCheck,
+        alternative:CRY.symmetryAlternative
+    };
+}
+/**
+ * Everything an edit can replace, read from the page as it is now.
+ *
+ * pushUndo keeps one before every edit; an undo or a redo keeps the state it
+ * walks away from on the opposite stack. Both directions therefore restore
+ * through the same fields (see restoreHistorySnapshot), and a step can be
+ * walked back and forth any number of times.
+ */
+function buildUndoSnapshot(symmetryState){
     // hasExplicitBonds is part of the restore state: an Import can flip it
     // false→true, and an undo of that import must restore it, otherwise Move
     // Atoms would keep using the explicit-bonds (deletion-only) path on what
@@ -6370,8 +6422,8 @@ function pushUndo(symmetryState){
         // A crystal's picture is a pure function of three things — the base
         // cell, its bonds and the bounds — so those three are the snapshot, and
         // the displayed supercell is not stored at all: a 2x2x2 view then costs
-        // exactly what a 1x1x1 view does, and doUndo() rebuilds the picture from
-        // the cell it restores.
+        // exactly what a 1x1x1 view does, and restoreHistorySnapshot() rebuilds
+        // the picture from the cell it restores.
         snap.baseAtoms=JSON.parse(JSON.stringify(CRY.baseAtoms));
         snap.baseBonds=JSON.parse(JSON.stringify(CRY.baseBonds));
         // The file's own bond table (_geom_bond) is indexed like baseAtoms, so
@@ -6410,6 +6462,30 @@ function pushUndo(symmetryState){
     // What this snapshot costs, for the budget the parked histories are held
     // to (see undoParked): a crystal stores its base cell, a molecule its atoms.
     snap.atomCount=CRY?(snap.baseAtoms?snap.baseAtoms.length:0):snap.atoms.length;
+    return snap;
+}
+function pushUndo(symmetryState){
+    // An edit is about to change the structure; anything computed from the old
+    // one (an Add H request in flight) is now stale. The counter lives on the
+    // structure itself so every path that can carry it does (see Add H).
+    MD.structureRevision=(MD.structureRevision||0)+1;
+    // Every coordinate edit opens with a snapshot. An open manual displacement
+    // is a *pending* rewrite of the whole structure — its next slider move would
+    // put every atom back onto base + amplitude — so it is closed here, once,
+    // for every edit path at the one door they all pass through. The geometry it
+    // produced stays exactly as it is, and the snapshot below therefore captures
+    // the displaced structure the edit is about to change.
+    if(vdActive&&!vdSuppress)vdCommit();
+    var snap=buildUndoSnapshot(symmetryState);
+    // An undo left a future behind and this edit replaces it. The branch is
+    // kept on the snapshot rather than dropped outright because a gesture can
+    // still take the snapshot back — a dialog's Cancel, a click without a drag,
+    // a Rotate Group Reset (see dropUndoSnapshot) — and then the redo steps
+    // are exactly the ones the user had before the gesture began.
+    if(redoStack.length>0){
+        snap.redoBefore=redoStack;
+        redoStack=[];
+    }
     undoStack.push(snap);
     if(undoStack.length>MAX_UNDO)undoStack.shift();
     updateUndoBtn();
@@ -6421,9 +6497,44 @@ function pushUndo(symmetryState){
     // pushUndo out and run it against a stub), where no editor is listening.
     if(typeof markEdited==='function')markEdited(undoStack.length);
 }
-function updateUndoBtn(){var b=document.getElementById('undo-btn');if(b)b.disabled=undoStack.length===0}
-function doUndo(){
-    if(undoStack.length===0)return;
+function updateUndoBtn(){
+    var b=document.getElementById('undo-btn');if(b)b.disabled=undoStack.length===0;
+    var r=document.getElementById('redo-btn');if(r)r.disabled=redoStack.length===0;
+}
+/**
+ * Take back the newest snapshot without applying it.
+ *
+ * A gesture may push a snapshot and then turn out to change nothing — a click
+ * in Move Atoms that never dragged, a dialog's Cancel, a Rotate Group Reset.
+ * Dropping its snapshot is what keeps the history honest; the redo branch that
+ * snapshot displaced when it was pushed is put back with it, because the edit
+ * it belonged to never happened.
+ */
+function dropUndoSnapshot(expected){
+    if(undoStack.length===0)return false;
+    // A gesture that names its own snapshot (a measurement dialog) only takes
+    // back that one: an edit that landed meanwhile sits above it and is a real
+    // step, not part of the gesture.
+    if(expected&&undoStack[undoStack.length-1]!==expected)return false;
+    var snap=undoStack.pop();
+    if(snap.redoBefore){
+        redoStack=snap.redoBefore;
+        snap.redoBefore=null;
+    }
+    updateUndoBtn();
+    return true;
+}
+function doUndo(){return walkHistory(true)}
+function doRedo(){return walkHistory(false)}
+/**
+ * Stop everything that is writing the structure before a snapshot replaces it.
+ *
+ * An active optimisation, vibration, drag, bake or manual displacement all own
+ * the geometry they are previewing; restoring over them would leave the
+ * session's next tick writing the old structure back. Their work stays on
+ * screen, exactly as a mode switch ends them.
+ */
+function beginHistoryRestore(){
     // Auto-play replaces the structure on every tick; an undo restored here
     // would be overwritten by the next switchFrame before the user sees it.
     stopFrameAutoPlay();
@@ -6437,7 +6548,9 @@ function doUndo(){
     // The snapshot replaces every coordinate, so a displacement session has
     // nothing left to be measured from — it is dropped, not committed.
     vdEnd();
-    var snap=undoStack.pop();
+}
+/** Put one snapshot's state back on the page. */
+function restoreHistorySnapshot(snap){
     MD.hasExplicitBonds=!!snap.hasExplicitBonds;
     // The snapshot's electronic state comes back with its geometry: an atom
     // list and the charge it was perceived with are one state.
@@ -6495,6 +6608,9 @@ function doUndo(){
     }else{
         MD.atoms=snap.atoms;MD.bonds=snap.bonds;
     }
+}
+/** Bring the panels, the selection and the Rotate Group slider back in step. */
+function finishHistoryRestore(snap){
     rebuildScene();updateUndoBtn();
     if(diffMode)resetSelection();
     if(currentMode==='mmOpt'){
@@ -6505,8 +6621,8 @@ function doUndo(){
     }
     if(currentMode==='rotateGroup'&&rotActive){
         if(snap.rotAngle!=null){
-            // Undo one angle adjustment: sync slider and displays to the
-            // restored angle so the panel stays consistent with the molecule.
+            // One angle adjustment: sync slider and displays to the restored
+            // angle so the panel stays consistent with the molecule.
             rotCommittedAngle=snap.rotAngle;
             var slider=document.getElementById('rp-slider');
             if(slider)slider.value=snap.rotAngle;
@@ -6516,14 +6632,49 @@ function doUndo(){
             if(ain)ain.value=snap.rotAngle;
             showRotAxisLine();
         }else{
-            // Undo stepped past this rotation session's own history (e.g. an
+            // The step goes past this rotation session's own history (e.g. an
             // earlier unrelated edit) — close the session cleanly.
             resetRotAxisState();
             originalCoords=null;
         }
     }
 }
+/**
+ * One step through the history, in either direction.
+ *
+ * `isUndo` chooses which stack is read and which receives the state being
+ * left. Both stacks hold the same snapshots, so walking back and forth is a
+ * round trip through restoreHistorySnapshot rather than two implementations
+ * of what a state is.
+ */
+function walkHistory(isUndo){
+    if((isUndo?undoStack:redoStack).length===0)return false;
+    beginHistoryRestore();
+    // beginHistoryRestore may end a gesture that takes its own snapshot back
+    // (an Alt-click without a drag drops it, restoring the branch it held), so
+    // the stacks are read after it rather than before.
+    var fromStack=isUndo?undoStack:redoStack;
+    var toStack=isUndo?redoStack:undoStack;
+    if(fromStack.length===0)return false;
+    var snap=fromStack.pop();
+    // The state being left may describe the other half of a symmetry switch;
+    // capture the operations the snapshot on the from-stack also carries, so
+    // the two directions agree about how the cell was expanded.
+    var leaving=buildUndoSnapshot(snap.symmetry?captureSymmetryState():undefined);
+    // In a Rotate Group session the angle on the slider describes the geometry
+    // being left. Tagging the snapshot lets the shared tail put the slider and
+    // the molecule back together, whichever stack the step came from.
+    if(snap.rotAngle!=null&&rotActive&&currentMode==='rotateGroup'&&typeof rotCommittedAngle==='number'){
+        leaving.rotAngle=rotCommittedAngle;
+    }
+    toStack.push(leaving);
+    if(toStack.length>MAX_UNDO)toStack.shift();
+    restoreHistorySnapshot(snap);
+    finishHistoryRestore(snap);
+    return true;
+}
 document.getElementById('undo-btn').addEventListener('click',doUndo);
+document.getElementById('redo-btn').addEventListener('click',doRedo);
 document.getElementById('save-btn').addEventListener('click',function(){doSave()});
 document.getElementById('snap-btn').addEventListener('click',openSnapshotDialog);
 document.getElementById('import-btn').addEventListener('click',function(){
@@ -6927,12 +7078,17 @@ window.addEventListener('message',function(event){
         if(outcome==='failed')postSaveCancelled();
     }else if(msg.command==='hostUndo'){
         // The editor's Undo command, routed to the one history the page keeps.
-        // It is the same call the page's own Ctrl+Z makes.
-        doUndo();
+        // It is the same call the page's own Ctrl+Z makes, with the same rule
+        // about an open dialog: a measurement dialog is previewing geometry on
+        // top of a snapshot of its own, and a history step underneath it would
+        // leave the dialog's Cancel restoring the wrong state.
+        if(!modalOpen())doUndo();
     }else if(msg.command==='hostRedo'){
-        // The viewer has one stack and no redo, exactly as its own keyboard
-        // shortcut does; the editor's Redo is answered with nothing rather than
-        // with an edit the page cannot reproduce.
+        // The editor's Redo command, routed to the same history: the state an
+        // undo walked away from is on the redo stack, so this is the exact
+        // inverse and the page's own Ctrl+Shift+Z makes the same call — and is
+        // held back by an open dialog for the same reason.
+        if(!modalOpen())doRedo();
     }else if(msg.command==='hostSession'){
         vscodeApi.postMessage({command:'session',session:buildSession()});
     }else if(msg.command==='fileChanged'){
@@ -10732,9 +10888,11 @@ function startVibration(modeIdx){
             }
         }
         var keptUndo=sameList?undoStack.slice():null;
+        var keptRedo=sameList?redoStack.slice():null;
         switchFrame(totalFrames-1);
         if(keptUndo){
             undoStack=keptUndo;
+            redoStack=keptRedo;
             updateUndoBtn();
         }
     }
@@ -10992,7 +11150,7 @@ function vdDropSession(popUndo){
     // The snapshot belongs to the session: when the geometry is back at the
     // equilibrium it is not an edit any more, unless something else pushed on
     // top of it in the meantime.
-    if(popUndo&&vdUndoDepth===undoStack.length&&undoStack.length>0){undoStack.pop();updateUndoBtn()}
+    if(popUndo&&vdUndoDepth===undoStack.length&&undoStack.length>0)dropUndoSnapshot()
     vdActive=false;vdBase=null;vdComp.length=0;vdMaxDisp=0;vdUndoDepth=-1;
 }
 /** Open a session: the equilibrium snapshot and the one undo step it owns. */
@@ -11355,9 +11513,11 @@ function orbitalJumpToFrame(){
         }
     }
     var keptUndo=keep?undoStack.slice():null;
+    var keptRedo=keep?redoStack.slice():null;
     switchFrame(ORBITALS.frame);
     if(keptUndo){
         undoStack=keptUndo;
+        redoStack=keptRedo;
         updateUndoBtn();
     }
     return true;
@@ -11415,9 +11575,11 @@ function chargeJumpToFrame(){
         }
     }
     var keptUndo=keep?undoStack.slice():null;
+    var keptRedo=keep?redoStack.slice():null;
     switchFrame(set.frame);
     if(keptUndo){
         undoStack=keptUndo;
+        redoStack=keptRedo;
         updateUndoBtn();
     }
     return true;
@@ -17402,7 +17564,7 @@ function rotAroundAxis(px,py,pz,ox,oy,oz,dx,dy,dz,angle){
     return{x:rx+ox,y:ry+oy,z:rz+oz};
 }
 
-function saveOriginal(){originalCoords=MD.atoms.map(function(a){return{x:a.x,y:a.y,z:a.z}});pushUndo()}
+function saveOriginal(){originalCoords=MD.atoms.map(function(a){return{x:a.x,y:a.y,z:a.z}});pushUndo();originalSnap=undoStack[undoStack.length-1]}
 function restoreOriginal(){if(!originalCoords)return;originalCoords.forEach(function(c,i){var a=MD.atoms[i];if(!a)return;a.x=c.x;a.y=c.y;a.z=c.z})}
 
 function applyBondLength(targetLen,fixFirst,moveMode){
@@ -17627,7 +17789,12 @@ function showBondLengthModal(){
         // its base cell, so the previewed geometry is carried there now, before
         // the session baseline this dialog captured is dropped.
         if(CRY)commitCrystalCoords();
-        provMarkIfMoved('bondLen');hideModal();originalCoords=null;resetSelection()
+        // An OK that leaves the geometry and the bond as they were is not an
+        // edit: dropping the snapshot the dialog opened with also puts back the
+        // redo branch that snapshot displaced, exactly as its Cancel does.
+        var bondChanged=(existingBond?existingBond.order:0)!==(hadBondAtOpen?curOrder:0);
+        if(!provMarkIfMoved('bondLen')&&!bondChanged)dropUndoSnapshot(originalSnap);
+        hideModal();originalCoords=null;resetSelection()
     });
     document.getElementById('m-cancel').addEventListener('click',function(){
         if(existingBond&&originalCoords){existingBond.order=curOrder}
@@ -17638,7 +17805,7 @@ function showBondLengthModal(){
         // snapshot this dialog opened with is the state to put back before the
         // snapshot is dropped.
         if(CRY)restoreCrystalBaseFromUndoTop();
-        restoreOriginal();rebuildScene();undoStack.pop();updateUndoBtn();hideModal();originalCoords=null;resetSelection()
+        restoreOriginal();rebuildScene();dropUndoSnapshot(originalSnap);hideModal();originalCoords=null;resetSelection()
     });
 }
 
@@ -17669,8 +17836,14 @@ function showBondAngleModal(){
     valEl.addEventListener('input',function(){sliderEl.value=this.value;applyBondAngle(parseFloat(this.value),fixEl.value==='1',moveEl.value)});
     fixEl.addEventListener('change',function(){applyBondAngle(parseFloat(valEl.value),this.value==='1',moveEl.value)});
     moveEl.addEventListener('change',function(){applyBondAngle(parseFloat(valEl.value),fixEl.value==='1',this.value)});
-    document.getElementById('m-ok').addEventListener('click',function(){if(CRY)commitCrystalCoords();provMarkIfMoved('bondAngle');hideModal();originalCoords=null;resetSelection()});
-    document.getElementById('m-cancel').addEventListener('click',function(){restoreOriginal();rebuildScene();undoStack.pop();updateUndoBtn();hideModal();originalCoords=null;resetSelection()});
+    document.getElementById('m-ok').addEventListener('click',function(){
+        if(CRY)commitCrystalCoords();
+        // See the bond length dialog: an untouched angle is not an edit, and
+        // its snapshot (with the redo branch it displaced) goes back with OK.
+        if(!provMarkIfMoved('bondAngle'))dropUndoSnapshot(originalSnap);
+        hideModal();originalCoords=null;resetSelection()
+    });
+    document.getElementById('m-cancel').addEventListener('click',function(){restoreOriginal();rebuildScene();dropUndoSnapshot(originalSnap);hideModal();originalCoords=null;resetSelection()});
 }
 
 function showDihedralModal(){
@@ -17700,8 +17873,13 @@ function showDihedralModal(){
     valEl.addEventListener('input',function(){sliderEl.value=this.value;applyDihedral(parseFloat(this.value),fixEl.value==='1',moveEl.value)});
     fixEl.addEventListener('change',function(){applyDihedral(parseFloat(valEl.value),this.value==='1',moveEl.value)});
     moveEl.addEventListener('change',function(){applyDihedral(parseFloat(valEl.value),fixEl.value==='1',this.value)});
-    document.getElementById('m-ok').addEventListener('click',function(){if(CRY)commitCrystalCoords();provMarkIfMoved('dihedral');hideModal();originalCoords=null;resetSelection()});
-    document.getElementById('m-cancel').addEventListener('click',function(){restoreOriginal();rebuildScene();undoStack.pop();updateUndoBtn();hideModal();originalCoords=null;resetSelection()});
+    document.getElementById('m-ok').addEventListener('click',function(){
+        if(CRY)commitCrystalCoords();
+        // See the bond length dialog: an untouched dihedral is not an edit.
+        if(!provMarkIfMoved('dihedral'))dropUndoSnapshot(originalSnap);
+        hideModal();originalCoords=null;resetSelection()
+    });
+    document.getElementById('m-cancel').addEventListener('click',function(){restoreOriginal();rebuildScene();dropUndoSnapshot(originalSnap);hideModal();originalCoords=null;resetSelection()});
 }
 
 var UNIT_CANDIDATES=(function(){
@@ -18289,14 +18467,17 @@ function provModesText(){
     return parts.join(' + ');
 }
 /** The three geometry dialogs preview live and keep the result on OK; nothing
- *  moved means nothing to report, however many times the slider was touched. */
+ *  moved means nothing to report, however many times the slider was touched.
+ *  The answer is also what lets OK drop a snapshot nothing was done with, so a
+ *  dialog opened and closed untouched costs the history no step. */
 function provMarkIfMoved(kind){
-    if(!originalCoords)return;
+    if(!originalCoords)return false;
     for(var i=0;i<originalCoords.length;i++){
         var oc=originalCoords[i],a=MD.atoms[i];
         if(!oc||!a)continue;
-        if(Math.abs(a.x-oc.x)>1e-9||Math.abs(a.y-oc.y)>1e-9||Math.abs(a.z-oc.z)>1e-9){provMark(kind,1);return}
+        if(Math.abs(a.x-oc.x)>1e-9||Math.abs(a.y-oc.y)>1e-9||Math.abs(a.z-oc.z)>1e-9){provMark(kind,1);return true}
     }
+    return false;
 }
 /** The supercell is a property of the crystal on screen, not an edit that can be
  *  undone, so it is read from the bounds at save time instead of being marked. */
@@ -20178,7 +20359,7 @@ function endBakeSession(){
     bakeActive=false;
     if(!bakeMoved){
         // An Alt-click that changed nothing pushed a snapshot it does not need.
-        if(undoStack.length>0){undoStack.pop();updateUndoBtn()}
+        dropUndoSnapshot();
     }else{
         // The centre follows the atoms, so a baked translation changes it by
         // exactly that translation. Committing the pan the drag would have
@@ -20803,6 +20984,7 @@ function escapeOneLevel(){
 (function(){
     // The two mouse-free actions say their own keys, on the buttons that do them.
     var ub=document.getElementById('undo-btn');if(ub)ub.title='Undo ('+KEY_MOD+'+Z)';
+    var rb=document.getElementById('redo-btn');if(rb)rb.title='Redo ('+KEY_MOD+'+Shift+Z)';
     var sb=document.getElementById('save-btn');if(sb)sb.title='Save As ('+KEY_MOD+'+S)';
     var nb=document.getElementById('snap-btn');if(nb)nb.title='Export the 3D view as a PNG image';
 })();
@@ -20862,6 +21044,16 @@ document.addEventListener('keydown',function(e){
             // Paste grows the structure: never behind a dialog, and never on a
             // key repeat, or holding the key would paste again and again.
             if(!editable&&!e.repeat&&!modalOpen()&&pasteClipboard()){e.preventDefault();return}
+        }
+    }
+    // Redo is the same history from its other end. It is checked after the
+    // plain shortcuts so a layout where Shift changes e.key (or a keyboard
+    // where e.code is the only stable half) still resolves one press to one
+    // action; the dialog rule is the undo's, for the same preview reason.
+    if(mod&&!e.altKey&&e.shiftKey){
+        var rk=(e.key||'').toLowerCase();
+        if(rk==='z'||e.code==='KeyZ'){
+            if(!editable&&!modalOpen()){e.preventDefault();doRedo();return}
         }
     }
     if(editable)return;
