@@ -80,7 +80,13 @@ function mergeStatedBonds(atoms: Atom[], bonds: Bond[], stated: Bond[]): Bond[] 
 export function ensureBonds(data: MolecularData): MolecularData {
     const stated = data.statedBonds && data.statedBonds.length > 0 ? data.statedBonds : undefined;
     const authored = stripGhostBonds(data.atoms, data.bonds);
-    if (data.hasExplicitBonds && data.bonds.length > 0) {
+    // `hasExplicitBonds` is the file's statement that its bond list is the
+    // whole list, and an empty list is a statement too: a structure whose file
+    // says it has no bonds (a MOL2 `@<TRIPOS>BOND` block with no records, an
+    // empty `connect` section) must stay unbonded. Testing the list's length
+    // here let that case fall through to perception, which invented bonds the
+    // file had explicitly denied.
+    if (data.hasExplicitBonds) {
         if (authored === data.bonds && stated === undefined) return data;
         const bonds = stated === undefined ? authored : mergeStatedBonds(data.atoms, authored, stated);
         return { ...data, bonds, statedBonds: undefined };

@@ -82,6 +82,20 @@ function getNonce(): string {
 }
 
 /**
+ * A script body is inserted into the page verbatim, and the HTML parser ends
+ * a script element at the first `</script` — even inside a JavaScript string
+ * or comment. A body carrying that sequence would truncate the page and hand
+ * the remainder to the markup parser. The assets and the generated module
+ * sources are checked rather than rewritten: none is supposed to contain one,
+ * and silently editing code would hide the mistake that put it there.
+ */
+function assertEmbeddableScript(source: string, what: string): void {
+    if (/<\/script/i.test(source)) {
+        throw new Error(what + ' contains a </script> sequence and cannot be embedded in the page');
+    }
+}
+
+/**
  * A page for a webview whose renderer could not be read.
  *
  * It is static HTML: no script, no data payload, nothing that could fail a
@@ -487,6 +501,11 @@ export async function renderViewerPage(extensionUri: vscode.Uri, options: Viewer
     // not a second copy kept in the template. It carries a reading aid
     // only — nothing it returns is written back to the structure.
     const bvsSource = BVS_SOURCE;
+
+    assertEmbeddableScript(bondPerceptionSource, 'the bond-perception source');
+    assertEmbeddableScript(bvsSource, 'the bond-valence source');
+    assertEmbeddableScript(threeJsContent, 'media/three.min.js');
+    assertEmbeddableScript(viewerJs, 'media/viewer.js');
 
     onProgress?.(0.95, 'Assembling the page');
 

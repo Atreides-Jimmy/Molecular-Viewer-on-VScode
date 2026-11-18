@@ -14,7 +14,7 @@ import {
 import { lookupSpaceGroupOps, lookupSpaceGroupSettings, SpaceGroupOps } from '../tools/spaceGroupTable';
 import { normalizeElementSymbol } from '../tools/periodicTable';
 import { isUsableLattice } from './periodicUtils';
-import { AnisoTensor, rotateAnisoTensor, symOpCartesianRotation } from '../tools/adp';
+import { AnisoTensor, rotateAnisoTensor, symOpCartesianRotation, uCifAsCart } from '../tools/adp';
 
 /**
  * CIF reader.
@@ -1270,10 +1270,12 @@ function readCifBondTable(
 // ===== Anisotropic displacement parameters =====
 //
 // `_atom_site_aniso_U_ij` is a table of its own, keyed by site label, and the
-// six numbers are a Cartesian tensor in Angstrom squared. The loop is read
-// separately from the atom sites because the two need not list the same rows
-// (a file may refine ADPs for the heavy atoms only), and it is joined back by
-// the label the dictionary itself defines as the join key.
+// six numbers are in the crystal-axis basis — not Cartesian. They are
+// converted as they are read (see `uCifAsCart`), because everything downstream
+// draws and rotates the Cartesian tensor. The loop is read separately from the
+// atom sites because the two need not list the same rows (a file may refine
+// ADPs for the heavy atoms only), and it is joined back by the label the
+// dictionary itself defines as the join key.
 //
 // A U_iso-only loop is not this table: it states one isotropic value per site,
 // which is not an ellipsoid, and drawing it as one would invent an orientation.
@@ -1284,7 +1286,7 @@ interface AnisoTable {
     warnings: string[];
 }
 
-function readAnisoTable(data: CifData): AnisoTable {
+function readAnisoTable(data: CifData, lattice: number[][]): AnisoTable {
     const byLabel: { [label: string]: AnisoTensor } = {};
     const warnings: string[] = [];
     let skipped = 0;
@@ -1292,6 +1294,7 @@ function readAnisoTable(data: CifData): AnisoTable {
     let zeroedOffDiagonal = 0;
     let negative = 0;
     let negativeExample = '';
+    let unconverted = 0;
 
     for (const loop of data.loops) {
         const labelCol = columnOf(loop, ['_atom_site_aniso_label']);
@@ -1333,10 +1336,17 @@ function readAnisoTable(data: CifData): AnisoTable {
                     negativeExample = 'site ' + label + ': ' + bad[0] + '=' + bad[1].toFixed(4);
                 }
             }
+            // The file's numbers are in the crystal-axis basis; the viewer
+            // stores Cartesian. A degenerate cell has no reciprocal basis to
+            // convert with, and guessing that its U values are Cartesian is
+            // the very mistake this conversion exists to avoid — the site
+            // keeps its scalar/disorder data but gets no ellipsoid.
+            const cart = uCifAsCart(u, lattice);
+            if (cart === null) { unconverted++; continue; }
             // The first record for a label wins: a duplicated row is a file
             // error, and taking the later one would make two readers disagree
             // depending on which they happened to look at.
-            if (!byLabel[label]) byLabel[label] = u;
+            if (!byLabel[label]) byLabel[label] = cart;
         }
     }
 
@@ -1353,6 +1363,11 @@ function readAnisoTable(data: CifData): AnisoTable {
         warnings.push('anisotropic displacement: ' + negative + ' record' + (negative === 1 ? ' has' : 's have') +
             ' a negative diagonal element (e.g. ' + negativeExample +
             '): the ellipsoid is drawn from the data that is there');
+    }
+    if (unconverted > 0) {
+        warnings.push('anisotropic displacement: the unit cell has no usable reciprocal basis, so ' +
+            unconverted + ' record' + (unconverted === 1 ? ' is' : 's are') +
+            ' not converted to Cartesian and not drawn');
     }
     return { byLabel, warnings };
 }
@@ -1490,7 +1505,7 @@ export function parseCif(content: string): MolecularData {
     const occCol = columnOf(atomLoop, ['_atom_site_occupancy']);
     const disorderCol = columnOf(atomLoop, ['_atom_site_disorder_group']);
 
-    const aniso = readAnisoTable(data);
+    const aniso = readAnisoTable(data, lattice);
     warnings.push(...aniso.warnings);
 
     const rawAtoms: CifRawAtom[] = [];

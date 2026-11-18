@@ -120,6 +120,11 @@ export function parseSymOp(s: string): SymOp {
         if (idx >= parts.length) continue;
         const expr = parts[idx].replace(/\s+/g, '').toLowerCase();
         let sign = 1;
+        // A number directly in front of a variable is its coefficient (`2x`,
+        // `-2*x`), not a translation. Without this, `2x` became the operation
+        // x+2: the coefficient was silently dropped and the 2 was added to the
+        // origin — a symmetry operation that moves every atom.
+        let coefficient: number | null = null;
         let k = 0;
         while (k < expr.length) {
             const ch = expr[k];
@@ -127,8 +132,9 @@ export function parseSymOp(s: string): SymOp {
             if (ch === '-') { sign = -1; k++; continue; }
             if (ch === 'x' || ch === 'y' || ch === 'z') {
                 const col = ch === 'x' ? 0 : ch === 'y' ? 1 : 2;
-                R[idx][col] += sign;
+                R[idx][col] += sign * (coefficient === null ? 1 : coefficient);
                 sign = 1;
+                coefficient = null;
                 k++;
                 continue;
             }
@@ -143,6 +149,20 @@ export function parseSymOp(s: string): SymOp {
                     v = p / q;
                 } else {
                     v = parseFloat(numMatch[1]);
+                }
+                // Look past an optional `*` to see whether a variable follows.
+                // Only integer coefficients occur in symmetry operations; a
+                // fraction followed by a variable is malformed and keeps the
+                // translation reading it had before rather than inventing a
+                // non-lattice rotation.
+                let j = k + numMatch[1].length;
+                while (j < expr.length && expr[j] === '*') j++;
+                const next = expr.charAt(j);
+                if ((next === 'x' || next === 'y' || next === 'z') &&
+                    v === Math.round(v) && v !== 0) {
+                    coefficient = v;
+                    k = j;
+                    continue;
                 }
                 t[idx] += sign * v;
                 sign = 1;

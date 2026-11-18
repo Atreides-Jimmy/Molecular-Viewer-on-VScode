@@ -18476,6 +18476,31 @@ function gjfBondOrder(order){
     if(!isFinite(o)||o<=0)o=1;
     return o.toFixed(1);
 }
+// A CIF states U_ij in the crystal-axis basis, while the page stores the
+// tensor Cartesian and already rotated into the P1 frame (see
+// src/tools/adp.ts). Saving therefore undoes both: the reciprocal vectors
+// N = [a*; b*; c*] (the rows of CRY_INV) give U_star = N U N^T, and the
+// reciprocal lengths undo the scaling that produced it. For an orthogonal
+// cell N is diagonal and the values pass through unchanged — which is why
+// writing them as they stood looked correct until a non-orthogonal cell was
+// saved and read back under the corrected reader.
+function cifUFromCart(u){
+    if(!CRY||!CRY_INV)return null;
+    var N=CRY_INV,r=[0,0,0],i,j;
+    for(i=0;i<3;i++){
+        r[i]=Math.sqrt(N[i][0]*N[i][0]+N[i][1]*N[i][1]+N[i][2]*N[i][2]);
+        if(!(r[i]>0)||!isFinite(r[i]))return null;
+    }
+    var U=[[u[0],u[3],u[4]],[u[3],u[1],u[5]],[u[4],u[5],u[2]]];
+    var NU=[[0,0,0],[0,0,0],[0,0,0]];
+    for(i=0;i<3;i++)for(j=0;j<3;j++)NU[i][j]=N[i][0]*U[0][j]+N[i][1]*U[1][j]+N[i][2]*U[2][j];
+    var S=[[0,0,0],[0,0,0],[0,0,0]];
+    for(i=0;i<3;i++)for(j=0;j<3;j++)S[i][j]=NU[i][0]*N[j][0]+NU[i][1]*N[j][1]+NU[i][2]*N[j][2];
+    return [
+        S[0][0]/(r[0]*r[0]),S[1][1]/(r[1]*r[1]),S[2][2]/(r[2]*r[2]),
+        S[0][1]/(r[0]*r[1]),S[0][2]/(r[0]*r[2]),S[1][2]/(r[1]*r[2])
+    ];
+}
 function doSave(hostRequest){
     if(!MD.atoms||MD.atoms.length===0){alert('No atoms to save');return 'failed'}
     for(var ci=0;ci<MD.atoms.length;ci++){var ca=MD.atoms[ci];if(isNaN(ca.x)||isNaN(ca.y)||isNaN(ca.z)){alert('Atom '+(ci+1)+' has invalid coordinates (NaN). Cannot save.');return 'failed'}}
@@ -18781,20 +18806,22 @@ function doSave(hostRequest){
             // P1 has one operation, so every site is its own multiplicity.
             cifContent+=label+' '+ba.element+' '+f[0].toFixed(6)+' '+f[1].toFixed(6)+' '+f[2].toFixed(6)+' '+occ+' 1\n';
         });
-        // Anisotropic displacement parameters travel with the site. They are
-        // already Cartesian Angstrom squared and already rotated into the P1
-        // frame, so the six numbers are written as they stand; the loop names
+        // Anisotropic displacement parameters travel with the site. The stored
+        // tensor is Cartesian and rotated into the P1 frame, so each one is
+        // converted back to the crystal-axis U_ij a CIF states; the loop names
         // only the sites that carry a tensor, which the dictionary allows. A
         // saved file without any aniso data is byte-identical to the old one.
         var cifAnisoRows='';
         cifBase.forEach(function(ba,i){
             var u=ba.uAniso;
             if(!u||u.length<6)return;
+            var cu=cifUFromCart(u);
+            if(!cu)return;
             var ok=true;
-            for(var k=0;k<6;k++){if(typeof u[k]!=='number'||!isFinite(u[k]))ok=false}
+            for(var k=0;k<6;k++){if(typeof cu[k]!=='number'||!isFinite(cu[k]))ok=false}
             if(!ok)return;
             cifAnisoRows+=ba.element+(i+1);
-            for(var k2=0;k2<6;k2++)cifAnisoRows+=' '+u[k2].toFixed(6);
+            for(var k2=0;k2<6;k2++)cifAnisoRows+=' '+cu[k2].toFixed(6);
             cifAnisoRows+='\n';
         });
         if(cifAnisoRows!==''){

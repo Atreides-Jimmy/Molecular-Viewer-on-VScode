@@ -2631,6 +2631,44 @@ const MODULE_FUNCTIONS: Array<(...args: never[]) => unknown> = [
     perceiveBonds
 ];
 
+/** Every module-level constant the emitted source declares. */
+const MODULE_CONSTANTS: string[] = [
+    'COV_R', 'PAIR_CUT', 'SPECS', 'CEIL', 'TERMINAL', 'Z_OF', 'METALS', 'VALENCE',
+    'FALLBACK_VALENCE', 'OUTER_E', 'MAX_RELAX_ATOMS', 'MAX_SOLVER_ATOMS',
+    'MAX_COMBOS', 'MAX_COMBO_WORK', 'MAX_SHED_BONDS', 'MIN_BOND_DISTANCE'
+];
+
+/**
+ * A function body with its comments removed. The guard below reads names, and
+ * prose is not a reference: the word `XOR` in a comment once looked like a
+ * module constant to a naive scan.
+ */
+function bpWithoutComments(body: string): string {
+    return body
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+}
+
+/** The names a body declares for itself: locals and parameters. */
+function bpLocalNames(code: string, body: string): { [name: string]: boolean } {
+    const local: { [name: string]: boolean } = {};
+    const decl = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g;
+    let m: RegExpExecArray | null = decl.exec(code);
+    while (m !== null) {
+        local[m[1]] = true;
+        m = decl.exec(code);
+    }
+    const sig = /\(([^)]*)\)/.exec(body);
+    if (sig !== null) {
+        const params = sig[1].split(',');
+        for (let i = 0; i < params.length; i++) {
+            const name = params[i].trim().replace(/=.*$/, '').trim();
+            if (name !== '') local[name] = true;
+        }
+    }
+    return local;
+}
+
 /**
  * The module as one self-contained expression, for the webview to evaluate.
  *
@@ -2659,8 +2697,36 @@ export const BOND_PERCEPTION_SOURCE: string = (function buildSource(): string {
     parts.push('var MAX_COMBO_WORK=' + MAX_COMBO_WORK + ';');
     parts.push('var MAX_SHED_BONDS=' + MAX_SHED_BONDS + ';');
     parts.push('var MIN_BOND_DISTANCE=' + MIN_BOND_DISTANCE + ';');
+    // Every name the emitted functions reference has to be declared in the
+    // same scope: the constants emitted above or one of the functions in
+    // MODULE_FUNCTIONS. A missing entry would become a free variable in the
+    // page, where it surfaces only when a panel opens or a bond is re-detected,
+    // so the contract is checked here instead, at module load. Comments are
+    // stripped first, and names a body declares itself are not references.
+    const declared: { [name: string]: boolean } = {};
+    for (let i = 0; i < MODULE_CONSTANTS.length; i++) declared[MODULE_CONSTANTS[i]] = true;
     for (let i = 0; i < MODULE_FUNCTIONS.length; i++) {
-        parts.push(MODULE_FUNCTIONS[i].toString());
+        const name = MODULE_FUNCTIONS[i].name;
+        if (name === '') throw new Error('bond perception source contains an unnamed function');
+        declared[name] = true;
+    }
+    for (let i = 0; i < MODULE_FUNCTIONS.length; i++) {
+        const body = MODULE_FUNCTIONS[i].toString();
+        const code = bpWithoutComments(body);
+        const local = bpLocalNames(code, body);
+        const caps = code.match(/\b[A-Z][A-Z0-9_]{2,}\b/g) || [];
+        for (let r = 0; r < caps.length; r++) {
+            if (!declared[caps[r]] && !local[caps[r]]) {
+                throw new Error('bond perception source refers to a name the page does not define: ' + caps[r]);
+            }
+        }
+        const calls = code.match(/\bbp[A-Z]\w*\b/g) || [];
+        for (let r = 0; r < calls.length; r++) {
+            if (!declared[calls[r]] && !local[calls[r]]) {
+                throw new Error('bond perception source refers to a function outside MODULE_FUNCTIONS: ' + calls[r]);
+            }
+        }
+        parts.push(body);
     }
     parts.push('return {perceiveBonds:perceiveBonds, pairCutoff:bpPairCutoff, supportedOrder:bpSupportedOrder};');
     parts.push('})()');
@@ -2671,6 +2737,12 @@ export const BOND_PERCEPTION_SOURCE: string = (function buildSource(): string {
     // the only way that mistake cannot reach a user.
     if (source.indexOf('`') >= 0 || source.indexOf('${') >= 0) {
         throw new Error('bond perception source contains a template-literal delimiter');
+    }
+    // The page puts this text inside a <script> element. The HTML parser ends
+    // that element at the first `</script`, even inside a JavaScript string or
+    // comment, so the rest of the module would be handed to the markup parser.
+    if (/<\/script/i.test(source)) {
+        throw new Error('bond perception source contains a </script> sequence');
     }
     return source;
 })();
