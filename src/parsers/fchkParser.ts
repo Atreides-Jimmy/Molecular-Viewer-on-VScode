@@ -73,7 +73,15 @@ export interface FchkBasis {
     shellType: number[];
     /** Per shell: primitives it is contracted from. */
     shellPrim: number[];
-    /** Per shell: the atom it is centred on (0-based). */
+    /**
+     * Per shell: the atom it is centred on, **0-based**.
+     *
+     * The file writes this one 1-based ("Shell to atom map" numbers the atoms
+     * from one), and it is converted here so a reader can index the atom list
+     * with it directly. Nothing else in the viewer reads the raw array, and the
+     * orbital mesh needs it whenever a checkpoint states no shell coordinates
+     * and the shells have to be placed from their atom.
+     */
     shellAtom: number[];
     /** Per primitive, in shell order. */
     exponents: number[];
@@ -514,7 +522,7 @@ class FchkScan {
             case 'Current cartesian coordinates': this.coordinates = v; return;
             case 'Shell types': this.shellType = v.map(x => Math.round(x)); return;
             case 'Number of primitives per shell': this.shellPrim = v.map(x => Math.round(x)); return;
-            case 'Shell to atom map': this.shellAtom = v.map(x => Math.round(x)); return;
+            case 'Shell to atom map': this.shellAtom = v.map(x => Math.max(0, Math.round(x) - 1)); return;
             case 'Primitive exponents': this.exponents = v; return;
             case 'Contraction coefficients': this.coefficients = v; return;
             case 'P(S=P) Contraction coefficients': this.spCoefficients = v; return;

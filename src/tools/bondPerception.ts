@@ -70,7 +70,14 @@ const COV_R: { [key: string]: number } = {
 
 /** Distance beyond which an element pair can never bond, when tabulated. */
 const PAIR_CUT: { [key: string]: number } = {
-    HH: 0.0, CH: 1.3, HO: 1.2, HN: 1.3,
+    // H-H is the shortest real bond there is — 0.74 Å in H2, 0.9 Å in a
+    // dihydrogen complex — and this entry used to be 0.0, which cut the pair off
+    // before any distance could qualify: a hydrogen molecule, a bridging
+    // hydride and a dihydrogen ligand all came out as two separate atoms, with
+    // no bond, no valence and no force-field term. 1.1 Å covers every bonded
+    // H···H and stops well short of the shortest hydrogen-bond contact (1.4 Å
+    // in a very strong one, 1.6–2.0 Å in the ordinary case).
+    HH: 1.1, CH: 1.3, HO: 1.2, HN: 1.3,
     CC: 1.9, CO: 1.7, CN: 1.7, NN: 1.7,
     NO: 1.8, CF: 1.6, CS: 2.0
 };
@@ -81,6 +88,15 @@ interface OrderSpec { o: number; l: number; t: number; }
  * Measured length each bond order implies for an element pair. This is the
  * only place bond lengths turn into chemistry, and the only table that can
  * produce the aromatic order 1.5.
+ *
+ * The aromatic entry is listed before the double bond of the same pair, and
+ * that order is not what decides an alkene from an aromatic bond: both bands
+ * bracket a length of 1.38–1.40, so the length alone cannot tell them apart.
+ * The ring is what tells them apart, and `bpAromaticRing` is where that is
+ * decided — a 1.5 that does not lie on a cycle of 1.5 bonds is downgraded to
+ * the best order that is not aromatic. Listing the aromatic entry first
+ * therefore only means "an aromatic ring is the reading a length in the overlap
+ * supports", not "every bond of that length is aromatic".
  */
 const SPECS: { [key: string]: OrderSpec[] } = {
     'C+C': [
@@ -91,7 +107,12 @@ const SPECS: { [key: string]: OrderSpec[] } = {
     ],
     'C+N': [
         { o: 2.0, l: 1.26, t: 0.05 },
-        { o: 1.5, l: 1.36, t: 0.05 },
+        // The aromatic window runs to 1.42 A on purpose: a pyrrole's or an
+        // indole's C–N is 1.37 A, an N-aryl bond is 1.40 A, and a C–N of 1.42 A
+        // is still part of a ring's delocalised system — while a 1.43 A one is
+        // an amine's single bond. A narrower window dropped such a ring onto the
+        // single-bond band and turned the whole ring into a Kekulé structure.
+        { o: 1.5, l: 1.36, t: 0.06 },
         { o: 1.0, l: 1.43, t: 0.10 },
         { o: 3.0, l: 1.16, t: 0.06 }
     ],
@@ -118,6 +139,40 @@ const SPECS: { [key: string]: OrderSpec[] } = {
         { o: 2.0, l: 1.60, t: 0.10 },
         { o: 1.0, l: 1.82, t: 0.15 }
     ],
+    // Sulphur–oxygen is the pair the second-row octet cannot describe, and the
+    // length is the only evidence the file gives: a sulphoxide's S=O (1.48 Å),
+    // a sulphone's two (1.44 Å) and a sulphate's four (1.47 Å) all read as
+    // double bonds. What separates a sulphate from a sulphone is not a length
+    // but the count — four double bonds put sulphur at eight, over its ceiling
+    // of six, and the relaxation then brings it back to the two-double/two-single
+    // pair of valences six; two double bonds already sum to six and are left
+    // alone. The single-bond band is deliberately wide (1.42–1.82 Å) so the
+    // reduction has somewhere to go: a sulphate's 1.47 Å S–O is 0.17 Å from the
+    // single ideal and only a tolerance of 0.20 brackets it. Without that, the
+    // ladder of a sulphate's S–O bond held one entry (the double), a centre two
+    // units over its ceiling had nothing to reach for, and sulphur came out at
+    // eight with a +6 formal charge.
+    'O+S': [
+        { o: 2.0, l: 1.46, t: 0.08 },
+        { o: 1.0, l: 1.62, t: 0.20 }
+    ],
+    // Phosphorus–oxygen: phosphine oxide P=O is 1.48 Å, a phosphate's four P–O
+    // are 1.51–1.55 Å, and the double band stops at 1.51 so the anion keeps its
+    // single bonds (and the dative charge that balances its four oxygens).
+    'O+P': [
+        { o: 2.0, l: 1.47, t: 0.04 },
+        { o: 1.0, l: 1.59, t: 0.10 }
+    ],
+    // A silicon–oxygen bond is a single bond at every length it is found at
+    // (1.58–1.68 Å, siloxane and silicate alike). The entry exists so the pair
+    // has a length at all: without one, `bpSpecDev` reported a perfect fit for
+    // any order the relaxation proposed and the pass was free to invent a
+    // one-and-a-half bond out of a distance that never argued for one.
+    'O+Si': [{ o: 1.0, l: 1.63, t: 0.10 }],
+    // Chlorine–oxygen is drawn single on purpose: perchlorate and chlorate are
+    // the dative reading, in which Cl carries +3 and each oxygen −1, and that
+    // is the only reading whose charges add up to the anion's own charge.
+    'Cl+O': [{ o: 1.0, l: 1.70, t: 0.14 }],
     'C+F': [{ o: 1.0, l: 1.33, t: 0.10 }],
     'C+H': [{ o: 1.0, l: 0.97, t: 0.15 }],
     'N+H': [{ o: 1.0, l: 0.88, t: 0.15 }],
@@ -126,7 +181,24 @@ const SPECS: { [key: string]: OrderSpec[] } = {
 
 /** Hard valence ceiling per element. Never exceeded by a sane assignment. */
 const CEIL: { [key: string]: number } = {
-    H: 1, C: 4, N: 3, O: 2, F: 1, S: 6, P: 5, Cl: 1, Br: 1, I: 1, B: 3
+    // The halogens are not all monovalent: perchlorate, chlorate, the chlorine
+    // fluorides and their bromine and iodine analogues are ordinary chemistry,
+    // and a ceiling of 1 made every one of them permanently over-coordinated.
+    // The relaxation then had a centre it could never satisfy — it spent its
+    // budget on it in every pass, and the diagnostic listed it for ever. A
+    // ceiling of 7 is the most a halogen is ever seen to carry; the bonds it
+    // actually has are still decided by the lengths.
+    //
+    // Nitrogen is four, not three: an ammonium, a pyridinium and a nitro group
+    // all carry four bonds, and the answer for them is a positive formal charge
+    // (which `bpAtomicCharge` states), not a repair. At a ceiling of three every
+    // one of them counted as over-coordinated, and the relaxation then spent its
+    // budget lowering the bonds of a perfectly good aromatic ring to bring the
+    // nitrogen down — a pyrrole's or a pyridinium's two aromatic bonds came out
+    // single and the ring stopped being aromatic, from a pass whose whole job is
+    // to remove excess that was never there. A nitrogen measured with five bonds
+    // is still over, and still repaired.
+    H: 1, C: 4, N: 4, O: 2, F: 1, S: 6, P: 5, Cl: 7, Br: 7, I: 7, B: 3
 };
 
 /**
@@ -138,13 +210,50 @@ const TERMINAL: { [key: string]: number } = {
     H: 1, F: 1, Cl: 1, Br: 1, I: 1, He: 1, Ne: 1, Ar: 1, Kr: 1, Xe: 1, Rn: 1
 };
 
-/** Atomic number per element symbol, for the elements the valence tables cover. */
+/**
+ * Atomic number per element symbol, for every element the viewer can draw.
+ *
+ * The table used to stop at the main group, so every transition metal read as
+ * −1, `bpPossibleValences` answered nothing for it, and the valence solver
+ * refused the *whole component* an iron atom belonged to — a ferrocene or a
+ * metalloprotein kept whatever the geometric pass produced even where the
+ * organic part needed repairing. The numbers are here now; what a metal has no
+ * entry for is a valence (see `bpValenceModelled`), which is a different
+ * question and is answered by leaving such an atom frozen rather than by
+ * disabling its neighbours.
+ */
 const Z_OF: { [key: string]: number } = {
     H: 1, He: 2, Li: 3, Be: 4, B: 5, C: 6, N: 7, O: 8, F: 9, Ne: 10,
     Na: 11, Mg: 12, Al: 13, Si: 14, P: 15, S: 16, Cl: 17, Ar: 18,
-    K: 19, Ca: 20, Ge: 32, As: 33, Se: 34, Br: 35, Kr: 36,
-    Rb: 37, Sr: 38, Sn: 50, Sb: 51, Te: 52, I: 53, Xe: 54,
-    Cs: 55, Ba: 56, Tl: 81, Pb: 82, Bi: 83
+    K: 19, Ca: 20, Sc: 21, Ti: 22, V: 23, Cr: 24, Mn: 25, Fe: 26, Co: 27,
+    Ni: 28, Cu: 29, Zn: 30, Ga: 31, Ge: 32, As: 33, Se: 34, Br: 35, Kr: 36,
+    Rb: 37, Sr: 38, Y: 39, Zr: 40, Nb: 41, Mo: 42, Tc: 43, Ru: 44, Rh: 45,
+    Pd: 46, Ag: 47, Cd: 48, In: 49, Sn: 50, Sb: 51, Te: 52, I: 53, Xe: 54,
+    Cs: 55, Ba: 56, La: 57, Ce: 58, Pr: 59, Nd: 60, Pm: 61, Sm: 62, Eu: 63,
+    Gd: 64, Tb: 65, Dy: 66, Ho: 67, Er: 68, Tm: 69, Yb: 70, Lu: 71, Hf: 72,
+    Ta: 73, W: 74, Re: 75, Os: 76, Ir: 77, Pt: 78, Au: 79, Hg: 80,
+    Tl: 81, Pb: 82, Bi: 83, Po: 84, At: 85, Rn: 86
+};
+
+/**
+ * Elements whose bonds have no length table and no valence model: the d and f
+ * block.
+ *
+ * Their bond *lengths* are still read from the covalent radii (see
+ * `bpMetalSpec`) — a metal–oxygen bond at 2.05 Å is a bond, and its order is
+ * one — but their *valence* is not a number a file can be asked about: an iron
+ * is six-coordinate in one complex and four in the next, and which of its
+ * ligands are "bonds" is the chemistry of the compound, not of the distance.
+ * The solver therefore treats a metal as frozen (see `bpDetermineOrders`) and
+ * the formal charge as unknown, which is what the module promises for an
+ * element it has no entry for.
+ */
+const METALS: { [key: string]: number } = {
+    Sc: 1, Ti: 1, V: 1, Cr: 1, Mn: 1, Fe: 1, Co: 1, Ni: 1, Cu: 1, Zn: 1,
+    Y: 1, Zr: 1, Nb: 1, Mo: 1, Tc: 1, Ru: 1, Rh: 1, Pd: 1, Ag: 1, Cd: 1,
+    La: 1, Ce: 1, Pr: 1, Nd: 1, Pm: 1, Sm: 1, Eu: 1, Gd: 1, Tb: 1, Dy: 1,
+    Ho: 1, Er: 1, Tm: 1, Yb: 1, Lu: 1, Hf: 1, Ta: 1, W: 1, Re: 1, Os: 1,
+    Ir: 1, Pt: 1, Au: 1, Hg: 1, Ac: 1, Th: 1, Pa: 1, U: 1, Np: 1, Pu: 1
 };
 
 /** Target valences an atom is allowed to take, keyed by atomic number. */
@@ -157,11 +266,19 @@ const VALENCE: { [key: number]: number[] } = {
     9: [1],
     14: [4],
     15: [5, 3],
-    16: [6, 3, 2, 1],
-    17: [1],
+    // 4 is the sulphoxide: one S=O and two S–C add up to four, which is neither
+    // the sulphone's six nor a thioether's two, and leaving it out of the set
+    // made every sulphoxide read as off its valence in the diagnostic.
+    16: [6, 4, 3, 2, 1],
+    // The halogens the oxoacids and the interhalogens are built from: 1 in a
+    // halide, 3 in ClF3, 4 in the dative perchlorate, 5 in ClF5, 7 in IF7. The
+    // set is what the solver may aim at and what the diagnostic measures
+    // against; without these values every hypervalent halogen was reported off
+    // its valence by an amount the pass could never repair.
+    17: [1, 3, 4, 5, 7],
     32: [4],
-    35: [1],
-    53: [1]
+    35: [1, 3, 4, 5, 7],
+    53: [1, 3, 4, 5, 7]
 };
 
 /** Target valences for elements outside VALENCE, by periodic-table group. */
@@ -188,6 +305,32 @@ const MAX_SOLVER_ATOMS = 3000;
 
 /** Valence combinations a component may enumerate before it gives up. */
 const MAX_COMBOS = 200000;
+
+/**
+ * Element operations one component may spend on those combinations.
+ *
+ * A bound on the count alone is not a bound on the work: the sweep copies a
+ * `k`×`k` order matrix and runs a blossom matching inside every combination it
+ * looks at, so 200 000 combinations of a 3 000-atom component is 200 000 × 10⁷
+ * operations — minutes to hours on one core, from a single structure that
+ * merely happens to contain a component the solver was offered. The budget is
+ * charged in the units the work is actually made of (`k` for a combination's
+ * per-atom checks, `k`×`k` for the matrix, `k`×`k` per matching round), so a
+ * small molecule still walks the whole combination space — a 30-atom component
+ * costs about 900 per combination and 200 000 of them fit — while a component
+ * large enough for the copy to be expensive is cut short and keeps the
+ * geometric answer, which is exactly what `declined` reports.
+ */
+const MAX_COMBO_WORK = 40000000;
+
+/**
+ * Neighbours an over-ceiling centre may lower at once.
+ *
+ * Three covers every polyvalent centre the tables describe (a sulphate's
+ * sulphur needs two, a chlorate's one) and bounds the subset search at a few
+ * hundred plans even for a ten-coordinate metal.
+ */
+const MAX_SHED_BONDS = 3;
 
 /**
  * Distance below which two atoms can never be bonded: shorter than the
@@ -243,6 +386,52 @@ function bpZOf(el: string): number {
     return z === undefined ? -1 : z;
 }
 
+/** Whether the element is a transition or inner-transition metal. */
+function bpIsMetal(el: string): boolean {
+    return METALS[bpNorm(el)] === 1;
+}
+
+/**
+ * Whether a valence model exists for an element at all.
+ *
+ * This is the question the solver asks, and it is not the same as "does the
+ * element have a Z". A metal has one and no valence — which is why it is
+ * frozen inside the solve rather than used as a reason to refuse the whole
+ * component. An element with neither (a dummy, a superheavy placeholder) is
+ * frozen the same way.
+ */
+function bpValenceModelled(z: number): boolean {
+    return bpPossibleValences(z) !== null;
+}
+
+/**
+ * The length table for an element pair, with the metals filled in.
+ *
+ * A metal has no tabulated lengths — its bonds are 2.0–2.5 Å depending on the
+ * ligand, the oxidation state and the coordination number — so the pair would
+ * otherwise read as "no evidence", which the relaxation took for a perfect fit
+ * and the refinement took for freedom to move the order by half a unit. A
+ * single bond at the covalent-radius sum, with the widest tolerance that still
+ * is not a second bond, states the one thing that is true of every metal
+ * contact: it is a single bond, and a length far from that sum is worth
+ * nothing. Nothing above a single bond is ever proposed, which is what keeps a
+ * ferrocene's five Fe–C contacts single rather than double.
+ */
+function bpMetalSpec(el1: string, el2: string): OrderSpec[] | null {
+    if (!bpIsMetal(el1) && !bpIsMetal(el2)) return null;
+    const r1 = COV_R[bpNorm(el1)];
+    const r2 = COV_R[bpNorm(el2)];
+    if (r1 === undefined || r2 === undefined) return null;
+    return [{ o: 1.0, l: r1 + r2, t: 0.45 }];
+}
+
+/** The specs of a pair: the table's own, else the metal fallback, else none. */
+function bpSpecList(el1: string, el2: string): OrderSpec[] | null {
+    const specs = SPECS[bpSpecKey(el1, el2)];
+    if (specs) return specs;
+    return bpMetalSpec(el1, el2);
+}
+
 /**
  * Whether an atom is a ghost (a position with no nucleus, electrons or bonds).
  *
@@ -270,55 +459,92 @@ function bpIsGhost(a: Atom | null | undefined): boolean {
 /**
  * The best order a pair's length supports that is *not* the aromatic one.
  *
- * Used only to downgrade a bond the ring test has ruled out; the nearest
- * tabulated length wins, so a 1.40 Å C–C becomes the 1.38 Å double bond and a
- * 1.43 Å one the 1.51 Å single bond it is closer to than to 1.39.
+ * Used only to downgrade a bond the ring test has ruled out. A tolerance band
+ * that brackets the distance wins over the nearest tabulated length, because
+ * the two disagree exactly where it matters: a C–C of 1.44 Å is inside the
+ * single-bond band (1.41–1.61) and outside the double-bond one (1.33–1.43), yet
+ * it is nearer to 1.38 than to 1.51 — so a nearest-fit rule turned the one
+ * single bond of a furan's Kekulé form into a second double bond and left the
+ * carbon between them five-valent. Where no band brackets the distance the
+ * nearest length is the only evidence there is, and it is used.
  */
 function bpNonAromaticOrder(el1: string, el2: string, d: number): number {
-    const specs = SPECS[bpSpecKey(el1, el2)];
+    const specs = bpSpecList(el1, el2);
     if (!specs) return 1.0;
-    let best = 1.0;
-    let bestDiff = Infinity;
+    let bandOrder = 0;
+    let bandDev = Infinity;
+    let nearest = 1.0;
+    let nearestDiff = Infinity;
     for (let i = 0; i < specs.length; i++) {
         if (Math.abs(specs[i].o - 1.5) < 1e-9) continue;
         const diff = Math.abs(d - specs[i].l);
-        if (diff < bestDiff) {
-            bestDiff = diff;
-            best = specs[i].o;
+        if (diff <= specs[i].t && diff < bandDev) {
+            bandDev = diff;
+            bandOrder = specs[i].o;
+        }
+        if (diff < nearestDiff) {
+            nearestDiff = diff;
+            nearest = specs[i].o;
         }
     }
-    return best;
+    return bandOrder > 0 ? bandOrder : nearest;
 }
 
 /**
- * Take the aromatic order 1.5 off every bond that is not on a ring.
+ * Take the aromatic order 1.5 off every bond that is not part of an aromatic
+ * ring.
  *
  * The C–C length table brackets 1.34–1.44 Å with *both* the aromatic and the
- * double order, and bpGeometricOrder returns the first band that contains the
- * distance — so every alkene in that window came out aromatic: a four-
- * substituted C=C at 1.40 Å was read as 1.5, went into the MM parameters and
- * the drawing, and was exported to MOL2 as "ar", which states a ring.
+ * double order, so the length alone cannot tell an aromatic bond from an
+ * alkene: a four-substituted C=C at 1.40 Å, a ring alkene, a ring imine and a
+ * conjugated diene all land in the aromatic band. What the distance cannot
+ * state is the ring, and the reading a length in the overlap supports is only
+ * "could be aromatic" — the graph has to agree.
  *
- * Ring membership is the fact the distance cannot state, and it is exactly what
- * a bridge search answers: an edge lies on a cycle if and only if it is not a
- * bridge. A bridge is therefore downgraded to the best non-aromatic order its
- * length supports, while every bond of a phenyl ring keeps its 1.5. This is a
- * property of the graph, not of the element pair, so the other pairs with an
- * aromatic entry (C–N, N–O, C–S) are covered by the same test.
+ * **The rule is a cycle of aromatic bonds, not merely a cycle.** An earlier
+ * version of this pass asked only whether a bond lay on *some* cycle (a bridge
+ * search over the whole connectivity), which accepted exactly what it was meant
+ * to reject: one alkene bond of a cyclohexene ring is on a cycle, so it stayed
+ * 1.5, went into the MM parameters as a half order and was exported to MOL2 as
+ * "ar". A ring alkene, a ring imine and a bond of a partly saturated fused
+ * system are all on a cycle; none of them is aromatic.
+ *
+ * Running the same bridge search over the *aromatic edges alone* answers the
+ * right question: a 1.5 lies on a cycle all of whose edges are 1.5 if and only
+ * if it is not a bridge of that subgraph. Every bond of benzene, pyridine,
+ * pyrrole, thiophene, naphthalene and a porphyrin's rings survives, because
+ * each of them closes a loop of aromatic bonds. A cyclohexene's single 1.5 is a
+ * bridge of a one-bond subgraph and is downgraded to the best order its length
+ * supports that is not aromatic; so is a furan's pair of C=C, because its C–O
+ * bonds cannot carry 1.5 without putting the oxygen at three (the Kekulé form
+ * of furan is two C=C and two C–O, which is what comes back); so is a
+ * cyclooctatetraene's, whose alternating 1.33/1.46 ring is a polyene.
+ *
+ * It also removes the flicker a trajectory had. Under the whole-graph test, any
+ * edge crossing the cutoff anywhere in the structure — a hydrogen-bond contact
+ * appearing between two molecules, a ligand drifting past 3 Å — could close a
+ * ring and re-label bonds that had nothing to do with it, so orders jumped
+ * between frames near the cutoff. An edge of order 1 can never join a cycle of
+ * order-1.5 edges, so a contact appearing or disappearing now changes nothing
+ * about which bonds are aromatic; only the ring the bond belongs to breaking
+ * does, which is a real change in the structure rather than an artefact of the
+ * threshold.
  *
  * Iterative Tarjan with an explicit stack: a 20 000-atom structure must not be
- * able to overflow the call stack, and the pass is O(V+E).
+ * able to overflow the call stack, and the pass is O(V+E) over the aromatic
+ * edges, which are a small fraction of the bonds.
  */
-function bpDropNonRingAromatic(bondMap: Map<number, Map<number, number>>, atoms: Atom[]): number {
+function bpAromaticRing(bondMap: Map<number, Map<number, number>>, atoms: Atom[]): number {
     const n = atoms.length;
-    const adj: number[][] = new Array(n);
-    for (let i = 0; i < n; i++) adj[i] = [];
+
+    // The aromatic subgraph, edges numbered in (i, j) insertion order.
     const from: number[] = [];
     const to: number[] = [];
+    const adj: number[][] = new Array(n);
+    for (let i = 0; i < n; i++) adj[i] = [];
     bondMap.forEach(function (neighbors, i) {
-        neighbors.forEach(function (_order, j) {
-            // Each edge once, from its lower end, in insertion order.
-            if (j <= i) return;
+        neighbors.forEach(function (order, j) {
+            if (j <= i || Math.abs(order - 1.5) > 1e-9) return;
             const id = from.length;
             from.push(i);
             to.push(j);
@@ -370,7 +596,7 @@ function bpDropNonRingAromatic(bondMap: Map<number, Map<number, number>>, atoms:
                     const p = stackNode[top - 1];
                     if (low[u] < low[p]) low[p] = low[u];
                     // u cannot reach above its parent without using the edge it
-                    // came in on, so that edge lies on no cycle.
+                    // came in on, so that edge closes no loop of aromatic bonds.
                     if (low[u] > disc[p]) isBridge[parentEdge] = 1;
                 }
             }
@@ -423,7 +649,7 @@ function bpGeometricOrder(el1: string, el2: string, d: number): number {
     if (!(d >= MIN_BOND_DISTANCE)) return 0;
     if (d > bpPairCutoff(bpNorm(el1), bpNorm(el2))) return 0;
 
-    const specs = SPECS[bpSpecKey(el1, el2)];
+    const specs = bpSpecList(el1, el2);
     if (specs) {
         for (let i = 0; i < specs.length; i++) {
             if (Math.abs(d - specs[i].l) <= specs[i].t) return specs[i].o;
@@ -456,7 +682,7 @@ function bpGeometricOrder(el1: string, el2: string, d: number): number {
  * after a move and decide whether re-deriving it could change anything.
  */
 function bpSupportedOrder(el1: string, el2: string, d: number): number {
-    const specs = SPECS[bpSpecKey(el1, el2)];
+    const specs = bpSpecList(el1, el2);
     if (!specs) return 0;
     let order = 0;
     let best = Infinity;
@@ -470,10 +696,26 @@ function bpSupportedOrder(el1: string, el2: string, d: number): number {
     return order;
 }
 
-/** How far an assigned order sits from the length the table expects for it. */
+/**
+ * How far an assigned order sits from the length the table expects for it.
+ *
+ * **−1 means the pair has no length evidence at all**, and that is a different
+ * answer from 0. It used to return 0 for an untabulated pair, which says
+ * "perfect fit" — so a silicon–oxygen or a sulphur–oxygen bond, neither of
+ * which had a table entry, read as fitting its length perfectly at *every*
+ * order, and the refinement was free to move such a bond by half a unit
+ * (`bpSpecDev(next) <= bpSpecDev(current)` was 0 ≤ 0 for any `next`). That is
+ * where the half-integer Si–O and S–O orders came from. The caller now has to
+ * say what no evidence means for it, and every one of them reads it as "this
+ * bond cannot be moved on length grounds".
+ *
+ * `Infinity` is the second special answer: the pair is tabulated but the order
+ * in question is not one of its values (a 1.5 on a C–H bond, say), so no length
+ * could justify it either.
+ */
 function bpSpecDev(el1: string, el2: string, order: number, d: number): number {
-    const specs = SPECS[bpSpecKey(el1, el2)];
-    if (!specs) return 0;
+    const specs = bpSpecList(el1, el2);
+    if (!specs) return -1;
     let best = Infinity;
     for (let i = 0; i < specs.length; i++) {
         if (Math.abs(specs[i].o - order) > 1e-9) continue;
@@ -583,8 +825,9 @@ function bpConnectivity(atoms: Atom[]): Map<number, Map<number, number>> {
     }
     // Aromaticity is a property of a ring, and the length table cannot tell a
     // ring bond from an alkene of the same length: the order the geometry
-    // suggests stands only where the graph says a cycle exists.
-    if (bondMap.size > 0) bpDropNonRingAromatic(bondMap, atoms);
+    // suggests stands only where the graph closes a loop of aromatic bonds
+    // around it.
+    if (bondMap.size > 0) bpAromaticRing(bondMap, atoms);
     return bondMap;
 }
 
@@ -594,7 +837,7 @@ function bpConnectivity(atoms: Atom[]): Map<number, Map<number, number>> {
 
 /** Every order the element pair may carry, read out of the length table. */
 function bpAllowedOrders(el1: string, el2: string): number[] {
-    const specs = SPECS[bpSpecKey(el1, el2)];
+    const specs = bpSpecList(el1, el2);
     if (!specs) return [1.0];
     const out: number[] = [];
     for (let i = 0; i < specs.length; i++) {
@@ -812,11 +1055,20 @@ function bpValenceGap(z: number, v: number, ceil: number): number {
  * neighbours, so any candidate outside that band is impossible and is dropped.
  * Each tightening shortens the round after it, so the pass runs to a fixed
  * point instead of once.
+ *
+ * A frozen atom — one with no valence model, a metal — has exactly one
+ * candidate: the degree it already has. That is not a target valence, it is the
+ * statement that its bonds are not up for negotiation, and it is what lets the
+ * rest of its component be solved without the metal being consulted.
  */
-function bpPruneValences(zs: number[], deg: number[], nbr: number[][]): number[][] | null {
+function bpPruneValences(zs: number[], deg: number[], nbr: number[][], frozen: boolean[]): number[][] | null {
     const k = zs.length;
     let cur: number[][] = new Array(k);
     for (let i = 0; i < k; i++) {
+        if (frozen[i]) {
+            cur[i] = [deg[i]];
+            continue;
+        }
         const v = bpPossibleValences(zs[i]);
         if (!v) return null;
         cur[i] = v;
@@ -865,15 +1117,39 @@ function bpPruneValences(zs: number[], deg: number[], nbr: number[][]): number[]
 }
 
 /**
- * Formal charge implied by an element and its total bond valence. The generic
- * branch counts the octet the atom has filled against its outermost electrons;
- * the exceptions are the elements whose normal valence is not an octet.
+ * Formal charge implied by an element, its total bond valence and how many
+ * neighbours it has. The generic branch counts the octet the atom has filled
+ * against its outermost electrons; the exceptions are the centres the octet
+ * cannot describe.
+ *
+ * The valence alone is not enough for three of them, and the neighbour count is
+ * what makes the difference:
+ *
+ *   - **Nitrogen.** Four units of bond order make an ammonium when there are
+ *     four neighbours and no charge at all when there are three: a pyrrole, an
+ *     indole or an amide nitrogen contributes its lone pair to the ring, so the
+ *     aromatic pair in its two ring bonds is electrons the atom already had, not
+ *     a fourth bond. The octet formula charged every one of them +1.
+ *   - **Sulphur.** Six of bond order is neutral whatever the split (a sulphone's
+ *     two S=O, a sulphate's two S=O and two S–O); three units over two
+ *     neighbours is a thiophene (neutral), three over three is the dative
+ *     sulphoxide's S(+1)–O(−1), and four over three is a sulphoxide drawn with
+ *     a double bond, which is neutral. The formula charged the dative cases +1
+ *     and +2, which is a charge the file never stated.
+ *   - **Phosphorus.** Five units is neutral (phosphine oxide, PF5); four is the
+ *     phosphate dative count, which the formula already gets right.
  */
-function bpAtomicCharge(z: number, valence: number): number | null {
+function bpAtomicCharge(z: number, valence: number, degree: number): number | null {
     if (z === 1) return 1 - valence;
     if (z === 5) return 3 - valence;
+    if (z === 7 && valence === 4) return degree === 4 ? 1 : 0;
     if (z === 15 && valence === 5) return 0;
-    if (z === 16 && valence === 6) return 0;
+    if (z === 16) {
+        if (valence === 6) return 0;
+        if (valence === 3 && degree === 2) return 0;
+        if (valence === 3 && degree === 3) return 1;
+        if (valence === 4 && degree === 3) return 0;
+    }
     const outer = OUTER_E[z];
     if (outer === undefined) return null;
     return outer - 8 + valence;
@@ -895,25 +1171,42 @@ function bpCheckSaturation(order: number[], valency: number[]): boolean {
 
 /**
  * Whether the formal charges implied by a valence assignment sum to the
- * molecule's total charge, with the two carbon special cases folded in: a
- * two-coordinate carbon carrying a valence of two is a carbene and contributes
- * one extra unit, and a three-coordinate carbon leaves one unit of its charge
- * to the molecule while the count is still far below the target.
+ * molecule's total charge.
+ *
+ * Two carbon cases are folded in — a two-coordinate carbon carrying a valence of
+ * two is a carbene and contributes one extra unit, and a three-coordinate carbon
+ * leaves one unit of its charge to the molecule — and both are decided from the
+ * whole assignment rather than from a running total. The three-coordinate case
+ * used to be tested as `total + 1 < charge` *while* the total was still being
+ * accumulated, so whether a carbon contributed its extra units depended on how
+ * many atoms happened to be counted before it: renumbering the same structure
+ * could turn a component the solver accepted into one it rejected. The base
+ * total is summed first and the carbons are added afterwards, in a loop whose
+ * length is a count and not a position.
+ *
+ * An atom with no valence model (a metal) contributes nothing and is not
+ * consulted: it has no formal charge the tables can state, and one iron must
+ * not decide whether its component's organic part balances.
  */
 function bpCheckCharge(zs: number[], degrees: number[], valency: number[], charge: number): boolean {
-    let total = 0;
+    let base = 0;
+    let carbenes = 0;
+    let threeCoord = 0;
     for (let i = 0; i < zs.length; i++) {
         const z = zs[i];
-        const c = bpAtomicCharge(z, valency[i]);
+        if (!bpValenceModelled(z)) continue;
+        const c = bpAtomicCharge(z, valency[i], degrees[i]);
         if (c === null) return false;
-        total += c;
+        base += c;
         if (z === 6) {
-            if (degrees[i] === 2 && valency[i] === 2) {
-                total += 1;
-            } else if (degrees[i] === 3 && total + 1 < charge) {
-                total += 2;
-            }
+            if (degrees[i] === 2 && valency[i] === 2) carbenes++;
+            else if (degrees[i] === 3) threeCoord++;
         }
+    }
+    let total = base + carbenes;
+    for (let t = 0; t < threeCoord; t++) {
+        if (total + 1 >= charge) break;
+        total += 2;
     }
     return total === charge;
 }
@@ -941,9 +1234,19 @@ interface SolverAttempt {
  * pair remains. An assignment is accepted when no atom exceeds its target and
  * all of them reach it; one that fits the ceiling but stays short is kept as
  * the best approximation, the largest total order winning. Nothing is returned
- * when the component has no table entry for some element, no legal combination
- * survives pruning, or the sweep would enumerate more combinations than the
- * budget allows — the caller then keeps the geometric result.
+ * when no legal combination survives pruning, or when the sweep runs out of the
+ * work budget (see `MAX_COMBO_WORK`) — the caller then keeps the geometric
+ * result, and the reason says which of the two happened.
+ *
+ * **An atom with no valence model is frozen, not fatal.** A metal has no target
+ * valence the tables can state, and the first version of this function read
+ * that as "this component cannot be solved", which handed every structure
+ * containing an iron back to the geometric pass — a ferrocene's cyclopentadienyl
+ * rings, a magnesium complex's ligands, a zinc enzyme's whole organic part. The
+ * atom now keeps the bonds the geometry gave it: its target is its own degree,
+ * which makes it saturated by construction, so the matching never touches it and
+ * no bond of its is moved. Only a component in which *every* atom is unmodelled
+ * still declines, which is the right answer for a bare metal cluster.
  */
 function bpDetermineOrders(
     zs: number[],
@@ -951,11 +1254,13 @@ function bpDetermineOrders(
     charge: number,
     k: number
 ): SolverAttempt {
+    const frozen: boolean[] = new Array(k);
+    let modelled = 0;
     for (let i = 0; i < k; i++) {
-        if (!bpPossibleValences(zs[i])) {
-            return { result: null, reason: 'unknown-element', combos: 0 };
-        }
+        frozen[i] = !bpValenceModelled(zs[i]);
+        if (!frozen[i]) modelled++;
     }
+    if (modelled === 0) return { result: null, reason: 'unmodelled', combos: 0 };
 
     const con: number[][] = [];
     const val0: number[] = new Array(k);
@@ -979,7 +1284,7 @@ function bpDetermineOrders(
     }
     const deg = val0.slice();
 
-    const combos = bpPruneValences(zs, deg, nbr);
+    const combos = bpPruneValences(zs, deg, nbr, frozen);
     if (!combos) return { result: null, reason: 'no-legal-valence', combos: 0 };
 
     let total = 1;
@@ -991,10 +1296,23 @@ function bpDetermineOrders(
 
     let best: SolverResult | null = null;
     let bestSum = -1;
+    let work = 0;
     const idx: number[] = new Array(k);
     for (let i = 0; i < k; i++) idx[i] = 0;
 
     for (let iter = 0; iter < total; iter++) {
+        // The budget is charged before the combination is looked at, so a
+        // component whose combinations are individually expensive stops at the
+        // first one that would overrun instead of after a hundred of them.
+        work += k;
+        if (work > MAX_COMBO_WORK) {
+            return {
+                result: best,
+                reason: best ? 'approximate' : 'work-budget',
+                combos: total
+            };
+        }
+
         const order: number[] = new Array(k);
         for (let i = 0; i < k; i++) order[i] = combos[i][idx[i]];
 
@@ -1014,8 +1332,14 @@ function bpDetermineOrders(
             const ordMat: number[][] = new Array(k);
             for (let i = 0; i < k; i++) ordMat[i] = con[i].slice();
             const val = val0.slice();
+            work += k * k;
 
-            for (let guard = 0; guard < 200; guard++) {
+            // The matching round count is bounded by the structure as well as
+            // by the constant: every round that changes something adds at least
+            // one unit of bond order, and the total is bounded by the sum of the
+            // ceilings.
+            const guardLimit = Math.min(200, 4 + 2 * k);
+            for (let guard = 0; guard < guardLimit; guard++) {
                 let changed = false;
                 const ua: number[] = [];
                 for (let i = 0; i < k; i++) {
@@ -1028,6 +1352,8 @@ function bpDetermineOrders(
                     }
                 }
                 if (pairs.length) {
+                    work += k + ua.length * ua.length;
+                    if (work > MAX_COMBO_WORK) break;
                     const mate = bpMaximumMatching(k, pairs);
                     for (let v = 0; v < k; v++) {
                         if (mate[v] !== -1 && v < mate[v]) {
@@ -1073,7 +1399,7 @@ function bpDetermineOrders(
 
 /** Candidate orders for one bond that the measured distance actually supports. */
 function bpRelaxLadder(el1: string, el2: string, d: number): number[] {
-    const specs = SPECS[bpSpecKey(el1, el2)];
+    const specs = bpSpecList(el1, el2);
     const out: number[] = [];
     if (!specs) return out;
     let best = -1;
@@ -1103,6 +1429,18 @@ function bpRelaxLadder(el1: string, el2: string, d: number): number[] {
  * available, and a balanced pair move is searched alongside single transfers.
  * Terminal neighbours are pinned to a single bond and excluded from the
  * budget. Returns whether anything changed.
+ *
+ * An over-ceiling centre is searched differently, because it is over by an
+ * amount that is not always one unit: a sulphate's sulphur with four S=O bonds
+ * measured at 1.47 Å is two units above its ceiling of six, and a plan that
+ * moves one neighbour at a time can never reach it — the first version of this
+ * pass could only ever shed a single unit, so the largest repair it could make
+ * was from 7 to 6 and a centre at 8 stayed at 8. The over-ceiling branch
+ * therefore searches subsets of up to three neighbours, one step down each,
+ * and keeps the fitting plan whose bonds sit closest to their lengths. Three
+ * is enough for every polyvalent centre the tables contain (a sulphate needs
+ * two, a perphosphonate two, a sulphone none) and bounds the search at a few
+ * hundred plans for the widest coordination.
  */
 function bpRelaxCenter(
     bondMap: Map<number, Map<number, number>>,
@@ -1113,7 +1451,7 @@ function bpRelaxCenter(
     curSum: number
 ): boolean {
     const el = bpNorm(atoms[i].element);
-    const maxV = CEIL[el] === undefined ? 100 : CEIL[el];
+    const maxV = bpCeiling(el);
 
     const free: number[] = [];
     let terminalSum = 0;
@@ -1125,52 +1463,60 @@ function bpRelaxCenter(
     if (free.length === 0) return false;
     const nf = free.length;
 
+    // Candidate orders and their deviations, built together so the two arrays
+    // can never get out of step. They used to be filled by two separate pushes,
+    // keyed only by the assumption that every candidate is new: for a pair whose
+    // table lists the same order twice (or a current order already on the
+    // ladder) the deviation of one bond was read for another.
     const cand: number[][] = [];
     const devs: number[][] = [];
     const curIdx: number[] = [];
     for (let fi = 0; fi < nf; fi++) {
         const j = entries[free[fi]][0];
+        const cur = entries[free[fi]][1];
         const d = bpDist(atoms[i], atoms[j]);
-        const specs = SPECS[bpSpecKey(el, atoms[j].element)];
+        const specs = bpSpecList(el, atoms[j].element);
         const ladder: number[] = [];
-        const devOf: number[] = [];
-        const add = function (o: number): void {
-            if (o > 0 && ladder.indexOf(o) < 0) ladder.push(o);
+        const dlist: number[] = [];
+        const add = function (o: number, dev: number): void {
+            if (!(o > 0)) return;
+            const at = ladder.indexOf(o);
+            if (at >= 0) {
+                if (dev < dlist[at]) dlist[at] = dev;
+                return;
+            }
+            ladder.push(o);
+            dlist.push(dev);
         };
         if (specs) {
             const idxs = bpRelaxLadder(el, atoms[j].element, d);
             for (let q = 0; q < idxs.length; q++) {
-                add(specs[idxs[q]].o);
-                devOf.push(Math.abs(d - specs[idxs[q]].l));
+                add(specs[idxs[q]].o, Math.abs(d - specs[idxs[q]].l));
             }
-            const cur = entries[free[fi]][1];
             if (ladder.indexOf(cur) < 0) {
-                let ci = 0;
+                // The order already assigned, when the length no longer argues
+                // for it: it stays reachable so a plan can keep it, priced at
+                // the deviation of the nearest tabulated order.
                 let cd = Infinity;
                 for (let q = 0; q < specs.length; q++) {
                     const df = Math.abs(d - specs[q].l);
-                    if (df < cd) {
-                        cd = df;
-                        ci = q;
-                    }
+                    if (df < cd) cd = df;
                 }
-                add(cur);
-                devOf.push(Math.abs(d - specs[ci].l));
+                add(cur, cd);
             }
         } else {
-            add(entries[free[fi]][1]);
-            devOf.push(0);
+            add(cur, 0);
         }
         cand.push(ladder);
-        devs.push(devOf);
-        const ci2 = ladder.indexOf(entries[free[fi]][1]);
-        curIdx.push(ci2 >= 0 ? ci2 : 0);
+        devs.push(dlist);
+        const at = ladder.indexOf(cur);
+        curIdx.push(at >= 0 ? at : 0);
     }
 
     const headroom: number[] = [];
     for (let fi = 0; fi < nf; fi++) {
         const j = entries[free[fi]][0];
-        const cap = CEIL[bpNorm(atoms[j].element)] === undefined ? 100 : (CEIL[bpNorm(atoms[j].element)] as number);
+        const cap = bpCeiling(atoms[j].element);
         const own = bondMap.get(j);
         let used = 0;
         if (own) {
@@ -1181,7 +1527,7 @@ function bpRelaxCenter(
         headroom.push(cap - used);
     }
 
-    const chosen = curIdx.slice();
+    let chosen = curIdx.slice();
     let bestSigned = 0;
     let bestAbs = 0;
     let found = false;
@@ -1198,31 +1544,25 @@ function bpRelaxCenter(
     // out of long contacts.
     const overCenter = !bpValenceOk(curSum, maxV);
 
-    const consider = function (fi: number, i1: number, fj: number, i2: number): void {
+    const evaluate = function (plan: number[]): void {
         let sum = terminalSum;
-        for (let k = 0; k < nf; k++) {
-            sum += k === fi ? cand[k][i1] : k === fj ? cand[k][i2] : cand[k][curIdx[k]];
-        }
+        for (let k = 0; k < nf; k++) sum += cand[k][plan[k]];
         if (!bpValenceOk(sum, maxV)) return;
 
         let signed = 0;
         let abs = 0;
         for (let k = 0; k < nf; k++) {
-            const v = k === fi ? cand[k][i1] : k === fj ? cand[k][i2] : cand[k][curIdx[k]];
-            const d = k === fi ? devs[k][i1] : k === fj ? devs[k][i2] : devs[k][curIdx[k]];
-            const delta = v - cand[k][curIdx[k]];
-            if (delta > headroom[k] + 0.001) return;
-            signed += d - devs[k][curIdx[k]];
-            abs += d;
+            const v = cand[k][plan[k]];
+            if (v - cand[k][curIdx[k]] > headroom[k] + 0.001) return;
+            signed += devs[k][plan[k]] - devs[k][curIdx[k]];
+            abs += devs[k][plan[k]];
         }
 
         if (overCenter) {
             if (!found || abs < bestAbs - 1e-9) {
                 bestSigned = signed;
                 bestAbs = abs;
-                for (let k = 0; k < nf; k++) {
-                    chosen[k] = k === fi ? i1 : k === fj ? i2 : curIdx[k];
-                }
+                chosen = plan.slice();
                 found = true;
             }
             return;
@@ -1232,49 +1572,64 @@ function bpRelaxCenter(
         if (!found || signed < bestSigned - 1e-9 || (Math.abs(signed - bestSigned) <= 1e-9 && abs < bestAbs - 1e-9)) {
             bestSigned = signed;
             bestAbs = abs;
-            for (let k = 0; k < nf; k++) {
-                chosen[k] = k === fi ? i1 : k === fj ? i2 : curIdx[k];
-            }
+            chosen = plan.slice();
             found = true;
         }
     };
 
-    // Phase 0 — shed a unit on a single neighbour, changing the centre's total.
-    // The balanced phases below always leave the total where it was, so without
-    // this a centre above its ceiling has nothing to reach for: every plan they
-    // offer still adds up to the same over-large sum. Only an over-ceiling
-    // centre runs this phase, because moving one neighbour on its own is
-    // exactly what the strict-improvement rule forbids everywhere else.
-    if (overCenter) {
-        for (let fi = 0; fi < nf; fi++) {
-            for (let i1 = 0; i1 < cand[fi].length; i1++) {
-                if (cand[fi][i1] === cand[fi][curIdx[fi]]) continue;
-                consider(fi, i1, -1, 0);
-            }
-        }
-    }
+    const scratch = curIdx.slice();
 
-    for (let fi = 0; fi < nf; fi++) {
-        for (let i1 = 0; i1 < cand[fi].length; i1++) {
-            const delta = cand[fi][i1] - cand[fi][curIdx[fi]];
-            if (delta === 0) continue;
-            for (let fj = 0; fj < nf; fj++) {
-                if (fj === fi) continue;
-                for (let i2 = 0; i2 < cand[fj].length; i2++) {
-                    if (Math.abs(cand[fj][i2] - cand[fj][curIdx[fj]] + delta) > 0.001) continue;
-                    consider(fi, i1, fj, i2);
+    // Phase 0 — shed units, changing the centre's total. The balanced phases
+    // below always leave the total where it was, so without this a centre above
+    // its ceiling has nothing to reach for: every plan they offer still adds up
+    // to the same over-large sum. Only an over-ceiling centre runs this phase,
+    // because moving a neighbour with nothing balancing it is exactly what the
+    // strict-improvement rule forbids everywhere else.
+    if (overCenter) {
+        const plan = curIdx.slice();
+        const walk = function (from: number, depth: number): void {
+            if (depth > 0) evaluate(plan);
+            if (depth >= MAX_SHED_BONDS) return;
+            for (let fi = from; fi < nf; fi++) {
+                for (let q = 0; q < cand[fi].length; q++) {
+                    if (cand[fi][q] >= cand[fi][curIdx[fi]]) continue;
+                    const keep = plan[fi];
+                    plan[fi] = q;
+                    walk(fi + 1, depth + 1);
+                    plan[fi] = keep;
                 }
             }
+        };
+        walk(0, 0);
+    } else {
+        // Phase 1 — one neighbour, any direction.
+        for (let fi = 0; fi < nf; fi++) {
+            for (let i1 = 0; i1 < cand[fi].length; i1++) {
+                if (i1 === curIdx[fi]) continue;
+                scratch[fi] = i1;
+                evaluate(scratch);
+                scratch[fi] = curIdx[fi];
+            }
         }
-    }
-    for (let fi = 0; fi < nf; fi++) {
-        for (let i1 = 0; i1 < cand[fi].length; i1++) {
-            const delta = cand[fi][i1] - cand[fi][curIdx[fi]];
-            if (delta === 0) continue;
-            for (let fj = fi + 1; fj < nf; fj++) {
-                for (let i2 = 0; i2 < cand[fj].length; i2++) {
-                    if (Math.abs(cand[fj][i2] - cand[fj][curIdx[fj]] + delta) > 0.001) continue;
-                    consider(fi, i1, fj, i2);
+
+        // Phase 2 and 3 — a balanced pair, so the centre's total is unchanged
+        // while its neighbours' lengths are served better. Both orderings of the
+        // pair are tried, because the first loop may move the *earlier* bond up
+        // while the later one comes down.
+        for (let fi = 0; fi < nf; fi++) {
+            for (let i1 = 0; i1 < cand[fi].length; i1++) {
+                const delta = cand[fi][i1] - cand[fi][curIdx[fi]];
+                if (delta === 0) continue;
+                for (let fj = 0; fj < nf; fj++) {
+                    if (fj === fi) continue;
+                    for (let i2 = 0; i2 < cand[fj].length; i2++) {
+                        if (Math.abs(cand[fj][i2] - cand[fj][curIdx[fj]] + delta) > 0.001) continue;
+                        scratch[fi] = i1;
+                        scratch[fj] = i2;
+                        evaluate(scratch);
+                        scratch[fi] = curIdx[fi];
+                        scratch[fj] = curIdx[fj];
+                    }
                 }
             }
         }
@@ -1375,7 +1730,7 @@ function bpRelaxValence(bondMap: Map<number, Map<number, number>>, atoms: Atom[]
         for (let e = 0; e < entries.length; e++) {
             curSum += entries[e][1];
             const d = bpDist(atoms[i], atoms[entries[e][0]]);
-            const specs = SPECS[bpSpecKey(atoms[i].element, atoms[entries[e][0]].element)];
+            const specs = bpSpecList(atoms[i].element, atoms[entries[e][0]].element);
             let ideal = d;
             if (specs) {
                 let minD = Infinity;
@@ -1600,7 +1955,9 @@ function bpRefineValences(bondMap: Map<number, Map<number, number>>, atoms: Atom
     // How far the centre's own bonds sit from the lengths the table expects.
     // A move that fixes a valence but drags a bond well off its length is not
     // a gain, so the neighbourhood is only allowed to trade one for the other
-    // when the length fit does not get worse.
+    // when the length fit does not get worse. A pair with no table entry has no
+    // fit to compare and contributes nothing — which is why the *admission* of
+    // a candidate below cannot be decided here.
     const devOf = function (i: number, around: number[]): number {
         const nb = bondMap.get(i);
         if (!nb) return 0;
@@ -1610,9 +1967,27 @@ function bpRefineValences(bondMap: Map<number, Map<number, number>>, atoms: Atom
             const j = around[k];
             const o = nb.get(j);
             if (o === undefined) continue;
-            s += bpSpecDev(a.element, atoms[j].element, o, bpDist(a, atoms[j]));
+            const dev = bpSpecDev(a.element, atoms[j].element, o, bpDist(a, atoms[j]));
+            if (dev >= 0 && dev < Infinity) s += dev;
         }
         return s;
+    };
+    /**
+     * Whether the pair's own table says a move to a new order fits this length
+     * at least as well as the current one does.
+     *
+     * A pair with no table at all answers *no*, and that is the whole point.
+     * bpSpecDev used to answer 0 for such a pair — "perfect fit" — so a
+     * silicon–oxygen or sulphur–oxygen bond, neither of which had an entry, was
+     * freely movable by half a unit and came out at 1.5. No evidence is not
+     * evidence for every order; it is evidence for none, and the bond keeps the
+     * order the geometry gave it.
+     */
+    const moveAllowed = function (el1: string, el2: string, d: number, cur: number, next: number): boolean {
+        const curDev = bpSpecDev(el1, el2, cur, d);
+        if (!(curDev >= 0)) return false;
+        const dev = bpSpecDev(el1, el2, next, d);
+        return dev >= 0 && dev <= curDev + 1e-9;
     };
     const setOrder = function (i: number, j: number, v: number): void {
         const ni = bondMap.get(i);
@@ -1643,14 +2018,13 @@ function bpRefineValences(bondMap: Map<number, Map<number, number>>, atoms: Atom
                 if (isH[j]) return;
                 const d = bpDist(atoms[i], atoms[j]);
                 const s = bpSupportedOrder(atoms[i].element, atoms[j].element, d);
-                const curDev = bpSpecDev(atoms[i].element, atoms[j].element, o, d);
                 let c = 1;
                 if (s > 0 && Math.abs(s - o) > 1e-9) c++;
                 for (let t = 0; t < 2; t++) {
                     const v = o + (t === 0 ? -0.5 : 0.5);
                     if (v < 1 || v > 3) continue;
                     if (Math.abs(v - s) < 1e-9) continue;
-                    if (bpSpecDev(atoms[i].element, atoms[j].element, v, d) <= curDev + 1e-9) c++;
+                    if (moveAllowed(atoms[i].element, atoms[j].element, d, o, v)) c++;
                 }
                 choices *= c;
             });
@@ -1693,12 +2067,11 @@ function bpRefineValences(bondMap: Map<number, Map<number, number>>, atoms: Atom
                 // bond drops to a single candidate, the combination count
                 // collapses to one, and the whole neighbourhood is skipped
                 // instead of enumerated.
-                const curDev = bpSpecDev(atoms[i].element, atoms[j].element, cur, d);
                 const extra = [cur - 0.5, cur + 0.5];
                 for (let t = 0; t < extra.length; t++) {
                     const v = extra[t];
                     if (v < 1 || v > 3 || list.indexOf(v) >= 0) continue;
-                    if (bpSpecDev(atoms[i].element, atoms[j].element, v, d) <= curDev + 1e-9) list.push(v);
+                    if (moveAllowed(atoms[i].element, atoms[j].element, d, cur, v)) list.push(v);
                 }
                 cands.push(list);
                 combos *= list.length;
@@ -1812,16 +2185,22 @@ interface ComponentAttempt {
  * Re-derive one component with the valence solver, in the component's own
  * index space so the matching never sees an index it does not own. Returns
  * null when the component has no legal assignment at all.
+ *
+ * The index map is the caller's (`localOf`), not a fresh array: it used to be
+ * allocated here, `new Array(atoms.length)` for *every* component, so a
+ * structure of 3 000 fragments paid 3 000 × 3 000 slots for a map that holds one
+ * component at a time. It is allocated once per pass and the entries this
+ * component wrote are cleared before returning, which leaves it exactly as it
+ * was found.
  */
 function bpSolveComponent(
     bondMap: Map<number, Map<number, number>>,
     atoms: Atom[],
     comp: number[],
-    charge: number
+    charge: number,
+    localOf: number[]
 ): ComponentAttempt {
     const k = comp.length;
-    const localOf: number[] = new Array(atoms.length);
-    for (let i = 0; i < atoms.length; i++) localOf[i] = -1;
     for (let i = 0; i < k; i++) localOf[comp[i]] = i;
 
     const zs: number[] = new Array(k);
@@ -1845,11 +2224,15 @@ function bpSolveComponent(
     }
 
     const attempt = bpDetermineOrders(zs, edges, charge, k);
+
+    // Hand the map back in the state it arrived in, whatever the outcome: a
+    // stale entry would make a later component see an index it does not own.
+    for (let i = 0; i < k; i++) localOf[comp[i]] = -1;
     if (!attempt.result) {
         return { solution: null, reason: attempt.reason, combos: attempt.combos };
     }
-    const res = attempt.result;
 
+    const res = attempt.result;
     const orders: Array<[number, number, number]> = [];
     for (let i = 0; i < k; i++) {
         for (let j = i + 1; j < k; j++) {
@@ -1857,9 +2240,18 @@ function bpSolveComponent(
         }
     }
 
+    // Neighbours as well as the valence: the formal charge of a nitrogen or a
+    // sulphur is not a function of its bond order alone (pyrrole N and
+    // pyridinium N have the same sum over bonds and differ only in how many
+    // neighbours it takes), so the degree has to be the component's own.
+    const degree = new Array<number>(k).fill(0);
+    for (let e = 0; e < edges.length; e++) {
+        degree[edges[e][0]]++;
+        degree[edges[e][1]]++;
+    }
     const charges: number[] = new Array(k);
     for (let i = 0; i < k; i++) {
-        const c = bpAtomicCharge(zs[i], res.valency[i]);
+        const c = bpAtomicCharge(zs[i], res.valency[i], degree[i]);
         charges[i] = c === null ? 0 : c;
     }
 
@@ -1896,16 +2288,21 @@ export interface PerceptionOptions {
     /** Components above this atom count keep the geometric result. */
     maxSolverAtoms?: number;
     /**
-     * Also produce the formal charges and the diagnostics.
+     * Also produce the diagnostics: the off-valence list and the components the
+     * solver could settle.
      *
      * Off by default, because the common caller wants the bond list and nothing
      * else — a re-derivation after an edit, the webview's client-side entry
      * point, a structure being loaded. Those extra results are O(atoms) work
-     * over the finished result (a component walk, a valence pass per component,
-     * a charge per atom), which is nothing on a small molecule and very visible
-     * on a big one: on a dense few-thousand-atom system they were most of the
-     * cost of a re-derivation that only ever read `.bonds`. Ask for them when
-     * you are going to look at them.
+     * over the finished result (a component walk, a valence pass per component),
+     * which is nothing on a small molecule and very visible on a big one: on a
+     * dense few-thousand-atom system they were most of the cost of a
+     * re-derivation that only ever read `.bonds`. Ask for them when you are
+     * going to look at them.
+     *
+     * The formal charges are *not* gated on this: one charge per atom is the
+     * valence that already had to be summed for the bond list, and `charges`
+     * promises them unconditionally.
      */
     extras?: boolean;
 }
@@ -1928,12 +2325,22 @@ export interface PerceptionDiagnostics {
     declined: number;
     /** Of those, how many were refused for exceeding the combination budget. */
     declinedByCombos: number;
+    /** Of those, how many ran out of the work budget before finding an answer. */
+    declinedByWork: number;
     /** Answers that were discarded because they were worse than what stood. */
     rolledBack: number;
     /** Bonds moved back onto the order their measured length argues for. */
     restoredBonds: number;
     /** Bonds moved by the final valence pass. */
     refinedBonds: number;
+    /**
+     * Whether the local relaxation was skipped because the structure is above
+     * `MAX_RELAX_ATOMS`. The pass used to return silently, so a 30 000-atom
+     * trajectory was drawn with over-coordinated centres and nothing said why.
+     */
+    relaxSkipped: boolean;
+    /** Components the solver was not offered because of `maxSolverAtoms`. */
+    oversizeComponents: number;
     /** Whether the total charge was supplied rather than assumed neutral. */
     chargeKnown: boolean;
 }
@@ -2005,9 +2412,12 @@ export function perceiveBonds(rawAtoms: Atom[], opts?: PerceptionOptions): Perce
         approximate: 0,
         declined: 0,
         declinedByCombos: 0,
+        declinedByWork: 0,
         rolledBack: 0,
         restoredBonds: 0,
         refinedBonds: 0,
+        relaxSkipped: false,
+        oversizeComponents: 0,
         chargeKnown: typeof options.charge === 'number'
     };
     if (n === 0) return { bonds: [], charges: [], diagnostics: diagnostics };
@@ -2022,8 +2432,12 @@ export function perceiveBonds(rawAtoms: Atom[], opts?: PerceptionOptions): Perce
     bpFixOrders(bondMap, atoms);
 
     // 3) Bring over-coordinated centres as close to their lengths as the
-    //    lengths allow. This is the pass the viewer has always run.
+    //    lengths allow. This is the pass the viewer has always run. It is
+    //    skipped above MAX_RELAX_ATOMS, and the skip is reported rather than
+    //    silent: a caller that sees over-coordinated centres in a big structure
+    //    can now tell whether the pass declined or found nothing to do.
     if (n <= MAX_RELAX_ATOMS) bpRelaxValence(bondMap, atoms);
+    else diagnostics.relaxSkipped = true;
 
     // 4) Hand each component still off its allowed valence to the solver, when
     //    it has been asked for. Without the solver the geometric result stands
@@ -2038,15 +2452,24 @@ export function perceiveBonds(rawAtoms: Atom[], opts?: PerceptionOptions): Perce
 
     if (!useSolver) {
         for (let c = 0; c < comps.length; c++) {
-            if (comps[c].length <= maxSolver && bpHasViolation(bondMap, atoms, comps[c])) {
-                diagnostics.repairable++;
+            if (comps[c].length > maxSolver) {
+                diagnostics.oversizeComponents++;
+                continue;
             }
+            if (bpHasViolation(bondMap, atoms, comps[c])) diagnostics.repairable++;
         }
     }
 
+    // One index map for every component, cleared by the solve as it finishes
+    // with it (see bpSolveComponent).
+    const localOf: number[] = useSolver ? new Array(n).fill(-1) : [];
+
     for (let c = 0; c < comps.length && useSolver; c++) {
         const comp = comps[c];
-        if (comp.length > maxSolver) continue;
+        if (comp.length > maxSolver) {
+            diagnostics.oversizeComponents++;
+            continue;
+        }
         if (!bpHasViolation(bondMap, atoms, comp)) continue;
 
         // The total charge describes the whole structure, not each fragment.
@@ -2055,10 +2478,11 @@ export function perceiveBonds(rawAtoms: Atom[], opts?: PerceptionOptions): Perce
         // inherit the stated total, and a fragment of a larger structure is
         // solved as neutral (its own charge is not stated anywhere).
         const compCharge = comp.length === n ? totalCharge : 0;
-        const attempt = bpSolveComponent(bondMap, atoms, comp, compCharge);
+        const attempt = bpSolveComponent(bondMap, atoms, comp, compCharge, localOf);
         if (!attempt.solution) {
             diagnostics.declined++;
             if (attempt.reason === 'combo-overflow') diagnostics.declinedByCombos++;
+            else if (attempt.reason === 'work-budget') diagnostics.declinedByWork++;
             continue;
         }
         const sol = attempt.solution;
@@ -2132,7 +2556,7 @@ export function perceiveBonds(rawAtoms: Atom[], opts?: PerceptionOptions): Perce
     //     not survive on a bond that is not in one. In the ordinary path this
     //     changes nothing — the connectivity pass already applied it — so it
     //     costs a second O(V+E) walk and no behaviour.
-    bpDropNonRingAromatic(bondMap, atoms);
+    bpAromaticRing(bondMap, atoms);
 
     // 6) Collect the result. The formal charges and the off-valence list are
     //    derived from the finished orders here — they read, they never write,
@@ -2140,7 +2564,12 @@ export function perceiveBonds(rawAtoms: Atom[], opts?: PerceptionOptions): Perce
     const bonds: Bond[] = [];
     const seen: { [key: string]: number } = {};
     const off = wantExtras ? new Set<number>() : null;
-    const charges: (number | null)[] = wantExtras ? new Array(n).fill(null) : [];
+    // One entry per atom, always. The result type says the charges are derived
+    // whatever the options say, and a caller that read .charges got an empty
+    // array whenever it had not also asked for the diagnostics — the one field
+    // of the two that costs nothing (the valence is already summed for the bond
+    // list) was the one held back.
+    const charges: (number | null)[] = new Array(n).fill(null);
 
     bondMap.forEach(function (neighbors, i) {
         let valence = 0;
@@ -2151,10 +2580,11 @@ export function perceiveBonds(rawAtoms: Atom[], opts?: PerceptionOptions): Perce
             seen[key] = 1;
             bonds.push({ atom1: i < j ? i : j, atom2: i < j ? j : i, order: order });
         });
-        if (!wantExtras) return;
         const z = bpZOf(atoms[i].element);
-        if (bpValenceGap(z, valence, bpCeiling(atoms[i].element)) > 1e-6) (off as Set<number>).add(i);
-        charges[i] = bpAtomicCharge(z, valence);
+        if (off && bpValenceGap(z, valence, bpCeiling(atoms[i].element)) > 1e-6) {
+            (off as Set<number>).add(i);
+        }
+        charges[i] = bpAtomicCharge(z, valence, neighbors.size);
     });
 
     bonds.sort(function (a, b) {
@@ -2186,8 +2616,9 @@ export function perceiveBonds(rawAtoms: Atom[], opts?: PerceptionOptions): Perce
  * has to appear here, or the client copy would reference something undefined.
  */
 const MODULE_FUNCTIONS: Array<(...args: never[]) => unknown> = [
-    bpNorm, bpPairKey, bpSpecKey, bpDist, bpIsTerminal, bpCeiling, bpZOf, bpIsGhost,
-    bpNonAromaticOrder, bpDropNonRingAromatic, bpPairCutoff, bpGeometricOrder, bpConnectivity,
+    bpNorm, bpPairKey, bpSpecKey, bpDist, bpIsTerminal, bpCeiling, bpZOf,
+    bpIsMetal, bpMetalSpec, bpSpecList, bpValenceModelled, bpIsGhost,
+    bpNonAromaticOrder, bpAromaticRing, bpPairCutoff, bpGeometricOrder, bpConnectivity,
     bpAllowedOrders, bpNearestAllowed, bpFixOrders,
     bpMaximumMatching,
     bpPossibleValences, bpValenceOk, bpValenceGap, bpPruneValences, bpAtomicCharge,
@@ -2218,12 +2649,15 @@ export const BOND_PERCEPTION_SOURCE: string = (function buildSource(): string {
     parts.push('var CEIL=' + JSON.stringify(CEIL) + ';');
     parts.push('var TERMINAL=' + JSON.stringify(TERMINAL) + ';');
     parts.push('var Z_OF=' + JSON.stringify(Z_OF) + ';');
+    parts.push('var METALS=' + JSON.stringify(METALS) + ';');
     parts.push('var VALENCE=' + JSON.stringify(VALENCE) + ';');
     parts.push('var FALLBACK_VALENCE=' + JSON.stringify(FALLBACK_VALENCE) + ';');
     parts.push('var OUTER_E=' + JSON.stringify(OUTER_E) + ';');
     parts.push('var MAX_RELAX_ATOMS=' + MAX_RELAX_ATOMS + ';');
     parts.push('var MAX_SOLVER_ATOMS=' + MAX_SOLVER_ATOMS + ';');
     parts.push('var MAX_COMBOS=' + MAX_COMBOS + ';');
+    parts.push('var MAX_COMBO_WORK=' + MAX_COMBO_WORK + ';');
+    parts.push('var MAX_SHED_BONDS=' + MAX_SHED_BONDS + ';');
     parts.push('var MIN_BOND_DISTANCE=' + MIN_BOND_DISTANCE + ';');
     for (let i = 0; i < MODULE_FUNCTIONS.length; i++) {
         parts.push(MODULE_FUNCTIONS[i].toString());
@@ -2258,5 +2692,9 @@ export const __internals = {
     components: bpComponents,
     restAromatic: bpRestoreAromatic,
     relaxValence: bpRelaxValence,
-    valenceGap: bpValenceGap
+    valenceGap: bpValenceGap,
+    aromaticRing: bpAromaticRing,
+    atomicCharge: bpAtomicCharge,
+    specDev: bpSpecDev,
+    specList: bpSpecList
 };

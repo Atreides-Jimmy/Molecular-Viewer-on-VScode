@@ -365,25 +365,125 @@ function primitiveExtent(alpha: number, l: number, scale: number, eps: number): 
 }
 
 /**
+ * Whether a d or f shell is the pure (spherical) set, given the sign of its
+ * type and the job-level scalar the file states.
+ *
+ * `useSign` picks which of the two is believed. The sign is the file's own
+ * per-shell statement and is what fixes the number of coefficients a shell
+ * consumes, so it is believed first; the job-level `Pure/Cartesian d shells`
+ * scalar is consulted only when the sign's reading does not add up to the
+ * file's own basis-function count. That is the one case where the scalar can
+ * rescue a file: a writer that emits `2` for every d shell (the Cartesian
+ * code) while its own header says the shells are pure. Believing the scalar
+ * first would instead override a file whose per-shell signs are correct, which
+ * is every file Gaussian itself writes.
+ */
+function shellIsPure(basis: FchkBasis, type: number, l: number, useSign: boolean): boolean {
+    if (l < 2) return false;
+    if (useSign) return type < 0;
+    if (l === 2) return basis.cartesianD === false || type < 0;
+    if (l === 3) return basis.cartesianF === false || type < 0;
+    return type < 0;
+}
+
+/**
+ * Coefficients a shell consumes, under one reading of purity.
+ *
+ * This is not `shellFunctionCount(type)` alone: a d shell whose per-shell sign
+ * says Cartesian but whose file-level scalar says pure consumes five
+ * coefficients, not six, and a `nfun` taken from the sign in that case would
+ * shift every shell after it by one. `shellFunctionCount` stays the answer for
+ * s, p, sp and for any shell whose sign agrees with the file.
+ */
+function shellCoefficientCount(basis: FchkBasis, type: number, useSign: boolean): number {
+    const l = shellAngular(type);
+    if (l < 2) return shellFunctionCount(type);
+    return shellIsPure(basis, type, l, useSign) ? 2 * l + 1 : (l === 2 ? 6 : l === 3 ? 10 : 15);
+}
+
+/** Basis functions the shell list accounts for, under one reading of purity. */
+function countBasisFunctions(basis: FchkBasis, useSign: boolean): number {
+    let total = 0;
+    for (let s = 0; s < basis.shellType.length; s++) {
+        const n = shellCoefficientCount(basis, basis.shellType[s], useSign);
+        if (n === 0) return -1;
+        total += n;
+    }
+    return total;
+}
+
+/**
  * Turn a basis plus one orbital's coefficients into evaluable shells.
  *
  * `eps` is the absolute amplitude a shell is allowed to be dropped at; 1e-5 is
  * a twentieth of a percent of the default isovalue, well below what any contour
  * can show.
+ *
+ * Three things this function refuses to guess, because guessing them puts the
+ * whole orbital somewhere it is not:
+ *
+ *   - **Where a shell is centred.** `centers` (the file's *Coordinates of each
+ *     shell*, in Bohr) is used when it is there; otherwise the shell-to-atom
+ *     map plus the structure's own coordinates supplies it, converted from
+ *     Angstrom. When neither is available the call fails instead of placing
+ *     every shell at the origin — which is what `basis.centers[s * 3] || 0`
+ *     did: a checkpoint without that array drew the orbital as one blob at
+ *     (0, 0, 0), with no error and no way for a reader to tell.
+ *   - **How many coefficients a shell consumes.** The shell list is summed and
+ *     compared with the column that was read; a mismatch means one of the two
+ *     readings of purity is wrong or the column is truncated, and either way
+ *     every shell after the mistake would be built from the wrong coefficients.
+ *     The job-level `Pure/Cartesian` scalars are what rescues the ambiguous
+ *     case (see `shellIsPure`).
+ *   - **What a shell type means.** A g shell or an unknown code fails here, per
+ *     shell, instead of shifting every offset after it.
  */
-export function buildEvalShells(basis: FchkBasis, coefficients: ArrayLike<number>, eps = 1e-5): EvalShell[] {
+export function buildEvalShells(
+    basis: FchkBasis,
+    coefficients: ArrayLike<number>,
+    eps = 1e-5,
+    atoms?: { x: number; y: number; z: number }[]
+): EvalShell[] {
+    const nShell = basis.shellType.length;
+    if (basis.shellPrim.length < nShell) {
+        throw new Error('this checkpoint lists ' + nShell + ' shells but only ' + basis.shellPrim.length +
+            ' primitive counts');
+    }
+    const centres = basis.centers;
+    const hasCentres = !!centres && centres.length >= nShell * 3;
+    const map = basis.shellAtom;
+    const hasMap = !!map && map.length >= nShell && !!atoms && atoms.length > 0;
+    if (!hasCentres && !hasMap) {
+        throw new Error('this checkpoint states neither the coordinates of its shells nor a shell-to-atom map, ' +
+            'so an orbital cannot be placed');
+    }
+
+    const nBasis = coefficients.length;
+    let useSign = true;
+    const bySign = countBasisFunctions(basis, true);
+    if (bySign !== nBasis) {
+        const byFlag = countBasisFunctions(basis, false);
+        if (byFlag !== nBasis) {
+            throw new Error('the shell list accounts for ' + bySign + ' basis functions but the file states ' +
+                nBasis + ' (and ' + byFlag + ' with its Pure/Cartesian scalars), so the coefficients of ' +
+                'every shell after the first mismatch would be read from the wrong place');
+        }
+        useSign = false;
+    }
+
     const shells: EvalShell[] = [];
     let offset = 0;
     let prim = 0;
-    for (let s = 0; s < basis.shellType.length; s++) {
+    for (let s = 0; s < nShell; s++) {
         const type = basis.shellType[s];
         const nprim = basis.shellPrim[s] || 0;
         const nfun = shellFunctionCount(type);
         if (nfun === 0) throw new Error('this checkpoint uses a shell type this viewer does not know (' + type + ')');
-        const x = basis.centers[s * 3] || 0;
-        const y = basis.centers[s * 3 + 1] || 0;
-        const z = basis.centers[s * 3 + 2] || 0;
         const l = shellAngular(type);
+        const centre = shellCentre(basis, s, hasCentres, hasMap, atoms);
+        const x = centre[0];
+        const y = centre[1];
+        const z = centre[2];
 
         const prims: { alpha: number; d: number }[] = [];
         for (let k = 0; k < nprim; k++) {
@@ -412,20 +512,54 @@ export function buildEvalShells(basis: FchkBasis, coefficients: ArrayLike<number
             // The sign of the shell type is the file's own statement of the
             // shell's angular form (-2 = five pure d, -3 = seven pure f), and it
             // is also what fixes how many coefficients the shell consumes. The
-            // job-level `Pure/Cartesian` scalars are not used here: a file whose
-            // per-shell sign and global scalar disagree would otherwise read the
-            // wrong number of coefficients and shift every shell after it.
-            const pure = type < 0 && l >= 2;
+            // job-level `Pure/Cartesian` scalars only enter when the signs do
+            // not account for the file's basis-function count.
+            const pure = shellIsPure(basis, type, l, useSign);
             const comps = expandCartesianShell(l, pure, coefficients, offset);
             if (!comps) {
                 throw new Error('this basis uses g functions (angular momentum ' + l + '), which this viewer does not evaluate');
             }
             shells.push(makeShell(x, y, z, l, prims, comps, eps));
         }
-        offset += nfun;
+        // The count the shell actually consumes under the reading in force, not
+        // the one its sign alone implies: a d shell rescued by the file-level
+        // `Pure/Cartesian` scalar reads five coefficients, and advancing by six
+        // would shift every shell after it by one.
+        offset += shellCoefficientCount(basis, type, useSign);
         prim += nprim;
     }
     return shells;
+}
+
+/**
+ * Where shell `s` sits, in Bohr: the file's own shell coordinates, else the
+ * atom its map names. A record that states a non-finite coordinate is treated
+ * as absent, because a NaN centre is indistinguishable from a centre at the
+ * origin once it reaches the grid.
+ */
+function shellCentre(
+    basis: FchkBasis,
+    s: number,
+    hasCentres: boolean,
+    hasMap: boolean,
+    atoms?: { x: number; y: number; z: number }[]
+): [number, number, number] {
+    if (hasCentres) {
+        const x = basis.centers[s * 3];
+        const y = basis.centers[s * 3 + 1];
+        const z = basis.centers[s * 3 + 2];
+        if (isFinite(x) && isFinite(y) && isFinite(z)) return [x, y, z];
+    }
+    if (hasMap && atoms) {
+        const ai = basis.shellAtom[s];
+        const a = ai >= 0 && ai < atoms.length ? atoms[ai] : null;
+        if (a && isFinite(a.x) && isFinite(a.y) && isFinite(a.z)) {
+            // The structure is in Angstrom; every length in the coefficient
+            // block and in the grid is Bohr.
+            return [a.x / BOHR, a.y / BOHR, a.z / BOHR];
+        }
+    }
+    throw new Error('the position of shell ' + (s + 1) + ' is not stated by this checkpoint');
 }
 
 /** Assemble one evaluable shell, normalized end to end. */
@@ -636,6 +770,20 @@ const CORNERS: number[][] = [
 const TET_EDGES: number[][] = [[0, 1], [1, 2], [2, 0], [0, 3], [1, 3], [2, 3]];
 
 /**
+ * Whether two tetrahedron edges share no corner.
+ *
+ * Two crossing points on such a pair are opposite corners of the quad the
+ * isosurface cuts through the tetrahedron; two on a shared corner are
+ * neighbours of it. That is the whole geometry of the four-point case, and it
+ * is what a split has to be built from — see `extractSurface`.
+ */
+function tetEdgesOpposite(e1: number, e2: number): boolean {
+    const a = TET_EDGES[e1];
+    const b = TET_EDGES[e2];
+    return a[0] !== b[0] && a[0] !== b[1] && a[1] !== b[0] && a[1] !== b[1];
+}
+
+/**
  * Extract one isosurface from the grid.
  *
  * `sign` decides which side of zero is contoured (`iso * sign`), because a
@@ -651,6 +799,7 @@ export function extractSurface(grid: FieldGrid, iso: number, sign: number): Surf
     const v = new Float64Array(8);
     const p = new Float64Array(12);
     const cross = new Float64Array(12);
+    const crossEdge = new Int32Array(4);
 
     for (let k = 0; k < nz - 1; k++) {
         for (let j = 0; j < ny - 1; j++) {
@@ -695,6 +844,7 @@ export function extractSurface(grid: FieldGrid, iso: number, sign: number): Surf
                         cross[count * 3] = ax + (p[b * 3] - ax) * s;
                         cross[count * 3 + 1] = ay + (p[b * 3 + 1] - ay) * s;
                         cross[count * 3 + 2] = az + (p[b * 3 + 2] - az) * s;
+                        crossEdge[count] = e;
                         count++;
                     }
                     if (count === 3) {
@@ -703,30 +853,47 @@ export function extractSurface(grid: FieldGrid, iso: number, sign: number): Surf
                             gridVertex(builder, grid, cross[3], cross[4], cross[5]),
                             gridVertex(builder, grid, cross[6], cross[7], cross[8]));
                     } else if (count === 4) {
-                        // A quad: split along its shorter diagonal, so the two
-                        // triangles stay as close to the true surface as the
-                        // four sampled points allow.
-                        const d02 = Math.hypot(cross[0] - cross[6], cross[1] - cross[7], cross[2] - cross[8]);
-                        const d13 = Math.hypot(cross[3] - cross[9], cross[4] - cross[10], cross[5] - cross[11]);
-                        if (d02 <= d13) {
-                            builder.triangle(
-                                gridVertex(builder, grid, cross[0], cross[1], cross[2]),
-                                gridVertex(builder, grid, cross[3], cross[4], cross[5]),
-                                gridVertex(builder, grid, cross[6], cross[7], cross[8]));
-                            builder.triangle(
-                                gridVertex(builder, grid, cross[0], cross[1], cross[2]),
-                                gridVertex(builder, grid, cross[6], cross[7], cross[8]),
-                                gridVertex(builder, grid, cross[9], cross[10], cross[11]));
-                        } else {
-                            builder.triangle(
-                                gridVertex(builder, grid, cross[0], cross[1], cross[2]),
-                                gridVertex(builder, grid, cross[3], cross[4], cross[5]),
-                                gridVertex(builder, grid, cross[9], cross[10], cross[11]));
-                            builder.triangle(
-                                gridVertex(builder, grid, cross[3], cross[4], cross[5]),
-                                gridVertex(builder, grid, cross[6], cross[7], cross[8]),
-                                gridVertex(builder, grid, cross[9], cross[10], cross[11]));
+                        // A quad, and which of its corners are opposite is
+                        // decided by the tetrahedron, not by the order the
+                        // crossings were collected in. Two of the six pairs are
+                        // diagonals — the ones whose edges share no corner —
+                        // and they are the only pairs a split may join: cutting
+                        // across an *edge* of the quad instead folds the two
+                        // triangles over each other, which is the pinhole a
+                        // viewer sees in an otherwise smooth surface. The
+                        // shorter diagonal is taken, so the two triangles stay
+                        // as close to the true surface as the four sampled
+                        // points allow.
+                        let d0 = -1;
+                        let d1 = -1;
+                        for (let a = 0; a < 4 && d1 < 0; a++) {
+                            for (let b = a + 1; b < 4; b++) {
+                                if (!tetEdgesOpposite(crossEdge[a], crossEdge[b])) continue;
+                                if (d0 < 0) d0 = a * 4 + b;
+                                else d1 = a * 4 + b;
+                            }
                         }
+                        if (d0 < 0 || d1 < 0) continue;
+                        const a0 = (d0 / 4) | 0, b0 = d0 % 4;
+                        const a1 = (d1 / 4) | 0, b1 = d1 % 4;
+                        const len0 = Math.hypot(cross[a0 * 3] - cross[b0 * 3], cross[a0 * 3 + 1] - cross[b0 * 3 + 1], cross[a0 * 3 + 2] - cross[b0 * 3 + 2]);
+                        const len1 = Math.hypot(cross[a1 * 3] - cross[b1 * 3], cross[a1 * 3 + 1] - cross[b1 * 3 + 1], cross[a1 * 3 + 2] - cross[b1 * 3 + 2]);
+                        // The diagonal to cut along, and the two corners off it.
+                        const p0 = len0 <= len1 ? a0 : a1;
+                        const p1 = len0 <= len1 ? b0 : b1;
+                        const q0 = len0 <= len1 ? a1 : a0;
+                        const q1 = len0 <= len1 ? b1 : b0;
+                        // p0-q0-p1-q1 is the quad's cycle: p0 and p1 are
+                        // opposite, so each triangle takes one of them plus the
+                        // other two corners.
+                        builder.triangle(
+                            gridVertex(builder, grid, cross[p0 * 3], cross[p0 * 3 + 1], cross[p0 * 3 + 2]),
+                            gridVertex(builder, grid, cross[q0 * 3], cross[q0 * 3 + 1], cross[q0 * 3 + 2]),
+                            gridVertex(builder, grid, cross[p1 * 3], cross[p1 * 3 + 1], cross[p1 * 3 + 2]));
+                        builder.triangle(
+                            gridVertex(builder, grid, cross[p1 * 3], cross[p1 * 3 + 1], cross[p1 * 3 + 2]),
+                            gridVertex(builder, grid, cross[q1 * 3], cross[q1 * 3 + 1], cross[q1 * 3 + 2]),
+                            gridVertex(builder, grid, cross[p0 * 3], cross[p0 * 3 + 1], cross[p0 * 3 + 2]));
                     }
                 }
             }
@@ -815,7 +982,10 @@ export class OrbitalSurfaceTask extends GridTask {
 
     constructor(basis: FchkBasis, coefficients: ArrayLike<number>, atoms: { x: number; y: number; z: number }[], private readonly iso: number, quality: GridQuality) {
         super(boxOf(atoms, 6), quality);
-        this.shells = buildEvalShells(basis, coefficients);
+        // The structure is passed on as well: a checkpoint that states no shell
+        // coordinates is placed from its shell-to-atom map instead of having
+        // every shell dumped at the origin.
+        this.shells = buildEvalShells(basis, coefficients, 1e-5, atoms);
         if (this.shells.length === 0) throw new Error('this orbital has no basis functions to evaluate');
     }
 
