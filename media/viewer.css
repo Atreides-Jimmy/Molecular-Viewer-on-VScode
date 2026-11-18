@@ -302,6 +302,27 @@ canvas{display:block}
 #diff-panel .diff-stat-table th:first-child,#diff-panel .diff-stat-table td:first-child{text-align:left}
 #diff-panel .diff-stat-table th{color:var(--vscode-descriptionForeground,#999);border-bottom:1px solid rgba(255,255,255,0.18)}
 #diff-panel .diff-stat-table tr.diff-stat-total td{border-top:1px solid rgba(255,255,255,0.18);font-weight:bold}
+/* The comparison's display selector: side-by-side or the overlaid fit. */
+#diff-panel .diff-view-row{display:flex;align-items:center;gap:4px;margin:2px 0 4px}
+#diff-panel .diff-view-label{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-right:2px}
+#diff-panel .diff-view-btn{font-size:10px;padding:2px 8px;border-radius:3px;border:1px solid rgba(255,255,255,0.25);background:rgba(255,255,255,0.06);color:var(--vscode-editor-foreground,#ccc);cursor:pointer;font-family:inherit}
+#diff-panel .diff-view-btn:hover:not(:disabled){background:rgba(255,255,255,0.16)}
+#diff-panel .diff-view-btn.active{background:var(--vscode-button-background,#0e639c);border-color:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff)}
+#diff-panel .diff-view-btn:disabled{opacity:0.45;cursor:default}
+/* The overlaid fit's readings: RMSD, the displacement legend and the morph slider. */
+#diff-panel .diff-overlay{margin:4px 0 2px;padding:5px 6px;border:1px solid rgba(255,255,255,0.14);border-radius:3px;background:rgba(255,255,255,0.04)}
+#diff-panel .diff-overlay .diff-rmsd{font-size:12px}
+#diff-panel .diff-disp-label{display:flex;align-items:center;gap:5px;margin:4px 0 2px;cursor:pointer;user-select:none;-webkit-user-select:none}
+#diff-panel .diff-disp-legend{display:flex;align-items:center;gap:5px;font-size:9px;color:var(--vscode-descriptionForeground,#999);margin:1px 0 5px}
+#diff-panel .diff-disp-gradient{flex:1 1 auto;height:7px;border-radius:2px;background:linear-gradient(to right,#2b6cff,#00c8c8,#ffd000,#ff3b30)}
+#diff-panel .diff-morph-row{display:none;align-items:center;gap:6px;margin:4px 0 0}
+#diff-panel.overlay-on .diff-morph-row{display:flex}
+#diff-panel .diff-morph-row input[type=range]{flex:1 1 auto;min-width:60px;accent-color:var(--vscode-textLink-foreground,#3794ff)}
+#diff-panel .diff-morph-val{min-width:34px;text-align:right;font-variant-numeric:tabular-nums}
+#diff-panel .diff-note{font-size:9px;line-height:1.35;color:var(--vscode-descriptionForeground,#999);margin-top:2px}
+#diff-panel .diff-note.overlay-note{display:none}
+#diff-panel.overlay-on .diff-note.overlay-note{display:block}
+#diff-label-right.overlay{max-width:82%}
 #opt-panel{display:none;position:absolute;top:36px;left:8px;color:var(--vscode-editor-foreground,#ccc);font-size:11px;background:rgba(0,0,0,0.78);padding:8px 10px;border-radius:4px;z-index:25;width:340px;max-width:calc(100% - 16px);max-height:70%;overflow:hidden;pointer-events:auto;line-height:1.4}
 #opt-panel.show{display:flex;flex-direction:column}
 #opt-panel .opt-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.15)}

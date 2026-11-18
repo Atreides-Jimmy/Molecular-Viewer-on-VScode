@@ -78,7 +78,8 @@ A clean, fully featured 3D molecular viewer and editor for VS Code / Trae — en
 
 - **Any format** — Compare the current structure with any supported file; multi-frame logs and trajectories ask which frame to use.
 - **Skeleton check** — Structures match by connectivity (graph isomorphism using element, degree and neighbour signature), ignoring bond order, so different bond orders at the same connectivity still match.
-- **Side-by-side view** — Each half rotates, pans and zooms independently and keeps its own aspect ratio.
+- **Side by side or overlaid** — Every Diff panel carries a **Display** row. **Side by side** keeps each half with its own rotation, pan, zoom and aspect ratio, exactly as before; **Overlay** fits the comparison side onto the structure on screen and draws both through one camera. Switching back restores each half's own view.
+- **Overlay, RMSD and morph** — Overlay superposes the structures by a Kabsch/Horn least-squares fit over the atoms the skeleton match paired, and reports the fit RMSD, the largest and the mean displacement. **Colour atoms by displacement** paints both structures on a blue → cyan → yellow → red ramp (0 Å to the largest displacement), and the **Morph** slider moves the comparison structure between its own orientation (0%) and the fitted pose (100%). A crystal comparison and a skeleton mismatch keep **Overlay** disabled with the reason on the button.
 - **Differences** — Matching skeletons highlight bond length, angle and dihedral differences in orange on both sides, with percentage changes and a complete difference list. Bond-order differences at the same skeleton are listed too (single / aromatic / double / triple) at any threshold, so a single↔double change is never reported as identical. A 0–20% threshold slider controls what is highlighted (0% really means 0%); the results panel can be closed and reopened with **Show Results**.
 - **Statistics** — A collapsible **Internal Coordinate Statistics** block gives n, RMS, max |Δ|, mean and standard deviation per element-composition group and overall. It covers every compared coordinate, not only those above the threshold.
 - **Auto-mirror selection** — Measuring a bond, angle or dihedral on one side selects the mapped atoms on the other and shows both values plus Δ.
@@ -233,7 +234,7 @@ The list mirrors the extensions the viewer registers; drop any line you do not w
 |--------|--------|
 | Left-drag | Rotate around the molecule centre |
 | Scroll | Zoom in / out |
-| Middle/right-drag | Pan (cursor-locked; in Diff mode only the grabbed half) |
+| Middle/right-drag | Pan (cursor-locked; in Diff mode the grabbed half, or the single fitted view in overlay) |
 | Hover atom | Show element and coordinates |
 | Arrow keys | Rotate (←/→ around Y, ↑/↓ around X); with Auto Rotate on, a held key spins the view up |
 | `Esc` | One step back: cancel a dialog or box select, leave the current tool for View, or clear the selection |
@@ -365,7 +366,8 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 - **任意格式** — 把当前结构与任一受支持文件比较；多帧日志与轨迹会询问使用哪一帧。
 - **骨架校验** — 按连接性做图同构匹配（元素、度数、邻居签名），不考虑键级，因此连接性相同但键级写得不一致的分子仍能匹配。
-- **并排视图** — 左右两半可各自独立旋转、平移与缩放，并保持各自的宽高比。
+- **并排或叠合** — 每个对比面板都带一行 **Display**。**并排**（Side by side）时左右两半各自独立旋转、平移、缩放并保持各自的宽高比，与原有行为一致；**叠合**（Overlay）把对比侧刚体叠合到屏幕上的一侧，两结构共用同一相机绘制。切回并排会恢复两半各自的视图。
+- **叠合、RMSD 与 Morph** — 叠合按骨架匹配出的原子对应做 Kabsch/Horn 最小二乘拟合，给出拟合 RMSD、最大与平均位移；**Colour atoms by displacement** 以蓝 → 青 → 黄 → 红渐变（0 Å 到最大位移）给两侧原子着色，**Morph** 滑块让对比结构在自己的朝向（0%）与叠合姿态（100%）之间移动。晶体对比与骨架不匹配时 **Overlay** 按钮禁用，并在按钮提示中说明原因。
 - **差异显示** — 骨架匹配时，两侧以橙色高亮键长、键角与二面角差异，显示百分比变化和完整差异列表。同一骨架上的键级差异也会单独列出（单键 / 芳香 / 双键 / 三键），不受阈值影响，因此单键↔双键不会被误报为“完全相同”。0–20% 的阈值滑块控制高亮内容（0% 即真正的 0%）；结果面板可用 **Show Results** 关闭与重开。
 - **分组统计** — 可折叠的 **Internal Coordinate Statistics** 区块按元素组成分组，给出 n、RMS、最大 |Δ|、均值与标准差，并附一行总体统计。统计覆盖所有比较过的坐标，而不只是超过阈值的那些。
 - **自动镜像选择** — 在一侧测量键长、键角或二面角时，另一侧会自动选中对应原子，并同时显示两侧数值与 Δ。
@@ -520,7 +522,7 @@ SMILES 支持有机子集以及分支、`%nn` 环闭合、芳香性、显式键�
 |------|------|
 | 左键拖拽 | 绕分子中心旋转 |
 | 滚轮 | 缩放 |
-| 中键/右键拖拽 | 平移（抓取点锁定在光标下；Diff 模式下只平移抓到的那一半） |
+| 中键/右键拖拽 | 平移（抓取点锁定在光标下；Diff 模式下只平移抓到的那一半，叠合时平移整个视图） |
 | 悬停原子 | 显示元素与坐标 |
 | 方向键 | 旋转（←/→ 绕 Y 轴，↑/↓ 绕 X 轴）；开启 Auto Rotate 后按住方向键会加速自转 |
 | `Esc` | 后退一步：取消对话框或框选、从当前工具回到 View、或清除选择 |

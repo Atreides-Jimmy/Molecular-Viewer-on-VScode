@@ -2612,6 +2612,29 @@ function setAtomHighlight(mesh,state){
 function setDiffAtomHighlight(mesh,state){
     setAtomHighlight(mesh,state);
 }
+// Repaint one drawn atom without rebuilding the layer, or put its own colour
+// back when hex is null. This is the comparison's displacement ramp: the
+// instance colour buffer is the only thing a plain sphere reads, so a colour
+// change is a few bytes in the buffer the mesh already uploaded. Ghost and
+// occupancy spheres carry their colour in a texture, so they keep it.
+function sphereLayerSetColor(layer,h,hex){
+    if(!layer||!h||!h.userData)return;
+    var ud=h.userData;
+    var c=layer.classes[ud.sphereAppearance];
+    if(!c)return;
+    if(ud.ghost||(ud.occ!=null&&ud.occ<0.999))return;
+    var col=atomColorOf(hex||ud.baseColor||'#FF1493');
+    for(var s=0;s<3;s++){
+        var inst=c.insts[s];
+        if(!inst)continue;
+        // The comparison's difference state reads as the comparison's orange
+        // unless the displacement ramp owns the colour; every state then
+        // follows the colour asked for.
+        inst.setColorAt(ud.sphereSlot,(layer.kind==='diff'&&s===2&&!diffDispOn)?ATOM_ORANGE:col);
+        if(inst.instanceColor)inst.instanceColor.needsUpdate=true;
+    }
+    needsRender=true;
+}
 
 function disposeMesh(ch){
     // A pooled geometry/material is still drawing every other atom or bond
@@ -2971,9 +2994,10 @@ function sphereLayerBuild(layer,handles,parent,segs,isDiff){
             var state=mu.hlState||0;
             // A ghost and an occupancy material already carry their colour; a
             // plain atom takes the element colour from the instance buffer. The
-            // difference half paints every marked atom orange.
+            // difference half paints every marked atom orange, except while a
+            // displacement ramp is on and the ramp is the reading.
             var col=(occupancy||mu.ghost)?ATOM_WHITE:atomColorOf(mu.baseColor||'#FF1493');
-            for(s=0;s<3;s++)c.insts[s].setColorAt(m,(isDiff&&s===2)?ATOM_ORANGE:col);
+            for(s=0;s<3;s++)c.insts[s].setColorAt(m,(isDiff&&s===2&&!diffDispOn)?ATOM_ORANGE:col);
             for(s=0;s<3;s++){
                 var show=(s===state)&&mu.drawn!==false;
                 writeAtomMatrix(c.insts[s],m,mm,show?mu.radius:0);
@@ -4708,6 +4732,27 @@ function initPanGrab(e){
     // In diff mode each viewport pans independently, so the grab is scoped to
     // the side the pointer is over and applied to that side's pan offset.
     panGrabActive=false;
+    if(diffMode&&diffViewMode==='overlay'){
+        // One view: the grabbed point is read in the same full-viewport camera
+        // the pick used, and the grab is kept on the shared pan offset.
+        var idxO=getClickedAtom(e);
+        var refZo=0;
+        if(idxO>=0){
+            if(diffActiveSide==='right'&&diffAtomMeshes[idxO]){
+                var mp=diffAtomMeshes[idxO].position;
+                refZo=new THREE.Vector3(mp.x,mp.y,mp.z).applyQuaternion(rotQuat).z;
+            }else if(MD.atoms[idxO]){
+                refZo=atomWorldZ(MD.atoms[idxO]);
+            }
+        }
+        var hitO=screenPointOnPlane(e,refZo);
+        if(!hitO)return;
+        panGrabOffset={x:hitO.x-panX,y:hitO.y-panY};
+        panRefZ=refZo;
+        panGrabSide='left';
+        panGrabActive=true;
+        return;
+    }
     if(diffMode){
         var side=diffViewportSide(e);
         panGrabSide=side;
@@ -6699,6 +6744,10 @@ var diffData=null;
 var diffPivot=null;
 var diffMolGroup=null;
 var diffAtomMeshes=[];
+// One THREE.Color per right-hand atom, the colour its bonds' halves take. It is
+// rebuilt with the model, so a displacement-ramp repaint and a morph's bond
+// rebuild share one Color per atom instead of allocating two per bond.
+var diffRightAtomColors=[];
 // The comparison's right-hand hulls, in the same style the left half draws.
 var diffPolyFacesMesh=null;
 var diffPolyEdgesMesh=null;
@@ -6751,6 +6800,34 @@ var diffActiveSide='left';
 var diffSelectedAtoms=[];
 var diffMapping=null;
 var diffReverseMapping=null;
+// The comparison's display: 'side' is the two independent halves the feature
+// has always drawn, 'overlay' fits the two structures on top of each other.
+// Only a molecular comparison with a matched skeleton can overlay; a crystal
+// comparison (cells, not molecule lists) stays side by side.
+var diffViewMode='side';
+// The overlaid fit. diffMorphBase/diffMorphRight hold, per right-hand atom, the
+// local position the morph interpolates between: at 0 the structure stands in
+// its own orientation but centred on the left structure's rotation centre, at 1
+// it wears the Kabsch rotation and sits on the left structure. Both are local to
+// the shared view (already relative to the left centre), so switching the morph
+// only rewrites the right halves of the atom handles and their bond pieces.
+// diffOverlayStats carries the fit's RMSD/max/mean and the displacement arrays
+// the optional colouring paints both halves with.
+var diffMorphBase=null;
+var diffMorphRight=null;
+var diffMorphT=1;
+var diffOverlayStats=null;
+var diffOverlayFitDist=10;
+var diffDispOn=false;
+var diffDispLeftColors=null;
+var diffDispRightColors=null;
+// The comparison's last difference count, so the status line can name the
+// display mode without re-counting anything.
+var diffTotalCount=0;
+// The two view states are parked here while the overlay is up, so switching
+// back to side by side returns each half to the orientation, pan and zoom it
+// had before the overlay took the canvas over.
+var diffSideViewState=null;
 // A crystal comparison runs on the base cells, so the difference list's indices
 // are base indices, the right-half display index is the matching base index, and
 // the left half has one displayed image per base atom (more in a supercell).
@@ -8377,17 +8454,20 @@ function crystalDiffStatusHTML(res){
     var html='<span class="diff-close">×</span>';
     if(res.status==='cell-differs'){
         html+='<h4>Unit Cells Differ</h4>'+
+            buildDiffViewHTML()+
             '<div class="diff-row">The two files state different cells, so their periodic graphs cannot be compared.</div>'+
             crystalCellDiffHTML(res.leftCell,res.rightCell)+
             '<div class="diff-row" style="margin-top:6px;color:var(--vscode-descriptionForeground,#999)">The two structures are still shown side by side. Click Diff again to exit.</div>';
     }else if(res.status==='skeleton-differs'){
         html+='<h4>Skeletons Differ</h4>'+
+            buildDiffViewHTML()+
             '<div class="diff-row">The unit cells match, but the base-cell graphs do not.</div>'+
             '<div class="diff-row">Left: '+res.leftAtoms+' atoms, '+res.leftBonds+' bonds (base cell)</div>'+
             '<div class="diff-row">Right: '+res.rightAtoms+' atoms, '+res.rightBonds+' bonds (base cell)</div>'+
             '<div class="diff-row" style="margin-top:6px;color:var(--vscode-descriptionForeground,#999)">Click Diff again to exit.</div>';
     }else{
         html+='<h4>Not Comparable</h4>'+
+            buildDiffViewHTML()+
             '<div class="diff-row">A crystal is compared with another crystal: one side of this comparison states no unit cell.</div>'+
             '<div class="diff-row" style="margin-top:6px;color:var(--vscode-descriptionForeground,#999)">Click Diff again to exit.</div>';
     }
@@ -8445,7 +8525,8 @@ function startCrystalDiff(msg){
         showDiffPanel(buildDiffResultsHTML(diffs,total),true);
         wireDiffSlider();
         diffLabelRight.textContent='Diff: '+diffData.fileName;
-        modeInfoEl.textContent='Diff Mode ('+total+' differences)';
+        diffTotalCount=total;
+        updateDiffModeInfo();
         enterDiffRender(diffs,res.mapping);
         vdSyncPanel();
         layoutPanels();
@@ -8477,7 +8558,8 @@ function crystalDiffRefresh(){
     var fullHTML=buildDiffResultsHTML(diffs,total);
     diffPanelHTML=fullHTML;
     diffResultsHTML=fullHTML;
-    modeInfoEl.textContent='Diff Mode ('+total+' differences)';
+    diffTotalCount=total;
+    updateDiffModeInfo();
     diffLabelRight.textContent='Diff: '+diffData.fileName;
     updateDiffHighlights(diffs);
 }
@@ -8499,9 +8581,15 @@ function startDiff(msg){
         if(mmPanelInDiff)mmPanelInDiff.classList.remove('show');
     }
     mmCancelRun();
-    diffData={atoms:msg.atoms,bonds:msg.bonds,title:msg.title||msg.fileName,fileName:msg.fileName,charge:msg.charge};
+    diffData={atoms:msg.atoms,bonds:msg.bonds,title:msg.title||msg.fileName,fileName:msg.fileName,charge:msg.charge,multiplicity:msg.multiplicity};
     diffBaseIndices=false;diffHasCrystal=false;diffLabelAtoms=null;diffDisplayByBase=null;
     diffReverseBaseMapping=null;diffRightCrystal=null;diffRightInv=null;diffRightBonds=null;
+    diffMapping=null;diffReverseMapping=null;diffTotalCount=0;
+    // Every comparison starts side by side; the overlay is a display choice the
+    // user makes from the results panel once the two structures have matched.
+    diffViewMode='side';diffSideViewState=null;diffDispOn=false;
+    diffMorphBase=null;diffMorphRight=null;diffMorphT=1;
+    diffOverlayStats=null;diffDispLeftColors=null;diffDispRightColors=null;
 
     // A crystal on either side is compared as a cell, never as the two atom
     // lists the screen and the file happen to hold. The one exception is a
@@ -8528,6 +8616,7 @@ function startDiff(msg){
         diffMapping=null;diffReverseMapping=null;
         showDiffPanel('<span class="diff-close">×</span>'+
             '<h4>Skeletons Differ</h4>'+
+            buildDiffViewHTML()+
             '<div class="diff-row">Molecular skeletons are different — cannot compare.</div>'+
             '<div class="diff-row">Left: '+MD.atoms.length+' atoms, '+detBonds1.length+' bonds (detected)</div>'+
             '<div class="diff-row">Right: '+diffData.atoms.length+' atoms, '+detBonds2.length+' bonds (detected)</div>'+
@@ -8555,25 +8644,422 @@ function startDiff(msg){
     diffMapping=mapping;
     diffReverseMapping=new Array(diffData.atoms.length).fill(-1);
     for(var mi=0;mi<mapping.length;mi++){diffReverseMapping[mapping[mi]]=mi}
+    // The overlay's fit is data about the two structures, not about their
+    // display: it is computed once here so the panel can report the fit RMSD
+    // and offer the displacement colouring in either display mode.
+    computeDiffOverlay();
+    diffTotalCount=totalDiff;
 
     var html=buildDiffResultsHTML(diffs,totalDiff);
     showDiffPanel(html,true);
-    wireDiffSlider();
     diffMode=true;
-    diffLabelLeft.textContent='Original: '+(MD.title||'molecule');
-    diffLabelLeft.classList.add('show');
-    diffLabelRight.textContent='Diff: '+diffData.fileName;
-    diffLabelRight.classList.add('show');
-    modeInfoEl.textContent='Diff Mode ('+totalDiff+' differences)';
+    syncDiffLabels();
+    updateDiffModeInfo();
 
     enterDiffRender(diffs,mapping);
     vdSyncPanel();
     layoutPanels();
 }
 
+// ===== The overlay: the two structures fitted on top of each other =====
+//
+// Side by side answers "what changed" as two pictures; the overlay answers "how
+// much" — the same structures fitted rigidly on top of each other, with the
+// fit's RMSD, a per-atom displacement ramp and a morph slider that slides the
+// right structure between its own orientation and the fit. Only a molecular
+// comparison whose skeletons matched can overlay: a crystal comparison compares
+// cells, and an unmatched pair has no atom correspondence to fit through.
+function diffOverlayAvailable(){
+    return !diffHasCrystal&&!!diffMapping&&diffMapping.length===MD.atoms.length;
+}
+function diffOverlayReason(){
+    if(diffHasCrystal)return 'A crystal comparison compares cells; it stays side by side';
+    return 'The two skeletons differ, so there is no atom correspondence to fit';
+}
+// Largest eigenvector of a symmetric 4x4 matrix by cyclic Jacobi rotations. The
+// fit runs once per comparison (and after an edit) on a matrix no larger than
+// 4x4, so the small iterative solver is simpler than a closed form and exact
+// enough that a test with random rotations recovers the fit to ~1e-14.
+function diffJacobiEigen4(N){
+    var a=[[N[0][0],N[0][1],N[0][2],N[0][3]],
+           [N[1][0],N[1][1],N[1][2],N[1][3]],
+           [N[2][0],N[2][1],N[2][2],N[2][3]],
+           [N[3][0],N[3][1],N[3][2],N[3][3]]];
+    var v=[[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]];
+    var p,q,k,sweep;
+    for(sweep=0;sweep<32;sweep++){
+        var off=0;
+        for(p=0;p<3;p++)for(q=p+1;q<4;q++)off+=a[p][q]*a[p][q];
+        if(off<1e-24)break;
+        for(p=0;p<3;p++)for(q=p+1;q<4;q++){
+            var apq=a[p][q];
+            if(Math.abs(apq)<1e-18)continue;
+            var theta=(a[q][q]-a[p][p])/(2*apq);
+            var t=(theta>=0?1:-1)/(Math.abs(theta)+Math.sqrt(theta*theta+1));
+            var c=1/Math.sqrt(t*t+1),s=t*c;
+            for(k=0;k<4;k++){
+                if(k===p||k===q)continue;
+                var akp=a[k][p],akq=a[k][q];
+                a[k][p]=c*akp-s*akq;a[p][k]=a[k][p];
+                a[k][q]=s*akp+c*akq;a[q][k]=a[k][q];
+            }
+            var app=a[p][p],aqq=a[q][q];
+            a[p][p]=c*c*app-2*s*c*apq+s*s*aqq;
+            a[q][q]=s*s*app+2*s*c*apq+c*c*aqq;
+            a[p][q]=0;a[q][p]=0;
+            for(k=0;k<4;k++){
+                var vkp=v[k][p],vkq=v[k][q];
+                v[k][p]=c*vkp-s*vkq;
+                v[k][q]=s*vkp+c*vkq;
+            }
+        }
+    }
+    var best=0;
+    for(k=1;k<4;k++)if(a[k][k]>a[best][best])best=k;
+    return [v[0][best],v[1][best],v[2][best],v[3][best]];
+}
+// The per-atom displacement ramp, shared with the legend in the panel.
+var DIFF_DISP_STOPS=[[0,43,108,255],[1/3,0,200,200],[2/3,255,208,0],[1,255,59,48]];
+function diffHex2(v){var s=v.toString(16);return s.length<2?'0'+s:s}
+function diffDispColorHex(d,scale){
+    var t=scale>1e-12?d/scale:0;
+    if(!(t>0))t=0;else if(t>1)t=1;
+    var k=0;
+    while(k<DIFF_DISP_STOPS.length-2&&t>DIFF_DISP_STOPS[k+1][0])k++;
+    var s0=DIFF_DISP_STOPS[k],s1=DIFF_DISP_STOPS[k+1];
+    var f=(t-s0[0])/(s1[0]-s0[0]);
+    var r=Math.round(s0[1]+(s1[1]-s0[1])*f);
+    var g=Math.round(s0[2]+(s1[2]-s0[2])*f);
+    var b=Math.round(s0[3]+(s1[3]-s0[3])*f);
+    return '#'+diffHex2(r)+diffHex2(g)+diffHex2(b);
+}
+// Fit the right structure onto the left by the Kabsch/Horn quaternion method:
+// the rotation is the eigenvector of the largest eigenvalue of the 4x4 matrix
+// built from the centred cross-covariance, and the translation puts the right
+// centroid on the left one. The result is reused for the display, the RMSD and
+// the displacement colours; the structures themselves are never changed.
+function computeDiffOverlay(){
+    diffOverlayStats=null;diffMorphBase=null;diffMorphRight=null;
+    diffDispLeftColors=null;diffDispRightColors=null;
+    if(!diffOverlayAvailable())return false;
+    var n=MD.atoms.length,m=diffMapping,i,j;
+    if(!n)return false;
+    // A fit needs a one-to-one correspondence covering both lists. findAtomMapping
+    // always returns a permutation, but the check keeps a future mapping source
+    // (a subset, a reordered list) from writing into a stale slot.
+    var seen=new Array(diffData.atoms.length);
+    for(i=0;i<n;i++){
+        j=m[i];
+        if(j==null||j<0||j>=diffData.atoms.length||seen[j])return false;
+        seen[j]=1;
+    }
+    var lcx=0,lcy=0,lcz=0,rcx=0,rcy=0,rcz=0;
+    for(i=0;i<n;i++){
+        var a=MD.atoms[i],b=diffData.atoms[m[i]];
+        lcx+=a.x;lcy+=a.y;lcz+=a.z;
+        rcx+=b.x;rcy+=b.y;rcz+=b.z;
+    }
+    lcx/=n;lcy/=n;lcz/=n;rcx/=n;rcy/=n;rcz/=n;
+    var Sxx=0,Sxy=0,Sxz=0,Syx=0,Syy=0,Syz=0,Szx=0,Szy=0,Szz=0;
+    for(i=0;i<n;i++){
+        a=MD.atoms[i];b=diffData.atoms[m[i]];
+        var lx=a.x-lcx,ly=a.y-lcy,lz=a.z-lcz;
+        var rx=b.x-rcx,ry=b.y-rcy,rz=b.z-rcz;
+        Sxx+=lx*rx;Sxy+=lx*ry;Sxz+=lx*rz;
+        Syx+=ly*rx;Syy+=ly*ry;Syz+=ly*rz;
+        Szx+=lz*rx;Szy+=lz*ry;Szz+=lz*rz;
+    }
+    var q=diffJacobiEigen4([
+        [Sxx+Syy+Szz,Syz-Szy,Szx-Sxz,Sxy-Syx],
+        [Syz-Szy,Sxx-Syy-Szz,Sxy+Syx,Szx+Sxz],
+        [Szx-Sxz,Sxy+Syx,-Sxx+Syy-Szz,Syz+Szy],
+        [Sxy-Syx,Szx+Sxz,Syz+Szy,-Sxx-Syy+Szz]
+    ]);
+    var qw=q[0],qx=q[1],qy=q[2],qz=q[3];
+    var qn=Math.sqrt(qw*qw+qx*qx+qy*qy+qz*qz);
+    if(!(qn>1e-12)){qw=1;qx=0;qy=0;qz=0;qn=1}
+    qw/=qn;qx/=qn;qy/=qn;qz/=qn;
+    // The cross-covariance above is left-against-right, so its eigenvector
+    // carries the rotation left -> right; the fit needs right -> left, and a
+    // rotation's inverse is its transpose, which is the conjugate quaternion.
+    qx=-qx;qy=-qy;qz=-qz;
+    var R00=1-2*(qy*qy+qz*qz),R01=2*(qx*qy-qw*qz),R02=2*(qx*qz+qw*qy);
+    var R10=2*(qx*qy+qw*qz),R11=1-2*(qx*qx+qz*qz),R12=2*(qy*qz-qw*qx);
+    var R20=2*(qx*qz-qw*qy),R21=2*(qy*qz+qw*qx),R22=1-2*(qx*qx+qy*qy);
+    // The shared view's rotation centre is the left structure's, so the offset
+    // from it to the left centroid is added to every right local position.
+    var offx=lcx-CX,offy=lcy-CY,offz=lcz-CZ;
+    diffMorphBase=new Array(diffData.atoms.length);
+    diffMorphRight=new Array(diffData.atoms.length);
+    diffDispRightColors=new Array(diffData.atoms.length).fill(null);
+    for(i=0;i<diffData.atoms.length;i++){
+        b=diffData.atoms[i];
+        var bx=b.x-rcx+offx,by=b.y-rcy+offy,bz=b.z-rcz+offz;
+        diffMorphBase[i]={x:bx,y:by,z:bz};
+        diffMorphRight[i]={x:bx,y:by,z:bz};
+    }
+    diffDispLeftColors=new Array(n).fill(null);
+    var disp=new Float64Array(n);
+    var sum2=0,sumD=0,maxD=0;
+    for(i=0;i<n;i++){
+        a=MD.atoms[i];j=m[i];b=diffData.atoms[j];
+        var vx=b.x-rcx,vy=b.y-rcy,vz=b.z-rcz;
+        var fx=R00*vx+R01*vy+R02*vz+offx;
+        var fy=R10*vx+R11*vy+R12*vz+offy;
+        var fz=R20*vx+R21*vy+R22*vz+offz;
+        diffMorphRight[j]={x:fx,y:fy,z:fz};
+        var dx=fx-(a.x-CX),dy=fy-(a.y-CY),dz=fz-(a.z-CZ);
+        var d=Math.sqrt(dx*dx+dy*dy+dz*dz);
+        disp[i]=d;sum2+=d*d;sumD+=d;if(d>maxD)maxD=d;
+    }
+    // A perfectly matching pair (maxD≈0) must not divide the ramp by zero: the
+    // scale falls back to 1 Å, which paints every atom the ramp's first colour.
+    var scale=maxD>1e-9?maxD:1;
+    for(i=0;i<n;i++){
+        var col=diffDispColorHex(disp[i],scale);
+        diffDispLeftColors[i]=col;
+        diffDispRightColors[m[i]]=col;
+    }
+    diffOverlayStats={rmsd:Math.sqrt(sum2/n),maxD:maxD,mean:sumD/n,n:n,scale:scale};
+    return true;
+}
+// The distance that holds both structures, as they are drawn in the overlay.
+function diffFitViewDistance(){
+    var maxD=0;
+    function scan(p){var d=Math.sqrt(p.x*p.x+p.y*p.y+p.z*p.z);if(d>maxD)maxD=d}
+    MD.atoms.forEach(function(a){scan({x:a.x-CX,y:a.y-CY,z:a.z-CZ})});
+    if(diffMorphBase)diffMorphBase.forEach(scan);
+    if(diffMorphRight)diffMorphRight.forEach(scan);
+    return maxD*2.5+5;
+}
+function diffRmsdText(){
+    var st=diffOverlayStats;
+    if(!st)return 'Least-squares fit unavailable.';
+    return 'Fit RMSD <b>'+st.rmsd.toFixed(3)+' Å</b> · max <b>'+st.maxD.toFixed(3)+' Å</b> · mean '+st.mean.toFixed(3)+' Å';
+}
+function diffRmsdHTML(){
+    return '<div class="diff-rmsd" id="diff-rmsd">'+diffRmsdText()+'</div>';
+}
+function diffDispLegendHTML(){
+    if(!diffOverlayStats)return '';
+    return '<div class="diff-disp-legend"><span>0 Å</span><span class="diff-disp-gradient"></span><span id="diff-disp-max">'+
+        diffOverlayStats.maxD.toFixed(2)+' Å</span></div>';
+}
+// The display selector and the overlay's controls, rebuilt with the panel.
+function buildDiffViewHTML(){
+    var can=diffOverlayAvailable();
+    var html='<div class="diff-view-row"><span class="diff-view-label">Display</span>';
+    html+='<button type="button" class="diff-view-btn'+(diffViewMode==='side'?' active':'')+
+        '" data-diff-view="side" title="Two independent views, one per structure">Side by side</button>';
+    html+='<button type="button" class="diff-view-btn'+(diffViewMode==='overlay'?' active':'')+
+        '" data-diff-view="overlay"'+(can?'':' disabled')+' title="'+
+        (can?'Fit the two structures on top of each other (Kabsch least-squares)':diffOverlayReason())+
+        '">Overlay</button>';
+    html+='</div>';
+    if(!can)return html;
+    var pct=Math.round(diffMorphT*100);
+    html+='<div class="diff-overlay">';
+    html+=diffRmsdHTML();
+    html+='<label class="diff-disp-label" for="diff-disp-chk"><input type="checkbox" id="diff-disp-chk"'+
+        (diffDispOn?' checked':'')+'> Colour atoms by displacement</label>';
+    html+=diffDispLegendHTML();
+    html+='<div class="diff-morph-row"><label for="diff-morph-slider">Morph</label>'+
+        '<input type="range" id="diff-morph-slider" min="0" max="100" step="1" value="'+pct+'">'+
+        '<span class="diff-morph-val" id="diff-morph-val">'+pct+'%</span></div>';
+    html+='<div class="diff-note overlay-note">Overlay is a rigid least-squares fit: the right structure is rotated and translated onto the left, and neither geometry changes. Morph slides it between its own orientation (0%) and the fit (100%).</div>';
+    html+='</div>';
+    return html;
+}
+function wireDiffViewControls(rootEl){
+    if(!rootEl)return;
+    var btns=rootEl.querySelectorAll('[data-diff-view]');
+    for(var i=0;i<btns.length;i++)btns[i].addEventListener('click',function(){
+        setDiffViewMode(this.getAttribute('data-diff-view'));
+    });
+    var disp=rootEl.querySelector('#diff-disp-chk');
+    if(disp)disp.addEventListener('change',function(){setDiffDispColoring(!!disp.checked)});
+    var morph=rootEl.querySelector('#diff-morph-slider');
+    if(morph)morph.addEventListener('input',function(){
+        var val=parseFloat(morph.value);
+        if(!isFinite(val))val=100;
+        diffApplyMorph(val/100);
+        var lab=diffPanelEl.querySelector('#diff-morph-val');
+        if(lab)lab.textContent=Math.round(val)+'%';
+    });
+}
+function syncDiffViewButtons(){
+    if(!diffPanelEl)return;
+    var btns=diffPanelEl.querySelectorAll('[data-diff-view]');
+    for(var i=0;i<btns.length;i++){
+        var b=btns[i];
+        b.classList.toggle('active',b.getAttribute('data-diff-view')===diffViewMode);
+    }
+}
+function syncDiffLabels(){
+    if(!diffData){
+        diffLabelLeft.classList.remove('show');
+        diffLabelRight.classList.remove('show','overlay');
+        return;
+    }
+    if(diffViewMode==='overlay'){
+        // One picture, one name: the halves' separate labels have nothing left
+        // to tell apart, so the right label widens over the whole view.
+        diffLabelLeft.classList.remove('show');
+        diffLabelRight.textContent='Overlay: '+(MD.title||'molecule')+' vs '+diffData.fileName;
+        diffLabelRight.classList.add('overlay','show');
+    }else{
+        diffLabelLeft.textContent='Original: '+(MD.title||'molecule');
+        diffLabelLeft.classList.add('show');
+        diffLabelRight.textContent='Diff: '+diffData.fileName+(diffMapping?'':' (skeleton differs)');
+        diffLabelRight.classList.remove('overlay');
+        diffLabelRight.classList.add('show');
+    }
+    layoutPanels();
+}
+function updateDiffModeInfo(){
+    if(diffViewMode==='overlay'&&diffOverlayStats){
+        modeInfoEl.textContent='Diff Mode - Overlay ('+diffTotalCount+' differences, RMSD '+
+            diffOverlayStats.rmsd.toFixed(3)+' Å)';
+    }else{
+        modeInfoEl.textContent='Diff Mode ('+diffTotalCount+' differences)';
+    }
+}
+// Switch the comparison between the two halves and the fitted single view. The
+// halves' view states are parked on the way in and put back on the way out, so
+// the side-by-side picture the user arranged is not thrown away by a look at
+// the overlay.
+function setDiffViewMode(mode){
+    if(!diffMode||mode===diffViewMode)return;
+    stopSpin();
+    if(mode==='overlay'){
+        if(!diffOverlayAvailable())return;
+        if(!diffOverlayStats&&!computeDiffOverlay())return;
+        diffSideViewState={rot:rotQuat.clone(),diffRot:diffRotQuat.clone(),
+            panX:panX,panY:panY,diffPanX:diffPanX,diffPanY:diffPanY,
+            camDist:camDist,diffCamDist:diffCamDist};
+        diffViewMode='overlay';
+        diffOverlayFitDist=diffFitViewDistance();
+        camDist=diffOverlayFitDist;
+        panX=0;panY=0;
+        updateTransform();
+        rebuildDiffModel();
+        diffApplyMorph(diffMorphT);
+    }else{
+        diffViewMode='side';
+        if(diffSideViewState){
+            rotQuat.copy(diffSideViewState.rot);
+            diffRotQuat.copy(diffSideViewState.diffRot);
+            panX=diffSideViewState.panX;panY=diffSideViewState.panY;
+            diffPanX=diffSideViewState.diffPanX;diffPanY=diffSideViewState.diffPanY;
+            camDist=diffSideViewState.camDist;diffCamDist=diffSideViewState.diffCamDist;
+            diffSideViewState=null;
+        }
+        // The right halves of the handles were parked at morphed positions;
+        // rebuilding the model puts them back at their own coordinates, their
+        // own colours and their own scale.
+        rebuildDiffModel();
+        updateTransform();
+    }
+    if(diffPanelEl)diffPanelEl.classList.toggle('overlay-on',diffViewMode==='overlay');
+    syncDiffViewButtons();
+    syncDiffLabels();
+    updateDiffModeInfo();
+    needsRender=true;
+    layoutPanels();
+}
+// Repaint the left half in the ramp (or back in its view colours) without
+// rebuilding the scene: the sphere colour lives in the instance buffer, and a
+// bond piece's colour is read when it is placed.
+function diffRecolorLeft(){
+    atomMeshes.forEach(function(m,i){
+        var a=MD.atoms[i];
+        if(a)sphereLayerSetColor(mainSphereLayer,m,atomDrawColor(a));
+    });
+    bondPool.pieces.forEach(function(p){
+        var b=MD.bonds[p.bondIdx];
+        if(!b)return;
+        var a=MD.atoms[p.half===1?b.atom2:b.atom1];
+        if(a)p.col.set(atomDrawColor(a));
+    });
+    placeBondPieces();
+}
+function setDiffDispColoring(on){
+    on=!!on;
+    if(on&&!diffOverlayStats&&!computeDiffOverlay())return;
+    diffDispOn=on;
+    diffRecolorLeft();
+    rebuildDiffModel();
+    if(diffViewMode==='overlay')diffApplyMorph(diffMorphT);
+    needsRender=true;
+}
+// Move the right structure between its own orientation (t=0) and the fitted
+// one (t=1). Only the handles move; the bonds are re-described from the new
+// positions, so the picture is always the geometry the handles state.
+function diffApplyMorph(t){
+    if(!isFinite(t))t=1;
+    if(t<0)t=0;else if(t>1)t=1;
+    diffMorphT=t;
+    if(diffViewMode!=='overlay'||!diffMorphBase||!diffMorphRight)return;
+    var n=Math.min(diffAtomMeshes.length,diffMorphBase.length);
+    for(var i=0;i<n;i++){
+        var b=diffMorphBase[i],f=diffMorphRight[i]||b;
+        diffAtomMeshes[i].position.set(b.x+(f.x-b.x)*t,b.y+(f.y-b.y)*t,b.z+(f.z-b.z)*t);
+    }
+    sphereLayerSyncPositions(diffSphereLayer);
+    diffRebuildBondPieces();
+    needsRender=true;
+}
+// Rebuild the right half's bond pieces from the positions its handles carry
+// now. Highlighted bonds are re-marked by the pair of left indices they map to,
+// exactly as buildDiffModel keys them.
+function diffRebuildBondPieces(){
+    if(!diffMolGroup||!diffData)return;
+    var hiBond={};
+    diffBondPieces.forEach(function(p){if(p.hi&&p.key)hiBond[p.key]=true});
+    diffBondPieces.length=0;
+    var rr=diffViewMode==='overlay'?BOND_R*0.7:BOND_R;
+    if(displayStyle!=='spacefill')diffData.bonds.forEach(function(b){
+        var m1=diffAtomMeshes[b.atom1],m2=diffAtomMeshes[b.atom2];
+        if(!m1||!m2)return;
+        var sx=m1.position.x,sy=m1.position.y,sz=m1.position.z;
+        var ex=m2.position.x,ey=m2.position.y,ez=m2.position.z;
+        var dx=ex-sx,dy=ey-sy,dz=ez-sz;
+        var l=Math.sqrt(dx*dx+dy*dy+dz*dz);
+        if(l<0.001)return;
+        var mpx=(sx+ex)*0.5,mpy=(sy+ey)*0.5,mpz=(sz+ez)*0.5;
+        var origI1=diffReverseMapping?diffReverseMapping[b.atom1]:-1;
+        var origI2=diffReverseMapping?diffReverseMapping[b.atom2]:-1;
+        var key=Math.min(origI1,origI2)+'-'+Math.max(origI1,origI2);
+        var c1=diffRightAtomColors[b.atom1]||new THREE.Color(diffData.atoms[b.atom1].color);
+        var c2=diffRightAtomColors[b.atom2]||new THREE.Color(diffData.atoms[b.atom2].color);
+        addDiffBondPiece(sx,sy,sz,mpx-sx,mpy-sy,mpz-sz,l/2,rr,c1,key,hiBond[key]===true);
+        addDiffBondPiece(mpx,mpy,mpz,ex-mpx,ey-mpy,ez-mpz,l/2,rr,c2,key,hiBond[key]===true);
+    });
+    diffBuildBondPools();
+}
+// After an edit the fit, the displacement colours and the panel's numbers all
+// describe the old geometry; this refreshes them in place.
+function diffRefreshOverlayPanel(){
+    var el=diffPanelEl.querySelector('#diff-rmsd');
+    if(el)el.innerHTML=diffRmsdText();
+    var mx=diffPanelEl.querySelector('#diff-disp-max');
+    if(mx&&diffOverlayStats)mx.textContent=diffOverlayStats.maxD.toFixed(2)+' Å';
+}
+function diffResetOverlayState(){
+    diffViewMode='side';diffSideViewState=null;diffDispOn=false;
+    diffMorphBase=null;diffMorphRight=null;diffMorphT=1;
+    diffOverlayStats=null;diffDispLeftColors=null;diffDispRightColors=null;
+    diffOverlayFitDist=10;
+    if(diffPanelEl)diffPanelEl.classList.remove('overlay-on');
+}
+
+// Split the panel's results list into the display choice and the difference
+// list; the display row and the overlay's numbers stay put while the threshold
+// slider only rewrites the list below them.
 function buildDiffResultsHTML(diffs,totalDiff){
     var html='<span class="diff-close">×</span>';
     html+='<h4>Diff Results</h4>';
+    html+=buildDiffViewHTML();
     html+='<div class="diff-row" style="margin-bottom:4px">';
     html+='<label style="font-size:11px">Threshold: <b><span id="thresh-val">'+diffThresholdPct.toFixed(1)+'</span>%</b></label>';
     html+='<input type="range" id="thresh-slider" min="0" max="20" step="0.5" value="'+diffThresholdPct+'" style="width:100%;accent-color:var(--vscode-textLink-foreground,#3794ff)">';
@@ -8722,7 +9208,8 @@ function recomputeDiff(){
     var fullHTML=buildDiffResultsHTML(diffs,totalDiff);
     diffPanelHTML=fullHTML;
     diffResultsHTML=fullHTML;
-    modeInfoEl.textContent='Diff Mode ('+totalDiff+' differences)';
+    diffTotalCount=totalDiff;
+    updateDiffModeInfo();
     updateDiffHighlights(diffs);
 }
 function refreshDiff(){
@@ -8739,15 +9226,44 @@ function refreshDiff(){
     if(diffMapping){
         diffReverseMapping=new Array(diffData.atoms.length).fill(-1);
         for(var mi=0;mi<diffMapping.length;mi++){diffReverseMapping[diffMapping[mi]]=mi}
+        // The left geometry may have moved under the comparison: refit, put the
+        // displacement ramp back on the new fit, then refresh the difference
+        // list. The right half is rebuilt from the same fit, so the two pictures
+        // never describe different geometries.
+        computeDiffOverlay();
+        if(diffDispOn)diffRecolorLeft();
         recomputeDiff();
+        if(diffViewMode==='overlay'){
+            if(!diffOverlayStats){
+                diffViewMode='side';diffSideViewState=null;
+                if(diffPanelEl)diffPanelEl.classList.remove('overlay-on');
+                rebuildDiffModel();
+                syncDiffViewButtons();syncDiffLabels();
+            }else{
+                diffOverlayFitDist=diffFitViewDistance();
+                rebuildDiffModel();
+                diffApplyMorph(diffMorphT);
+            }
+        }else{
+            rebuildDiffModel();
+        }
+        diffRefreshOverlayPanel();
     }else{
         diffReverseMapping=null;
+        // Without a correspondence there is no fit and no ramp: the display
+        // goes back to the two halves and the left half gets its own colours.
+        var hadDisp=diffDispOn;
+        diffResetOverlayState();
+        if(hadDisp)diffRecolorLeft();
+        diffTotalCount=0;
         diffPanelEl.innerHTML='<span class="diff-close">×</span>'+
             '<h4>Skeletons Differ</h4>'+
+            buildDiffViewHTML()+
             '<div class="diff-row">After edit, molecular skeletons differ — cannot compare.</div>'+
             '<div class="diff-row">Left: '+MD.atoms.length+' atoms, '+diffDetBonds1.length+' bonds (detected)</div>'+
             '<div class="diff-row">Right: '+diffData.atoms.length+' atoms, '+diffDetBonds2.length+' bonds (detected)</div>';
-        diffLabelRight.textContent='Diff: '+diffData.fileName+' (skeleton differs)';
+        wireDiffViewControls(diffPanelEl);
+        syncDiffLabels();
         atomMeshes.forEach(function(m){m.userData.diffHi=false;setAtomHighlight(m,0)});
         diffAtomMeshes.forEach(function(m){m.userData.diffHi=false;setDiffAtomHighlight(m,0)});
         diffBondPieces.forEach(function(p){p.hi=false});
@@ -8804,6 +9320,7 @@ function showDiffPanel(html,isResults){
     if(isResults)diffResultsHTML=html;
     diffPanelEl.innerHTML=html;
     diffPanelEl.classList.add('show');
+    diffPanelEl.classList.toggle('overlay-on',diffViewMode==='overlay');
     diffReopenEl.classList.remove('show');
     var closeBtn=diffPanelEl.querySelector('.diff-close');
     if(closeBtn){
@@ -8814,6 +9331,7 @@ function showDiffPanel(html,isResults){
         });
     }
     wireDiffSlider();
+    wireDiffViewControls(diffPanelEl);
     wireDiffStatsToggle(diffPanelEl);
     layoutPanels();
 }
@@ -8822,6 +9340,7 @@ diffReopenEl.addEventListener('click',function(){
     var html=diffResultsHTML||diffPanelHTML;
     diffPanelEl.innerHTML=html;
     diffPanelEl.classList.add('show');
+    diffPanelEl.classList.toggle('overlay-on',diffViewMode==='overlay');
     diffReopenEl.classList.remove('show');
     var closeBtn=diffPanelEl.querySelector('.diff-close');
     if(closeBtn){
@@ -8832,6 +9351,7 @@ diffReopenEl.addEventListener('click',function(){
         });
     }
     wireDiffSlider();
+    wireDiffViewControls(diffPanelEl);
     wireDiffStatsToggle(diffPanelEl);
     layoutPanels();
 });
@@ -8852,18 +9372,26 @@ function buildDiffModel(hiAtom,hiBond){
     // The atoms are records now, not children of the group: the instanced layer
     // below is what draws them, so there is nothing to remove or dispose here.
     diffAtomMeshes=[];
+    diffRightAtomColors=[];
+    // Overlay shrinks the right half a little: two copies of the same atom
+    // drawn at the same radius fight for the same pixels, and a smaller right
+    // structure lets the left one show through where the two disagree.
+    var rScale=diffViewMode==='overlay'?0.62:1;
+    var brScale=diffViewMode==='overlay'?0.7:1;
     var dSegs=sphereSegs(diffData.atoms.length);
     diffData.atoms.forEach(function(a,i){
         var gh=isGhostAtom(a);
         // The same radius rule as the left half — the default balls, van der
         // Waals spheres, or a joint as thick as the sticks. A comparison's atoms
         // carry no script scale, so there is none to apply.
-        var r=drawnRadius({element:a.element,ghost:gh},0);
+        var r=drawnRadius({element:a.element,ghost:gh},0)*rScale;
         var isHi=hiAtom[i]===true;
         // A ghost is the small faint marker it is on the left, so the two halves
         // read the same way. The mark is a state on the handle; the instanced
         // layer draws a marked atom in the comparison's orange.
-        var diffCol=gh?GHOST_COLOR:a.color;
+        var diffCol=gh?GHOST_COLOR:
+            (diffDispOn&&diffDispRightColors&&diffDispRightColors[i]?diffDispRightColors[i]:a.color);
+        diffRightAtomColors[i]=new THREE.Color(diffCol);
         var mesh=atomHandle();
         mesh.position.set(a.x-diffCX,a.y-diffCY,a.z-diffCZ);
         mesh.userData={element:a.element,index:i,diffHi:isHi,baseColor:diffCol,ghost:gh,
@@ -8894,8 +9422,8 @@ function buildDiffModel(hiAtom,hiBond){
         var origI2=diffReverseMapping?diffReverseMapping[b.atom2]:-1;
         var bondKey=Math.min(origI1,origI2)+'-'+Math.max(origI1,origI2);
         var isHi=hiBond[bondKey]===true;
-        addDiffBondPiece(sx,sy,sz,mpx-sx,mpy-sy,mpz-sz,l/2,BOND_R,new THREE.Color(a1.color),bondKey,isHi);
-        addDiffBondPiece(mpx,mpy,mpz,ex-mpx,ey-mpy,ez-mpz,l/2,BOND_R,new THREE.Color(a2.color),bondKey,isHi);
+        addDiffBondPiece(sx,sy,sz,mpx-sx,mpy-sy,mpz-sz,l/2,BOND_R*brScale,diffRightAtomColors[b.atom1],bondKey,isHi);
+        addDiffBondPiece(mpx,mpy,mpz,ex-mpx,ey-mpy,ez-mpz,l/2,BOND_R*brScale,diffRightAtomColors[b.atom2],bondKey,isHi);
     });
     diffBuildBondPools();
     buildDiffPolyhedra();
@@ -9012,8 +9540,13 @@ function enterDiffRender(diffs,mapping){
 }
 
 function exitDiff(){
+    // The left half may be wearing the displacement ramp; the comparison is
+    // leaving, so its own colours are put back once the second structure is
+    // gone (below, through the ordinary scene rebuild).
+    var hadDisp=diffDispOn;
     stopSpin();
     diffMode=false;
+    diffResetOverlayState();
     updateBakeHint();
     // One structure again: the displacement block takes its mode back.
     vdSyncPanel();
@@ -9044,6 +9577,7 @@ function exitDiff(){
     diffDisplayByBase=null;diffReverseBaseMapping=null;
     diffRightCrystal=null;diffRightInv=null;diffRightBonds=null;
     diffDetBonds1=null;diffDetBonds2=null;
+    diffTotalCount=0;
     diffActiveSide='left';
     diffTransformSide='left';
     diffRotQuat.identity();
@@ -9054,7 +9588,7 @@ function exitDiff(){
     diffPanelHTML='';
     diffResultsHTML='';
     diffLabelLeft.classList.remove('show');
-    diffLabelRight.classList.remove('show');
+    diffLabelRight.classList.remove('show','overlay');
     layoutPanels();
     modeInfoEl.textContent='View Mode';
     atomMeshes.forEach(function(m){
@@ -9063,6 +9597,10 @@ function exitDiff(){
     });
     highlightSelected();
     pivotGroup.visible=true;
+    // The ramp was written into the instance colours and bond pieces, so a
+    // rebuild is the one path that restores every atom and bond from the view
+    // state that is now active (element, charge or Beta colouring).
+    if(hadDisp)rebuildScene(!!TRAJ_FRAMES);
     // One structure again: the contact list and its lines come back with it.
     if(neighActive)neighRefresh();
     // The interaction list is a reading of the same geometry: an edit, an undo
@@ -11676,11 +12214,18 @@ function chargeColorOf(a){
     if(i<0||i>=chargeColors.length)return null;
     return chargeColors[i];
 }
-// The colour one ATOM is drawn in, as a hex string: a charge map wins over the
-// scalar (Beta) map, because it is the one the user just switched on, and the
-// two are never both on (each switch turns the other off). Distinct from
-// atomColorOf(col), which turns a colour *string* into a THREE.Color.
+// The colour one ATOM is drawn in, as a hex string: the comparison's
+// displacement ramp wins while an overlay paints both structures by how far
+// each atom sits from its partner, then a charge map, then the scalar (Beta)
+// map, then the element colour. The two data maps are never both on (each
+// switch turns the other off) and the overlay ramp is only ever active while
+// the comparison is up. Distinct from atomColorOf(col), which turns a colour
+// *string* into a THREE.Color.
 function atomDrawColor(a){
+    if(diffDispOn&&diffDispLeftColors){
+        var dc=diffDispLeftColors[a?a.index:-1];
+        if(dc)return dc;
+    }
     var q=chargeColorOf(a);
     if(q)return q;
     return betaColorOf(a)||a.color;
@@ -12898,7 +13443,15 @@ function getMoleculeScreenBox(){
     }
     var sa=camera.aspect,sp=camera.position.clone();
     try{
-        if(diffMode&&diffPivot&&diffAtomMeshes.length>0){
+        if(diffMode&&diffViewMode==='overlay'&&diffPivot&&diffAtomMeshes.length>0){
+            // One viewport now: both groups project through the same camera,
+            // and their footprints are unioned so the panels keep clear of
+            // the fitted pair as a whole.
+            camera.aspect=w/h;camera.updateProjectionMatrix();
+            camera.position.set(0,0,camDist);camera.updateMatrixWorld(true);
+            projectGroup(moleculeGroup,atomMeshes,w,0);
+            projectGroup(diffMolGroup,diffAtomMeshes,w,0);
+        }else if(diffMode&&diffPivot&&diffAtomMeshes.length>0){
             var halfW=Math.floor(w/2);
             camera.aspect=halfW/h;camera.updateProjectionMatrix();
             camera.position.set(0,0,camDist);camera.updateMatrixWorld(true);
@@ -13097,7 +13650,10 @@ function layoutPanels(){
         {id:'cav-panel',pr:4,anc:'bl'},
         {id:'cav-reopen',pr:4,anc:'bl',chip:true},
         {id:'diff-label',pr:4,anc:'tc',pct:0.25},
-        {id:'diff-label-right',pr:5,anc:'tc',pct:0.75},
+        // The overlay has one combined label over the whole view (the left
+        // label is hidden then), so it takes the centre instead of the right
+        // half's quarter.
+        {id:'diff-label-right',pr:5,anc:'tc',pct:(diffViewMode==='overlay'?0.5:0.75)},
         {id:'bake-reopen',pr:3,anc:'br',chip:true},
         {id:'view-reopen',pr:4,anc:'br',chip:true},
         {id:'opt-panel',pr:7,anc:'tl'},
@@ -20009,8 +20565,16 @@ function updateTransform(){
         moleculeGroup.quaternion.copy(rotQuat);
         pivotGroup.position.set(panX,panY,0);
         if(diffMolGroup){
-            diffMolGroup.quaternion.copy(diffRotQuat);
-            diffPivot.position.set(diffPanX,diffPanY,0);
+            // The overlay is one picture: both groups share the one view state.
+            // Side by side keeps the independent quaternion and pan each half
+            // has always had.
+            if(diffViewMode==='overlay'){
+                diffMolGroup.quaternion.copy(rotQuat);
+                diffPivot.position.set(panX,panY,0);
+            }else{
+                diffMolGroup.quaternion.copy(diffRotQuat);
+                diffPivot.position.set(diffPanX,diffPanY,0);
+            }
         }
     }else{
         moleculeGroup.quaternion.copy(rotQuat);
@@ -20096,7 +20660,7 @@ function spinLaunch(){
     if(mag>SPIN_MAX){var s=SPIN_MAX/mag;wx*=s;wy*=s;mag=SPIN_MAX}
     spinAxis.set(wx/mag,wy/mag,0);
     spinSpeed=mag;
-    spinQuatRef=diffMode?(diffTransformSide==='right'?diffRotQuat:rotQuat):rotQuat;
+    spinQuatRef=diffMode?((diffViewMode==='overlay'||diffTransformSide!=='right')?rotQuat:diffRotQuat):rotQuat;
 }
 
 // A held arrow key, with Auto Rotate on, drives the very same angular velocity
@@ -20120,7 +20684,7 @@ function keySpinDrive(dt){
     var m=Math.sqrt(kx*kx+ky*ky);
     spinAxis.set(kx/m,ky/m,0);
     spinSpeed=Math.min(KEY_SPIN_BASE+KEY_SPIN_RATE*keySpinHold,SPIN_MAX);
-    spinQuatRef=diffMode?(diffTransformSide==='right'?diffRotQuat:rotQuat):rotQuat;
+    spinQuatRef=diffMode?((diffViewMode==='overlay'||diffTransformSide!=='right')?rotQuat:diffRotQuat):rotQuat;
 }
 
 function updateSpinButton(){
@@ -20419,7 +20983,7 @@ var PICK_SLOP_PX=6;
 var _pickInv=new THREE.Matrix4();
 var _pickO=new THREE.Vector3();
 var _pickDir=new THREE.Vector3();
-function stickPick(atoms,meshes,cx,cy,cz,group){
+function stickPick(atoms,meshes,cx,cy,cz,group,meshPos){
     if(displayStyle!=='stick'||!group||!atoms||atoms.length===0)return -1;
     var h=canvas.clientHeight||0;
     if(!(h>1))return -1;
@@ -20440,8 +21004,17 @@ function stickPick(atoms,meshes,cx,cy,cz,group){
         // An atom that is not drawn is not a target, which is exactly what its
         // mesh says (a VMD script hides an atom by giving it sphere scale 0).
         if(meshes&&meshes[i]&&meshes[i].visible===false)continue;
-        var a=atoms[i];if(!a)continue;
-        var ox=a.x-cx-_pickO.x,oy=a.y-cy-_pickO.y,oz=a.z-cz-_pickO.z;
+        var ox,oy,oz;
+        if(meshPos&&meshes&&meshes[i]){
+            // The overlay's right half is drawn at morphed positions that its
+            // atom records do not describe, so the pick reads the handle's
+            // local position (already relative to the group's origin) instead.
+            var mp=meshes[i].position;
+            ox=mp.x-_pickO.x;oy=mp.y-_pickO.y;oz=mp.z-_pickO.z;
+        }else{
+            var a=atoms[i];if(!a)continue;
+            ox=a.x-cx-_pickO.x;oy=a.y-cy-_pickO.y;oz=a.z-cz-_pickO.z;
+        }
         var t=ox*_pickDir.x+oy*_pickDir.y+oz*_pickDir.z;
         if(!(t>0)||t>=bestT)continue;
         var qx=ox-_pickDir.x*t,qy=oy-_pickDir.y*t,qz=oz-_pickDir.z*t;
@@ -20486,6 +21059,28 @@ function pickAtomSphere(atoms,meshes,cx,cy,cz,group){
 function getClickedAtom(e){
     var rect=canvas.getBoundingClientRect();
     if(diffMode){
+        if(diffViewMode==='overlay'){
+            // Both structures live in the one viewport, so the probe asks each
+            // group with the same camera and reports which side answered. The
+            // right half is picked by its handle positions, which are the
+            // morphed ones currently on screen.
+            var ow=rect.width,oh=rect.height;
+            mouse.x=((e.clientX-rect.left)/ow)*2-1;
+            mouse.y=-((e.clientY-rect.top)/oh)*2+1;
+            camera.aspect=ow/oh;camera.updateProjectionMatrix();
+            camera.position.set(0,0,camDist);camera.updateMatrixWorld();
+            raycaster.setFromCamera(mouse,camera);
+            var ol=pickAtomSphere(MD.atoms,atomMeshes,CX,CY,CZ,moleculeGroup);
+            if(ol>=0){diffActiveSide='left';return ol}
+            var osl=stickPick(MD.atoms,atomMeshes,CX,CY,CZ,moleculeGroup);
+            if(osl>=0){diffActiveSide='left';return osl}
+            var or=pickAtomSphere(diffData.atoms,diffAtomMeshes,diffCX,diffCY,diffCZ,diffMolGroup);
+            if(or>=0){diffActiveSide='right';return or}
+            var osr=stickPick(diffData.atoms,diffAtomMeshes,diffCX,diffCY,diffCZ,diffMolGroup,true);
+            if(osr>=0){diffActiveSide='right';return osr}
+            diffActiveSide='left';
+            return -1;
+        }
         var w=rect.width;
         var h=rect.height;
         var halfW=Math.floor(w/2);
@@ -20661,7 +21256,7 @@ canvas.addEventListener('mousedown',function(e){
     if(diffMode){
         var rect=canvas.getBoundingClientRect();
         var halfW=Math.floor(rect.width/2);
-        diffTransformSide=(e.clientX-rect.left)<halfW?'left':'right';
+        diffTransformSide=(diffViewMode==='overlay'||(e.clientX-rect.left)<halfW)?'left':'right';
     }
     prevM={x:e.clientX,y:e.clientY};
     e.preventDefault();
@@ -20697,7 +21292,7 @@ canvas.addEventListener('mousemove',function(e){
     var dm={x:e.clientX-prevM.x,y:e.clientY-prevM.y};
     if(diffMode){
         var side=diffTransformSide;
-        var rq=side==='right'?diffRotQuat:rotQuat;
+        var rq=(diffViewMode==='overlay')?rotQuat:(side==='right'?diffRotQuat:rotQuat);
         if(isRot){
             spinRecordPoint(e.clientX,e.clientY);
             var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),dm.x*0.008);
@@ -20706,10 +21301,19 @@ canvas.addEventListener('mousemove',function(e){
             updateTransform()
         }
         if(isPan){
-            // Pan the viewport that was actually grabbed. In diff mode the two
-            // sides keep separate pan offsets, so a right-drag on the right
-            // half must move the comparison structure, not the original.
-            if(panGrabActive){
+            // Pan the viewport that was actually grabbed. Side by side the two
+            // halves keep separate pan offsets; in the overlay there is one
+            // viewport and one offset, so the grab follows the full-viewport
+            // camera the pick configured.
+            if(diffViewMode==='overlay'){
+                if(panGrabActive){
+                    var pco=screenPointOnPlane(e,panRefZ);
+                    if(pco){panX=pco.x-panGrabOffset.x;panY=pco.y-panGrabOffset.y}
+                }else{
+                    var pko=0.01*(camDist/20);
+                    panX+=dm.x*pko;panY-=dm.y*pko;
+                }
+            }else if(panGrabActive){
                 // Cursor-locked: recompute this side's pan so the grabbed point
                 // follows the cursor 1:1 (same world-z reference plane as at grab).
                 if(panGrabSide==='right'){
@@ -20835,9 +21439,30 @@ canvas.addEventListener('mouseup',function(e){
         // the same local position the instance matrices carry and applies the
         // group's world matrix itself — the number a Mesh.getWorldPosition()
         // used to return.
-        if(diffMode){
-            var dw=rect.width,dh=rect.height,dhalfW=Math.floor(dw/2);
+        if(diffMode&&diffViewMode==='overlay'){
+            // One viewport: both groups project through the same camera, and
+            // the right half is tested at the morphed positions it is drawn at.
+            var ow=rect.width,oh=rect.height;
+            camera.aspect=ow/oh;camera.updateProjectionMatrix();
+            camera.position.set(0,0,camDist);camera.updateMatrixWorld(true);
+            moleculeGroup.updateWorldMatrix(true,false);
+            atomMeshes.forEach(function(m,i){
+                v.set(m.position.x,m.position.y,m.position.z).applyMatrix4(moleculeGroup.matrixWorld);
+                v.project(camera);
+                var sx=(v.x*0.5+0.5)*ow+rect.left;
+                var sy=(-v.y*0.5+0.5)*oh+rect.top;
+                if(sx>=bx&&sx<=bx+bw&&sy>=by&&sy<=by+bh)leftHits.push(m.userData.index);
+            });
+            diffMolGroup.updateWorldMatrix(true,false);
+            diffAtomMeshes.forEach(function(m,i){
+                v.set(m.position.x,m.position.y,m.position.z).applyMatrix4(diffMolGroup.matrixWorld);
+                v.project(camera);
+                var sx=(v.x*0.5+0.5)*ow+rect.left;
+                var sy=(-v.y*0.5+0.5)*oh+rect.top;
+                if(sx>=bx&&sx<=bx+bw&&sy>=by&&sy<=by+bh)rightHits.push(m.userData.index);
+            });
             diffActiveSide='left';
+        }else if(diffMode){
             camera.aspect=dhalfW/dh;camera.updateProjectionMatrix();
             camera.position.set(0,0,camDist);camera.updateMatrixWorld(true);
             moleculeGroup.updateWorldMatrix(true,false);
@@ -20883,15 +21508,20 @@ canvas.addEventListener('mouseup',function(e){
 canvas.addEventListener('mouseleave',function(){if(bakeActive)endBakeSession();isRot=false;isPan=false;panGrabActive=false;spinSamples.length=0;tooltipEl.style.display='none';if(moveDragActive)endMoveDrag();if(fragRotActive)endFragRot();if(isBoxSelecting){isBoxSelecting=false;boxRectEl.style.display='none';boxStart=null}});
 canvas.addEventListener('wheel',function(e){e.preventDefault();
     if(diffMode){
-        var rect=canvas.getBoundingClientRect();
-        var halfW=Math.floor(rect.width/2);
-        var side=(e.clientX-rect.left)<halfW?'left':'right';
-        if(side==='right'){
-            diffCamDist*=e.deltaY>0?1.1:0.9;
-            diffCamDist=Math.max(1,Math.min(500,diffCamDist));
-        }else{
+        if(diffViewMode==='overlay'){
             camDist*=e.deltaY>0?1.1:0.9;
             camDist=Math.max(1,Math.min(500,camDist));
+        }else{
+            var rect=canvas.getBoundingClientRect();
+            var halfW=Math.floor(rect.width/2);
+            var side=(e.clientX-rect.left)<halfW?'left':'right';
+            if(side==='right'){
+                diffCamDist*=e.deltaY>0?1.1:0.9;
+                diffCamDist=Math.max(1,Math.min(500,diffCamDist));
+            }else{
+                camDist*=e.deltaY>0?1.1:0.9;
+                camDist=Math.max(1,Math.min(500,camDist));
+            }
         }
     }else{
         camDist*=e.deltaY>0?1.1:0.9;
@@ -20907,7 +21537,7 @@ canvas.addEventListener('touchstart',function(e){e.preventDefault();
     if(e.touches.length===1){
         stopSpin();
         isRot=true;prevM={x:e.touches[0].clientX,y:e.touches[0].clientY};
-        if(diffMode){var rect=canvas.getBoundingClientRect();var halfW=Math.floor(rect.width/2);diffTransformSide=(e.touches[0].clientX-rect.left)<halfW?'left':'right'}
+        if(diffMode){var rect=canvas.getBoundingClientRect();var halfW=Math.floor(rect.width/2);diffTransformSide=(diffViewMode==='overlay'||(e.touches[0].clientX-rect.left)<halfW)?'left':'right'}
     }
     else if(e.touches.length===2){isRot=false;var dx=e.touches[0].clientX-e.touches[1].clientX,dy=e.touches[0].clientY-e.touches[1].clientY;touchSD=Math.sqrt(dx*dx+dy*dy)}
 },{passive:false});
@@ -20918,7 +21548,7 @@ canvas.addEventListener('touchmove',function(e){e.preventDefault();
         var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),dm.x*0.008);
         var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),dm.y*0.008);
         if(diffMode){
-            var rq=diffTransformSide==='right'?diffRotQuat:rotQuat;
+            var rq=(diffViewMode==='overlay'||diffTransformSide!=='right')?rotQuat:diffRotQuat;
             rq.premultiply(qx);rq.premultiply(qy);rq.normalize();
         }else{
             rotQuat.premultiply(qx);rotQuat.premultiply(qy);rotQuat.normalize();
@@ -20930,7 +21560,9 @@ canvas.addEventListener('touchmove',function(e){e.preventDefault();
         if(touchSD>0){
             if(diffMode){
                 var sc=touchSD/d;
-                if(diffTransformSide==='right'){diffCamDist*=sc;diffCamDist=Math.max(1,Math.min(500,diffCamDist))}
+                if(diffViewMode==='overlay'){
+                    camDist*=sc;camDist=Math.max(1,Math.min(500,camDist));
+                }else if(diffTransformSide==='right'){diffCamDist*=sc;diffCamDist=Math.max(1,Math.min(500,diffCamDist))}
                 else{camDist*=sc;camDist=Math.max(1,Math.min(500,camDist))}
             }else{
                 camDist*=touchSD/d;camDist=Math.max(1,Math.min(500,camDist));camera.position.z=camDist;
@@ -21218,7 +21850,7 @@ function animate(){
             if(spinOn){
                 keySpinDrive(spinDt);
             }else{
-                var rq=(diffTransformSide==='right')?diffRotQuat:rotQuat;
+                var rq=(diffViewMode==='overlay'||diffTransformSide!=='right')?rotQuat:diffRotQuat;
                 if(keyState.ArrowLeft){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),-keyRotSpeed);rq.premultiply(qx)}
                 if(keyState.ArrowRight){var qx=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),keyRotSpeed);rq.premultiply(qx)}
                 if(keyState.ArrowUp){var qy=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),-keyRotSpeed);rq.premultiply(qy)}
@@ -21439,6 +22071,22 @@ function exportSnapshotPNG(scale,bg){
  */
 function renderFrame(w,h){
     if(diffMode){
+        if(diffViewMode==='overlay'&&diffMolGroup){
+            // One viewport, one camera, both groups visible: the fitted pair is
+            // drawn exactly as an ordinary structure is, which is also what
+            // makes the PNG capture come out without any split.
+            renderer.autoClear=true;
+            renderer.setScissorTest(false);
+            renderer.setViewport(0,0,w,h);
+            renderer.setScissor(0,0,w,h);
+            camera.aspect=w/h;
+            camera.updateProjectionMatrix();
+            camera.position.set(0,0,camDist);
+            if(diffPivot)diffPivot.visible=true;
+            pivotGroup.visible=true;
+            renderer.render(scene,camera);
+            return;
+        }
         var halfW=Math.floor(w/2);
         renderer.autoClear=false;
         renderer.setScissorTest(true);
