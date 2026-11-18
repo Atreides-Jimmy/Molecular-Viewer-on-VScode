@@ -4348,6 +4348,7 @@ var moveKeyActive=false;       // a Ctrl+arrow fragment rotation session in prog
 var moveKeyLatch=false;        // block fragment-key restart until arrows released
 var keyRotLatch=false;         // block view rotation until arrows released (after a fragment session ends mid-hold)
 var ctrlDown=false;            // live Ctrl modifier state
+var zHistoryKeyHeld=false;     // the Z key is down; cleared by keyup or blur
 var panGrabActive=false;       // view pan uses cursor locking
 var panGrabOffset={x:0,y:0};   // grabbed point world xy minus pan offset
 var panRefZ=0;                 // world z of the pan reference plane
@@ -20992,6 +20993,14 @@ document.addEventListener('keydown',function(e){
     if(e.key==='Escape'&&!e.ctrlKey&&!e.metaKey&&!e.altKey){
         if(escapeOneLevel()){e.preventDefault();return}
     }
+    // The undo/redo key is judged by its own press-and-release, not by what the
+    // platform calls a repeat: some environments keep sending fresh-looking
+    // keydowns for a held key. The first keydown of the physical key counts as
+    // the press, every later one is still the same press, and only the keyup
+    // (or losing focus) opens the door for another one.
+    var zKey=(e.code==='KeyZ')||((e.key||'').toLowerCase()==='z');
+    var zWasHeld=zHistoryKeyHeld;
+    if(zKey)zHistoryKeyHeld=true;
     var editable=keyTargetEditable(e.target);
     var mod=e.ctrlKey||e.metaKey;
     if(mod&&!e.altKey&&!e.shiftKey){
@@ -21003,7 +21012,13 @@ document.addEventListener('keydown',function(e){
             // Not while a dialog is open: it previews geometry on top of an
             // undo step of its own, and an undo behind its back would split
             // the two apart — its Cancel would then pop someone else's step.
-            if(!editable&&!modalOpen()){e.preventDefault();doUndo();return}
+            // One history step per physical press: a held key's auto-repeat is
+            // consumed here but must not walk the history any further.
+            if(!editable&&!modalOpen()){
+                e.preventDefault();
+                if(!zWasHeld&&!e.repeat)doUndo();
+                return;
+            }
         }else if(lk==='s'||e.code==='KeyS'){
             if(modalOpen()){
                 // The Save dialog is the one dialog that can finish its own
@@ -21053,7 +21068,13 @@ document.addEventListener('keydown',function(e){
     if(mod&&!e.altKey&&e.shiftKey){
         var rk=(e.key||'').toLowerCase();
         if(rk==='z'||e.code==='KeyZ'){
-            if(!editable&&!modalOpen()){e.preventDefault();doRedo();return}
+            // One redo per physical press, exactly as the undo above: the same
+            // held key never steps again until it has been released.
+            if(!editable&&!modalOpen()){
+                e.preventDefault();
+                if(!zWasHeld&&!e.repeat)doRedo();
+                return;
+            }
         }
     }
     if(editable)return;
@@ -21077,6 +21098,7 @@ document.addEventListener('keydown',function(e){
     }
 });
 document.addEventListener('keyup',function(e){
+    if((e.code==='KeyZ')||((e.key||'').toLowerCase()==='z'))zHistoryKeyHeld=false;
     ctrlDown=e.ctrlKey;
     if(e.key in keyState){
         keyState[e.key]=false;e.preventDefault();
@@ -21102,6 +21124,8 @@ window.addEventListener('blur',function(){
     // No keyup follows a release made in another window; a latch left on would
     // swallow the first fresh arrow-key session after focus returns.
     keyRotLatch=false;moveKeyLatch=false;
+    // The same holds for the history shortcut's held key.
+    zHistoryKeyHeld=false;
     tooltipEl.style.display='none';
     needsRender=true;
 });
