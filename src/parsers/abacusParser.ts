@@ -1,7 +1,16 @@
-import { MolecularData } from '../types';
+import { MolecularData, StructureStep } from '../types';
 import { elementFromAtomName, normalizeElementSymbol } from '../tools/periodicTable';
 import { cellToLatticeVectors } from '../tools/crystalGeometry';
-import { BOHR_TO_ANGSTROM, buildPeriodicStructure, isUsableLattice, oneLineTitle, Site } from './periodicUtils';
+import { chooseTrajectoryFrameIndexes } from './trajectoryParser';
+import {
+    BOHR_TO_ANGSTROM,
+    buildPeriodicStructure,
+    isUsableLattice,
+    oneLineTitle,
+    Site,
+    StepGeometry,
+    structureSteps
+} from './periodicUtils';
 
 /**
  * ABACUS reader: the input structure (`STRU`), the SCF log and the MD dump.
@@ -218,6 +227,12 @@ export function parseAbacusStru(content: string): MolecularData {
         }
 
         if (head === 'ATOMIC_POSITIONS') {
+            // Every section states its own mode. A second `ATOMIC_POSITIONS`
+            // block that does not repeat it used to inherit the first block's,
+            // which sent the block's Cartesian numbers through the fractional
+            // reading (or the reverse) and put every atom of it in the wrong
+            // place; the mode line belongs to the section that states it.
+            mode = null;
             // The mode may share the keyword's line (`ATOMIC_POSITIONS Direct`).
             const rest = raw.split(/\s+/).slice(1).join(' ');
             if (rest !== '') mode = parsePositionMode(rest);
@@ -538,22 +553,32 @@ export function parseAbacusLog(content: string): MolecularData {
 
     const types = collectAbacusTypes(lines);
 
-    // The last complete DIRECT COORDINATES table is the final geometry: a log
-    // that ran ionic steps prints the starting cell before each step.
-    const sites: Site[] = [];
-    let typeUnresolved = false;
+    // The last *complete* DIRECT COORDINATES table is the final geometry: a log
+    // that ran ionic steps prints the cell before each step, and a run that was
+    // cut off leaves a table with one or two rows behind. Taking the last table
+    // that held any row therefore drew a fragment of the final geometry as if
+    // it were the structure, so every table is read and the completeness of its
+    // row count decides.
     const tableStarts: number[] = [];
     for (let i = 0; i < lines.length; i++) {
         if (/DIRECT COORDINATES/i.test(lines[i])) tableStarts.push(i);
     }
-    for (let t = tableStarts.length - 1; t >= 0 && sites.length === 0; t--) {
-        let j = tableStarts[t] + 1;
+    // The atom count the log states is what makes "complete" a fact: the sum of
+    // the per-type counts, when the log printed one for every type.
+    const expected = types.length > 0 && types.every(t => isFinite(t.count) && t.count > 0)
+        ? types.reduce((sum, t) => sum + t.count, 0)
+        : 0;
+    const tables: { sites: Site[]; unresolved: boolean }[] = [];
+    for (const start of tableStarts) {
+        const rows: Site[] = [];
+        let unresolved = false;
+        let j = start + 1;
         // Skip the column header.
         if (j < lines.length && /atom\s+x\s+y\s+z/i.test(lines[j])) j++;
         for (; j < lines.length; j++) {
             const row = lines[j].trim();
             if (row === '') {
-                if (sites.length > 0) break;
+                if (rows.length > 0) break;
                 continue;
             }
             const parts = row.split(/\s+/);
@@ -566,13 +591,43 @@ export function parseAbacusLog(content: string): MolecularData {
             if (!isFinite(x) || !isFinite(y) || !isFinite(z)) break;
             let element = abacusLabelElement(parts[0]);
             if (!element) {
-                element = abacusTypeElement(types, sites.length);
+                element = abacusTypeElement(types, rows.length);
                 if (element === undefined) {
                     element = 'X';
-                    typeUnresolved = true;
+                    unresolved = true;
                 }
             }
-            sites.push({ element, frac: [x, y, z], label: parts[0] });
+            rows.push({ element, frac: [x, y, z], label: parts[0] });
+        }
+        tables.push({ sites: rows, unresolved });
+    }
+    let chosen = -1;
+    for (let t = tables.length - 1; t >= 0; t--) {
+        if (tables[t].sites.length === 0) continue;
+        if (expected > 0 && tables[t].sites.length !== expected) continue;
+        chosen = t;
+        break;
+    }
+    const completeFell = chosen < 0;
+    if (completeFell) {
+        // No table states every atom: the last one that held rows is still the
+        // most recent geometry the log reached, and it is reported as partial.
+        for (let t = tables.length - 1; t >= 0; t--) {
+            if (tables[t].sites.length > 0) { chosen = t; break; }
+        }
+    }
+    let sites: Site[] = [];
+    let typeUnresolved = false;
+    if (chosen >= 0) {
+        sites = tables[chosen].sites;
+        typeUnresolved = tables[chosen].unresolved;
+        if (expected > 0 && sites.length !== expected) {
+            warnings.push('the last coordinate table in the log holds ' + sites.length + ' of ' +
+                expected + ' sites: showing the sites it lists');
+        } else if (expected > 0 && chosen < tables.length - 1) {
+            warnings.push('the last coordinate table in the log holds ' +
+                tables[tables.length - 1].sites.length + ' of ' + expected +
+                ' sites: showing the last complete one');
         }
     }
 
@@ -626,7 +681,7 @@ export function parseAbacusLog(content: string): MolecularData {
         warnings.push('one or more ABACUS atom types state no atom count: ' +
             'sites not named by their own label are read as the dummy element X');
     }
-    if (tableStarts.length > 1) {
+    if (tableStarts.length > 1 && chosen === tableStarts.length - 1) {
         warnings.push(tableStarts.length + ' coordinate tables in the log: showing the last');
     }
     return buildPeriodicStructure(lattice, sites, title, warnings);
@@ -640,32 +695,17 @@ interface MdDumpFrame {
     constant?: number;
 }
 
-export function parseAbacusMdDump(content: string): MolecularData {
-    const lines = content.split(/\r?\n/);
-    // The viewer draws one structure, so only the first complete MDSTEP is
-    // kept; a long dump is counted rather than accumulated frame by frame.
-    let firstFrame: MdDumpFrame | null = null;
-    let frameCount = 0;
-    const isComplete = (candidate: MdDumpFrame): boolean => {
-        if (candidate.sites.length === 0 || candidate.lattice.length !== 3) return false;
-        frameCount++;
-        return true;
+/** One `MDSTEP:` block of an MD dump, from its header up to the next block. */
+function readMdStepBlock(lines: string[], start: number, end: number): MdDumpFrame {
+    const stepMatch = /^MDSTEP:\s*(\S*)/i.exec(lines[start].trim());
+    const frame: MdDumpFrame = {
+        step: stepMatch && stepMatch[1] !== '' ? stepMatch[1] : String(start + 1),
+        lattice: [],
+        sites: []
     };
-    const warnings: string[] = [];
-
-    let frame: MdDumpFrame | null = null;
-    let i = 0;
-    while (i < lines.length) {
+    let i = start + 1;
+    while (i < end) {
         const line = lines[i].trim();
-        const stepMatch = /^MDSTEP:\s*(\S*)/i.exec(line);
-        if (stepMatch) {
-            if (frame && isComplete(frame) && firstFrame === null) firstFrame = frame;
-            frame = { step: stepMatch[1] || String(frameCount), lattice: [], sites: [] };
-            i++;
-            continue;
-        }
-        if (!frame) { i++; continue; }
-
         if (/^LATTICE_CONSTANT:/i.test(line)) {
             const m = /^LATTICE_CONSTANT:\s*([-+0-9.eE]+)\s*(\S*)/i.exec(line);
             if (m) {
@@ -679,7 +719,7 @@ export function parseAbacusMdDump(content: string): MolecularData {
         if (/^LATTICE_VECTORS/i.test(line)) {
             i++;
             const constant = frame.constant !== undefined ? frame.constant : 1;
-            for (let r = 0; r < 3 && i < lines.length; r++, i++) {
+            for (let r = 0; r < 3 && i < end; r++, i++) {
                 const parts = lines[i].trim().split(/\s+/).map(Number);
                 if (parts.length >= 3 && parts.slice(0, 3).every(v => isFinite(v))) {
                     frame.lattice.push([parts[0] * constant, parts[1] * constant, parts[2] * constant]);
@@ -697,7 +737,7 @@ export function parseAbacusMdDump(content: string): MolecularData {
                 ? BOHR_TO_ANGSTROM
                 : 1;
             i++;
-            while (i < lines.length) {
+            while (i < end) {
                 const row = lines[i].trim();
                 if (row === '' || /^MDSTEP:/i.test(row) || /^[A-Z_]+\s+\(/i.test(row) || /^VIRIAL/i.test(row)) break;
                 const parts = row.split(/\s+/);
@@ -714,25 +754,84 @@ export function parseAbacusMdDump(content: string): MolecularData {
         }
         i++;
     }
-    if (frame && isComplete(frame) && firstFrame === null) firstFrame = frame;
+    return frame;
+}
 
-    if (firstFrame === null) {
+export function parseAbacusMdDump(content: string): MolecularData {
+    const lines = content.split(/\r?\n/);
+    const warnings: string[] = [];
+    const starts: number[] = [];
+    for (let i = 0; i < lines.length; i++) {
+        if (/^MDSTEP:/i.test(lines[i].trim())) starts.push(i);
+    }
+    if (starts.length === 0) {
         return {
             atoms: [], bonds: [], title: 'ABACUS MD dump', hasExplicitBonds: false,
             warnings: ['no complete MDSTEP block in the ABACUS dump: no structure to show']
         };
     }
-    if (frameCount > 1) {
-        warnings.push(frameCount + ' MD steps in the dump: showing the first (step ' + firstFrame.step + ')');
+    const readBlock = (index: number): MdDumpFrame => readMdStepBlock(
+        lines,
+        starts[index],
+        index + 1 < starts.length ? starts[index + 1] : lines.length
+    );
+    const complete = (frame: MdDumpFrame): boolean => frame.sites.length > 0 && frame.lattice.length === 3;
+
+    // The structure on screen is the first complete step, and its atom count is
+    // what the sampling of the rest is measured in — so one block is read
+    // before the chosen ones are.
+    let first: MdDumpFrame | null = null;
+    for (let index = 0; index < starts.length; index++) {
+        const frame = readBlock(index);
+        if (!complete(frame)) continue;
+        first = frame;
+        break;
     }
-    const first = firstFrame;
+    if (first === null) {
+        return {
+            atoms: [], bonds: [], title: 'ABACUS MD dump', hasExplicitBonds: false,
+            warnings: ['no complete MDSTEP block in the ABACUS dump: no structure to show']
+        };
+    }
     if (!isUsableLattice(first.lattice)) {
         return {
             atoms: [], bonds: [], title: 'ABACUS MD dump', hasExplicitBonds: false,
             warnings: ['the MDSTEP lattice is unusable: no structure to show']
         };
     }
-    return buildPeriodicStructure(first.lattice, first.sites, 'ABACUS MD dump (step ' + first.step + ')', warnings);
+
+    // Every MDSTEP is a geometry of the same system: the dump is a trajectory,
+    // and the frames after the first used to be counted and thrown away.
+    let steps: StructureStep[] = [];
+    let stepsInFile = 0;
+    if (starts.length > 1) {
+        const natoms = first.sites.length;
+        const chosen = chooseTrajectoryFrameIndexes(starts.length, natoms);
+        const geometries: StepGeometry[] = [];
+        for (const index of chosen) {
+            const frame = readBlock(index);
+            if (frame.sites.length !== natoms) continue;
+            geometries.push({
+                label: 'MD step ' + frame.step,
+                sites: frame.sites,
+                lattice: frame.lattice.length === 3 ? frame.lattice : undefined
+            });
+        }
+        const collected = structureSteps(geometries, natoms);
+        steps = collected.steps;
+        stepsInFile = collected.total;
+    }
+    if (steps.length <= 1 && starts.length > 1) {
+        warnings.push(starts.length + ' MD steps in the dump: showing the first (step ' + first.step + ')');
+    }
+    const data = buildPeriodicStructure(
+        first.lattice, first.sites, 'ABACUS MD dump (step ' + first.step + ')', warnings
+    );
+    if (steps.length > 1) {
+        data.steps = steps;
+        data.stepsInFile = stepsInFile;
+    }
+    return data;
 }
 
 /** Whether a text is any ABACUS output this reader understands. */

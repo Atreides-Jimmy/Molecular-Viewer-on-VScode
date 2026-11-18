@@ -5,10 +5,11 @@ import * as path from 'path';
 import { MolecularData } from '../types';
 import {
     ParseFileOptions, DeepmdParseOptions, LammpsParseOptions, LammpsHints, TrajectoryFormat,
-    detectBinaryTrajectory, isLammpsInput, isLammpsData, isLammpsDump,
+    detectBinaryTrajectory, looksLikeBinaryTrajectory,
+    isLammpsInput, isLammpsData, isLammpsDump,
     isCp2kInput, isAbacusInput, isAbinitInput, scanAbacusInput, scanAbinitXyzfile,
     scanOrcaXyzfile, scanLammpsInput, parseLammpsInputHints, lammpsTypeElements,
-    deepmdFirstBox, parseDeepmdTypes, parseDeepmdTypeMap
+    deepmdFirstBox, deepmdBoxFrames, parseDeepmdTypes, parseDeepmdTypeMap
 } from '../parsers/index';
 import { decodeText, readFileWithProgress } from './loading';
 
@@ -16,6 +17,8 @@ import { decodeText, readFileWithProgress } from './loading';
 export interface ToolFileLoad {
     content: Uint8Array;
     binary: TrajectoryFormat | null;
+    /** True when the bytes are binary but not a trajectory format this reader knows. */
+    binaryUnsupported?: boolean;
     text: string;
     setup: ParseSetup | undefined;
 }
@@ -40,11 +43,17 @@ export async function readToolFile(
         : await vscode.workspace.fs.readFile(uri);
     if (report) report(0.85, 'Decoding the text');
     const binary = detectBinaryTrajectory(content);
-    const text = binary ? '' : decodeText(content);
+    // `.trj` is a text trajectory for xTB and a binary one for CHARMM/NAMD.
+    // A binary file that no magic recognised must not be decoded into mojibake
+    // and reported as a parse failure; the caller can name the real reason.
+    const binaryUnsupported = !binary &&
+        (/\.(xtc|trr|dcd|trj)$/i.test(fileName)) &&
+        looksLikeBinaryTrajectory(content);
+    const text = binary || binaryUnsupported ? '' : decodeText(content);
     if (report) report(0.9, 'Preparing the parse');
-    const setup = binary ? undefined : await buildParseOptions(uri, fileName, content, text);
+    const setup = binary || binaryUnsupported ? undefined : await buildParseOptions(uri, fileName, content, text);
     if (report) report(1, 'Prepared');
-    return { content, binary, text, setup };
+    return { content, binary, binaryUnsupported, text, setup };
 }
 
 /** A structure file a main input names, already read from disk. */
@@ -233,7 +242,12 @@ export async function scanLammpsChain(
     mainDir: vscode.Uri
 ): Promise<LammpsInputChain> {
     const chain: LammpsInputChain = { texts: [], readData: [], warnings: [] };
-    const visited = new Set<string>();
+    // LAMMPS executes an `include` every time it appears: the same file may be
+    // included twice to define different regions or to re-use a variable block,
+    // and the second execution is part of the script's meaning. Only a file on
+    // the *current* include stack is a cycle; a later, non-recursive include of
+    // the same file is read and scanned again.
+    const visiting = new Set<string>();
     const visit = async (
         fileUri: vscode.Uri,
         content: string,
@@ -241,37 +255,45 @@ export async function scanLammpsChain(
         inherited: { [name: string]: string }
     ): Promise<{ [name: string]: string }> => {
         const key = fileUri.fsPath.toLowerCase();
-        if (visited.has(key)) return inherited;
-        visited.add(key);
+        if (visiting.has(key)) {
+            chain.warnings.push('the LAMMPS include "' + path.basename(fileUri.fsPath) +
+                '" forms a cycle: stopped there');
+            return inherited;
+        }
         if (depth > 8) {
             chain.warnings.push('the LAMMPS include chain is deeper than 8 files: stopped at ' +
                 path.basename(fileUri.fsPath));
             return inherited;
         }
-        const fromDir = vscode.Uri.file(path.dirname(fileUri.fsPath));
-        const scan = scanLammpsInput(content, inherited);
-        chain.texts.push({ content, variables: { ...inherited } });
-        for (const name of scan.readData) chain.readData.push({ name, fromDir });
-        if (scan.readRestart) chain.readRestart = scan.readRestart;
-        let variables = { ...inherited, ...scan.variables };
-        for (const include of scan.includes) {
-            const uris = await resolveIncludeUris(mainDir, fromDir, include);
-            if (uris.length === 0) {
-                chain.warnings.push('the LAMMPS include "' + include + '" could not be found');
-                continue;
-            }
-            for (const uri of uris) {
-                let text: string;
-                try {
-                    text = decodeText(await vscode.workspace.fs.readFile(uri));
-                } catch {
-                    chain.warnings.push('the LAMMPS include "' + include + '" could not be read');
+        visiting.add(key);
+        try {
+            const fromDir = vscode.Uri.file(path.dirname(fileUri.fsPath));
+            const scan = scanLammpsInput(content, inherited);
+            chain.texts.push({ content, variables: { ...inherited } });
+            for (const name of scan.readData) chain.readData.push({ name, fromDir });
+            if (scan.readRestart) chain.readRestart = scan.readRestart;
+            let variables = { ...inherited, ...scan.variables };
+            for (const include of scan.includes) {
+                const uris = await resolveIncludeUris(mainDir, fromDir, include);
+                if (uris.length === 0) {
+                    chain.warnings.push('the LAMMPS include "' + include + '" could not be found');
                     continue;
                 }
-                variables = await visit(uri, text, depth + 1, variables);
+                for (const uri of uris) {
+                    let text: string;
+                    try {
+                        text = decodeText(await vscode.workspace.fs.readFile(uri));
+                    } catch {
+                        chain.warnings.push('the LAMMPS include "' + include + '" could not be read');
+                        continue;
+                    }
+                    variables = await visit(uri, text, depth + 1, variables);
+                }
             }
+            return variables;
+        } finally {
+            visiting.delete(key);
         }
-        return variables;
     };
     await visit(mainUri, mainText, 0, {});
     return chain;
@@ -652,8 +674,14 @@ export async function buildParseOptions(
         const boxFile = await readCompanion(dir, 'box.raw') || await readCompanion(dir, 'box.npy');
         if (boxFile) {
             const np = boxFile.name.toLowerCase().endsWith('.npy');
-            const box = deepmdFirstBox(np ? '' : decodeText(boxFile.bytes), np ? boxFile.bytes : undefined);
+            const boxText = np ? '' : decodeText(boxFile.bytes);
+            const box = deepmdFirstBox(boxText, np ? boxFile.bytes : undefined);
             if (box) deepmd.box = box;
+            // The box holds one row per frame, so its row count is what tells a
+            // `(natoms, 3)` coordinate array (a single frame) from `(frames, 3)`
+            // when `type.raw` is missing.
+            const boxFrames = deepmdBoxFrames(boxText, np ? boxFile.bytes : undefined);
+            if (boxFrames > 0) deepmd.framesHint = boxFrames;
         }
         for (const root of roots) {
             if (!deepmd.types) {
@@ -714,7 +742,7 @@ export async function buildParseOptions(
         }
 
         for (const item of chainTexts) {
-            const parsed = parseLammpsInputHints(item.content, item.variables);
+            const parsed = parseLammpsInputHints(item.content, item.variables, units);
             if (!units && parsed.units) units = parsed.units;
             if (!atomStyle && parsed.atomStyle) atomStyle = parsed.atomStyle;
             for (const key of Object.keys(parsed.typeElements)) {
@@ -774,7 +802,7 @@ export async function buildParseOptions(
             }
         }
         if (dataText !== undefined) {
-            const masses = lammpsTypeElements(dataText);
+            const masses = lammpsTypeElements(dataText, units);
             for (const key of Object.keys(masses)) {
                 const type = Number(key);
                 if (!hints.typeElements[type]) hints.typeElements[type] = masses[type];

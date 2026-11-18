@@ -133,7 +133,12 @@ export function buildImportBlock(atoms: ImportAtomPayload[], bonds: ImportBondPa
         const base = c * atoms.length;
         for (let i = 0; i < atoms.length; i++) {
             const a = atoms[i];
-            outAtoms.push({ element: a.element, x: a.x + shift, y: a.y, z: a.z, color: a.color });
+            const copy: ImportAtomPayload = { element: a.element, x: a.x + shift, y: a.y, z: a.z, color: a.color };
+            // A ghost stays a ghost in every copy: dropping the flag here would
+            // turn a `C-Bq` into a real carbon, which then bonds, draws at the
+            // carbon radius and counts in the formula.
+            if (a.ghost === true) copy.ghost = true;
+            outAtoms.push(copy);
         }
         for (let k = 0; k < bonds.length; k++) {
             const b = bonds[k];
@@ -155,22 +160,59 @@ export function buildImportBlock(atoms: ImportAtomPayload[], bonds: ImportBondPa
  */
 export function postImportCopies(webview: vscode.Webview, fileName: string,
                           atoms: ImportAtomPayload[], bonds: ImportBondPayload[],
-                          hasExplicitBonds: boolean, copies: number): void {
-    const affordable = Math.max(1, Math.floor(IMPORT_ATOM_LIMIT / Math.max(1, atoms.length)));
+                          hasExplicitBonds: boolean, copies: number,
+                          charge?: number, multiplicity?: number): void {
+    const perCopy = Math.max(1, atoms.length);
+    const affordable = Math.floor(IMPORT_ATOM_LIMIT / perCopy);
     let count = copies;
-    if (count > affordable) {
+    if (affordable < 1) {
+        // One copy alone is already past the limit. Trimming it would cut
+        // atoms out of a structure the user asked to see, so the copy is
+        // imported whole and the user is told why the view may be slow;
+        // additional copies are still reduced to one, because the limit is
+        // about how many atoms one import adds.
+        count = 1;
+        vscode.window.showWarningMessage('Import: the structure has ' + atoms.length +
+            ' atoms, above the ' + IMPORT_ATOM_LIMIT + '-atom import limit, so ' +
+            (copies > 1 ? 'only one copy is imported instead of ' + copies : 'it is imported whole') +
+            '; a structure this large may be slow to view.');
+    } else if (count > affordable) {
         count = affordable;
         vscode.window.showWarningMessage('Import: ' + copies + ' copies of a ' + atoms.length +
             '-atom structure would add ' + (copies * atoms.length) + ' atoms, so this import is limited to ' +
             count + ' copies.');
     }
     const block = buildImportBlock(atoms, bonds, count);
+    // The electronic state of the block, which is not simply the fragment's
+    // value repeated: N copies of a singly charged ion are N times the charge,
+    // while N copies of a doublet have 2N open shells that can couple several
+    // ways — a total multiplicity the file does not state. So the charge is
+    // multiplied, the multiplicity is stated only when the copies cannot
+    // differ (a closed shell stays a closed shell, and a single copy is the
+    // fragment itself), and the page is told why a number is missing instead of
+    // being handed one that describes something else.
+    const totalCharge = typeof charge === 'number' ? charge * count : undefined;
+    let totalMultiplicity: number | undefined;
+    if (typeof multiplicity === 'number' && multiplicity >= 1) {
+        totalMultiplicity = count === 1 || multiplicity === 1 ? multiplicity : undefined;
+    }
+    const note = typeof multiplicity === 'number' && multiplicity > 1 && count > 1
+        ? count + ' copies of a multiplicity-' + multiplicity + ' fragment: the combined spin state is not stated by the file'
+        : undefined;
     webview.postMessage({
         command: 'importResult',
         cancelled: false,
         fileName: count > 1 ? fileName + ' x ' + count : fileName,
         atoms: block.atoms,
         bonds: block.bonds,
-        hasExplicitBonds: hasExplicitBonds
+        hasExplicitBonds: hasExplicitBonds,
+        // The imported file's own electronic state. The page keeps the host's
+        // bonds (computed against this charge) instead of re-perceiving the
+        // combined system with the charge of whatever was already open. Every
+        // copy carries the fragment's charge, so the block's total is that
+        // charge times the number of copies.
+        charge: totalCharge,
+        multiplicity: totalMultiplicity,
+        note: note
     });
 }

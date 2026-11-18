@@ -160,6 +160,25 @@ export function parseOrcainp(content: string, external?: OrcaExternalStructure):
                 continue;
             }
             const lowerLine = line.toLowerCase();
+            // `%coords` states the electronic state with its own keywords:
+            // `Charge 0` / `Mult 1` (and `CTyp xyz`, which names the coordinate
+            // type). They used to fall through as unreadable lines, so a charged
+            // or open-shell `%coords` input opened as the default neutral
+            // singlet and bond perception solved the wrong system.
+            if (lowerLine.startsWith('charge')) {
+                // `Charge 0` and `Charge=0` are both accepted by ORCA.
+                const v = parseInt(line.split(/[\s=]+/)[1], 10);
+                if (!isNaN(v)) charge = v;
+                continue;
+            }
+            if (lowerLine.startsWith('mult')) {
+                const v = parseInt(line.split(/[\s=]+/)[1], 10);
+                if (!isNaN(v)) multiplicity = v;
+                continue;
+            }
+            if (lowerLine.startsWith('ctyp') || lowerLine.startsWith('coords')) {
+                continue;
+            }
             if (lowerLine.startsWith('xyz')) {
                 const parts = line.split(/\s+/);
                 if (parts.length >= 3) {

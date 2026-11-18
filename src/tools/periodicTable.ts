@@ -88,23 +88,87 @@ export function normalizeElementSymbol(raw: string): string | undefined {
 /**
  * The element an MD program's atom *label* stands for.
  *
- * GROMACS calls a water oxygen `OW` and its hydrogens `HW1`/`HW2`; a silicon
- * atom may be `SIL`; LAMMPS uses `Si`, `Mg`, `Na`. Exact symbols win, then the
- * longest known prefix (so `OW` -> O, `HW1` -> H, `SIL` -> Si), then nothing.
- * A label that merely starts with a valid letter must not become that element
- * (`SOL` is a residue name, not sulfur) unless no longer prefix is a symbol —
- * which is the same best-effort rule this function is documented to follow.
+ * Labels are names, not element spellings, and the rules follow the ones a
+ * polymer CIF needs (see `elementFromLabel` in cifParser):
+ *
+ *   - a one-letter label is that element (`C`, `O`, `H`);
+ *   - a two-letter label whose second letter is lowercase is a symbol
+ *     (`Si`, `Ca`, `Cl`), as is one followed by a serial (`ZN1`, `CA1`), where
+ *     the number says the column numbers element sites rather than naming
+ *     atoms;
+ *   - otherwise a two-letter label is a PDB atom name: `CA` is a C-alpha and
+ *     `HW` a hydrogen, while `ZN`/`MG` — whose first letter is no element —
+ *     still read as zinc and magnesium. The second letter must be one a
+ *     biomolecular atom name uses, so `CL`, `NA` and `FE` remain chlorine,
+ *     sodium and iron;
+ *   - a longer label is the element only when its first two letters are a
+ *     symbol (`SIL` -> Si, `OW1` -> O through its one-letter run). A group or
+ *     residue name with no such prefix is not an element: `SOL` and `WAT` are
+ *     water, not sulfur and tungsten.
+ *
+ * The old rule matched the first letter whenever no two-letter prefix fit, so
+ * every three-letter residue name became an element; and it matched a
+ * two-letter prefix before looking at the label's shape, so `CA` became
+ * calcium in every protein. Both produce atoms the file never contained — with
+ * the wrong radius, colour, mass and bonds.
  */
+// The second letters a PDB atom name uses after each element's initial:
+// CA/CB/CG/CD/CE/CZ/CH, ND/NE/NH/NZ, OD/OE/OG/OH, SD/SG/SH, HA/HB/HG/HD/HE/HZ.
+// A pair outside its own row is an element spelling instead (CL, NA, FE, PB,
+// SB, SE), which is what keeps those labels from losing their second letter.
+const PDB_NAME_SUFFIXES: { [initial: string]: string } = {
+    C: 'ABDEGHZ',
+    N: 'DEHZ',
+    O: 'DEGH',
+    S: 'DGH',
+    H: 'ABDEGHZ',
+    P: ''
+};
+
 export function elementFromAtomName(name: string): string | undefined {
-    const letters = String(name || '').replace(/[^A-Za-z]/g, '');
-    if (letters === '') return undefined;
-    const exact = SYMBOL_BY_LOWER[letters.toLowerCase()];
-    if (exact) return exact;
-    if (letters.length >= 2) {
-        const two = SYMBOL_BY_LOWER[letters.slice(0, 2).toLowerCase()];
-        if (two) return two;
+    const s = String(name || '').trim();
+    const run = /[A-Za-z]+/.exec(s);
+    if (!run) return undefined;
+    const letters = run[0];
+    const after = s.slice(run.index + letters.length);
+    const numbered = /[0-9]/.test(after);
+
+    if (letters.length === 1) {
+        return SYMBOL_BY_LOWER[letters.toLowerCase()];
     }
-    return SYMBOL_BY_LOWER[letters.slice(0, 1).toLowerCase()];
+
+    const two = SYMBOL_BY_LOWER[letters.slice(0, 2).toLowerCase()];
+    const one = SYMBOL_BY_LOWER[letters.charAt(0).toLowerCase()];
+
+    if (letters.length === 2) {
+        // `Ca`, `Ow`: a lowercase second letter spells a symbol outright.
+        if (letters.charAt(1) === letters.charAt(1).toLowerCase()) {
+            return two || one;
+        }
+        // `ZN1`, `CA1`: a serial marks element sites, not atom names.
+        if (numbered && two) return two;
+        // `CA`/`CB`/`ND`/`HG`: a PDB atom name; its element is the first
+        // letter. `CL`, `NA`, `FE` do not match that shape and keep their
+        // element. A first letter that is no element (`Z` in `ZN`) falls back
+        // to the two-letter symbol.
+        const suffixes = PDB_NAME_SUFFIXES[letters.charAt(0).toUpperCase()];
+        if (suffixes !== undefined && suffixes.indexOf(letters.charAt(1).toUpperCase()) >= 0) {
+            return one || two;
+        }
+        return two || one;
+    }
+
+    // Three or more letters: only a two-letter symbol prefix is trusted.
+    // `SIL` -> Si; `SOL` and `WAT` -> nothing. A handful of common names
+    // *do* begin with a real symbol and would otherwise become the wrong
+    // element — the TIPn water models read as titanium and HOH water as
+    // holmium — so they are refused by name. `OXT`, the terminal oxygen of a
+    // peptide, is the one three-letter atom name whose prefix is not a
+    // symbol; without it the name would stop being oxygen.
+    const upper = letters.toUpperCase();
+    if (upper === 'TIP' || upper === 'HOH') return undefined;
+    if (upper === 'OXT') return 'O';
+    return two;
 }
 
 /**

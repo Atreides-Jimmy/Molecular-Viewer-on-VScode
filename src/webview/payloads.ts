@@ -1,6 +1,6 @@
 // Payload shapes exchanged between the host and the webview page, and the
 // element colours both sides use.
-import { MolecularData, NormalMode, OptStep, OptThresholds } from '../types';
+import { MolecularData, NormalMode, OptStep, OptThresholds, LogPathways } from '../types';
 import { LogFrame, OrcaFrame, RouteSection, LogChargeSet, LogSummary } from '../parsers/index';
 
 export const ATOM_COLORS: { [key: string]: string } = {
@@ -25,7 +25,14 @@ export const ATOM_COLORS: { [key: string]: string } = {
     Pa: '#00A1FF', U: '#008FFF', Np: '#0080FF', Pu: '#006BFF', Am: '#545CF2',
     Cm: '#785CE3', Bk: '#8A4FE3', Cf: '#A136D4', Es: '#B31FD4', Fm: '#B31FBA',
     Md: '#B30DA6', No: '#BD0D87', Lr: '#C70066', Rf: '#CC0059', Db: '#D9004F',
-    Sg: '#E00045', Bh: '#E6002E', Hs: '#EB0026'
+    Sg: '#E00045', Bh: '#E6002E', Hs: '#EB0026',
+    // Jmol's table ends at Hs and most copies of it stop at Mt. The remaining
+    // ten follow the same transactinide ramp (Avogadro's continuation), so a
+    // superheavy atom keeps a real element colour instead of the magenta
+    // "unknown element" fallback - both when a file is opened and when one is
+    // imported, which read the same table.
+    Mt: '#E80026', Ds: '#EA0023', Rg: '#ED0021', Cn: '#EF001E', Nh: '#F2001C',
+    Fl: '#F40019', Mc: '#F70016', Lv: '#F90014', Ts: '#FC0011', Og: '#FF000F'
 };
 
 /** 导入消息里的原子载荷 (客户端 importStructure 逐项写入 MD.atoms)。 */
@@ -35,6 +42,8 @@ export interface ImportAtomPayload {
     y: number;
     z: number;
     color: string;
+    /** 该原子是 ghost/哑点 (见 Atom.ghost); 多份拷贝时也必须保留。 */
+    ghost?: boolean;
 }
 
 /** 导入消息里的键载荷 (索引相对本次导入的原子数组)。 */
@@ -104,6 +113,15 @@ export interface VmdMoleculePayload {
     segments: VmdSegmentPayload[];
     reps: VmdRepPayload[];
     warnings: string[];
+    /** The molecule's own electronic state, as its file states it. */
+    charge?: number;
+    multiplicity?: number;
+    /** Whether the molecule's bonds were authored rather than perceived. */
+    hasExplicitBonds: boolean;
+    /** The route and title card of a Gaussian input, for a later Save As. */
+    gjfMeta?: MolecularData['gjfMeta'];
+    /** Parser warnings of the molecule's file (distinct from `warnings`). */
+    parseWarnings?: string[];
 }
 
 export interface VmdPayload {
@@ -124,6 +142,9 @@ export interface LoadedStructure {
      *  `LogChargeSet` / `LogSummary`); absent for every other format. */
     charges?: LogChargeSet[];
     summary?: LogSummary[];
+    /** A relaxed scan and/or an IRC path: the structures along one coordinate,
+     *  which take the convergence card's place. */
+    pathways?: LogPathways;
     logSource?: string;
     error?: string;
 }

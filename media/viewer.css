@@ -313,6 +313,33 @@ canvas{display:block}
 #opt-panel .opt-body{overflow-y:scroll;overflow-x:hidden;flex:1 1 auto;min-height:0;width:100%;box-sizing:border-box}
 #opt-panel canvas{display:block;width:100%;max-width:100%;margin:2px 0 6px}
 #opt-panel .opt-chart-title{font-size:10px;color:var(--vscode-descriptionForeground,#999);margin-top:4px}
+/* A card's own mark: 13 px of line art drawn in the ink of whatever it sits
+   in, so the Scan and IRC cards read the same beside a title and inside a chip
+   as the emoji chips do, and follow the theme without a second colour. */
+#opt-panel .pn-mark,#opt-reopen .pn-mark{vertical-align:-2px;margin-right:5px}
+#opt-panel .opt-sub{font-weight:normal;font-size:10px;color:var(--vscode-descriptionForeground,#888);margin-left:6px}
+/* The per-point list under a scan's or an IRC path's charts: one row per point,
+   the numbers the file stated, and a click that shows that structure. */
+#opt-panel .pw-head{display:flex;gap:5px;margin:7px 0 2px;padding:0 3px 2px;border-bottom:1px solid rgba(255,255,255,0.12);color:var(--vscode-descriptionForeground,#888);font-size:10px}
+#opt-panel .pw-row{display:flex;gap:5px;padding:1px 3px;border-radius:2px;font-family:monospace;font-size:10px;line-height:1.35}
+#opt-panel .pw-row.can{cursor:pointer}
+#opt-panel .pw-row.can:hover{background:rgba(255,255,255,0.09)}
+#opt-panel .pw-row.on{background:rgba(255,214,102,0.18);box-shadow:inset 2px 0 0 #ffd666}
+#opt-panel .pw-row.failed{opacity:0.62}
+/* The junction of a joined IRC path: the transition state both halves start
+   from. Its name and energy are tinted, so the barrier is findable in the list
+   without a second header row. */
+#opt-panel .pw-row.pw-ts .pw-no{color:#ffd666;font-weight:bold}
+#opt-panel .pw-row.pw-ts .pw-e{color:#ffd666}
+#opt-panel .pw-no{flex:0 0 20px;text-align:right;color:var(--vscode-descriptionForeground,#999)}
+#opt-panel .pw-co{flex:0 0 62px;text-align:right;color:#9cdcfe}
+#opt-panel .pw-e{flex:1 1 auto;text-align:right;color:#d7dae0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#opt-panel .pw-f{flex:0 0 50px;text-align:right;color:#ffa94d}
+#opt-panel .pw-d{flex:0 0 50px;text-align:right;color:#6bb7ff}
+#opt-panel .pw-s{flex:0 0 16px;text-align:right;color:var(--vscode-descriptionForeground,#888)}
+#opt-panel .pw-head.pw-path{margin-top:8px;border-bottom:none;color:#ffd666}
+#opt-panel .pw-head.pw-path .pw-no{flex:0 0 auto;font-weight:bold}
+#opt-panel .pw-head.pw-path .pw-e{color:var(--vscode-descriptionForeground,#888)}
 #opt-reopen{display:none;position:absolute;top:36px;left:8px;z-index:26;padding:4px 10px;border-radius:4px;border:1px solid var(--vscode-button-border,#555);background:rgba(0,0,0,0.7);color:var(--vscode-editor-foreground,#ccc);font-size:11px;cursor:pointer;pointer-events:auto}
 #opt-reopen.show{display:block}
 #opt-reopen:hover{background:var(--vscode-button-background,#0e639c)}
@@ -496,3 +523,17 @@ canvas{display:block}
    spilling over its neighbours. */
 #view-panel,#bake-panel,#select-panel,#neigh-panel,#int-panel,#rotate-panel{overflow:auto}
 @media (max-width:600px){.tbtn{padding:3px 6px;font-size:10px}#frame-info{font-size:10px}#toolbar .trow{gap:1px}}
+/* ===== The file changed on disk ===== */
+/* The page draws the copy it parsed when the tab opened. Another program (the
+   job still appending to its own log, an editor, a script) can change the file
+   afterwards, and the notice says so with the one action that matters: read it
+   again. It is an overlay, so a page whose file has not changed is laid out
+   exactly as it was — the element is display:none until it has something to
+   say. */
+#file-notice{display:none;position:absolute;top:8px;left:50%;transform:translateX(-50%);z-index:60;align-items:center;gap:8px;padding:5px 8px 5px 10px;border-radius:4px;border:1px solid rgba(232,163,61,0.55);background:rgba(38,30,12,0.94);color:#f0d9b0;font-size:11px;line-height:1.4;max-width:calc(100% - 24px);pointer-events:auto;box-shadow:0 2px 10px rgba(0,0,0,0.4)}
+#file-notice.show{display:flex}
+#file-notice .fn-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+#file-notice .fn-btn{flex:0 0 auto;background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#fff);border:none;border-radius:3px;padding:3px 8px;font-size:11px;cursor:pointer}
+#file-notice .fn-btn:hover{background:var(--vscode-button-hoverBackground,#1177bb)}
+#file-notice .fn-btn.fn-quiet{background:transparent;color:inherit;opacity:0.7;padding:0 2px;font-size:14px;line-height:1}
+#file-notice .fn-btn.fn-quiet:hover{opacity:1;background:transparent}

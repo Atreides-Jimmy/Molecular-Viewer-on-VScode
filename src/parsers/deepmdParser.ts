@@ -29,6 +29,8 @@ export interface DeepmdParseOptions {
     types?: number[];
     /** The first frame's nine box numbers, from `box.raw` or `box.npy`. */
     box?: number[];
+    /** Frames the companion `box` states, from `box.raw` or `box.npy`. */
+    framesHint?: number;
     /** The dataset has a `nopbc` marker: a molecule, even with a box. */
     nopbc?: boolean;
     /** Raw bytes when the primary file is a `.npy`. */
@@ -157,14 +159,43 @@ export interface DeepmdFrames {
 }
 
 /**
+ * Whether a `(rows, 3)` array is one frame of `rows` atoms rather than `rows`
+ * frames of one atom.
+ *
+ * `type.raw` answers it outright when its length is the row count. The box's
+ * frame count answers it when the type list is missing — a `box.npy` of the
+ * same number of rows says the coordinate file has that many frames, so the
+ * `(rows, 3)` array is one atom per frame. When neither matches, the row count
+ * is read as an atom count: a one-atom dataset is not a trajectory anyone
+ * writes, a single-frame `(natoms, 3)` export is ordinary — reading it as
+ * `natoms` frames of one atom drew a single atom and threw the rest of the
+ * coordinates away — and a `type.raw` that contradicts the array is already
+ * reported by the caller.
+ */
+function decideSingleFrame(rows: number, natomsHint?: number, framesHint?: number): boolean {
+    if (natomsHint !== undefined && natomsHint > 0 && rows === natomsHint) return true;
+    if (framesHint !== undefined && framesHint > 0 && rows === framesHint) return false;
+    return true;
+}
+
+/**
  * The first frame row of a DeepMD coordinate file, raw text or `.npy`.
  *
  * `natomsHint` is the length of `type.raw` (the atom count shared by every
- * frame). A two-dimensional `(natoms, 3)` array is one frame written per atom,
- * not `natoms` frames of a single atom; without the type list the two readings
- * are indistinguishable.
+ * frame) and `framesHint` the number of rows the companion `box` states. A
+ * two-dimensional `(n, 3)` array is either one frame written per atom or `n`
+ * frames of a single atom, and the two readings differ in everything; the
+ * hints decide, and the box's frame count is what makes a single-frame
+ * `coord.npy` readable when `type.raw` is missing. With no evidence at all the
+ * array is read as one frame of `n` atoms, because a one-atom dataset is not a
+ * trajectory anyone writes.
  */
-export function deepmdCoordinateFrames(content: string, binary?: Uint8Array, natomsHint?: number): DeepmdFrames {
+export function deepmdCoordinateFrames(
+    content: string,
+    binary?: Uint8Array,
+    natomsHint?: number,
+    framesHint?: number
+): DeepmdFrames {
     if (binary && binary.length > 0) {
         const header = npyHeader(binary);
         if (header && header.shape.length > 0) {
@@ -177,10 +208,11 @@ export function deepmdCoordinateFrames(content: string, binary?: Uint8Array, nat
             let frameCount: number;
             if (header.shape.length >= 2) {
                 const rowWidth = header.shape.slice(1).reduce((a, b) => a * b, 1);
-                const oneFramePerAtom = header.shape.length === 2 && rowWidth === 3 &&
-                    natomsHint !== undefined && natomsHint > 0 && header.shape[0] === natomsHint;
-                frameWidth = oneFramePerAtom ? header.shape[0] * rowWidth : rowWidth;
-                frameCount = oneFramePerAtom ? 1 : header.shape[0];
+                const rows = header.shape[0];
+                const singleFrameOfAtoms = header.shape.length === 2 && rowWidth === 3 && rows > 1 &&
+                    decideSingleFrame(rows, natomsHint, framesHint);
+                frameWidth = singleFrameOfAtoms ? rows * rowWidth : rowWidth;
+                frameCount = singleFrameOfAtoms ? 1 : rows;
             } else {
                 frameWidth = header.shape[0];
                 frameCount = 1;
@@ -251,6 +283,33 @@ export function deepmdFirstBox(content: string, binary?: Uint8Array): number[] |
     return undefined;
 }
 
+/**
+ * How many frames the companion `box` file states.
+ *
+ * The box is written once per frame, so its row count is the one piece of
+ * evidence a `(natoms, 3)` coordinate array needs to be read as one frame: the
+ * array that says `natoms` rows says `frames` to the box, and the box's answer
+ * decides which reading the dataset means.
+ */
+export function deepmdBoxFrames(content: string, binary?: Uint8Array): number {
+    if (binary && binary.length > 0) {
+        const header = npyHeader(binary);
+        if (header && header.shape.length > 0) {
+            const rows = header.shape.length === 1 ? 1 : header.shape[0];
+            return isFinite(rows) && rows > 0 ? Math.floor(rows) : 0;
+        }
+        return 0;
+    }
+    let rows = 0;
+    for (const line of content.split(/\r?\n/)) {
+        const text = line.trim();
+        if (text === '') continue;
+        const row = text.split(/\s+/).map(Number);
+        if (row.length >= 9 && row.slice(0, 9).every(v => isFinite(v))) rows++;
+    }
+    return rows;
+}
+
 export function isDeepmdDatasetFile(fileName: string): boolean {
     return /^coord\.(raw|npy)$/i.test(fileName);
 }
@@ -280,7 +339,8 @@ export function parseDeepmdDataset(content: string, fileName: string, options?: 
     const dataset = deepmdCoordinateFrames(
         content,
         options && options.binary,
-        options && options.types && options.types.length > 0 ? options.types.length : undefined
+        options && options.types && options.types.length > 0 ? options.types.length : undefined,
+        options && options.framesHint
     );
     if (!dataset.first || dataset.first.length === 0) {
         return {

@@ -136,8 +136,14 @@ function clamp01(v: number): number {
  * Colour of a scalar on the reference renderer's RGB gradient, clamped to the
  * given range. A range that collapses to a single value paints everything with
  * the low end, which is what the reference renderer does.
+ *
+ * `method` is the script's `color scale method`: RGB (the default) and BGR are
+ * the same ramp with the red and blue channels exchanged, which is exactly what
+ * the reference renderer does for BGR. RYB and HSV interpolate along a
+ * different path; `scaleMethodOf` reports them so `resolveVmdScene` can say the
+ * ramp is drawn as RGB instead of silently drawing a different gradient.
  */
-export function scalarColor(value: number, min: number, max: number): string {
+export function scalarColor(value: number, min: number, max: number, method?: string): string {
     let t: number;
     if (!isFinite(min) || !isFinite(max) || max === min) {
         t = 0;
@@ -156,7 +162,23 @@ export function scalarColor(value: number, min: number, max: number): string {
         g = clamp01(GRADIENT_BASE + GRADIENT_RATE * (1 - t));
         b = clamp01(GRADIENT_BASE + GRADIENT_RATE * (t - 0.5));
     }
+    if (scaleMethodOf(method) === 'BGR') return '#' + toHex(b) + toHex(g) + toHex(r);
     return '#' + toHex(r) + toHex(g) + toHex(b);
+}
+
+/**
+ * Which colour-scale method a `color scale method <name>` names.
+ *
+ * 'RGB' and 'BGR' are reproduced exactly; anything else ('RYB', 'HSV') is a
+ * different interpolation this viewer does not implement, so it is reported as
+ * 'OTHER' and drawn with the RGB ramp (with a warning) rather than drawn as if
+ * it had been honoured.
+ */
+function scaleMethodOf(name: string | undefined): 'RGB' | 'BGR' | 'OTHER' {
+    const text = (name || '').trim().toUpperCase();
+    if (text === '' || text === 'RGB') return 'RGB';
+    if (text === 'BGR') return 'BGR';
+    return 'OTHER';
 }
 
 /** Colour table entry for `mol color ColorID <id>`, honouring script overrides. */
@@ -207,6 +229,17 @@ export interface VmdRepKind {
 
 const SURFACE_STYLES: { [style: string]: boolean } = {
     surf: true, surface: true, quicksurf: true, msms: true, isosurface: true
+};
+
+/**
+ * The reference renderer's materials whose meaning is "you can see through it".
+ * The viewer draws every material opaque, so a representation that asks for one
+ * of these is reported; the rest of the named materials (Opaque, Glossy,
+ * Diffuse, AOShiny …) differ only in shading, which this viewer does not model
+ * and which therefore changes nothing a user would notice.
+ */
+const TRANSPARENT_MATERIALS: { [name: string]: boolean } = {
+    transparent: true, glass: true, edgyglass: true
 };
 
 /**
@@ -473,7 +506,7 @@ function makeColorResolver(rep: VmdRep, indices: number[], atoms: AtomLike[], sc
             // column that happens to be constant still sits at its own place on
             // a written scale (a written min === max is the only collapsed case,
             // and scalarColor then paints the low end).
-            return scalarColor(v, min, max);
+            return scalarColor(v, min, max, scene.colorScaleMethod);
         };
     }
     return null;
@@ -502,6 +535,10 @@ export function resolveVmdScene(
     const warnings: string[] = [];
 
     const dominantScale: number[] = new Array(n).fill(-1);
+    // One statement per script, not one per representation: a script that
+    // colours four reps by Beta does not have four problems.
+    let reportedScaleMethod = false;
+    const reportedMaterials: { [name: string]: boolean } = {};
 
     const wholeMolecule: number[] = [];
     for (let i = 0; i < n; i++) wholeMolecule.push(i);
@@ -512,6 +549,24 @@ export function resolveVmdScene(
         const selection = resolveSelection(rep.selection, atoms);
         if (selection.warning) warnings.push('rep ' + ri + ': ' + selection.warning);
         const indices = selection.indices === null ? wholeMolecule : selection.indices;
+        // `mol material` is part of the recipe the script states. The viewer has
+        // no per-representation shading model, so a material that means
+        // "see-through" in the reference renderer is drawn opaque here — and
+        // said so, because a script that asks for Glass and gets Opaque is a
+        // difference the user has to be able to see in the panel.
+        const material = (rep.material || '').trim();
+        const materialKey = material.toLowerCase();
+        if (material && TRANSPARENT_MATERIALS[materialKey] && !reportedMaterials[materialKey]) {
+            reportedMaterials[materialKey] = true;
+            warnings.push('rep ' + ri + ' asks for material "' + material +
+                '": every material is drawn opaque by this viewer');
+        }
+        if (!reportedScaleMethod && /^(beta|occupancy)$/.test((rep.colorMode || '').trim().toLowerCase()) &&
+            scaleMethodOf(scene.colorScaleMethod) === 'OTHER') {
+            reportedScaleMethod = true;
+            warnings.push('color scale method ' + scene.colorScaleMethod.trim() +
+                ' is not implemented: the scalar colours use the RGB ramp');
+        }
         // A script that writes an explicit colour-scale range is stating that
         // the file's temperature-factor column is a scalar channel, even when
         // the values happen to be constant — the reference renderer then paints
@@ -619,14 +674,19 @@ export function resolveVmdScene(
  * display background and any palette overrides.
  */
 
-const DISPLAY_BACKGROUND: { [name: string]: string } = {
-    white: '#FFFFFF',
-    black: '#000000',
-    gray: '#808080',
-    grey: '#808080',
-    blue: '#0000FF',
-    red: '#FF0000',
-    green: '#00FF00'
+/**
+ * The names `color Display Background <name>` accepts, as the colour ids of the
+ * reference renderer's palette. The old table knew seven of them, so a script
+ * that said `color Display Background ochre` (or `iceblue`, or `red3`) left the
+ * background at its default while the rest of the recipe was applied. Grey and
+ * gray are the same colour, as they are there.
+ */
+const VMD_COLOR_NAMES: { [name: string]: number } = {
+    blue: 0, red: 1, gray: 2, grey: 2, orange: 3, yellow: 4, tan: 5, silver: 6,
+    green: 7, white: 8, pink: 9, cyan: 10, purple: 11, lime: 12, mauve: 13,
+    ochre: 14, iceblue: 15, black: 16, yellow2: 17, yellow3: 18, green2: 19,
+    green3: 20, cyan2: 21, cyan3: 22, blue2: 23, blue3: 24, purple2: 25,
+    purple3: 26, pink2: 27, pink3: 28, red2: 29, red3: 30, orange2: 31, orange3: 32
 };
 
 export interface TclParseResult {
@@ -649,10 +709,20 @@ export function getVmdColor(colorId: number): string {
     return vmdColor(colorId);
 }
 
+/** The escapes a double-quoted word needs: the ones that protect its own characters. */
+const QUOTE_ESCAPES = '"\\$[]{};';
+
 /**
- * Split a script line into words, honouring `{…}` and `"…"` grouping. Inside a
- * group a backslash escapes the next character; outside one it only escapes
- * whitespace, so Windows-style paths survive intact.
+ * Split a script line into words, honouring `{…}` and `"…"` grouping.
+ *
+ * Braces and quotes are not the same thing in Tcl, and the difference is what
+ * a Windows path depends on: inside braces nothing is substituted, so a
+ * backslash is an ordinary character and `{C:\data\run.pdb}` is the path it
+ * looks like. Inside a double-quoted word only the escapes that decide where
+ * the word ends are applied (`\"`, `\\`, `\$`, `\{` …): the C-style controls
+ * are deliberately *not*, because the words this parser reads are file paths
+ * and selection expressions, and `\t` in `"C:\temp\x.pdb"` must not become a
+ * tab. A backslash before anything else stays as written.
  */
 function tokenize(line: string): string[] {
     const out: string[] = [];
@@ -662,22 +732,32 @@ function tokenize(line: string): string[] {
         if (ch === ' ' || ch === '\t') { i++; continue; }
         if (ch === '{' || ch === '"') {
             // Braces nest; a double-quoted word ends at the next unescaped quote.
-            const closer = ch === '{' ? '}' : '"';
+            const braced = ch === '{';
             let depth = 1;
             let j = i + 1;
             let buf = '';
             while (j < line.length) {
                 const d = line[j];
-                if (d === '\\' && j + 1 < line.length) {
-                    const n = line[j + 1];
-                    buf += n === 'n' ? '\n' : n === 't' ? '\t' : n === 'r' ? '\r' : n;
-                    j += 2;
+                if (braced) {
+                    // No substitution inside braces: a backslash never escapes
+                    // the closing brace, so `{a\}b}` ends at the first `}`.
+                    if (d === '{') depth++;
+                    else if (d === '}') {
+                        depth--;
+                        if (depth === 0) break;
+                    }
+                    buf += d;
+                    j++;
                     continue;
                 }
-                if (ch === '{' && d === '{') depth++;
-                else if (d === closer) {
-                    depth--;
-                    if (depth === 0) break;
+                if (d === '"') break;
+                if (d === '\\' && j + 1 < line.length) {
+                    const n = line[j + 1];
+                    if (QUOTE_ESCAPES.indexOf(n) >= 0) {
+                        buf += n;
+                        j += 2;
+                        continue;
+                    }
                 }
                 buf += d;
                 j++;
@@ -735,9 +815,14 @@ export function parseTcl(content: string): TclParseResult {
 
     let sourceFile = '';
     let sourceType = '';
-    let current: VmdMolecule | null = null;
     let currentIndex = -1;
     let pending: VmdRep | null = null;
+    // A background named from the palette is resolved once the whole script has
+    // been read: `color change rgb` may come after it, and the reference
+    // renderer paints the background in the colour as it ends up, not as it was
+    // when the command ran.
+    let backgroundId = -1;
+    let backgroundHex = '';
     // `mol new` also creates one default representation, which scripts almost
     // always delete again with `mol delrep 0 top`. Keeping track of it is what
     // makes representation indices address the same representation as in the
@@ -769,15 +854,23 @@ export function parseTcl(content: string): TclParseResult {
         if (verb === 'color') {
             const sub = (tokens[1] || '').toLowerCase();
             if (sub === 'display' && (tokens[2] || '').toLowerCase() === 'background') {
-                const name = (tokens[3] || '').toLowerCase();
-                if (DISPLAY_BACKGROUND[name]) {
-                    scene.background = DISPLAY_BACKGROUND[name];
-                } else if (/^#[0-9a-f]{6}$/i.test(tokens[3] || '')) {
-                    scene.background = tokens[3].toUpperCase();
+                const written = tokens[3] || '';
+                const name = written.toLowerCase();
+                if (Object.prototype.hasOwnProperty.call(VMD_COLOR_NAMES, name)) {
+                    backgroundId = VMD_COLOR_NAMES[name];
+                    backgroundHex = '';
+                } else if (/^\d+$/.test(name) && parseInt(name, 10) < VMD_COLOR_IDS.length) {
+                    // `color Display Background <colorID>` names a palette slot.
+                    backgroundId = parseInt(name, 10);
+                    backgroundHex = '';
+                } else if (/^#[0-9a-f]{6}$/i.test(written)) {
+                    backgroundHex = written.toUpperCase();
+                    backgroundId = -1;
                 } else if (tokens.length >= 6) {
                     const r = parseFloat(tokens[3]), g = parseFloat(tokens[4]), b = parseFloat(tokens[5]);
                     if (!isNaN(r) && !isNaN(g) && !isNaN(b)) {
-                        scene.background = '#' + toHexByte(r) + toHexByte(g) + toHexByte(b);
+                        backgroundHex = '#' + toHexByte(r) + toHexByte(g) + toHexByte(b);
+                        backgroundId = -1;
                     }
                 }
             } else if (sub === 'scale' && (tokens[2] || '').toLowerCase() === 'method') {
@@ -803,8 +896,8 @@ export function parseTcl(content: string): TclParseResult {
             for (let i = 3; i < tokens.length - 1; i++) {
                 if (tokens[i].toLowerCase() === 'type') { type = tokens[i + 1]; break; }
             }
-            current = { sourceFile: file, sourceType: type, label: file, reps: [] };
-            scene.molecules.push(current);
+            const molecule: VmdMolecule = { sourceFile: file, sourceType: type, label: file, reps: [] };
+            scene.molecules.push(molecule);
             currentIndex = scene.molecules.length - 1;
             hasDefaultRep.push(true);
             if (!sourceFile) {
@@ -816,7 +909,10 @@ export function parseTcl(content: string): TclParseResult {
         }
 
         if (op === 'addrep') {
-            if (current) current.reps.push(pending || newRep());
+            // `mol addrep [<molecule>]` adds to the molecule it names, not to
+            // whichever one the last `mol new` opened.
+            const molIndex = targetMolecule(tokens[2]);
+            if (molIndex >= 0) scene.molecules[molIndex].reps.push(pending || newRep());
             pending = null;
             continue;
         }
@@ -866,18 +962,23 @@ export function parseTcl(content: string): TclParseResult {
         }
 
         if (op === 'scaleminmax') {
+            // `mol scaleminmax <molecule> <rep> <min> <max>`: the molecule is
+            // the third word, so the range lands on that molecule's rep — the
+            // old code always used the last `mol new`, whatever was written.
             const tail = tokens.slice(3);
-            if (current && tail.length >= 2) {
+            const molIndex = targetMolecule(tokens[2]);
+            if (molIndex >= 0 && tail.length >= 2) {
+                const target = scene.molecules[molIndex];
                 const min = parseFloat(tail[tail.length - 2]);
                 const max = parseFloat(tail[tail.length - 1]);
-                let target = current.reps.length - 1;
+                let rep = target.reps.length - 1;
                 if (tail.length >= 3) {
                     const written = parseInt(tail[tail.length - 3], 10);
-                    if (!isNaN(written)) target = repIndex(currentIndex, written);
+                    if (!isNaN(written)) rep = repIndex(molIndex, written);
                 }
-                if (!isNaN(min) && !isNaN(max) && target >= 0 && target < current.reps.length) {
-                    current.reps[target].scaleMin = min;
-                    current.reps[target].scaleMax = max;
+                if (!isNaN(min) && !isNaN(max) && rep >= 0 && rep < target.reps.length) {
+                    target.reps[rep].scaleMin = min;
+                    target.reps[rep].scaleMax = max;
                 }
             }
             continue;
@@ -885,14 +986,18 @@ export function parseTcl(content: string): TclParseResult {
 
         // Rep modifications address an existing representation: `mol modstyle
         // <rep> <mol> <style> args…`, `mol modcolor <rep> <mol> <mode> [arg]`,
-        // `mol modselect <rep> <mol> <selection…>`, `mol modmaterial …`.
+        // `mol modselect <rep> <mol> <selection…>`, `mol modmaterial …`. The
+        // molecule is the fourth word and the rep index is counted inside it,
+        // so both the target and its default-representation state come from
+        // that molecule.
         if (op === 'modstyle' || op === 'modcolor' || op === 'modselect' || op === 'modmaterial') {
-            if (!current) continue;
             const written = parseInt(tokens[2], 10);
-            if (isNaN(written)) continue;
-            const idx = repIndex(currentIndex, written);
-            if (idx < 0 || idx >= current.reps.length) continue;
-            const rep = current.reps[idx];
+            const molIndex = targetMolecule(tokens[3]);
+            if (isNaN(written) || molIndex < 0) continue;
+            const target = scene.molecules[molIndex];
+            const idx = repIndex(molIndex, written);
+            if (idx < 0 || idx >= target.reps.length) continue;
+            const rep = target.reps[idx];
             if (op === 'modstyle' && tokens.length >= 5) {
                 parseRep(rep, tokens, 4);
             } else if (op === 'modcolor') {
@@ -909,6 +1014,12 @@ export function parseTcl(content: string): TclParseResult {
             continue;
         }
     }
+
+    // The background is resolved now that every `color change rgb` has been
+    // read: a name is a palette slot, so an override written anywhere in the
+    // script is what the background ends up painted in.
+    if (backgroundId >= 0) scene.background = vmdColor(backgroundId, scene);
+    else if (backgroundHex) scene.background = backgroundHex;
 
     // Legacy group list: only representations that name a ColorID colour and
     // select atoms by explicit index, in file order. Selections that need
@@ -934,7 +1045,12 @@ export function parseTcl(content: string): TclParseResult {
  * parsed). Returns null when the expression is not an index list.
  */
 function parseRawIndexList(selection: string): number[] | null {
-    const body = (selection || '').trim().replace(/^not\s+/i, '');
+    const body = (selection || '').trim();
+    // `not index 1 to 5` selects the atoms *outside* that range, which a list
+    // of indices cannot express without the atom count. Stripping the `not`
+    // (as this did) reported the complement's opposite: the five atoms the
+    // script excluded were the ones the group coloured.
+    if (/^not\b/i.test(body)) return null;
     const clause = body.match(/^index\s+([\s\S]+)$/i);
     if (!clause) return null;
     const tokens = clause[1].replace(/,/g, ' ').split(/\s+/).filter(function (t) { return t !== ''; });

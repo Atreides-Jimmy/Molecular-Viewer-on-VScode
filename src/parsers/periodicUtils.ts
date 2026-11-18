@@ -1,5 +1,6 @@
-import { Atom, CrystalData, MolecularData } from '../types';
-import { cartToFrac, fracToCart, wrapFrac } from '../tools/crystalGeometry';
+import { Atom, CrystalData, MolecularData, StructureStep } from '../types';
+import { cartToFrac, CELL_VOLUME_EPSILON, fracToCart, wrapFrac } from '../tools/crystalGeometry';
+import { chooseTrajectoryFrameIndexes } from './trajectoryParser';
 
 /** CODATA 2018 Bohr radius, the value every program below converts with. */
 export const BOHR_TO_ANGSTROM = 0.529177210903;
@@ -38,11 +39,18 @@ export function latticeToCellParams(lattice: number[][]): CellParameters {
     const dot = (x: number[], y: number[]) => x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
     const safeAcos = (v: number) => Math.acos(Math.max(-1, Math.min(1, v)));
     const rad = 180 / Math.PI;
+    // An angle exists only when both vectors have a length. The old
+    // `dot / (b * c || 1)` divided by 1 for a degenerate cell and reported a
+    // clean 90 degrees, which the cell panel then showed as a valid orthogonal
+    // cell; NaN states the truth, and every reader gates on `isUsableLattice`
+    // (which rejects exactly these lattices) before a cell is built.
+    const angleOf = (u: number[], v: number[], lu: number, lv: number) =>
+        lu > 0 && lv > 0 ? safeAcos(dot(u, v) / (lu * lv)) * rad : NaN;
     return {
         a, b, c,
-        alpha: safeAcos(dot(bVec, cVec) / (b * c || 1)) * rad,
-        beta: safeAcos(dot(aVec, cVec) / (a * c || 1)) * rad,
-        gamma: safeAcos(dot(aVec, bVec) / (a * b || 1)) * rad
+        alpha: angleOf(bVec, cVec, b, c),
+        beta: angleOf(aVec, cVec, a, c),
+        gamma: angleOf(aVec, bVec, a, b)
     };
 }
 
@@ -74,6 +82,16 @@ function siteCart(site: Site, lattice: number[][] | null): [number, number, numb
  * the file's atom list. Building that shape in one place keeps the crystal
  * invariants (`baseIdx`, `cellI/J/K`, wrapped fractional positions) identical
  * across readers, which is what the viewer's editing passes rely on.
+ *
+ * A site stated in fractional coordinates is wrapped into the cell, because
+ * that is what the number means. A site stated in Cartesian coordinates keeps
+ * the position the file gives it, even when that is outside the cell — the
+ * fraction it stands for is only used to report it. The asymmetry is deliberate
+ * and is what every molecular viewer does: an unwrapped
+ * MD frame, a POLYMAT-style data file or a table whose last atom sits on the far
+ * face is drawn as written, so a molecule that straddles the boundary is not
+ * torn in half and no coordinate is rewritten behind the user's back. Such
+ * sites are reported instead (`outside the cell` in the structure panel).
  */
 export function buildPeriodicStructure(
     lattice: number[][],
@@ -82,16 +100,28 @@ export function buildPeriodicStructure(
     warnings?: string[]
 ): MolecularData {
     const atoms: Atom[] = [];
+    let outsideCell = 0;
     for (let i = 0; i < sites.length; i++) {
         const site = sites[i];
-        let frac: number[];
         let cart: [number, number, number];
         if (site.frac) {
-            frac = [wrapFrac(site.frac[0]), wrapFrac(site.frac[1]), wrapFrac(site.frac[2])];
+            const frac = [wrapFrac(site.frac[0]), wrapFrac(site.frac[1]), wrapFrac(site.frac[2])];
             cart = fracToCart(frac, lattice);
         } else {
             cart = siteCart(site, lattice);
-            frac = cartToFrac(cart, lattice);
+            // The site keeps the position the file states (see above); the
+            // fraction derived from it is only asked whether the site is inside
+            // the cell at all. "Outside" means past a face, not on one: a site
+            // written at exactly the far face (fraction 1) is as much inside as
+            // one on the near face, and a rounding-level excursion is not worth
+            // a word either.
+            const raw = cartToFrac(cart, lattice);
+            let wasOutside = false;
+            for (let k = 0; k < 3; k++) {
+                const v = raw[k];
+                if (!(v >= -1e-6 && v <= 1 + 1e-6)) wasOutside = true;
+            }
+            if (wasOutside) outsideCell++;
         }
         const atom: Atom = {
             element: site.element,
@@ -109,6 +139,14 @@ export function buildPeriodicStructure(
         if (site.label) atom.siteLabel = site.label;
         if (site.ghost) atom.ghost = true;
         atoms.push(atom);
+    }
+    if (outsideCell > 0) {
+        // The note belongs to this structure, so it is written even when the
+        // caller had nothing to report of its own.
+        if (!warnings) warnings = [];
+        warnings.push(outsideCell + ' site' + (outsideCell === 1 ? ' lies' : 's lie') +
+            ' outside the cell the file states: ' + (outsideCell === 1 ? 'it is' : 'they are') +
+            ' drawn where the file puts ' + (outsideCell === 1 ? 'it' : 'them') + ', not folded into the cell');
     }
 
     const crystal: CrystalData = {
@@ -172,7 +210,7 @@ export function isUsableLattice(lattice: number[][]): boolean {
     const det = a[0] * (b[1] * c[2] - b[2] * c[1]) -
         a[1] * (b[0] * c[2] - b[2] * c[0]) +
         a[2] * (b[0] * c[1] - b[1] * c[0]);
-    return Math.abs(det) > 1e-8;
+    return Math.abs(det) > CELL_VOLUME_EPSILON;
 }
 
 /** `1.0 -> "1.0"` without the `-0` and exponent spellings programs dislike. */
@@ -186,4 +224,82 @@ export function formatNumber(v: number, digits: number): string {
 export function oneLineTitle(text: string, fallback: string): string {
     const line = String(text || '').split(/\r?\n/).map(s => s.trim()).filter(s => s !== '')[0];
     return line || fallback;
+}
+
+/** One geometry a multi-step output states, with the cell it was computed in. */
+export interface StepGeometry {
+    label: string;
+    sites: Site[];
+    /** The cell that geometry was computed in, when the file states one. */
+    lattice?: number[][];
+}
+
+/** The Cartesian triples of a site list, in Angstrom. */
+export function sitesToXyz(sites: Site[], lattice: number[][] | null): number[] {
+    const xyz: number[] = [];
+    for (const site of sites) {
+        if (site.frac && lattice) {
+            const cart = fracToCart(site.frac, lattice);
+            xyz.push(cart[0], cart[1], cart[2]);
+        } else {
+            const cart = site.cart || [0, 0, 0];
+            xyz.push(cart[0], cart[1], cart[2]);
+        }
+    }
+    return xyz;
+}
+
+/** Two consecutive steps that state the same geometry, within a rounding error. */
+function sameStep(a: StructureStep, b: StructureStep): boolean {
+    if (a.xyz.length !== b.xyz.length) return false;
+    const la = a.lattice;
+    const lb = b.lattice;
+    if (!la !== !lb) return false;
+    if (la && lb) {
+        for (let i = 0; i < 3; i++) {
+            for (let j = 0; j < 3; j++) {
+                if (Math.abs(la[i][j] - lb[i][j]) > 1e-6) return false;
+            }
+        }
+    }
+    for (let i = 0; i < a.xyz.length; i++) {
+        if (Math.abs(a.xyz[i] - b.xyz[i]) > 1e-6) return false;
+    }
+    return true;
+}
+
+/**
+ * The geometries a multi-step output states, as the viewer's frames.
+ *
+ * A CP2K molecular-dynamics run, an ABACUS `MD_dump` and a Quantum ESPRESSO
+ * output that prints a coordinate block per step describe one system over
+ * time, which is what the page's frame list shows. Two things are done here so
+ * the three readers stay one shape: a geometry that repeats the one before it
+ * is not a frame (a variable-cell relaxation that converged in its first step
+ * prints the same block twice, and a file with one geometry must stay the
+ * structure it always was), and a long run is sampled evenly to the same limits
+ * a binary trajectory uses, so a 10 000-step dump does not become 10 000 copies
+ * of the cell in the page payload.
+ */
+export function structureSteps(
+    geometries: StepGeometry[],
+    natoms: number
+): { steps: StructureStep[]; total: number } {
+    if (natoms <= 0 || geometries.length < 2) return { steps: [], total: geometries.length };
+    const placed: StructureStep[] = [];
+    for (const geometry of geometries) {
+        if (geometry.sites.length !== natoms) continue;
+        const step: StructureStep = {
+            label: geometry.label,
+            xyz: sitesToXyz(geometry.sites, geometry.lattice || null),
+            lattice: geometry.lattice
+        };
+        const previous = placed.length > 0 ? placed[placed.length - 1] : undefined;
+        if (previous && sameStep(previous, step)) continue;
+        placed.push(step);
+    }
+    if (placed.length < 2) return { steps: [], total: placed.length };
+    const chosen = chooseTrajectoryFrameIndexes(placed.length, natoms);
+    const steps = chosen.map(index => placed[index]);
+    return { steps, total: placed.length };
 }

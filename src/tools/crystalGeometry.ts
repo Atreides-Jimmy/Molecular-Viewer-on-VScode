@@ -15,6 +15,18 @@
 
 // ===== Cell =====
 
+/**
+ * Volume below which a 3x3 lattice is no cell at all, in A^3 per that lattice's
+ * own length unit.
+ *
+ * Every reader that decides "is this a cell?" reads this value: a cell whose
+ * volume is indistinguishable from zero has no periodic images to search and no
+ * density to compute, and two readers disagreeing on the cut (1e-8 here, 1e-9
+ * there) accepted a box one of them then failed to invert. 1e-8 A^3 is below
+ * any cell a program writes (a 0.002 A cube), so nothing real is rejected.
+ */
+export const CELL_VOLUME_EPSILON = 1e-8;
+
 export function cellToLatticeVectors(a: number, b: number, c: number, alpha: number, beta: number, gamma: number): number[][] {
     const rad = Math.PI / 180;
     const ar = alpha * rad;
@@ -82,12 +94,14 @@ export function cartToFrac(cart: number[], lattice: number[][]): number[] {
  * to 0 — would otherwise name the same atom in the *next* cell, which every
  * comparison downstream would then treat as a different point. Folding it back
  * to 0 is what makes "this image is the atom at (0,0,0)" true again.
+ *
+ * `v - Math.floor(v)` already lands in [0, 1), so the fold is one-way: the
+ * value returns 0 and is not pushed back below zero (subtracting 1 and then
+ * adding 1 again would restore the very 0.999999 this is meant to remove).
  */
 export function wrapFrac(v: number): number {
-    let r = v - Math.floor(v);
-    if (r >= 1 - 1e-6) r -= 1;
-    if (r < 0) r += 1;
-    return r;
+    const r = v - Math.floor(v);
+    return r >= 1 - 1e-6 ? 0 : r;
 }
 
 // ===== Symmetry =====
@@ -106,6 +120,11 @@ export function parseSymOp(s: string): SymOp {
         if (idx >= parts.length) continue;
         const expr = parts[idx].replace(/\s+/g, '').toLowerCase();
         let sign = 1;
+        // A number directly in front of a variable is its coefficient (`2x`,
+        // `-2*x`), not a translation. Without this, `2x` became the operation
+        // x+2: the coefficient was silently dropped and the 2 was added to the
+        // origin — a symmetry operation that moves every atom.
+        let coefficient: number | null = null;
         let k = 0;
         while (k < expr.length) {
             const ch = expr[k];
@@ -113,12 +132,16 @@ export function parseSymOp(s: string): SymOp {
             if (ch === '-') { sign = -1; k++; continue; }
             if (ch === 'x' || ch === 'y' || ch === 'z') {
                 const col = ch === 'x' ? 0 : ch === 'y' ? 1 : 2;
-                R[idx][col] += sign;
+                R[idx][col] += sign * (coefficient === null ? 1 : coefficient);
                 sign = 1;
+                coefficient = null;
                 k++;
                 continue;
             }
-            const numMatch = expr.substring(k).match(/^(\d+\/\d+|\d+\.?\d*)/);
+            // A translation may be written as `1/2`, `0.5` or `.5`: the leading
+            // dot is a decimal point, not punctuation to skip — without the
+            // `\.\d+` branch, `x+.5` was read as `x+5`.
+            const numMatch = expr.substring(k).match(/^(\d+\/\d+|\d*\.\d+|\d+\.?\d*)/);
             if (numMatch) {
                 let v: number;
                 if (numMatch[1].includes('/')) {
@@ -126,6 +149,20 @@ export function parseSymOp(s: string): SymOp {
                     v = p / q;
                 } else {
                     v = parseFloat(numMatch[1]);
+                }
+                // Look past an optional `*` to see whether a variable follows.
+                // Only integer coefficients occur in symmetry operations; a
+                // fraction followed by a variable is malformed and keeps the
+                // translation reading it had before rather than inventing a
+                // non-lattice rotation.
+                let j = k + numMatch[1].length;
+                while (j < expr.length && expr[j] === '*') j++;
+                const next = expr.charAt(j);
+                if ((next === 'x' || next === 'y' || next === 'z') &&
+                    v === Math.round(v) && v !== 0) {
+                    coefficient = v;
+                    k = j;
+                    continue;
                 }
                 t[idx] += sign * v;
                 sign = 1;

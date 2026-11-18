@@ -138,12 +138,27 @@ var vmdSurfaceMeshes=[];
 // index (the patch order of the script). Declared here, above the first
 // rebuildScene: a var further down would still be undefined there.
 var vmdHiddenSegments={};
+// Fresh records of a molecule's atoms or bonds. A VMD payload is the script's
+// resolved cache, and editing works on the records the page draws: handing the
+// cache itself to `MD.atoms` would write every coordinate edit back into it, so
+// switching away and back would show an edited molecule the file never stated.
+// Copies make a molecule switch read the structure from the file again, exactly
+// as a frame switch rebuilds its frame from the template.
+function vmdCopyRecords(list){
+    var out=[];
+    if(!list)return out;
+    for(var i=0;i<list.length;i++){
+        var src=list[i],copy={};
+        for(var k in src)copy[k]=src[k];
+        copy.index=i;
+        out.push(copy);
+    }
+    return out;
+}
 if(VMD){
     VMD.activeSegments=(VMD.molecules[0]&&VMD.molecules[0].segments)||[];
-    MD.atoms=VMD.molecules[0].atoms;
-    MD.bonds=VMD.molecules[0].bonds;
-    MD.atoms.forEach(function(a,i){a.index=i});
-    MD.bonds.forEach(function(b,i){b.index=i});
+    MD.atoms=vmdCopyRecords(VMD.molecules[0]&&VMD.molecules[0].atoms);
+    MD.bonds=vmdCopyRecords(VMD.molecules[0]&&VMD.molecules[0].bonds);
 }
 var boundary={aMin:0,aMax:1,bMin:0,bMax:1,cMin:0,cMax:1};
 // The most atoms a supercell may build. The bounds inputs alone can ask for
@@ -574,6 +589,14 @@ function updateMolInfo(){
         var styleText=Object.keys(styles).map(function(k){return k+'×'+styles[k]}).join(', ');
         html+='<br>VMD script: '+vm.reps.length+' rep'+(vm.reps.length===1?'':'s')+(styleText?' ('+styleText+')':'');
         html+='<br>Colour: '+VMD.colorScaleMethod;
+        // The material a representation names is part of the recipe the script
+        // states. Nothing is drawn differently for it (every material is opaque
+        // here), so the panel is where it is visible: a script that asks for
+        // Glass says so, instead of the field being parsed and then dropped.
+        var mats={};
+        vm.reps.forEach(function(r){var m=(r.material||'').trim();if(!m||/^opaque$/i.test(m))return;mats[m]=(mats[m]||0)+1});
+        var matText=Object.keys(mats).map(function(k){return k+'×'+mats[k]}).join(', ');
+        if(matText)html+='<br>Material: '+escapeHtml(matText);
         if(vm.segments.length)html+='<br>Surfaces: '+vm.segments.length;
         var warns=(VMD.warnings||[]).concat(vm.warnings||[]);
         if(warns.length)html+='<br><span style="color:#e8a33d">⚠ '+warns.length+' script warning'+(warns.length===1?'':'s')+'</span>';
@@ -4282,6 +4305,16 @@ function createBond(b){
         addBondPiece(br*0.45,c1,false,0,0,0,0,0);addBondPiece(br*0.45,c2,false,0,0,0,0,1);
         addBondPiece(br*0.45,c1,false,0,0,1,off3,0);addBondPiece(br*0.45,c2,false,0,0,1,off3,1);
         addBondPiece(br*0.45,c1,false,0,0,-1,off3,0);addBondPiece(br*0.45,c2,false,0,0,-1,off3,1);
+    }else if(ord<4.5){
+        // `$` (OpenSMILES quadruple bond): four parallel lines. Two sit close
+        // to the axis and two at three times that offset, so the bond reads as
+        // four orders rather than as a thick single one.
+        var off4=0.09*offK,r4=br*0.34;
+        addBondPiece(r4,c1,false,0,0,0,0,0);addBondPiece(r4,c2,false,0,0,0,0,1);
+        addBondPiece(r4,c1,false,0,0,1,off4,0);addBondPiece(r4,c2,false,0,0,1,off4,1);
+        addBondPiece(r4,c1,false,0,0,-1,off4,0);addBondPiece(r4,c2,false,0,0,-1,off4,1);
+        addBondPiece(r4,c1,false,0,0,1,off4*3,0);addBondPiece(r4,c2,false,0,0,1,off4*3,1);
+        addBondPiece(r4,c1,false,0,0,-1,off4*3,0);addBondPiece(r4,c2,false,0,0,-1,off4*3,1);
     }else{
         addBondPiece(br,c1,false,0,0,0,0,0);addBondPiece(br,c2,false,0,0,0,0,1);
     }
@@ -6248,6 +6281,45 @@ document.getElementById('reset-btn').addEventListener('click',function(){
     updateTransform();
 });
 var undoStack=[];var MAX_UNDO=50;
+// History belongs to one structure on screen. A snapshot holds a whole frame's
+// atom list, so applying one on another frame would write the wrong coordinates
+// into the wrong step — which is why a switch used to throw the stack away and
+// with it every edit made before navigating. Instead the stack is parked under
+// the frame it was made on and taken up again when the user comes back.
+//
+// The parked histories are bounded by atoms, not by frames: six frames of a
+// 5000-atom trajectory would otherwise hold three hundred copies of it. Oldest
+// goes first, and a single parked history is always kept whatever its size.
+var UNDO_PARK_MAX_ATOMS=120000;
+var undoParked={};
+function undoFrameKey(){
+    return (VMD&&VMD.molecules.length>1?('m'+vmdMolIdx):'m0')+'/f'+currentFrame;
+}
+function undoParkedAtoms(){
+    var total=0;
+    for(var k in undoParked){
+        if(!undoParked.hasOwnProperty(k))continue;
+        var stack=undoParked[k];
+        for(var i=0;i<stack.length;i++)total+=stack[i].atomCount||0;
+    }
+    return total;
+}
+function parkUndoHistory(key){
+    if(!key)return;
+    if(undoStack.length>0)undoParked[key]=undoStack;
+    else delete undoParked[key];
+    undoStack=[];
+    var keys=Object.keys(undoParked);
+    while(keys.length>1&&undoParkedAtoms()>UNDO_PARK_MAX_ATOMS){
+        delete undoParked[keys.shift()];
+    }
+    updateUndoBtn();
+}
+function adoptUndoHistory(key){
+    undoStack=(key&&undoParked[key])?undoParked[key]:[];
+    if(key)delete undoParked[key];
+    updateUndoBtn();
+}
 // What a saved file's title line says about where the structure came from and
 // what was done to it (the functions that build and record it are at "Save
 // provenance", next to doSave). Declared here, with the other view state, so it
@@ -6255,6 +6327,14 @@ var undoStack=[];var MAX_UNDO=50;
 var PROV_PREFIX='MV: ';   // our own marker, so re-saving a file never stacks lines
 var PROV_MAX=190;         // characters — a title line, not a paragraph
 var provSource=provBaseName(MD.filePath);
+// Where this session last wrote the structure, and in which format. The two
+// are separate from MD.filePath on purpose: that one is the file that was
+// *opened* — it is what the provenance line names — while these follow the
+// last write, so a Save As starts beside the file just written and a later
+// Save re-writes that same file instead of asking for a name again.
+var savePath=(typeof MD.filePath==='string')?MD.filePath:'';
+var saveFormat='';
+var saveRequestFormat='';   // format of the write now in flight, see saveResult
 var provMerged=[];        // files merged into this structure, in order
 var provEdits=[];         // [{k,n}] — what changed it, in the order it happened
 var provModes={};         // mode index -> {freq,scale}: displacement kept in the geometry
@@ -6276,6 +6356,16 @@ function pushUndo(symmetryState){
     // Atoms would keep using the explicit-bonds (deletion-only) path on what
     // is an auto-detected structure again.
     var snap={hasExplicitBonds:!!MD.hasExplicitBonds,prov:provClone()};
+    // The electronic state is part of what an edit can change: an import onto
+    // an empty canvas adopts the file's charge and multiplicity, so a snapshot
+    // that restored the atoms but not those two would leave the panel (and the
+    // bonds perceived from it) describing a structure that is gone. The flags
+    // say whether a value was stated at all — `undefined` is "the file does not
+    // say", which is not the same as zero and one.
+    snap.charge=MD.charge;
+    snap.multiplicity=MD.multiplicity;
+    snap.hasCharge=(typeof MD.charge==='number');
+    snap.hasMult=(typeof MD.multiplicity==='number');
     if(CRY){
         // A crystal's picture is a pure function of three things — the base
         // cell, its bonds and the bounds — so those three are the snapshot, and
@@ -6317,9 +6407,19 @@ function pushUndo(symmetryState){
         snap.atoms=JSON.parse(JSON.stringify(MD.atoms));
         snap.bonds=JSON.parse(JSON.stringify(MD.bonds));
     }
+    // What this snapshot costs, for the budget the parked histories are held
+    // to (see undoParked): a crystal stores its base cell, a molecule its atoms.
+    snap.atomCount=CRY?(snap.baseAtoms?snap.baseAtoms.length:0):snap.atoms.length;
     undoStack.push(snap);
     if(undoStack.length>MAX_UNDO)undoStack.shift();
     updateUndoBtn();
+    // The editor's dirty state follows this one history: an edit is what makes
+    // the document modified, and the editor's own Save is what clears it. The
+    // depth is what tells a snapshot that a gesture takes back from an edit.
+    // `typeof` because the bridge is installed with the rest of the page and
+    // this block is also exercised on its own (the verification harnesses cut
+    // pushUndo out and run it against a stub), where no editor is listening.
+    if(typeof markEdited==='function')markEdited(undoStack.length);
 }
 function updateUndoBtn(){var b=document.getElementById('undo-btn');if(b)b.disabled=undoStack.length===0}
 function doUndo(){
@@ -6339,6 +6439,10 @@ function doUndo(){
     vdEnd();
     var snap=undoStack.pop();
     MD.hasExplicitBonds=!!snap.hasExplicitBonds;
+    // The snapshot's electronic state comes back with its geometry: an atom
+    // list and the charge it was perceived with are one state.
+    MD.charge=snap.hasCharge?snap.charge:undefined;
+    MD.multiplicity=snap.hasMult?snap.multiplicity:undefined;
     // The provenance belongs to the geometry: an undone edit is not in the
     // structure any more, so its clause comes off the title with it.
     provRestore(snap.prov);
@@ -6420,7 +6524,7 @@ function doUndo(){
     }
 }
 document.getElementById('undo-btn').addEventListener('click',doUndo);
-document.getElementById('save-btn').addEventListener('click',doSave);
+document.getElementById('save-btn').addEventListener('click',function(){doSave()});
 document.getElementById('snap-btn').addEventListener('click',openSnapshotDialog);
 document.getElementById('import-btn').addEventListener('click',function(){
     if(diffMode){modeInfoEl.textContent='Import is not available in diff mode';return}
@@ -6516,6 +6620,255 @@ var diffStatsExpanded=true;
 var diffLabelLeft=document.getElementById('diff-label');
 var diffLabelRight=document.getElementById('diff-label-right');
 
+// ===== What the editor asks for =====
+//
+// The structure being edited lives in this page, so the editor's own commands —
+// Save, Save As, Revert, Undo — arrive as messages and are answered the same
+// way. Nothing is recorded as done until the host says it wrote a file: a save
+// the user dismisses leaves the document modified, which is what makes the
+// close prompt mean something rather than a courtesy.
+var hostSavePending=false;   // the editor is waiting for this save's answer
+var editTimer=0;
+
+/**
+ * One edit that survived the gesture that made it.
+ *
+ * This is what marks the document modified in the editor, shows its close
+ * prompt and gives the editor's Undo command something to call. The message is
+ * held back one turn of the event loop because a gesture can take its own
+ * snapshot back — a rotation drag that never moved pushes a snapshot and pops
+ * it again in the same call stack — and by then the stack depth says whether
+ * the edit really happened.
+ */
+function markEdited(depth){
+    if(editTimer)return;
+    editTimer=setTimeout(function(){
+        editTimer=0;
+        if(undoStack.length<depth)return;
+        vscodeApi.postMessage({command:'edit'});
+    },0);
+}
+
+/**
+ * The editor's Save: Ctrl+S, Save All, or the Save button of the close prompt.
+ *
+ * Once this session has written a file, that pair — format and path — is
+ * written again: the user already chose both, and asking a second time turns
+ * "save, then close" into a two-dialog operation. Before the first write there
+ * is nothing to re-write, so the format dialog opens exactly as the toolbar's
+ * Save As opens it.
+ */
+function hostSaveRequest(){
+    hostSavePending=true;
+    var outcome;
+    if(saveFormat&&savePath)outcome=doSave({format:saveFormat,targetPath:savePath});
+    else outcome=doSave();
+    if(outcome==='failed')postSaveCancelled();
+}
+
+// ===== What a window reload keeps =====
+//
+// A custom editor's edits live in the page, so the editor cannot save them by
+// itself: the page hands its state over, the host stores it beside VS Code's
+// own backups, and hands it back when the same file is reopened after a reload.
+// The state is the viewer's own — atoms and bonds with their ghosts, orders and
+// occupations, the electronic state, the cell — not a file in any format, so
+// nothing is lost to a round trip through XYZ.
+//
+// The structure on screen is always kept; frames edited earlier in the session
+// travel with it while they fit in the budget, because a trajectory that was
+// annotated frame by frame is a lot of atoms and a backup is not a save.
+var SESSION_FRAME_ATOM_BUDGET=500000;
+function buildSession(){
+    var s={
+        v:1,
+        title:MD.title||'',
+        frame:currentFrame,
+        charge:(typeof MD.charge==='number')?MD.charge:null,
+        multiplicity:(typeof MD.multiplicity==='number')?MD.multiplicity:null,
+        hasExplicitBonds:!!MD.hasExplicitBonds,
+        atoms:MD.atoms,
+        bonds:MD.bonds
+    };
+    if(VMD&&VMD.molecules.length>1)s.molecule=vmdMolIdx;
+    if(CRY){
+        // A crystal's picture is a function of the base cell, its bonds, the
+        // bounds and the cell parameters; storing the displayed supercell would
+        // store the same atoms many times over and still not say what to
+        // rebuild from.
+        s.crystal={
+            baseAtoms:CRY.baseAtoms,
+            baseBonds:CRY.baseBonds,
+            fileBonds:CRY.fileBonds||null,
+            bondsDetected:!!CRY.bondsDetected,
+            disorderFilter:CRY.disorderFilter||null,
+            disorderOccNormalize:!!disorderOccNormalize,
+            cell:{a:CRY.a,b:CRY.b,c:CRY.c,alpha:CRY.alpha,beta:CRY.beta,gamma:CRY.gamma,
+                latticeVectors:CRY.latticeVectors},
+            bounds:{aMin:boundary.aMin,aMax:boundary.aMax,bMin:boundary.bMin,
+                bMax:boundary.bMax,cMin:boundary.cMin,cMax:boundary.cMax}
+        };
+    }
+    // Frames edited earlier in the session: only a trajectory stores them
+    // explicitly (TRAJ_FRAMES[idx].atoms); a log frame's edits are its own
+    // atoms. They are kept while the budget allows, oldest last.
+    if(TRAJ_FRAMES){
+        var budget=SESSION_FRAME_ATOM_BUDGET-MD.atoms.length;
+        var edits=[];
+        for(var fi=0;fi<TRAJ_FRAMES.length&&budget>0;fi++){
+            var tf=TRAJ_FRAMES[fi];
+            if(!tf||!tf.atoms||fi===currentFrame)continue;
+            if(tf.atoms.length>budget)continue;
+            budget-=tf.atoms.length;
+            edits.push({frame:fi,atoms:tf.atoms,bonds:tf.bonds||[]});
+        }
+        if(edits.length>0)s.trajectoryEdits=edits;
+    }
+    return s;
+}
+
+/**
+ * Put a session back on top of the freshly parsed file.
+ *
+ * Every field is checked before anything is touched: a session that does not
+ * describe a structure must leave the file's own view exactly as it was, which
+ * is why this returns false instead of half-applying. The structure is written
+ * into the frame it came from as well, so navigating away and back shows what
+ * the user was looking at rather than the file's own copy of that step.
+ */
+function applyRestoreSession(s){
+    if(!s||s.v!==1||!s.atoms||s.atoms.length===0)return false;
+    var i,k;
+    for(i=0;i<s.atoms.length;i++){
+        var a=s.atoms[i];
+        if(!a||typeof a.element!=='string'||a.element==='')return false;
+        if(typeof a.x!=='number'||typeof a.y!=='number'||typeof a.z!=='number')return false;
+        if(a.x-a.x!==0||a.y-a.y!==0||a.z-a.z!==0)return false;
+    }
+    var n=s.atoms.length;
+    var atoms=s.atoms.map(function(rec,idx){
+        var copy={};
+        for(var key in rec){if(rec.hasOwnProperty(key))copy[key]=rec[key]}
+        copy.index=idx;
+        return copy;
+    });
+    var bonds=[];
+    var srcBonds=s.bonds||[];
+    for(i=0;i<srcBonds.length;i++){
+        var b=srcBonds[i];
+        if(!b||typeof b.atom1!=='number'||typeof b.atom2!=='number')continue;
+        if(b.atom1<0||b.atom2<0||b.atom1>=n||b.atom2>=n||b.atom1===b.atom2)continue;
+        bonds.push({atom1:b.atom1,atom2:b.atom2,order:(typeof b.order==='number'&&isFinite(b.order))?b.order:1});
+    }
+    var frame=(typeof s.frame==='number'&&s.frame>=0&&s.frame<totalFrames)?s.frame:0;
+    var crystal=s.crystal;
+    if(CRY&&crystal&&crystal.baseAtoms&&crystal.baseAtoms.length>0){
+        CRY.baseAtoms=crystal.baseAtoms;
+        CRY.baseBonds=crystal.baseBonds||[];
+        CRY.fileBonds=crystal.fileBonds||null;
+        CRY.bondsDetected=!!crystal.bondsDetected;
+        CRY.disorderFilter=crystal.disorderFilter||null;
+        disorderOccNormalize=crystal.disorderOccNormalize!==false;
+        if(crystal.cell){
+            CRY.a=crystal.cell.a;CRY.b=crystal.cell.b;CRY.c=crystal.cell.c;
+            CRY.alpha=crystal.cell.alpha;CRY.beta=crystal.cell.beta;CRY.gamma=crystal.cell.gamma;
+            CRY.latticeVectors=crystal.cell.latticeVectors;
+            computeCrystalInv();
+        }
+        if(crystal.bounds){
+            boundary.aMin=crystal.bounds.aMin;boundary.aMax=crystal.bounds.aMax;
+            boundary.bMin=crystal.bounds.bMin;boundary.bMax=crystal.bounds.bMax;
+            boundary.cMin=crystal.bounds.cMin;boundary.cMax=crystal.bounds.cMax;
+            syncBndInputs();
+        }
+    }
+    currentFrame=frame;
+    MD.atoms=atoms;
+    MD.bonds=bonds;
+    MD.charge=(typeof s.charge==='number')?s.charge:undefined;
+    MD.multiplicity=(typeof s.multiplicity==='number')?s.multiplicity:undefined;
+    MD.hasExplicitBonds=!!s.hasExplicitBonds;
+    if(typeof s.title==='string'&&s.title!=='')MD.title=s.title;
+    // A script's scene shows one molecule at a time. The session names the one
+    // it was made on, so the restored structure goes back onto that molecule —
+    // not onto whichever the script happens to list first.
+    if(VMD&&VMD.molecules.length>1&&typeof s.molecule==='number'&&
+        s.molecule>=0&&s.molecule<VMD.molecules.length){
+        vmdMolIdx=s.molecule;
+        var vm=VMD.molecules[vmdMolIdx];
+        if(vm){
+            vm.atoms=atoms.map(function(rec){var copy={};for(var key in rec){if(rec.hasOwnProperty(key))copy[key]=rec[key]}return copy});
+            vm.bonds=bonds;
+            vm.charge=MD.charge;
+            vm.multiplicity=MD.multiplicity;
+            vm.hasExplicitBonds=MD.hasExplicitBonds;
+        }
+        updateMolLabel();
+    }
+    // The frame keeps what was restored: a later visit reads the frame's own
+    // records, and they would otherwise still be the file's.
+    if(!CRY){
+        if(TRAJ_FRAMES){
+            if(s.trajectoryEdits){
+                for(i=0;i<s.trajectoryEdits.length;i++){
+                    var te=s.trajectoryEdits[i];
+                    if(!te||typeof te.frame!=='number'||!TRAJ_FRAMES[te.frame]||!te.atoms)continue;
+                    TRAJ_FRAMES[te.frame].atoms=te.atoms;
+                    TRAJ_FRAMES[te.frame].bonds=te.bonds||[];
+                }
+            }
+            if(TRAJ_FRAMES[frame]){
+                TRAJ_FRAMES[frame].atoms=atoms;
+                TRAJ_FRAMES[frame].bonds=bonds;
+            }
+        }else if(MD.frames&&MD.frames[frame]){
+            MD.frames[frame].atoms=atoms;
+            MD.frames[frame].bonds=bonds;
+        }
+    }
+    updateFrameInfo();
+    if(CRY){
+        rebuildCrystal();
+        if(typeof syncCellPanel==='function')syncCellPanel();
+    }
+    rebuildScene();
+    updateMolInfo();
+    reframeView();
+    return true;
+}
+
+// ===== The file changed on disk =====
+//
+// The page draws the copy it parsed when the tab opened. The host watches the
+// file and says when it changed, but never reloads on its own: an optimisation
+// log is rewritten every few seconds and a prompt per change would be noise.
+// The notice carries the one action that matters, and Reload asks the host to
+// read the file again (which rebuilds this page from the new content).
+var fileNoticeEl=null;
+function showFileNotice(text,canReload){
+    if(!fileNoticeEl)fileNoticeEl=document.getElementById('file-notice');
+    if(!fileNoticeEl)return;
+    var t=document.getElementById('file-notice-text');
+    if(t)t.textContent=text;
+    var btn=document.getElementById('file-notice-reload');
+    if(btn)btn.style.display=canReload?'':'none';
+    fileNoticeEl.classList.add('show');
+}
+function hideFileNotice(){
+    if(!fileNoticeEl)fileNoticeEl=document.getElementById('file-notice');
+    if(fileNoticeEl)fileNoticeEl.classList.remove('show');
+}
+(function(){
+    var btn=document.getElementById('file-notice-reload');
+    if(btn)btn.addEventListener('click',function(){
+        hideFileNotice();
+        modeInfoEl.textContent='Reloading the file from disk...';
+        vscodeApi.postMessage({command:'reloadRequest'});
+    });
+    var close=document.getElementById('file-notice-close');
+    if(close)close.addEventListener('click',function(){hideFileNotice()});
+})();
+
 window.addEventListener('message',function(event){
     var msg=event.data;
     // A message the host did not shape must not throw here and take the rest
@@ -6549,6 +6902,46 @@ window.addEventListener('message',function(event){
         applySurfaceResult(msg);
     }else if(msg.command==='surfaceDone'){
         applySurfaceDone(msg);
+    }else if(msg.command==='saveResult'){
+        // The host reports what it actually wrote. Only then does the page
+        // adopt the path, so a dialog that was dismissed leaves the identity of
+        // the document where it was — and the next Save As still points at the
+        // file the user last chose.
+        hostSavePending=false;
+        if(msg.ok&&typeof msg.path==='string'&&msg.path!==''){
+            savePath=msg.path;
+            if(saveRequestFormat)saveFormat=saveRequestFormat;
+            saveRequestFormat='';
+            modeInfoEl.textContent='Saved: '+provBaseName(msg.path);
+        }else{
+            saveRequestFormat='';
+            modeInfoEl.textContent=MODE_INFO[currentMode]||currentMode;
+        }
+    }else if(msg.command==='hostSave'){
+        hostSaveRequest();
+    }else if(msg.command==='hostSaveTo'){
+        // The editor's own Save As: the destination is already chosen, so only
+        // the content is missing and its format comes from the file name.
+        hostSavePending=true;
+        var outcome=doSave({format:typeof msg.format==='string'?msg.format:'xyz'});
+        if(outcome==='failed')postSaveCancelled();
+    }else if(msg.command==='hostUndo'){
+        // The editor's Undo command, routed to the one history the page keeps.
+        // It is the same call the page's own Ctrl+Z makes.
+        doUndo();
+    }else if(msg.command==='hostRedo'){
+        // The viewer has one stack and no redo, exactly as its own keyboard
+        // shortcut does; the editor's Redo is answered with nothing rather than
+        // with an edit the page cannot reproduce.
+    }else if(msg.command==='hostSession'){
+        vscodeApi.postMessage({command:'session',session:buildSession()});
+    }else if(msg.command==='fileChanged'){
+        // The notice names the consequence, not the event: reading the file
+        // again replaces every edit made in this tab.
+        showFileNotice(msg.deleted
+            ?'The file was deleted on disk. This view still shows the copy it opened.'
+            :'The file changed on disk. Reloading replaces the edits made in this view.',
+            !msg.deleted);
     }
 });
 
@@ -6616,32 +7009,47 @@ function importStructure(msg){
         if(a.ghost===true||a.element==='X')item.ghost=true;
         MD.atoms.push(item);
     }
-    // --- Bonds ---
-    if(!MD.hasExplicitBonds&&!msg.hasExplicitBonds){
-        // Fully automatic bond detection for the combined system (regular
-        // behavior for auto-detected files).
-        MD.bonds=detectBondsFromAtoms(MD.atoms,MD.charge);
+    // Importing onto an empty canvas is not combining two structures: what is on
+    // screen is the imported file, so its own electronic state is adopted.
+    //
+    // An import beside an existing structure is a combination, and its charge
+    // adds: the two blocks are placed apart and share no electrons, so the
+    // structure on screen carries the sum of what was there and what arrived.
+    // Dropping the incoming charge (what this used to do) left the panel, MM and
+    // Add H working from a total that described only half of the picture.
+    //
+    // A multiplicity does not add — two open shells can couple either way — so
+    // the combined value is the sum of the unpaired electrons, the high-spin
+    // limit, and only when both sides state one. A side that states none leaves
+    // the number where it was, and the host's note says why.
+    var addCharge=(typeof msg.charge==='number'&&isFinite(msg.charge))?msg.charge:null;
+    var addMult=(typeof msg.multiplicity==='number'&&isFinite(msg.multiplicity)&&msg.multiplicity>=1)?msg.multiplicity:null;
+    if(N0===0){
+        if(addCharge!==null)MD.charge=addCharge;
+        if(addMult!==null)MD.multiplicity=addMult;
     }else{
-        // At least one side has authored bonds: keep them and connect the
-        // imported part explicitly instead of re-detecting everything
-        // (re-detection could alter authored bond orders).
-        MD.hasExplicitBonds=true;
-        if(msg.hasExplicitBonds){
-            newBonds.forEach(function(b){
-                // A ghost can carry no bond: an authored bond naming one in the
-                // imported file is dropped here as it is on load.
-                if(newAtoms[b.atom1]&&isGhostAtom(newAtoms[b.atom1]))return;
-                if(newAtoms[b.atom2]&&isGhostAtom(newAtoms[b.atom2]))return;
-                if(b.atom1<newAtoms.length&&b.atom2<newAtoms.length)
-                    MD.bonds.push({atom1:N0+b.atom1,atom2:N0+b.atom2,order:b.order==null?1:b.order});
-            });
-        }else{
-            // Imported file had no authored bonds: auto-detect, keeping only
-            // bonds that touch a new atom (existing bonds stay as authored).
-            var det=detectBondsFromAtoms(MD.atoms,MD.charge);
-            det.forEach(function(b){if(b.atom1>=N0||b.atom2>=N0)MD.bonds.push(b)});
+        if(addCharge!==null&&typeof MD.charge==='number'&&isFinite(MD.charge))MD.charge=MD.charge+addCharge;
+        if(addMult!==null&&typeof MD.multiplicity==='number'&&isFinite(MD.multiplicity)&&MD.multiplicity>=1){
+            MD.multiplicity=(MD.multiplicity-1)+(addMult-1)+1;
         }
     }
+    // --- Bonds ---
+    // The imported part's bonds are the host's answer: it perceived them
+    // against the imported file's own charge and its own atoms. Re-perceiving
+    // the combined system with the current structure's charge (what this path
+    // used to do) discarded that answer, and perception hands the total charge
+    // only to a component that covers the whole structure — so an ion imported
+    // beside a neutral molecule was perceived as neutral. The two blocks are
+    // placed apart, so there is no junction bond to perceive either.
+    if(msg.hasExplicitBonds)MD.hasExplicitBonds=true;
+    newBonds.forEach(function(b){
+        // A ghost can carry no bond: an authored bond naming one in the
+        // imported file is dropped here as it is on load.
+        if(newAtoms[b.atom1]&&isGhostAtom(newAtoms[b.atom1]))return;
+        if(newAtoms[b.atom2]&&isGhostAtom(newAtoms[b.atom2]))return;
+        if(b.atom1<newAtoms.length&&b.atom2<newAtoms.length)
+            MD.bonds.push({atom1:N0+b.atom1,atom2:N0+b.atom2,order:b.order==null?1:b.order});
+    });
     rebuildScene();
     // Zoom out if the combined structure no longer fits the current view.
     var maxD=0;
@@ -6650,7 +7058,8 @@ function importStructure(msg){
     if(camDist<need){camDist=need;camera.position.set(0,0,camDist);camera.lookAt(0,0,0)}
     needsRender=true;
     provAddSource(msg.fileName);
-    modeInfoEl.textContent='Imported '+newAtoms.length+' atoms from '+(msg.fileName||'file')+' - placed beside the existing structure';
+    modeInfoEl.textContent='Imported '+newAtoms.length+' atoms from '+(msg.fileName||'file')+' - placed beside the existing structure'+
+        (msg.note?' ('+msg.note+')':'');
 }
 
 // ===== Fragment clipboard (Ctrl+C / Ctrl+X / Ctrl+V) =====
@@ -6876,7 +7285,11 @@ function startAddHydrogens(){
     modeInfoEl.textContent='Add H: completing '+hSel.length+' selected atom(s)...';
     vscodeApi.postMessage({
         command:'addHydrogens',
-        atoms:MD.atoms.map(function(a){return{element:isGhostAtom(a)?'X':a.element,x:a.x,y:a.y,z:a.z}}),
+        // A formal charge, when the structure has one, is what decides whether a
+        // centre is complete ([O-] with one bond) or one hydrogen short (O with
+        // one bond); it travels with the atom so the engine does not have to
+        // assume every centre is neutral.
+        atoms:MD.atoms.map(function(a){return{element:isGhostAtom(a)?'X':a.element,x:a.x,y:a.y,z:a.z,charge:(typeof a.charge==='number'?a.charge:undefined)}}),
         bonds:MD.bonds.map(function(b){return{atom1:b.atom1,atom2:b.atom2,order:b.order}}),
         selected:hSel,
         requestId:reqSeq,
@@ -7146,7 +7559,7 @@ function startCrystalAddHydrogens(){
     modeInfoEl.textContent='Add H: completing '+anchors.length+' selected site'+(anchors.length===1?'':'s')+'...';
     vscodeApi.postMessage({
         command:'addHydrogens',
-        atoms:cluster.atoms.map(function(a){return{element:a.element,x:a.x,y:a.y,z:a.z}}),
+        atoms:cluster.atoms.map(function(a){return{element:a.element,x:a.x,y:a.y,z:a.z,charge:(typeof a.charge==='number'?a.charge:undefined)}}),
         bonds:cluster.bonds.map(function(b){return{atom1:b.atom1,atom2:b.atom2,order:b.order}}),
         selected:cluster.anchors.map(function(a){return a.node}),
         requestId:reqSeq,
@@ -7654,6 +8067,7 @@ function diffOrderLabel(o){
     if(o===1)return 'single';
     if(o===2)return 'double';
     if(o===3)return 'triple';
+    if(o===4)return 'quadruple';
     return String(o);
 }
 function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct,geo){
@@ -8542,7 +8956,11 @@ function clamp01(v){
     if(!isFinite(v))return 0;
     return v<0?0:v>1?1:v;
 }
-function scalarColor(v,vmin,vmax){
+// The optional `method` is the script's `color scale method`: BGR is the same
+// ramp with red and blue exchanged, exactly as the reference renderer draws it.
+// The page itself always colours by RGB (it has no script to ask), and the
+// parameter is here so the two copies of this function stay identical.
+function scalarColor(v,vmin,vmax,method){
     var t;
     if(!isFinite(vmin)||!isFinite(vmax)||vmax===vmin){t=0}
     else{
@@ -8561,6 +8979,7 @@ function scalarColor(v,vmin,vmax){
         b=clamp01(GRADIENT_BASE+GRADIENT_RATE*(t-0.5));
     }
     var hex=function(x){var n=Math.round(x*255);if(!isFinite(n))n=0;if(n<0)n=0;if(n>255)n=255;var s=n.toString(16).toUpperCase();return s.length<2?'0'+s:s};
+    if(String(method||'').trim().toUpperCase()==='BGR')return '#'+hex(b)+hex(g)+hex(r);
     return '#'+hex(r)+hex(g)+hex(b);
 }
 var betaColorOn=false;
@@ -8876,8 +9295,60 @@ function updateFrameInfo(){
     if(el)el.textContent='/'+totalFrames+(MD.frames[currentFrame]?' - '+MD.frames[currentFrame].stepLabel:'');
     if(numEl)numEl.value=currentFrame+1;
 }
+// A trajectory frame states only its coordinates: the atoms and bonds on screen
+// are rebuilt from the document template on every visit. An edit made while a
+// frame is shown therefore had nowhere to live and was dropped by the next frame
+// switch, while an edited log frame keeps its geometry in `f.atoms`. The
+// trajectory frame gets the same persistence: when it is left in a state the
+// template cannot reproduce, it keeps its own records, and a later return shows
+// them instead of rebuilding the pristine frame. An untouched frame is still
+// rebuilt from the template, so simply playing a trajectory stores nothing.
+function trajFrameEdited(idx){
+    var tpl=MD.trajectoryTemplate||[];
+    if(MD.atoms.length!==tpl.length)return true;
+    var xyz=(TRAJ_FRAMES[idx]&&TRAJ_FRAMES[idx].xyz)||null;
+    var haveXyz=!!xyz&&xyz.length>=tpl.length*3;
+    for(var i=0;i<MD.atoms.length;i++){
+        var a=MD.atoms[i],base=tpl[i];
+        if(!a||!base)return true;
+        if(a.element!==base.element||(a.ghost===true)!==(base.ghost===true))return true;
+        if(haveXyz){
+            if(a.x!==xyz[i*3]||a.y!==xyz[i*3+1]||a.z!==xyz[i*3+2])return true;
+        }else if(a.x!==base.x||a.y!==base.y||a.z!==base.z){
+            return true;
+        }
+    }
+    var tplBonds=MD.trajectoryBonds||[];
+    if(MD.bonds.length!==tplBonds.length)return true;
+    for(var j=0;j<MD.bonds.length;j++){
+        var b=MD.bonds[j],o=tplBonds[j];
+        if(!o||b.atom1!==o.atom1||b.atom2!==o.atom2||b.order!==o.order)return true;
+    }
+    return false;
+}
+function keepTrajectoryFrame(idx){
+    if(!TRAJ_FRAMES||!TRAJ_FRAMES[idx])return;
+    if(!trajFrameEdited(idx)){
+        // Back to the frame the file states (an undo can do that): the kept
+        // records are dropped so the next visit rebuilds the pristine frame
+        // instead of bringing an older edit back.
+        if(TRAJ_FRAMES[idx].atoms){
+            delete TRAJ_FRAMES[idx].atoms;
+            delete TRAJ_FRAMES[idx].bonds;
+        }
+        return;
+    }
+    // The records on screen become the frame's own, exactly as a log frame's
+    // atoms are the records its edits write into. They are not shared with the
+    // template, so the next frame still starts from the pristine structure.
+    TRAJ_FRAMES[idx].atoms=MD.atoms;
+    TRAJ_FRAMES[idx].bonds=MD.bonds;
+}
 function switchFrame(idx){
     if(idx<0||idx>=totalFrames)return;
+    // The history on screen belongs to the frame on screen, and it is taken up
+    // again when that frame is visited next (see parkUndoHistory).
+    var undoFromKey=undoFrameKey();
     // A trajectory is one system over time, and its frames are read against
     // each other: the centre the first frame was framed with is kept while the
     // frames play. Re-centring on every frame's own atoms would slide a cell
@@ -8906,30 +9377,40 @@ function switchFrame(idx){
     // about to be replaced wholesale, so the centre that was on screen is put
     // back and the new frame is built against it.
     if(keepTrajCenter){CX=keepX;CY=keepY;CZ=keepZ}
+    // An edited trajectory frame keeps its geometry across a switch, exactly as
+    // a log frame's edits do (see keepTrajectoryFrame).
+    if(TRAJ_FRAMES)keepTrajectoryFrame(currentFrame);
     currentFrame=idx;
     var f=MD.frames[idx];
     if(TRAJ_FRAMES){
         // A trajectory keeps the template's elements, colours and bonds; only
         // the coordinates (and the cell) belong to the frame. Fresh records are
         // made every time so an edit of the frame on screen never reaches the
-        // template the next frame is built from.
-        var xyz=TRAJ_FRAMES[idx]?TRAJ_FRAMES[idx].xyz:null;
-        var tpl=MD.trajectoryTemplate||[];
-        var haveXyz=!!xyz&&xyz.length>=tpl.length*3;
-        MD.atoms=tpl.map(function(a,i){
-            var copy={};
-            for(var k in a)copy[k]=a[k];
-            copy.index=i;
-            if(haveXyz){
-                copy.x=xyz[i*3];
-                copy.y=xyz[i*3+1];
-                copy.z=xyz[i*3+2];
-            }
-            return copy;
-        });
-        MD.bonds=(MD.trajectoryBonds||[]).map(function(b){
-            var copy={};for(var k in b)copy[k]=b[k];return copy;
-        });
+        // template the next frame is built from — unless this frame was edited,
+        // in which case it kept its own records when it was left.
+        var kept=(TRAJ_FRAMES[idx]&&TRAJ_FRAMES[idx].atoms)?TRAJ_FRAMES[idx]:null;
+        if(kept){
+            MD.atoms=kept.atoms;
+            MD.bonds=kept.bonds||[];
+        }else{
+            var xyz=TRAJ_FRAMES[idx]?TRAJ_FRAMES[idx].xyz:null;
+            var tpl=MD.trajectoryTemplate||[];
+            var haveXyz=!!xyz&&xyz.length>=tpl.length*3;
+            MD.atoms=tpl.map(function(a,i){
+                var copy={};
+                for(var k in a)copy[k]=a[k];
+                copy.index=i;
+                if(haveXyz){
+                    copy.x=xyz[i*3];
+                    copy.y=xyz[i*3+1];
+                    copy.z=xyz[i*3+2];
+                }
+                return copy;
+            });
+            MD.bonds=(MD.trajectoryBonds||[]).map(function(b){
+                var copy={};for(var k in b)copy[k]=b[k];return copy;
+            });
+        }
         TRAJ_CELL=(TRAJ_FRAMES[idx]&&TRAJ_FRAMES[idx].cell)?TRAJ_FRAMES[idx].cell:null;
     }else{
         // Every frame states the electronic state it was computed at. Adopting
@@ -8966,7 +9447,12 @@ function switchFrame(idx){
         VMD.activeSegments=[];
         setVmdNavEnabled(false);
     }
-    undoStack.length=0;updateUndoBtn();
+    // A frame keeps its own undo history: the stack is parked with the frame
+    // being left and the incoming frame's is taken up, so an edit made three
+    // steps ago can still be undone after navigating back to it — and a
+    // snapshot of one frame can never be applied to another.
+    parkUndoHistory(undoFromKey);
+    adoptUndoHistory(undoFrameKey());
     // A selection names atoms of the frame being left. Every frame switch
     // clears it, not only one inside a comparison: keeping the numbers would
     // silently select the atoms that happen to hold the same indices in the
@@ -9010,6 +9496,9 @@ function switchMolecule(idx){
     if(!VMD||idx<0||idx>=VMD.molecules.length||idx===vmdMolIdx)return;
     if(diffMode){modeInfoEl.textContent='Molecule switching is not available in diff mode';return}
     if(CRY){modeInfoEl.textContent='Molecule switching is not available for crystal structures';return}
+    // The history belongs to the molecule on screen; it is parked under that
+    // molecule's key and taken up again when the user comes back to it.
+    var undoFromKey=undoFrameKey();
     // Same rule as a frame change: every writer of the current structure ends
     // before it is replaced (see switchFrame), a displacement session included.
     if(vibActive||vibPaused)stopVibration();
@@ -9022,15 +9511,31 @@ function switchMolecule(idx){
     MD.structureRevision=(MD.structureRevision||0)+1;
     vmdMolIdx=idx;
     var m=VMD.molecules[idx];
-    MD.atoms=m.atoms;
-    MD.bonds=m.bonds;
-    MD.atoms.forEach(function(a,i){a.index=i});
-    MD.bonds.forEach(function(b,i){b.index=i});
+    // A molecule is a structure of its own, and everything the file stated
+    // about it travels with it: its atoms and bonds (copied, so an edit never
+    // reaches the script's resolved cache) and the electronic state, route and
+    // parser warnings the file carried. Replacing only the coordinates left the
+    // info panel, Save As and the bond perception of a later import describing
+    // the molecule that was on screen before.
+    MD.atoms=vmdCopyRecords(m.atoms);
+    MD.bonds=vmdCopyRecords(m.bonds);
+    MD.charge=m.charge;
+    MD.multiplicity=m.multiplicity;
+    MD.gjfMeta=m.gjfMeta||null;
+    MD.warnings=(m.parseWarnings||[]).slice();
+    MD.hasExplicitBonds=!!m.hasExplicitBonds;
     VMD.activeSegments=m.segments||[];
     // 新分子的新补丁列表: 面板选择全部复位 (初始时所有 egg 都显示)。
     vmdHiddenSegments={};
     vmdSurfaceSignature='';
-    undoStack.length=0;updateUndoBtn();
+    // A selection names atoms of the molecule being left; the same indices in
+    // the new molecule would stay highlighted and Delete / Select / Rotate
+    // would act on atoms nobody picked.
+    resetSelection();
+    // Same rule as a frame: the history belongs to the molecule it was made on.
+    // The key carries the molecule index, so switching back restores it.
+    parkUndoHistory(undoFromKey);
+    adoptUndoHistory(undoFrameKey());
     resetRotAxisState();
     if(currentMode==='mmOpt'){mmLastResult=null;refreshMmPanel()}
     rebuildScene();
@@ -9111,6 +9616,40 @@ var routePanelEl=document.getElementById('route-panel');
 var routeReopenEl=document.getElementById('route-reopen');
 var OPT_STEPS=MD.optSteps||null;
 var OPT_SOURCE=MD.optSource||null;
+// ---------------------------------------------------------------------------
+// A relaxed scan and an IRC path are NOT convergence series: the first is one
+// optimised geometry per scan value, the second one geometry per path point.
+// Both are sequences of structures along a coordinate, so they replace the
+// convergence card (whose charts would plot every step of every scan point as
+// one series — 106 points for a 32-point scan, which is not a convergence at
+// all). Only one of the three can be on screen: the file decides.
+// ---------------------------------------------------------------------------
+var PATHWAYS=MD.pathways||null;
+var SCAN=(PATHWAYS&&PATHWAYS.scan&&PATHWAYS.scan.points&&PATHWAYS.scan.points.length)?PATHWAYS.scan:null;
+var IRC=(PATHWAYS&&PATHWAYS.irc&&PATHWAYS.irc.points&&PATHWAYS.irc.points.length)?PATHWAYS.irc:null;
+// A file that holds an IRC path has no scan points to show beside it, and one
+// that holds a scan has no IRC: the priority only matters for a --Link1-- file
+// that ran both, where the path is the later, more specific analysis.
+var OPT_MODE=IRC?'irc':(SCAN?'scan':((OPT_STEPS&&OPT_STEPS.length>0)?'opt':null));
+
+// Two marks for the two cards. Drawn rather than borrowed from an emoji font:
+// they have to read at 13 px beside the panel's title and inside its chip, and
+// they have to follow the theme's foreground colour (currentColor).
+//   Scan — samples of a potential along a coordinate: a baseline with a curve
+//   through four measured points.
+//   IRC  — the reaction coordinate itself: valley, barrier (the dashed height
+//   the path climbs), valley.
+var MARK_SCAN='<svg class="pn-mark" width="13" height="13" viewBox="0 0 16 16" aria-hidden="true" focusable="false">'+
+    '<path d="M1.8 13.7h12.4" stroke="currentColor" stroke-width="1" stroke-linecap="round" opacity="0.45"/>'+
+    '<path d="M2.6 10.6 6.1 6.5l3.1 1.9 4.2-5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>'+
+    '<circle cx="2.6" cy="10.6" r="1.25" fill="currentColor"/><circle cx="6.1" cy="6.5" r="1.25" fill="currentColor"/>'+
+    '<circle cx="9.2" cy="8.4" r="1.25" fill="currentColor"/><circle cx="13.4" cy="3.4" r="1.25" fill="currentColor"/>'+
+    '</svg>';
+var MARK_IRC='<svg class="pn-mark" width="13" height="13" viewBox="0 0 16 16" aria-hidden="true" focusable="false">'+
+    '<path d="M1.8 11.7c3 0 3.4-8.1 6.2-8.1s3.2 8.1 6.2 8.1" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>'+
+    '<path d="M8 1.4v2.2" stroke="currentColor" stroke-width="1.1" stroke-dasharray="1.2 1.2" opacity="0.7"/>'+
+    '<circle cx="1.8" cy="11.7" r="1.2" fill="currentColor"/><circle cx="14.2" cy="11.7" r="1.2" fill="currentColor"/>'+
+    '</svg>';
 // The convergence targets to draw as dashed guides. The file's own values win:
 // ORCA states its criteria (TolMAXG / TolRMSG / TolMAXD / TolRMSD) in every
 // optimization output, and a run told to converge tighter than the default must
@@ -9283,16 +9822,47 @@ function convTooltipValue(v,spanDec){
 }
 
 /** Index of the optimization step whose structure is currently displayed, or -1.
- *  Frames of an opt log are the per-step geometries in step order (the parser
- *  numbers them "Step k"), so the frame index IS the step index; the frame's
- *  own single-point energy is only a guard for formats/labels that do not
- *  follow that numbering. */
-function convSelectedStep(steps){
-    if(typeof currentFrame!=='number'||currentFrame<0||currentFrame>=steps.length)return -1;
+ *  The parser links every frame it builds to the step whose geometry it is
+ *  (`optStep`), and that link is what the charts follow: a log that prints the
+ *  input orientation as a block of its own repeats the first step's geometry as
+ *  a frame of its own, so the frame index sits one slot past the step index and
+ *  an index-based match marked the first point only. A frame the optimizer did
+ *  not print a table for (the converged structure repeated at the end of a job,
+ *  or the copy an `opt freq` run hands to its Freq job) is still that step's
+ *  structure, so it is matched by the single-point energy both were printed
+ *  with. A payload that carries no link (a trajectory built from frame
+ *  energies) keeps the old index identity, and a step whose printed energy is
+ *  not this frame's is never marked. */
+function convSelectedStep(steps,model){
+    if(typeof currentFrame!=='number'||currentFrame<0)return -1;
     var f=MD.frames&&MD.frames[currentFrame];
-    var e=f?f.energy:undefined;
-    if(e!=null&&!isNaN(e)&&steps[currentFrame].energy!=null&&Math.abs(steps[currentFrame].energy-e)>1e-9)return -1;
-    return currentFrame;
+    if(!f)return -1;
+    // A scan point and an IRC point name the frame that holds them, so the
+    // plotted index is read from the link rather than guessed from the frame
+    // number (a scan's frames are the steps of every point, not the points).
+    if(model==='scan'){
+        var sp=f.scanPoint;
+        if(typeof sp!=='number')return -1;
+        for(var q=0;q<steps.length;q++)if(steps[q].point===sp)return q;
+        return -1;
+    }
+    if(model==='frame'){
+        for(var q2=0;q2<steps.length;q2++)if(steps[q2].frame===currentFrame)return q2;
+        return -1;
+    }
+    var e=f.energy;
+    var k=(typeof f.optStep==='number')?f.optStep-1:currentFrame;
+    var se=(k>=0&&k<steps.length)?steps[k].energy:null;
+    if(k>=0&&k<steps.length&&(e==null||isNaN(e)||se==null||Math.abs(se-e)<=1e-9))return k;
+    if(e==null||isNaN(e))return -1;
+    var best=-1,bestD=Infinity;
+    for(var j=0;j<steps.length;j++){
+        var sj=steps[j].energy;
+        if(sj==null||isNaN(sj)||Math.abs(sj-e)>1e-9)continue;
+        var d=Math.abs(j-(k>=0?k:currentFrame));
+        if(d<bestD){best=j;bestD=d}
+    }
+    return best;
 }
 
 /** Draw the value tooltip of the data point nearest to the cursor (feature 3)
@@ -9322,7 +9892,18 @@ function convDrawTooltip(ctx,canvas){
     }
     if(!best)return false;
     var step=steps_get(geom.steps,best.i);
-    var lines=[(geom.xLabel||'Step')+' '+(best.i+1)];
+    // The point's own name when the series has one (a scan point, a half of an
+    // IRC path, the transition state), the plotted position otherwise (an
+    // optimisation step).
+    var xText;
+    if(step&&step.tip){
+        xText=step.tip;
+    }else if(step&&typeof step.point==='number'){
+        xText=(typeof step.path==='number'?'Path '+step.path+' · point ':'Point ')+step.point;
+    }else{
+        xText=(geom.xLabel||'Step')+' '+(best.i+1);
+    }
+    var lines=[xText];
     lines.push(best.name+' = '+convTooltipValue(best.v,best.dec));
     if(step&&step.energy!=null&&geom.field!=='energy')lines.push('Energy = '+convTooltipValue(step.energy,geom.energyDec));
     ctx.font='9px sans-serif';
@@ -9352,6 +9933,22 @@ function convDrawTooltip(ctx,canvas){
 
 /** Step object at idx, tolerating a missing steps array. */
 function steps_get(steps,i){return steps&&steps[i]?steps[i]:null}
+
+/** X-axis label of the idx-th plotted point. A scan or IRC series carries the
+ *  name the parser gave the row (`F3`, `R12`, `TS`), a scan point carries the
+ *  value of the coordinate the file drove, or the point number the file stated;
+ *  none of them is the index (an IRC path starts at point 0, and a joined path
+ *  runs reverse → TS → forward). An ordinary optimisation carries no name and
+ *  keeps the step's position. */
+function pwPointTick(steps,i){
+    var s=steps_get(steps,i);
+    if(s&&s.label!=null)return String(s.label);
+    // The scan chart's x axis is the coordinate the file drove, so its ticks
+    // are the values the parameter table printed — the same numbers the list
+    // shows in its coordinate column.
+    if(s&&typeof s.coord==='number')return String(s.coord);
+    return s&&typeof s.point==='number'?String(s.point):String(i+1);
+}
 
 /** Repaint a chart with the current pointer state: the selected-step highlight,
  *  plus a tooltip when the pointer is close enough to a point. Every repaint
@@ -9412,9 +10009,9 @@ function convDrawState(ctx,canvas){
     convDrawTooltip(ctx,canvas);
 }
 
-function drawConvergenceChart(canvas,steps,field,label,color,threshold){
+function drawConvergenceChart(canvas,steps,field,label,color,threshold,model,xLabel){
     if(!canvas.__convRedraw){
-        canvas.__convRedraw=function(){drawConvergenceChart(canvas,steps,field,label,color,threshold)};
+        canvas.__convRedraw=function(){drawConvergenceChart(canvas,steps,field,label,color,threshold,model,xLabel)};
         convAttachHover(canvas);
     }
     var ctx=canvas.getContext('2d');
@@ -9434,7 +10031,7 @@ function drawConvergenceChart(canvas,steps,field,label,color,threshold){
     if(threshold!=null){vmin=Math.min(vmin,threshold);vmax=Math.max(vmax,threshold)}
     if(vmax-vmin<1e-12){vmax=vmin+Math.abs(vmin)*1e-6+1e-9}
     var n=steps.length;
-    var sel=steps.length?convSelectedStep(steps):-1;
+    var sel=steps.length?convSelectedStep(steps,model):-1;
 
     // --- Feature 1: decimal axis labels, integer part shown once -----------
     // Decimals come from the gridline step (span / 4) and the base is picked on
@@ -9450,6 +10047,13 @@ function drawConvergenceChart(canvas,steps,field,label,color,threshold){
     // exactly that integer, so the two can never disagree).
     ctx.fillStyle='#ccc';ctx.font='10px sans-serif';ctx.textAlign='left';ctx.textBaseline='top';
     ctx.fillText(vbase==null?label:label+'  '+vbase+' +',padL,0);
+    // The ticks of a scan chart are the driven coordinate's values; naming the
+    // axis says which numbers they are (an optimisation passes none).
+    if(xLabel){
+        ctx.fillStyle='#888';ctx.textAlign='right';
+        ctx.fillText(xLabel,w-padR,0);
+        ctx.textAlign='left';
+    }
 
     // Grid + axis labels
     ctx.strokeStyle='rgba(255,255,255,0.12)';ctx.lineWidth=1;
@@ -9462,7 +10066,7 @@ function drawConvergenceChart(canvas,steps,field,label,color,threshold){
     ctx.textAlign='center';ctx.textBaseline='top';
     for(g=0;g<n;g+=Math.max(1,Math.floor(n/6))){
         var x=padL+(n<=1?0:pw*g/(n-1));
-        ctx.fillText(String(g+1),x,padT+ph+2);
+        ctx.fillText(pwPointTick(steps,g),x,padT+ph+2);
     }
     // Threshold line
     if(threshold!=null){
@@ -9492,7 +10096,7 @@ function drawConvergenceChart(canvas,steps,field,label,color,threshold){
     for(i=0;i<pts.length;i++){
         ctx.beginPath();ctx.arc(pts[i].x,pts[i].y,2,0,Math.PI*2);ctx.fill();
     }
-    canvas.__convGeom={padL:padL,padT:padT,pw:pw,ph:ph,n:n,xLabel:'Step',yLabel:label,
+    canvas.__convGeom={padL:padL,padT:padT,pw:pw,ph:ph,n:n,xLabel:xLabel||'Step',yLabel:label,
         spanVal:vmax-vmin,field:field,steps:steps,
         series:[{label:label,color:color,pts:pts,dec:convSeriesDecimals(steps,field)}],selected:sel};
     convDrawState(ctx,canvas);
@@ -9503,6 +10107,9 @@ function drawConvergenceChart(canvas,steps,field,label,color,threshold){
  *  highlight (feature 2) always follows the 3D view.
  *  [2026-09-12 | Atreides-Jimmy] */
 function renderOptCharts(){
+    // A scan or an IRC path owns this card; its charts are drawn from its own
+    // points (see renderPathwayCharts).
+    if(OPT_MODE==='scan'||OPT_MODE==='irc'){renderPathwayCharts();return}
     if(!OPT_STEPS||OPT_STEPS.length===0)return;
     // Nothing to redraw while the panel is closed (its canvases have no layout
     // then); buildOptPanel draws them again once the panel is shown.
@@ -9524,6 +10131,7 @@ function renderOptCharts(){
 }
 
 function buildOptPanel(){
+    if(OPT_MODE==='scan'||OPT_MODE==='irc'){buildPathwayPanel();return}
     if(!OPT_STEPS||OPT_STEPS.length===0)return;
     var hasEnergy=OPT_STEPS.some(function(s){return s.energy!=null});
     var hasForce=OPT_STEPS.some(function(s){return s.maxForce!=null||s.rmsForce!=null});
@@ -9569,9 +10177,354 @@ function buildOptPanel(){
     layoutPanels();
 }
 
-function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
+// ---------------------------------------------------------------------------
+// The Scan and IRC cards.
+//
+// They take the convergence card's shell — the same panel element, the same
+// chip, the same resize handle — because a file holds one of the three subjects
+// and never two at once: optimizer steps, scan points, or path points. What
+// changes is what a point IS. A scan point is one optimised geometry per scan
+// value: the energy, the forces and the frame that holds that geometry. An IRC
+// point is one geometry per step along the path, with its energy. Neither is a
+// step of one optimisation, which is why neither is drawn as one.
+// ---------------------------------------------------------------------------
+
+/** Points of one IRC path, in the file's order. */
+function ircPathPoints(path){
+    var out=[];
+    for(var i=0;i<IRC.points.length;i++)if(IRC.points[i].path===path)out.push(IRC.points[i]);
+    return out;
+}
+
+/** The paths array entry of one series, with the direction the file stated. */
+function ircPathMeta(path){
+    for(var i=0;i<IRC.paths.length;i++)if(IRC.paths[i].path===path)return IRC.paths[i];
+    return null;
+}
+
+/** The IRC calculations of the file. A payload that carries no run grouping
+ *  (an older host) is treated as one run holding every path, which is what a
+ *  single IRC job is and what the join below expects. */
+function ircRuns(){
+    if(IRC.runs&&IRC.runs.length)return IRC.runs;
+    var all=[];
+    for(var i=0;i<IRC.paths.length;i++)all.push(IRC.paths[i].path);
+    return [{paths:all}];
+}
+
+/** A run's paths and the direction of each half. A file that stated no
+ *  direction still printed the forward half before the reverse one, which is
+ *  the order Gaussian writes them in. */
+function ircRunParts(run){
+    var paths=(run&&run.paths)||[];
+    var dirs=[];
+    for(var i=0;i<paths.length;i++){
+        var meta=ircPathMeta(paths[i]);
+        dirs.push(meta&&meta.dir?meta.dir:null);
+    }
+    if(paths.length===2){
+        if(!dirs[0]&&!dirs[1]){dirs[0]='forward';dirs[1]='reverse';}
+        else if(!dirs[0]&&dirs[1]==='reverse'){dirs[0]='forward';}
+        else if(!dirs[1]&&dirs[0]==='forward'){dirs[1]='reverse';}
+        else if(!dirs[0]&&dirs[1]==='forward'){dirs[0]='reverse';}
+        else if(!dirs[1]&&dirs[0]==='reverse'){dirs[1]='forward';}
+    }
+    return {paths:paths,dirs:dirs};
+}
+
+/** One plotted row of a joined path: the file's point plus the name the card
+ *  shows for it (`R24`, `TS`, `F0`) and the full tooltip. */
+function ircRunStep(pt,label,tip){
+    return {label:label,tip:tip,point:pt.point,path:pt.path,frame:pt.frame,energy:pt.energy};
+}
+
+/**
+ * One IRC calculation as ONE reaction path: the reverse half descending toward
+ * the transition state, the barrier the path starts from, then the forward half
+ * moving away from it. The two halves are computed from the same TS, so drawing
+ * them as separate charts put the barrier at the far right of one and the far
+ * left of the other. A run that computed one half only is drawn with exactly
+ * that half (plus the TS it belongs to), never with a mirrored copy: a forward
+ * half leaves the barrier, so the barrier comes first; a reverse half ends at
+ * the barrier, so its far end comes first. This is also the order the frames
+ * are stored in, so the first row is the structure the viewer opens on.
+ */
+function ircRunPoints(run){
+    var parts=ircRunParts(run);
+    var fwd=-1,rev=-1;
+    for(var i=0;i<parts.paths.length;i++){
+        if(parts.dirs[i]==='forward'&&fwd<0)fwd=i;
+        else if(parts.dirs[i]==='reverse'&&rev<0)rev=i;
+    }
+    var out=[];
+    var ts=typeof run.tsFrame==='number'
+        ? {label:'TS',tip:'Transition state',frame:run.tsFrame,energy:run.tsEnergy,ts:true}
+        : null;
+    var revPath=rev>=0?parts.paths[rev]:null;
+    var fwdPath=fwd>=0?parts.paths[fwd]:null;
+    if(revPath!==null){
+        var rp=ircPathPoints(revPath).slice();
+        // Point 0 is the end nearest the TS, so the reverse half is drawn from
+        // its far end back to the barrier.
+        rp.sort(function(a,b){return b.point-a.point});
+        for(var r=0;r<rp.length;r++)out.push(ircRunStep(rp[r],'R'+rp[r].point,'Reverse · point '+rp[r].point));
+    }
+    if(ts)out.push(ts);
+    if(fwdPath!==null){
+        var fp=ircPathPoints(fwdPath);
+        for(var f=0;f<fp.length;f++)out.push(ircRunStep(fp[f],'F'+fp[f].point,'Forward · point '+fp[f].point));
+    }
+    // A series the file neither named nor paired (an unusual payload with more
+    // than two paths): keep it after the named halves rather than dropping it.
+    for(var k=0;k<parts.paths.length;k++){
+        if(parts.paths[k]===revPath||parts.paths[k]===fwdPath)continue;
+        var pts=ircPathPoints(parts.paths[k]);
+        var dir=parts.dirs[k];
+        var pre=dir==='reverse'?'R':(dir==='forward'?'F':'');
+        for(var q=0;q<pts.length;q++){
+            var tip=dir?((dir==='reverse'?'Reverse':'Forward')+' · point '+pts[q].point)
+                :('Point '+pts[q].point);
+            out.push(ircRunStep(pts[q],pre+pts[q].point,tip));
+        }
+    }
+    return out;
+}
+
+/** How many path points a run printed, and which halves they came from. */
+function ircRunSubtitle(run){
+    var parts=ircRunParts(run);
+    var n=0,hasF=false,hasR=false;
+    for(var i=0;i<parts.paths.length;i++){
+        var meta=ircPathMeta(parts.paths[i]);
+        if(meta)n+=meta.count;
+        if(parts.dirs[i]==='forward')hasF=true;
+        else if(parts.dirs[i]==='reverse')hasR=true;
+    }
+    var dirs=hasF&&hasR?'forward + reverse':(hasF?'forward':(hasR?'reverse':''));
+    return n+' points'+(dirs?' · '+dirs:'');
+}
+
+/** A number as the file stated it — shortest round-trip form, no rounding (a
+ *  value printed as 0.000003 must not read 0.000000). */
+function pwNum(v){return v==null?'–':String(v)}
+
+/** The per-point list under the charts: the numbers a reader wants next to the
+ *  picture, one row per point, and a click that takes the view to that
+ *  structure. Rows a file gave no frame stay unclickable rather than lying. */
+function pathwayListHTML(){
+    var html;
+    if(OPT_MODE==='scan'){
+        var coord=SCAN.coord;
+        var label=coord?coord.label:'';
+        html='<div class="pw-head">'+
+            '<span class="pw-no">#</span>'+
+            (coord?'<span class="pw-co">'+escapeHtml(label)+(coord.unit==='deg'?' (°)':' (Å)')+'</span>':'')+
+            '<span class="pw-e">E (Hartree)</span>'+
+            '<span class="pw-f">max F</span>'+
+            '<span class="pw-d">max D</span>'+
+            '<span class="pw-s">n</span></div>';
+        for(var i=0;i<SCAN.points.length;i++){
+            var p=SCAN.points[i];
+            var can=typeof p.frame==='number';
+            html+='<div class="pw-row'+(can?' can':'')+(p.converged===false?' failed':'')+'"'+
+                (can?' data-fr="'+p.frame+'"':'')+' data-point="'+p.point+'"'+
+                ' title="'+(can?'Show the optimized structure of this point':'The file holds no geometry for this point')+'">'+
+                '<span class="pw-no">'+p.point+'</span>'+
+                (coord?'<span class="pw-co">'+pwNum(p.coord)+'</span>':'')+
+                '<span class="pw-e">'+pwNum(p.energy)+'</span>'+
+                '<span class="pw-f">'+pwNum(p.maxForce)+'</span>'+
+                '<span class="pw-d">'+pwNum(p.maxDisplacement)+'</span>'+
+                '<span class="pw-s">'+(p.steps==null?'–':p.steps)+'</span></div>';
+        }
+        return html;
+    }
+    html='';
+    var runs=ircRuns();
+    if(runs.length===1){
+        html+='<div class="pw-head">'+
+            '<span class="pw-no">#</span>'+
+            '<span class="pw-e">E (Hartree)</span></div>';
+    }
+    for(var k=0;k<runs.length;k++){
+        if(runs.length>1){
+            html+='<div class="pw-head pw-path">'+
+                '<span class="pw-no">Run '+(k+1)+'</span>'+
+                '<span class="pw-e">'+ircRunSubtitle(runs[k])+' · E (Hartree)</span></div>';
+        }
+        var steps=ircRunPoints(runs[k]);
+        for(var q=0;q<steps.length;q++){
+            var pt=steps[q];
+            var ok=typeof pt.frame==='number';
+            html+='<div class="pw-row'+(ok?' can':'')+(pt.ts?' pw-ts':'')+'"'+(ok?' data-fr="'+pt.frame+'"':'')+
+                ' title="'+(ok?(pt.ts?'Show the transition state':'Show this point of the path'):'The file holds no geometry for this point')+'">'+
+                '<span class="pw-no">'+pt.label+'</span>'+
+                '<span class="pw-e">'+pwNum(pt.energy)+'</span></div>';
+        }
+    }
+    return html;
+}
+
+/** Mark the row of the structure on screen, so the list and the 3D view agree.
+ *
+ * A scan row names its point as well as the frame the point converged on: an
+ * intermediate step of point 19 is a frame of its own, and the chart ring
+ * already follows the point that frame belongs to (`f.scanPoint`). Matching the
+ * point here is what keeps the list from going dark while the ring is lit. */
+function syncPathwayRows(){
+    if(!optPanelEl)return;
+    var f=(MD.frames&&typeof currentFrame==='number')?MD.frames[currentFrame]:null;
+    var sp=(f&&typeof f.scanPoint==='number')?f.scanPoint:null;
+    var rows=optPanelEl.querySelectorAll('.pw-row');
+    for(var i=0;i<rows.length;i++){
+        var fr=rows[i].getAttribute('data-fr');
+        var pt=rows[i].getAttribute('data-point');
+        var on=fr!==null&&Number(fr)===currentFrame;
+        if(!on&&pt!==null&&sp!==null&&Number(pt)===sp)on=true;
+        rows[i].classList.toggle('on',on);
+    }
+}
+
+function buildPathwayPanel(){
+    var isScan=OPT_MODE==='scan';
+    var charts=[];
+    if(isScan){
+        charts.push({title:'Energy (Hartree)',kind:'energy',points:SCAN.points,model:'scan'});
+        // A scan point's table states the forces at the geometry it converged
+        // on, so the same four numbers the optimiser watched are drawn here —
+        // one point per scan value instead of one per step.
+        if(SCAN.points.some(function(p){return p.maxForce!=null||p.rmsForce!=null})){
+            charts.push({title:'Force at the optimized geometry (max + rms)',kind:'force',points:SCAN.points,model:'scan'});
+        }
+        // The table's displacement rows belong to the step that arrived at the
+        // point, so they are drawn per point beside the forces — the same four
+        // numbers the convergence chart shows for an optimisation, read at the
+        // scan values instead of at the steps.
+        if(SCAN.points.some(function(p){return p.maxDisplacement!=null||p.rmsDisplacement!=null})){
+            charts.push({title:'Displacement of the last step (max + rms)',kind:'disp',points:SCAN.points,model:'scan'});
+        }
+    }else{
+        var runs=ircRuns();
+        for(var k=0;k<runs.length;k++){
+            charts.push({
+                title:(runs.length>1?'Run '+(k+1)+' — ':'Reaction path — ')+'energy (Hartree)',
+                kind:'energy',points:ircRunPoints(runs[k]),model:'frame'
+            });
+        }
+    }
+    var body='';
+    for(var c=0;c<charts.length;c++){
+        body+='<div class="opt-chart-title">'+charts[c].title+'</div>'+
+            '<canvas data-field="'+charts[c].kind+'" data-pw="'+c+'"></canvas>';
+    }
+    body+=pathwayListHTML();
+    var mark=isScan?MARK_SCAN:MARK_IRC;
+    var sub;
+    if(isScan){
+        var total=SCAN.total||0;
+        sub=SCAN.points.length+(total>SCAN.points.length?' of '+total:'')+' points';
+    }else{
+        var runList=ircRuns();
+        if(runList.length>1){
+            var total=0;
+            for(var q=0;q<runList.length;q++){
+                var parts=ircRunParts(runList[q]);
+                for(var pq=0;pq<parts.paths.length;pq++){
+                    var meta=ircPathMeta(parts.paths[pq]);
+                    if(meta)total+=meta.count;
+                }
+            }
+            sub=runList.length+' runs · '+total+' points';
+        }else{
+            sub=ircRunSubtitle(runList[0]);
+        }
+    }
+    optPanelEl.innerHTML=
+        '<div class="opt-head"><span class="opt-title">'+mark+(isScan?'Scan':'IRC / Path')+
+        '<span class="opt-sub">'+sub+'</span></span>'+
+        '<span class="opt-close">×</span></div>'+
+        '<div class="opt-resize" id="opt-resize"></div>'+
+        '<div class="opt-body" id="opt-body">'+body+'</div>';
+    optPanelEl.__pwCharts=charts;
+    var canvases=optPanelEl.querySelectorAll('canvas');
+    for(var v=0;v<canvases.length&&v<charts.length;v++){
+        canvases[v].__pwPoints=charts[v].points;
+        canvases[v].__pwModel=charts[v].model;
+    }
+    optPanelEl.classList.add('show');
+    optReopenEl.classList.remove('show');
+    requestAnimationFrame(renderOptCharts);
+    optPanelEl.querySelector('.opt-close').addEventListener('click',function(){
+        optPanelEl.classList.remove('show');
+        optReopenEl.classList.add('show');
+        layoutPanels();
+    });
+    // A row names the frame that holds its structure; clicking it is the same
+    // move the frame arrows make.
+    var bodyEl=optPanelEl.querySelector('.opt-body');
+    bodyEl.addEventListener('click',function(e){
+        var row=e.target;
+        while(row&&row!==bodyEl&&!(row.className&&String(row.className).indexOf('pw-row')>=0))row=row.parentNode;
+        if(!row||row===bodyEl)return;
+        var fr=row.getAttribute('data-fr');
+        if(fr===null)return;
+        var idx=Number(fr);
+        if(isFinite(idx)&&idx>=0&&idx!==currentFrame)switchFrame(idx);
+    });
+    var resizeH=optPanelEl.querySelector('#opt-resize');
+    if(resizeH){
+        var dragging=false,startY=0,startH=0;
+        resizeH.addEventListener('mousedown',function(e){dragging=true;startY=e.clientY;startH=optPanelEl.offsetHeight;e.preventDefault();document.body.style.cursor='ns-resize'});
+        document.addEventListener('mousemove',function(e){
+            if(!dragging)return;
+            var nh=Math.max(120,Math.min(600,startH-(e.clientY-startY)));
+            optPanelEl.style.maxHeight=nh+'px';
+            renderOptCharts();
+        });
+        document.addEventListener('mouseup',function(){if(dragging){dragging=false;document.body.style.cursor='';layoutPanels()}});
+    }
+    layoutPanels();
+}
+
+/** Draw the two pathway cards' charts from the points each canvas was built
+ *  with, then mark the row of the structure on screen. */
+function renderPathwayCharts(){
+    if(!optPanelEl.classList.contains('show'))return;
+    var canvases=optPanelEl.querySelectorAll('canvas');
+    for(var i=0;i<canvases.length;i++){
+        var cv=canvases[i];
+        var pts=cv.__pwPoints||[];
+        if(pts.length===0)continue;
+        var model=cv.__pwModel||'frame';
+        // A scan's x axis is the coordinate the file drove; the ticks are its
+        // values and the axis title names it. An IRC path's ticks are the row
+        // names themselves (`R24` … `TS` … `F24`), so it needs no axis title.
+        var xl=(model==='scan'&&SCAN&&SCAN.coord)?SCAN.coord.label:'';
+        if(cv.dataset.field==='energy'){
+            cv.style.height='90px';
+            drawConvergenceChart(cv,pts,'energy','Energy (Hartree)','#3794ff',null,model,xl);
+        }else if(cv.dataset.field==='disp'){
+            cv.style.height='110px';
+            // The scan point's own convergence targets: the displacement at a
+            // converged point is below these lines, exactly like the forces.
+            drawDualChart(cv,pts,['maxDisplacement','rmsDisplacement'],['Max Disp','RMS Disp'],['#6bb7ff','#b18cff'],
+                OPT_THRESHOLDS?OPT_THRESHOLDS.maxDisplacement:null,
+                OPT_THRESHOLDS?OPT_THRESHOLDS.rmsDisplacement:null,model,xl);
+        }else{
+            cv.style.height='110px';
+            // The scan point's own convergence targets: the force at a converged
+            // point is below these lines, which is what makes the chart readable
+            // without a legend of its own.
+            drawDualChart(cv,pts,['maxForce','rmsForce'],['Max Force','RMS Force'],['#ff6b6b','#ffa94d'],
+                OPT_THRESHOLDS?OPT_THRESHOLDS.maxForce:null,
+                OPT_THRESHOLDS?OPT_THRESHOLDS.rmsForce:null,model,xl);
+        }
+    }
+    syncPathwayRows();
+}
+
+function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2,model,xLabel){
     if(!canvas.__convRedraw){
-        canvas.__convRedraw=function(){drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2)};
+        canvas.__convRedraw=function(){drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2,model,xLabel)};
         convAttachHover(canvas);
     }
     var ctx=canvas.getContext('2d');
@@ -9620,7 +10573,7 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
         return vmax-(vmax-vmin)*frac;
     }
     var n=steps.length;
-    var sel=convSelectedStep(steps);
+    var sel=convSelectedStep(steps,model);
     // [2026-09-12 | Atreides-Jimmy] The linear fallback now labels its ticks in
     // the same condensed decimal notation as the energy chart (feature 1); the
     // log axis keeps its log10 tick values by design.
@@ -9660,7 +10613,7 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
     ctx.textAlign='center';ctx.textBaseline='top';
     for(g=0;g<n;g+=Math.max(1,Math.floor(n/6))){
         var x=padL+(n<=1?0:pw*g/(n-1));
-        ctx.fillText(String(g+1),x,padT+ph+2);
+        ctx.fillText(pwPointTick(steps,g),x,padT+ph+2);
     }
     // Threshold lines
     [thresh1,thresh2].forEach(function(th,idx){
@@ -9676,6 +10629,17 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
         ctx.fillStyle=colors[fi];
         ctx.fillRect(padL+fi*80,padT-12,8,2);
         ctx.fillText(labels[fi],padL+fi*80+10,padT-14);
+    }
+    // The axis name sits opposite the legend, on the title line, when the
+    // legend leaves room for it.
+    if(xLabel){
+        var xw=ctx.measureText(xLabel).width;
+        var legendEnd=padL+(fields.length-1)*80+18+ctx.measureText(labels[labels.length-1]).width;
+        if(w-padR-xw>legendEnd){
+            ctx.fillStyle='#888';ctx.textAlign='right';
+            ctx.fillText(xLabel,w-padR,0);
+            ctx.textAlign='left';
+        }
     }
     // Data lines + points (kept for the hover tooltip / selected-step mark)
     var series=[];
@@ -9700,7 +10664,7 @@ function drawDualChart(canvas,steps,fields,labels,colors,thresh1,thresh2){
     }
     // spanVal states how fine the data (not the log axis) is: it drives the
     // tooltip's decimal resolution, so it must come from the plotted values.
-    canvas.__convGeom={padL:padL,padT:padT,pw:pw,ph:ph,n:n,xLabel:'Step',yLabel:labels[0],
+    canvas.__convGeom={padL:padL,padT:padT,pw:pw,ph:ph,n:n,xLabel:xLabel||'Step',yLabel:labels[0],
         spanVal:Math.max.apply(null,allVals)-Math.min.apply(null,allVals),field:fields[0],steps:steps,
         series:series,selected:sel,energyDec:convSeriesDecimals(steps,'energy')};
     convDrawState(ctx,canvas);
@@ -10368,6 +11332,36 @@ var SUMMARY=MD.summary||null;
 // never has to ask which file it is showing.
 var ORBITALS=MD.orbitals||null;
 var CAVITY=MD.cavity||null;
+/**
+ * Move the view to the geometry whose SCF printed the orbital energies.
+ *
+ * The level diagram describes the last SCF in the file, and that SCF belongs
+ * to one frame: the converged structure of an optimisation, the last point of
+ * a scan, or one end of an IRC path. Selecting the Orbitals tab is asking to
+ * read those orbitals, so it takes the view there — the same move choosing a
+ * charge scheme makes, and the undo history is carried across when both frames
+ * describe the same atom list.
+ */
+function orbitalJumpToFrame(){
+    if(!ORBITALS||typeof ORBITALS.frame!=='number')return false;
+    if(ORBITALS.frame===currentFrame)return false;
+    if(ORBITALS.frame<0||ORBITALS.frame>=totalFrames)return false;
+    var fromAtoms=MD.frames[currentFrame]&&MD.frames[currentFrame].atoms;
+    var toAtoms=MD.frames[ORBITALS.frame]&&MD.frames[ORBITALS.frame].atoms;
+    var keep=!!(fromAtoms&&toAtoms&&fromAtoms.length===toAtoms.length);
+    if(keep){
+        for(var i=0;i<fromAtoms.length;i++){
+            if(fromAtoms[i].element!==toAtoms[i].element){keep=false;break}
+        }
+    }
+    var keptUndo=keep?undoStack.slice():null;
+    switchFrame(ORBITALS.frame);
+    if(keptUndo){
+        undoStack=keptUndo;
+        updateUndoBtn();
+    }
+    return true;
+}
 // The geometry the file itself states, fingerprinted once. A molecular orbital
 // and a solvation cavity are properties of that geometry, so after an edit or an
 // import a new draw would picture atoms that are no longer on screen; the two
@@ -10703,7 +11697,8 @@ function chargeSyncPanel(){
             text='The analysis belongs to frame '+(set.frame+1)+' of '+totalFrames+
                 '; frame '+(currentFrame+1)+' is on screen, so nothing is drawn on it.';
         }else if(set&&set.complete===false){
-            text='This scheme sums hydrogens into heavy atoms: '+(set.covered)+' of '+(set.values?set.values.length:0)+' atoms carry a value.';
+            text='This scheme carries a value for '+(set.covered)+' of '+(set.values?set.values.length:0)+
+                ' atoms; the others are left blank.';
         }
         // A very large structure draws the values for a bounded number of atoms
         // (the layer is one span per atom); saying so is better than a picture
@@ -10801,6 +11796,10 @@ function propsTabsHtml(){
 function buildChargePanel(){
     if(!chargePanelEl||!propsAvailable())return;
     propTab=propsOpenTab();
+    // A file whose only electronic structure is its orbitals opens straight on
+    // that tab, and that is the same request as clicking it: take the view to
+    // the SCF the levels describe.
+    if(propTab==='mos')orbitalJumpToFrame();
     chargePanelEl.innerHTML=
         '<div class="chg-head"><span class="chg-title">⚛️ Electronic Structure</span><span class="chg-close">×</span></div>'+
         '<div class="chg-tabs">'+propsTabsHtml()+'</div>'+
@@ -10811,7 +11810,16 @@ function buildChargePanel(){
     for(var i=0;i<tabs.length;i++){
         tabs[i].addEventListener('click',function(){
             var id=this.getAttribute('data-tab');
-            if(!id||!propsTabHasData(id)||id===propTab)return;
+            if(!id||!propsTabHasData(id))return;
+            // Reading the orbital levels is asking for the SCF they came from:
+            // an optimisation's last SCF is a particular step, and in a scan,
+            // an IRC or a --Link1-- file that step is not the frame the file
+            // opened on. The jump is the same move a charge scheme makes.
+            var jumped=id==='mos'?orbitalJumpToFrame():false;
+            if(id===propTab){
+                if(jumped)renderPropsTab();
+                return;
+            }
             propTab=id;
             var all=chargePanelEl.querySelectorAll('.chg-tab');
             for(var k=0;k<all.length;k++)all[k].classList.toggle('on',all[k].getAttribute('data-tab')===id);
@@ -10934,8 +11942,19 @@ function bindPropsCavity(){
     syncSurfaceStatus();
 }
 // --- the orbital tab --------------------------------------------------
+// Whether the spin channel on show has a coefficient block to draw from. The
+// host answers this per channel: a UHF checkpoint can carry one block and not
+// the other, and asking for a surface on the empty one used to travel to the
+// host, fail there, and come back as an error — while the panel still showed
+// the Draw button and kept its `reason` hidden. An absent flag (an older
+// payload) keeps the old behaviour, which the host's own check still guards.
+function orbitalSpinDrawable(idx){
+    var sp=ORBITALS.spins[idx];
+    return !!(sp&&sp.drawable!==false);
+}
 function propsMoHtml(){
     var sp=ORBITALS.spins[orbitalSpin]||ORBITALS.spins[0];
+    var spinOk=orbitalSpinDrawable(ORBITALS.spins[orbitalSpin]?orbitalSpin:0);
     var html='';
     if(ORBITALS.spins.length>1){
         html+='<div class="chg-row"><label class="chg-lab" for="orb-spin">Spin</label><select id="orb-spin" class="chg-sel">';
@@ -10955,7 +11974,7 @@ function propsMoHtml(){
     html+='<div class="orb-nav orb-jump"><label class="chg-lab" for="orb-jump">MO #</label>'+
         '<input type="number" id="orb-jump" class="orb-num" min="1" max="'+sp.energies.length+'" step="1" placeholder="1–'+sp.energies.length+'" title="Jump to an orbital by its number (1 = the first one the file prints)">'+
         '<button type="button" id="orb-go" title="Move the list to this orbital">Go</button></div>';
-    if(ORBITALS.canDraw){
+    if(ORBITALS.canDraw&&spinOk){
         html+='<div class="orb-ctl"><label class="chg-lab" for="orb-iso">Isovalue</label>'+
             '<input type="number" id="orb-iso" class="orb-num" value="'+orbitalIso+'" step="0.005" min="0.0005" max="0.5" title="Contour value in atomic units — the usual GaussView default is 0.02">'+
             '<select id="orb-q" class="chg-sel orb-q" title="Grid spacing: a finer grid follows the surface more closely and costs more">'+
@@ -10964,12 +11983,28 @@ function propsMoHtml(){
             '<option value="fine"'+(orbitalQuality==='fine'?' selected':'')+'>Fine</option></select></div>';
         html+='<div class="chg-btns"><button id="orb-draw" class="chg-go" type="button" title="Compute the selected orbitals and draw both lobes">Draw</button>'+
             '<button id="orb-clear" class="chg-go" type="button" title="Remove every orbital surface">Clear</button></div>';
+    }else if(ORBITALS.canDraw){
+        // The other channel can still be drawn: say which one cannot, instead of
+        // hiding the whole panel or letting the request fail host-side. Clear
+        // stays, because a surface drawn from the other channel is still on the
+        // screen and this channel is where the user is looking.
+        html+='<div class="chg-hint">'+chargeEsc(sp.label)+' carries no coefficient block in this checkpoint, so its orbitals cannot be drawn; switch the spin channel to draw the one that has coefficients.</div>';
+        html+='<div class="chg-btns"><button id="orb-clear" class="chg-go" type="button" title="Remove every orbital surface">Clear</button></div>';
     }
     if(ORBITALS.model)html+='<div class="chg-hint">'+chargeEsc(ORBITALS.model)+'</div>';
     // A log prints one eigenvalue dump per SCF; the panel draws the last, which
-    // for an optimisation is the converged geometry's. A job with one geometry
-    // needs no such warning, and saying it there would only be noise.
-    if(totalFrames>1)html+='<div class="chg-hint">Eigenvalues of the last SCF the file printed — not of the frame on screen.</div>';
+    // belongs to one geometry. The tab takes the view there when it is chosen,
+    // and this line keeps saying which frame that is if the user navigates away.
+    if(totalFrames>1){
+        var of=ORBITALS.frame;
+        if(typeof of==='number'){
+            html+='<div class="chg-hint">'+(of===currentFrame
+                ? 'Eigenvalues of the SCF computed at this frame ('+(of+1)+' of '+totalFrames+').'
+                : 'Eigenvalues of the SCF computed at frame '+(of+1)+' of '+totalFrames+', not of the frame on screen.')+'</div>';
+        }else{
+            html+='<div class="chg-hint">Eigenvalues of the last SCF the file printed — not of the frame on screen.</div>';
+        }
+    }
     if(!ORBITALS.canDraw)html+='<div class="chg-hint">'+chargeEsc(ORBITALS.reason||'')+'</div>';
     html+='<div class="orb-prog" id="surf-prog"><div class="bar" id="surf-bar"></div></div>'+
         '<div class="chg-note" id="surf-note"></div>'+
@@ -11017,7 +12052,7 @@ function orbListHtml(){
         var occ=sp.occupations[i];
         var key=orbitalSpin+':'+i;
         var cls='orb-row'+(i===win.homo?' homo':'')+(i===win.lumo?' lumo':'')+(i===orbitalJumpTarget?' jump':'');
-        var box=ORBITALS.canDraw?'<input type="checkbox" class="orb-pick" data-key="'+key+'"'+(orbitalSel[key]?' checked':'')+
+        var box=(ORBITALS.canDraw&&orbitalSpinDrawable(orbitalSpin))?'<input type="checkbox" class="orb-pick" data-key="'+key+'"'+(orbitalSel[key]?' checked':'')+
             (Object.keys(orbitalSel).length>=MO_MAX_DRAW&&!orbitalSel[key]?' disabled':'')+'>':'';
         html+='<label class="'+cls+'">'+box+
             '<span class="orb-n">'+(i+1)+'</span>'+
@@ -11253,11 +12288,20 @@ function surfaceGeometryCurrent(){
 }
 function requestOrbitalSurfaces(){
     var picked=selectedOrbitals();
-    if(picked.length===0){
-        var note=chargePanelEl?chargePanelEl.querySelector('#surf-note'):null;
-        if(note)note.textContent='Select one to ten orbitals first.';
+    // A selection can outlive a change of what the file offers (it is kept per
+    // spin and orbital, so a channel that cannot be drawn may still hold keys).
+    // Only the drawable channels travel; if none is left, the note says why
+    // instead of a request the host has to refuse.
+    var drawable=picked.filter(function(o){return orbitalSpinDrawable(o.spin)});
+    if(drawable.length===0){
+        var noSpin=picked.length>0;
+        var noteEl=chargePanelEl?chargePanelEl.querySelector('#surf-note'):null;
+        if(noteEl)noteEl.textContent=noSpin
+            ?'The selected orbitals belong to a spin channel without a coefficient block, so they cannot be drawn.'
+            :'Select one to ten orbitals first.';
         return;
     }
+    picked=drawable;
     if(!surfaceGeometryCurrent())return;
     surfaceError='';
     // A new run replaces the picture from its first orbital on; clearing here is
@@ -11608,7 +12652,18 @@ if(chargeReopenEl)chargeReopenEl.addEventListener('click',function(){chargeReope
 if(summaryReopenEl)summaryReopenEl.addEventListener('click',function(){summaryReopen()});
 
 // Initial panel display — show reopen buttons only, don't auto-open panels
-if(OPT_STEPS&&OPT_STEPS.length>0){
+// The chip names the card that is actually there: a scan or an IRC path is not
+// a convergence, and a chip that said so would send the reader looking for a
+// series the file does not hold.
+if(OPT_MODE==='scan'){
+    optReopenEl.innerHTML=MARK_SCAN+'Scan';
+    optReopenEl.title='Scan points: the optimized structure, energy and forces of each scan value';
+    optReopenEl.classList.add('show');
+}else if(OPT_MODE==='irc'){
+    optReopenEl.innerHTML=MARK_IRC+'IRC / Path';
+    optReopenEl.title='IRC path points and their energies';
+    optReopenEl.classList.add('show');
+}else if(OPT_MODE==='opt'&&OPT_STEPS&&OPT_STEPS.length>0){
     optReopenEl.classList.add('show');
 }
 if(NORMAL_MODES&&NORMAL_MODES.length>0){
@@ -15378,7 +16433,10 @@ function xrdExport(){
     var stem=base;
     var dot=base.lastIndexOf('.');
     if(dot>0)stem=base.substring(0,dot);
-    vscodeApi.postMessage({command:'saveFile',content:out.join('\n')+'\n',suggestedName:stem+'.xy',filePath:MD.filePath||''});
+    // A data export, not the structure: it goes through its own message so the
+    // path it is written to never becomes the document's save target (a later
+    // Ctrl+S would otherwise write the structure into the .xy file).
+    vscodeApi.postMessage({command:'saveDataFile',content:out.join('\n')+'\n',suggestedName:stem+'.xy',extension:'.xy',filePath:savePath||''});
 }
 (function(){
     var openBtn=document.getElementById('xrd-open');
@@ -17401,10 +18459,52 @@ function gjfChargeMultLine(meta){
     var trailing=toks.length>2?toks.slice(2):[];
     return [c,m].concat(trailing).join(' ');
 }
-function doSave(){
-    if(!MD.atoms||MD.atoms.length===0){alert('No atoms to save');return}
-    for(var ci=0;ci<MD.atoms.length;ci++){var ca=MD.atoms[ci];if(isNaN(ca.x)||isNaN(ca.y)||isNaN(ca.z)){alert('Atom '+(ci+1)+' has invalid coordinates (NaN). Cannot save.');return}}
-    if(CRY&&!CRY_INV){alert('Crystal lattice is degenerate (zero determinant). Cannot save crystal formats.');return}
+/**
+ * The bond order a Gaussian connect line states.
+ *
+ * Gaussian's connectivity section takes a real bond order (its own manual
+ * gives 1.0 and 2.0 as examples and names 0.1 for a bond that only guides
+ * internal-coordinate generation), and a real input saved with `geom=connect`
+ * (test/1051388_3.gjf) states 1.5 for an aromatic bond. So 1.5 is written as
+ * it is: rounding it to 1 or 2 would break both the aromatic ring on the next
+ * open and the order Gaussian itself reads. A missing or non-finite order is
+ * the single bond the GJF parser also substitutes, rather than a crash in
+ * toFixed() that would abort the whole save.
+ */
+function gjfBondOrder(order){
+    var o=typeof order==='number'?order:parseFloat(order);
+    if(!isFinite(o)||o<=0)o=1;
+    return o.toFixed(1);
+}
+// A CIF states U_ij in the crystal-axis basis, while the page stores the
+// tensor Cartesian and already rotated into the P1 frame (see
+// src/tools/adp.ts). Saving therefore undoes both: the reciprocal vectors
+// N = [a*; b*; c*] (the rows of CRY_INV) give U_star = N U N^T, and the
+// reciprocal lengths undo the scaling that produced it. For an orthogonal
+// cell N is diagonal and the values pass through unchanged — which is why
+// writing them as they stood looked correct until a non-orthogonal cell was
+// saved and read back under the corrected reader.
+function cifUFromCart(u){
+    if(!CRY||!CRY_INV)return null;
+    var N=CRY_INV,r=[0,0,0],i,j;
+    for(i=0;i<3;i++){
+        r[i]=Math.sqrt(N[i][0]*N[i][0]+N[i][1]*N[i][1]+N[i][2]*N[i][2]);
+        if(!(r[i]>0)||!isFinite(r[i]))return null;
+    }
+    var U=[[u[0],u[3],u[4]],[u[3],u[1],u[5]],[u[4],u[5],u[2]]];
+    var NU=[[0,0,0],[0,0,0],[0,0,0]];
+    for(i=0;i<3;i++)for(j=0;j<3;j++)NU[i][j]=N[i][0]*U[0][j]+N[i][1]*U[1][j]+N[i][2]*U[2][j];
+    var S=[[0,0,0],[0,0,0],[0,0,0]];
+    for(i=0;i<3;i++)for(j=0;j<3;j++)S[i][j]=NU[i][0]*N[j][0]+NU[i][1]*N[j][1]+NU[i][2]*N[j][2];
+    return [
+        S[0][0]/(r[0]*r[0]),S[1][1]/(r[1]*r[1]),S[2][2]/(r[2]*r[2]),
+        S[0][1]/(r[0]*r[1]),S[0][2]/(r[0]*r[2]),S[1][2]/(r[1]*r[2])
+    ];
+}
+function doSave(hostRequest){
+    if(!MD.atoms||MD.atoms.length===0){alert('No atoms to save');return 'failed'}
+    for(var ci=0;ci<MD.atoms.length;ci++){var ca=MD.atoms[ci];if(isNaN(ca.x)||isNaN(ca.y)||isNaN(ca.z)){alert('Atom '+(ci+1)+' has invalid coordinates (NaN). Cannot save.');return 'failed'}}
+    if(CRY&&!CRY_INV){alert('Crystal lattice is degenerate (zero determinant). Cannot save crystal formats.');return 'failed'}
     try{
     // One PDB coordinate column (8 characters, 3 decimals). A value too large
     // for the column loses decimals rather than shifting the columns after it:
@@ -17472,7 +18572,7 @@ function doSave(){
     MD.atoms.forEach(function(a,i){
         var parts=[i+1];
         MD.bonds.forEach(function(b){
-            if(b.atom1===i)parts.push(b.atom2+1,b.order.toFixed(1));
+            if(b.atom1===i)parts.push(b.atom2+1,gjfBondOrder(b.order));
         });
         gjf+=parts.join(' ')+'\n';
     });
@@ -17610,7 +18710,10 @@ function doSave(){
     // CONECT is written in the (atom1 < atom2) direction the parser reads, so a
     // stored reverse bond is the same edge after a save and a re-open instead of
     // being dropped as "a2 < a1". Pairs are also sorted, which is what makes a
-    // strict PDB tool list them in serial order.
+    // strict PDB tool list them in serial order. A multiple bond repeats the
+    // partner's serial, which is the only way this format states an order: the
+    // reader counts the repeats back into one, so a saved PDB no longer loses
+    // the double bonds it was opened with.
     var conectPairs=[];
     MD.bonds.forEach(function(b){
         if(typeof b.atom1!=='number'||typeof b.atom2!=='number')return;
@@ -17618,7 +18721,10 @@ function doSave(){
         var lo=b.atom1<b.atom2?b.atom1:b.atom2;
         var hi=b.atom1<b.atom2?b.atom2:b.atom1;
         if(lo<0||hi>=MD.atoms.length)return;
-        conectPairs.push([lo+1,hi+1]);
+        // 1, 2 or 3: an aromatic 1.5 has no spelling here and stays one edge,
+        // which is what every PDB of an aromatic ring writes.
+        var rep=b.order>=2.5?3:(b.order>=1.75?2:1);
+        conectPairs.push([lo+1,hi+1,rep]);
     });
     conectPairs.sort(function(p,q){return p[0]-q[0]||p[1]-q[1]});
     var lastPair='';
@@ -17628,7 +18734,10 @@ function doSave(){
         lastPair=key;
         var a1=(''+p[0]);while(a1.length<5)a1=' '+a1;
         var a2=(''+p[1]);while(a2.length<5)a2=' '+a2;
-        pdb+='CONECT'+a1+a2+'\n';
+        var line='CONECT'+a1;
+        var rep=p[2]===2||p[2]===3?p[2]:1;
+        for(var r=0;r<rep;r++)line+=a2;
+        pdb+=line+'\n';
     });
     pdb+='END\n';
 
@@ -17697,20 +18806,22 @@ function doSave(){
             // P1 has one operation, so every site is its own multiplicity.
             cifContent+=label+' '+ba.element+' '+f[0].toFixed(6)+' '+f[1].toFixed(6)+' '+f[2].toFixed(6)+' '+occ+' 1\n';
         });
-        // Anisotropic displacement parameters travel with the site. They are
-        // already Cartesian Angstrom squared and already rotated into the P1
-        // frame, so the six numbers are written as they stand; the loop names
+        // Anisotropic displacement parameters travel with the site. The stored
+        // tensor is Cartesian and rotated into the P1 frame, so each one is
+        // converted back to the crystal-axis U_ij a CIF states; the loop names
         // only the sites that carry a tensor, which the dictionary allows. A
         // saved file without any aniso data is byte-identical to the old one.
         var cifAnisoRows='';
         cifBase.forEach(function(ba,i){
             var u=ba.uAniso;
             if(!u||u.length<6)return;
+            var cu=cifUFromCart(u);
+            if(!cu)return;
             var ok=true;
-            for(var k=0;k<6;k++){if(typeof u[k]!=='number'||!isFinite(u[k]))ok=false}
+            for(var k=0;k<6;k++){if(typeof cu[k]!=='number'||!isFinite(cu[k]))ok=false}
             if(!ok)return;
             cifAnisoRows+=ba.element+(i+1);
-            for(var k2=0;k2<6;k2++)cifAnisoRows+=' '+u[k2].toFixed(6);
+            for(var k2=0;k2<6;k2++)cifAnisoRows+=' '+cu[k2].toFixed(6);
             cifAnisoRows+='\n';
         });
         if(cifAnisoRows!==''){
@@ -17834,7 +18945,19 @@ function doSave(){
     }
     }catch(err){
         alert('Failed to generate save content: '+(err&&err.message?err.message:String(err)));
-        return;
+        return 'failed';
+    }
+
+    // A save the editor asked for already knows its format (the format this
+    // session last wrote, or the extension of the file the editor's own Save As
+    // chose), so it takes the content straight out of the same builder the
+    // dialog's Save button uses and posts it — no dialog, and a write identical
+    // to the one the dialog would have produced.
+    if(hostRequest&&hostRequest.format){
+        var picked=contentFor(hostRequest.format);
+        if(!picked)return 'failed';
+        sendSaveFile(picked,hostRequest.targetPath||'');
+        return 'sent';
     }
 
     // Saving a displaced structure is exactly what the feature is for, so the
@@ -17918,14 +19041,20 @@ function doSave(){
     }
     if(fmtSelEl)fmtSelEl.addEventListener('change',syncSaveRows);
     syncSaveRows();
-    document.getElementById('m-ok').addEventListener('click',function(){
-        var fmt=document.getElementById('m-fmt').value;
+    // The content one format asks for, built once and used by both callers: the
+    // dialog's Save button, and a save the editor asked for (Ctrl+S, the close
+    // prompt, the tab's Save As). One builder, so the two can never disagree
+    // about what a format holds.
+    function contentFor(fmt){
         var content,ext;
         // The suggestion keeps the source file's identity: a water.xyz file
         // saved as a Gaussian input is offered as water.gjf, not as a fixed
-        // molecule_modified name that loses which structure this is. The
-        // separator is built once so this stays readable inside the page.
-        var srcPath=String(MD.filePath||'');
+        // molecule_modified name that loses which structure this is. It follows
+        // the last written file, so a second save of that file is one Enter.
+        // The separator is built once so this stays readable inside the page.
+        // (`typeof`: a page without the save identity — the save harnesses run
+        // this block alone — falls back to the file that was opened.)
+        var srcPath=String(typeof savePath==='string'?savePath:(MD.filePath||''));
         var fsSlash=String.fromCharCode(47),bsSlash=String.fromCharCode(92);
         var srcCut=Math.max(srcPath.lastIndexOf(fsSlash),srcPath.lastIndexOf(bsSlash));
         var srcFile=srcPath.substring(srcCut+1);
@@ -17971,12 +19100,45 @@ function doSave(){
         }
         }catch(err){
             alert('Failed to generate save content: '+(err&&err.message?err.message:String(err)));
-            return;
+            return null;
         }
-        vscodeApi.postMessage({command:'saveFile',content:content,suggestedName:suggestName+ext,filePath:MD.filePath||''});
+        // The extension is the content's own format, not the filter the save
+        // dialog happened to show: the host uses it to correct a name typed
+        // without an extension and to question one that contradicts the
+        // content. STRU has no extension of its own and sends ''.
+        return {content:content,ext:ext,suggestedName:suggestName+ext,format:fmt};
+    }
+    document.getElementById('m-ok').addEventListener('click',function(){
+        var picked=contentFor(document.getElementById('m-fmt').value);
+        if(!picked)return;
+        sendSaveFile(picked,'');
         hideModal();
     });
-    document.getElementById('m-cancel').addEventListener('click',function(){hideModal()});
+    document.getElementById('m-cancel').addEventListener('click',function(){
+        hideModal();
+        // A dialog dismissed while the editor is waiting for a save is the
+        // answer: nothing was written, and the document stays modified.
+        if(hostSavePending)postSaveCancelled();
+    });
+}
+
+/**
+ * Post the content one format produced; the host decides where it goes.
+ *
+ * The dialog's Save carries no target (the host asks for a name), while a save
+ * the editor asked for carries the path this session last wrote, which the host
+ * writes without a dialog. It sits right after doSave so the save verification
+ * harnesses — which cut doSave out by its markers — exercise this exact post.
+ */
+function sendSaveFile(picked,targetPath){
+    saveRequestFormat=picked.format||'';
+    var msg={command:'saveFile',content:picked.content,suggestedName:picked.suggestedName,extension:picked.ext,filePath:savePath||''};
+    if(targetPath)msg.targetPath=targetPath;
+    vscodeApi.postMessage(msg);
+}
+function postSaveCancelled(){
+    hostSavePending=false;
+    vscodeApi.postMessage({command:'saveCancelled'});
 }
 
 // ===== Crystal export: the unit cell, and the cluster cut out of it =====
@@ -18192,8 +19354,8 @@ function buildClusterGjf(keepWhole){
     var conn=[];
     for(var ci=0;ci<cl.atoms.length;ci++)conn.push([]);
     cl.bonds.forEach(function(b){
-        if(b.atom1<b.atom2)conn[b.atom1].push(b.atom2+1,b.order.toFixed(1));
-        else if(b.atom2<b.atom1)conn[b.atom2].push(b.atom1+1,b.order.toFixed(1));
+        if(b.atom1<b.atom2)conn[b.atom1].push(b.atom2+1,gjfBondOrder(b.order));
+        else if(b.atom2<b.atom1)conn[b.atom2].push(b.atom1+1,gjfBondOrder(b.order));
     });
     for(var ai=0;ai<cl.atoms.length;ai++){
         out+=[ai+1].concat(conn[ai]).join(' ')+'\n';
@@ -18638,7 +19800,7 @@ function parseSelectInput(input){
             }
             return;
         }
-        var elNumMatch=tok.match(/^([A-Za-z]+)(d+)$/);
+        var elNumMatch=tok.match(/^([A-Za-z]+)(\d+)$/);
         if(elNumMatch){
             var elName=elNumMatch[1].charAt(0).toUpperCase()+elNumMatch[1].slice(1).toLowerCase();
             var en=parseInt(elNumMatch[2],10);
@@ -19667,12 +20829,15 @@ document.addEventListener('keydown',function(e){
                 // button, keeping the format already chosen.
                 var fmtEl=document.getElementById('m-fmt'),okEl=document.getElementById('m-ok');
                 if(fmtEl&&okEl){e.preventDefault();okEl.click();return}
-                // Any other dialog is replaced: doSave's showModal dismisses
-                // it through its own Cancel first, so a measurement preview
-                // is put back instead of being committed by the Save.
-                if(!editable){e.preventDefault();doSave();return}
+                // Any other dialog is replaced: the save dialog's showModal
+                // dismisses it through its own Cancel first, so a measurement
+                // preview is put back instead of being committed by the Save.
+                if(!editable){e.preventDefault();hostSaveRequest();return}
             }else if(!editable){
-                e.preventDefault();doSave();return;
+                // The same call the editor's own Ctrl+S makes (see
+                // hostSaveRequest): the file this session last wrote is written
+                // again, and until there is one the format dialog opens.
+                e.preventDefault();hostSaveRequest();return;
             }
         }else if(lk==='a'||e.code==='KeyA'){
             // Select every atom. Outside a text field the page has no use for
@@ -20088,6 +21253,19 @@ function renderFrame(w,h){
         camera.updateProjectionMatrix();
         camera.position.set(0,0,camDist);
         renderer.render(scene,camera);
+    }
+}
+// A window that was closed with unsaved edits reopens on them: the host read
+// the backup this page wrote and hands it back here. It is applied last, once
+// every panel and every frame is in place, so all it has to do is replace the
+// structure and rebuild — and a session that does not validate leaves the
+// file's own view untouched, with the reason on the info panel.
+if(MD.restore){
+    var restoredOk=false;
+    try{restoredOk=applyRestoreSession(MD.restore)}catch(e){restoredOk=false}
+    if(!restoredOk){
+        MD.warnings=(MD.warnings||[]).concat('the unsaved edits of this file could not be restored from the editor backup: the file itself is shown');
+        updateMolInfo();
     }
 }
 animate();

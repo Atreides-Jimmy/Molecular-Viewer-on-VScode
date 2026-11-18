@@ -73,7 +73,15 @@ export interface FchkBasis {
     shellType: number[];
     /** Per shell: primitives it is contracted from. */
     shellPrim: number[];
-    /** Per shell: the atom it is centred on (0-based). */
+    /**
+     * Per shell: the atom it is centred on, **0-based**.
+     *
+     * The file writes this one 1-based ("Shell to atom map" numbers the atoms
+     * from one), and it is converted here so a reader can index the atom list
+     * with it directly. Nothing else in the viewer reads the raw array, and the
+     * orbital mesh needs it whenever a checkpoint states no shell coordinates
+     * and the shells have to be placed from their atom.
+     */
     shellAtom: number[];
     /** Per primitive, in shell order. */
     exponents: number[];
@@ -166,6 +174,21 @@ export async function parseFchk(input: AsyncIterable<Uint8Array>, options: FchkR
     for await (const chunk of input) {
         scan.feed(chunk instanceof Buffer ? chunk : Buffer.from(chunk));
     }
+    return scan.finish();
+}
+
+/**
+ * Parse a checkpoint that is already in memory.
+ *
+ * The streaming reader is the one every caller should use — it is what keeps a
+ * 900 MB checkpoint from becoming a string — but `parseFile` only ever receives
+ * text, so a short checkpoint opened under a generic extension still gets the
+ * same reader rather than the XYZ fallback. The bytes are taken as latin1,
+ * which is what the line-oriented scan expects.
+ */
+export function parseFchkText(content: string): FchkResult {
+    const scan = new FchkScan({});
+    scan.feed(Buffer.from(content, 'latin1'));
     return scan.finish();
 }
 
@@ -427,9 +450,13 @@ class FchkScan {
         }
         if (/Charges$/.test(name)) {
             if (CHARGE_BLOCKLIST.indexOf(name.toLowerCase()) >= 0) return false;
-            // A per-atom population is exactly as long as the structure; an
-            // array of another length is a per-shell or per-primitive table.
-            return this.nAtoms > 0 && count === this.nAtoms;
+            // A per-atom population is normally exactly as long as the
+            // structure. A different length is still collected rather than
+            // skipped: `chargesOf` fills the missing slots with null and says
+            // how many the file stated, so a truncated table (or a QM-region
+            // population of an ONIOM job) stays visible as partial data
+            // instead of disappearing from the panel without a word.
+            return this.nAtoms > 0 && count > 0;
         }
         return false;
     }
@@ -495,7 +522,7 @@ class FchkScan {
             case 'Current cartesian coordinates': this.coordinates = v; return;
             case 'Shell types': this.shellType = v.map(x => Math.round(x)); return;
             case 'Number of primitives per shell': this.shellPrim = v.map(x => Math.round(x)); return;
-            case 'Shell to atom map': this.shellAtom = v.map(x => Math.round(x)); return;
+            case 'Shell to atom map': this.shellAtom = v.map(x => Math.max(0, Math.round(x) - 1)); return;
             case 'Primitive exponents': this.exponents = v; return;
             case 'Contraction coefficients': this.coefficients = v; return;
             case 'P(S=P) Contraction coefficients': this.spCoefficients = v; return;
@@ -608,18 +635,34 @@ class FchkScan {
     private chargesOf(atoms: Atom[]): LogChargeSet[] {
         const out: LogChargeSet[] = [];
         for (const table of this.chargeTables) {
-            if (table.values.length !== atoms.length) continue;
             const values: (number | null)[] = [];
             for (let i = 0; i < atoms.length; i++) {
-                const q = table.values[i];
+                const q = i < table.values.length ? table.values[i] : NaN;
                 values.push(Number.isFinite(q) ? q : null);
             }
+            // A table whose value line was truncated or held a field that is
+            // not a number is still a table the file printed; its unreadable
+            // slots stay null so the panel can show "(n/total)" and let the
+            // user see which atoms have no value. Skipping the table silently
+            // made the analysis disappear instead.
+            if (table.values.length !== atoms.length) {
+                this.warnings.push('the "' + table.label + '" charge table states ' + table.values.length +
+                    ' values for ' + atoms.length + ' atoms: ' +
+                    (table.values.length < atoms.length
+                        ? 'the missing values are left blank'
+                        : 'the extra values are ignored'));
+            }
+            const covered = values.filter(q => q !== null).length;
             out.push({
                 label: table.label,
                 values,
                 elements: atoms.map(a => a.element),
-                covered: values.filter(q => q !== null).length,
-                complete: true,
+                covered,
+                // The file can state a table that is shorter than the atom list
+                // or whose unparsable fields were left as null. That is a partial
+                // table, and the panel's `(n/total)` suffix is what tells the
+                // user so; claiming completeness would hide the missing values.
+                complete: covered === atoms.length,
                 frame: 0
             });
         }
@@ -642,7 +685,15 @@ class FchkScan {
             cartesianD: this.cartesianD,
             cartesianF: this.cartesianF
         };
-        const closed = this.nBeta === this.nAlpha &&
+        // A closed shell is a file with ONE set of orbitals. Equal alpha and
+        // beta electron counts do not prove it: a broken-symmetry UHF/UKS
+        // singlet also has nAlpha === nBeta and states multiplicity 1, and
+        // reading it as closed shell threw its beta orbitals away and forced
+        // two electrons into every alpha level. The checkpoint states the spin
+        // kind by storing a second set of MO coefficients (and its own orbital
+        // energies), so the presence of that channel is what decides.
+        const hasBetaChannel = this.betaLayout !== undefined || this.betaEnergies.length > 0;
+        const closed = !hasBetaChannel && this.nBeta === this.nAlpha &&
             (this.multiplicity === undefined || this.multiplicity === 1) && this.irohf === 0;
         const spins: FchkOrbitalSpin[] = [];
         if (this.alphaEnergies.length > 0) {
@@ -655,14 +706,24 @@ class FchkScan {
             });
         }
         if (this.betaLayout && !closed) {
-            const energies = this.betaEnergies.length > 0 ? this.betaEnergies : this.alphaEnergies;
-            spins.push({
-                label: 'Beta',
-                energies,
-                occupations: occupationsOf(energies.length, this.nBeta, this.nBeta, false, true, this.irohf !== 0),
-                occupied: this.nBeta,
-                layout: this.betaLayout
-            });
+            // The beta coefficient block can exist while the file states no
+            // beta orbital energies. Reusing the alpha list there put alpha
+            // numbers under the Beta heading, and an isosurface chosen by that
+            // list could be a different orbital than the one the user read.
+            // A channel whose levels the file does not state is not shown;
+            // the missing block is named instead of invented.
+            if (this.betaEnergies.length === 0) {
+                this.warnings.push('the checkpoint stores beta MO coefficients but no beta orbital energies: ' +
+                    'the beta channel is not shown, because its levels would be guessed');
+            } else {
+                spins.push({
+                    label: 'Beta',
+                    energies: this.betaEnergies,
+                    occupations: occupationsOf(this.betaEnergies.length, this.nBeta, this.nBeta, false, true, this.irohf !== 0),
+                    occupied: this.nBeta,
+                    layout: this.betaLayout
+                });
+            }
         }
         if (spins.length === 0) return undefined;
         return { nBasis, spins, basis, path: this.options.path || '', model: this.model };
@@ -708,12 +769,14 @@ function highestAngularMomentum(types: number[]): number {
  * beta electrons`, never an occupation vector, so the vector is rebuilt from
  * the counts:
  *
- *  - closed shell (`nAlpha === nBeta`, singlet, not ROHF): the first `nAlpha`
- *    orbitals hold two electrons, the rest none;
+ *  - closed shell (`nAlpha === nBeta`, singlet, not ROHF, no beta channel):
+ *    the first `nAlpha` orbitals hold two electrons, the rest none;
  *  - unrestricted: each spin's first `nAlpha`/`nBeta` orbitals hold one;
  *  - ROHF: the first `nBeta` alpha orbitals are the doubly occupied pair, the
- *    remaining `nAlpha - nBeta` are singly occupied, and beta holds `nBeta`
- *    pairs — the standard ROHF occupation, which is what `IROHF` means.
+ *    remaining `nAlpha - nBeta` are singly occupied, and the beta channel lists
+ *    the same pairs holding ONE beta electron each — writing 2 there counted
+ *    every paired beta electron twice, since the alpha row already states the
+ *    pair.
  */
 function occupationsOf(count: number, nAlpha: number, nBeta: number, closed: boolean, beta: boolean, rohf: boolean): number[] {
     const out = new Array<number>(count).fill(0);
@@ -722,10 +785,13 @@ function occupationsOf(count: number, nAlpha: number, nBeta: number, closed: boo
         return out;
     }
     if (rohf) {
-        for (let i = 0; i < Math.min(count, nBeta); i++) out[i] = 2;
-        if (!beta) {
-            for (let i = nBeta; i < Math.min(count, nAlpha); i++) out[i] = 1;
+        if (beta) {
+            // One electron per occupied beta spin orbital.
+            for (let i = 0; i < Math.min(count, nBeta); i++) out[i] = 1;
+            return out;
         }
+        for (let i = 0; i < Math.min(count, nBeta); i++) out[i] = 2;
+        for (let i = nBeta; i < Math.min(count, nAlpha); i++) out[i] = 1;
         return out;
     }
     const occupied = beta ? nBeta : nAlpha;
@@ -774,14 +840,31 @@ export async function readFchkColumn(
         length = (lastLine - firstLine) * layout.lineBytes + lastLineValues * layout.fieldWidth + layout.terminator;
     }
     const bytes = await read(layout.start + firstLine * layout.lineBytes, length);
+    // The final line of the array may be the last line of the file, where a
+    // writer can omit the line terminator; the values themselves must still be
+    // present. Anything shorter is a short read (or a truncated file), and it
+    // used to be filled with zeros here — the orbital was then drawn from a
+    // column that was mostly invented. Refusing it is the only honest answer.
+    const needed = length - (lastLine === lineCount - 1 ? layout.terminator : 0);
+    if (bytes.length < needed) {
+        throw new Error('the coefficient block of this checkpoint ended after ' + bytes.length +
+            ' of the ' + needed + ' bytes orbital ' + (orbital + 1) + ' needs; the file is truncated');
+    }
     const out = new Float64Array(nBasis);
     for (let k = 0; k < nBasis; k++) {
         const global = first + k;
         const line = Math.floor(global / layout.perLine) - firstLine;
         const field = global % layout.perLine;
         const at = line * layout.lineBytes + field * layout.fieldWidth;
-        const v = parseFloat(bytes.toString('latin1', at, at + layout.fieldWidth).replace(/[Dd]/, 'E'));
-        out[k] = Number.isFinite(v) ? v : 0;
+        const text = bytes.toString('latin1', at, at + layout.fieldWidth).replace(/[Dd]/, 'E');
+        const v = parseFloat(text);
+        if (!Number.isFinite(v)) {
+            // A field that is not a number (damage, a shifted layout) is not a
+            // zero coefficient: refusing it keeps a wrong orbital off the screen.
+            throw new Error('coefficient ' + (k + 1) + ' of orbital ' + (orbital + 1) +
+                ' is not a number ("' + text.trim() + '"); the checkpoint may be damaged');
+        }
+        out[k] = v;
     }
     return out;
 }

@@ -2,7 +2,7 @@
 // the page navigates and Diff/Import choose from.
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { Atom, Bond, MolecularData, TrajectoryInfo } from '../types';
+import { Atom, Bond, MolecularData, StructureStep, TrajectoryInfo } from '../types';
 import {
     ParseFileOptions, LammpsParseOptions, LammpsDumpTrajectory, TrajectoryFormat,
     parseFile, readBinaryTrajectory, lammpsLengthFactor, parseLammpsDumpTrajectory,
@@ -25,6 +25,12 @@ import { decodeText } from './loading';
  */
 export interface TrajectoryCompanions {
     units?: string;
+    /** The `atom_style` the input script set, when it states one. A data file
+     *  whose `Atoms` header carries no `# style` comment has to be read by
+     *  guesswork otherwise, and a 6/9-column row is ambiguous between `charge`
+     *  and `molecular`: guessing wrong reads the molecule id as the atom type
+     *  and maps every element through the wrong column. */
+    atomStyle?: string;
     typeElements: { [type: number]: string };
     readData: { name: string; fromDir: vscode.Uri }[];
     /** Scripts that name this trajectory (0 when none does). */
@@ -72,6 +78,7 @@ export async function collectTrajectoryCompanions(uri: vscode.Uri, fileName: str
     result.scripts = scripts.length;
 
     let units: string | undefined;
+    let atomStyle: string | undefined;
     for (const script of scripts) {
         const chain = await scanLammpsChain(script.uri, script.text, dir);
         result.warnings.push(...chain.warnings);
@@ -79,6 +86,10 @@ export async function collectTrajectoryCompanions(uri: vscode.Uri, fileName: str
         for (const item of chain.texts) {
             const hints = parseLammpsInputHints(item.content, item.variables);
             if (!units && hints.units) units = hints.units;
+            // Same hint the direct open passes on: the script is the only place
+            // an `atom_style` is stated when the data file's Atoms header does
+            // not repeat it.
+            if (!atomStyle && hints.atomStyle) atomStyle = hints.atomStyle;
             for (const key of Object.keys(hints.typeElements)) {
                 const type = Number(key);
                 if (!result.typeElements[type]) result.typeElements[type] = hints.typeElements[type];
@@ -86,6 +97,7 @@ export async function collectTrajectoryCompanions(uri: vscode.Uri, fileName: str
         }
     }
     if (units) result.units = units;
+    if (atomStyle) result.atomStyle = atomStyle;
     return result;
 }
 
@@ -115,6 +127,7 @@ export async function chooseTrajectoryTopology(
     const stem = fileName.replace(/\.(xtc|trr|dcd|lammpstrj|dump|crd|trj)$/i, '');
     const lammpsBase: LammpsParseOptions = {};
     if (companions.units) lammpsBase.units = companions.units;
+    if (companions.atomStyle) lammpsBase.atomStyle = companions.atomStyle;
     if (Object.keys(companions.typeElements).length > 0) lammpsBase.typeElements = companions.typeElements;
 
     const parseTopology = async (name: string): Promise<MolecularData | undefined> => {
@@ -292,11 +305,23 @@ export function trajectoryTemplate(
     if (!topology) {
         return { atoms, bonds: [], hasExplicitBonds: false, warnings };
     }
+    // A LAMMPS data file states its bonds in a `Bonds` section, and that table
+    // is the file's own answer to which atoms are bonded. Re-deriving them from
+    // the topology's coordinates replaces it: a non-standard bond, or one longer
+    // than perception's cutoff, came out as no bond at all — drawn short and
+    // used by MM as two unconnected atoms. The table is handed over as the
+    // template's explicit bond list. The per-bond periodic shift is dropped: it
+    // is an image offset of the data file's own geometry, while one template
+    // serves every frame of the trajectory.
+    const declared = topology.data.crystal ? topology.data.crystal.fileBonds : undefined;
+    const bonds = declared && declared.length > 0
+        ? declared.map(b => ({ atom1: b.atom1, atom2: b.atom2, order: b.order }))
+        : topology.data.bonds;
     const bonded = ensureBonds({
         atoms: topology.data.atoms,
-        bonds: topology.data.bonds,
+        bonds,
         title: topology.data.title,
-        hasExplicitBonds: topology.data.hasExplicitBonds
+        hasExplicitBonds: declared !== undefined && declared.length > 0 ? true : topology.data.hasExplicitBonds
     });
     return {
         atoms,
@@ -439,15 +464,33 @@ export async function loadDumpTrajectoryDocument(
     warnings.push(...lookup.warnings);
     const topology = lookup.topology;
     const first = trajectory.frames[0];
-    const dumpElements = first.sites.map(s => s.element).filter(e => !/^T\d+$/.test(e));
+    // An `element` column names its atoms; a dump written without one carries
+    // `T1`/`T2` (the reader's stand-in for a bare type) instead. One unknown
+    // label must not cost the whole table: every entry was discarded — every
+    // atom became `Xx` — as soon as a single type could not be named, which a
+    // mixed dump (some rows labelled, some not) hits immediately. The labels are
+    // kept position by position, and only the ones that name no element are
+    // blank, which the template draws as `Xx`.
+    const typedLabels: string[] = [];
+    const dumpElements = first.sites.map(s => {
+        if (!/^T\d+$/.test(s.element)) return s.element;
+        if (typedLabels.indexOf(s.element) < 0) typedLabels.push(s.element);
+        return '';
+    });
+    const namedCount = dumpElements.filter(e => e !== '').length;
     const elements = topology
         ? topology.data.atoms.map(a => a.element)
-        : (dumpElements.length === first.sites.length ? dumpElements : undefined);
+        : (namedCount > 0 ? dumpElements : undefined);
     const template = trajectoryTemplate(trajectory.natoms, elements, topology);
     if (!topology && !elements) {
         warnings.push('the dump names its atoms by LAMMPS type and no data file or element list was found: ' +
-            'the types are shown as labels and no bonds are drawn');
+            'they are shown as Xx and no bonds are drawn');
     } else if (!topology) {
+        if (namedCount < dumpElements.length) {
+            const unnamed = dumpElements.length - namedCount;
+            warnings.push(unnamed + ' atom' + (unnamed === 1 ? '' : 's') + ' (type ' + typedLabels.join(', ') +
+                ') name no element: shown as Xx (keep the matching .data file beside the dump to name them)');
+        }
         warnings.push('no topology was found for this dump: its element column names the atoms but no bonds are drawn; ' +
             'keep the matching .data file beside it to draw bonds');
     }
@@ -481,6 +524,48 @@ export async function loadDumpTrajectoryDocument(
         },
         warnings
     );
+}
+
+/**
+ * A multi-step output as the document the page navigates frame by frame.
+ *
+ * A CP2K molecular-dynamics run, an ABACUS `MD_dump` and a Quantum ESPRESSO
+ * output that prints a coordinate block per step state one system over time —
+ * exactly what a text dump states — so they open with the same frame list. The
+ * template (elements, colours and bonds) is the structure the reader chose,
+ * and each frame brings its own cell, which the page draws as that frame's box.
+ * A document that states a single geometry never reaches here.
+ */
+export function loadStructureStepsDocument(
+    fileName: string,
+    data: MolecularData,
+    steps: StructureStep[],
+    stepsInFile: number
+): TrajectoryDocument {
+    const natoms = data.atoms.length;
+    const warnings: string[] = data.warnings ? data.warnings.slice() : [];
+    const frames: TrajectoryFramePayload[] = [];
+    for (const step of steps) {
+        if (step.xyz.length !== natoms * 3) continue;
+        frames.push({ stepLabel: step.label, xyz: step.xyz, cell: step.lattice });
+    }
+    if (frames.length === 0) return emptyTrajectoryDocument(data.title, warnings);
+    const template = trajectoryTemplate(natoms, data.atoms.map(a => a.element), {
+        data,
+        name: fileName,
+        path: ''
+    });
+    warnings.push(...template.warnings);
+    if (stepsInFile > frames.length) {
+        warnings.push(stepsInFile + ' geometries in the file: showing ' + frames.length + ' sampled evenly');
+    }
+    return finishTrajectoryDocument(data.title, template, frames, {
+        format: 'steps',
+        source: fileName,
+        framesInFile: stepsInFile,
+        sampled: stepsInFile > frames.length,
+        truncated: false
+    }, warnings);
 }
 
 export interface PickedTextFrame {

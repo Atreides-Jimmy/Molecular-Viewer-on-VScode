@@ -97,6 +97,75 @@ function parseAtomLine(parts: string[]): { element: string; x: number; y: number
     return null;
 }
 
+/**
+ * Whether an atom-block line is a Z-matrix (internal-coordinate) row rather
+ * than a Cartesian one.
+ *
+ * A Z-matrix row names the atom's references instead of its position:
+ * `C 1 1.50 2 109.5 3 120.0` (label + three `(reference, value)` pairs), a
+ * shorter form for the first atoms (`C 1 1.50`, and just `C` for the first).
+ * A Cartesian row never has that shape: it states three numbers, possibly
+ * followed by fixed-atom markers, so its token count is 4 or ≥5 with three
+ * coordinates in a row.
+ *
+ * The check is deliberately strict — references are 1-based integers, values
+ * are numbers or symbols (`R1`, `A1`, `D1`) — because it runs before the
+ * Cartesian reader: a row it claims is not drawn as an atom at all, and a
+ * Cartesian row read as a Z-matrix row would lose a real atom.
+ */
+function looksLikeZMatrixRow(parts: string[], ordinal: number): boolean {
+    if (parts.length < 1 || parts.length > 7) return false;
+    if (!/^[A-Za-z]/.test(parts[0])) return false;
+    if ((parts.length - 1) % 2 !== 0) return false;   // label + (ref, value) pairs
+    for (let k = 1; k < parts.length; k += 2) {
+        if (!/^\d+$/.test(parts[k])) return false;
+        const ref = parseInt(parts[k], 10);
+        // References are 1-based and point at an atom already defined: this is
+        // what tells `C 1 1.50 2 109.5` (a Z-matrix row) from an integer
+        // Cartesian row with fixed-atom markers such as `C 1 2 3 1 1 1`.
+        if (ref < 1 || ref >= ordinal) return false;
+        const value = parts[k + 1];
+        if (value === undefined) continue;
+        if (/^[-+]?(?:\d+\.?\d*|\.\d+)(?:[EeDd][-+]?\d+)?$/.test(value)) continue;
+        if (/^[A-Za-z][\w()]*$/.test(value)) continue;  // a variable such as `R1`
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Whether a line is the charge/multiplicity line rather than the first atom row.
+ *
+ * Gaussian writes the pair (or one pair per fragment) as plain integers, and
+ * the atom block follows it. A file that omits the pair therefore used to lose
+ * its first atom: the row was read as the pair, failed to parse as two
+ * integers, and was consumed anyway. A line only counts here when every field
+ * is a plain integer, the count is even, and every multiplicity field (the
+ * odd-indexed one of each pair) is plausible. That rejects an atomic-number
+ * atom row with integral coordinates such as `6 0 0 0` (multiplicity 0 and 0)
+ * while still accepting a multi-fragment list such as `1 1 0 1`.
+ */
+function looksLikeChargeMultLine(line: string): boolean {
+    const tokens = chargeMultTokens(line);
+    if (tokens.length < 2 || tokens.length % 2 !== 0) return false;
+    if (!tokens.every(t => /^[+-]?\d+$/.test(t))) return false;
+    const values = tokens.map(t => parseInt(t, 10));
+    if (values.some(v => !isFinite(v))) return false;
+    for (let i = 0; i < values.length; i += 2) {
+        if (Math.abs(values[i]) > 20) return false;
+        if (values[i + 1] < 1 || values[i + 1] > 10) return false;
+    }
+    return true;
+}
+
+/** The numbers of a charge/multiplicity line. Gaussian accepts a comma between
+ *  them (`0,1`) — a spelling many writers produce and the reader used to
+ *  reject, which lost the charge of every such input and left bond perception
+ *  assuming a neutral molecule. */
+function chargeMultTokens(line: string): string[] {
+    return line.trim().replace(/,/g, ' ').split(/\s+/).filter(t => t !== '');
+}
+
 export function parseGjf(content: string): MolecularData {
     const lines = content.split(/\r?\n/);
     const atoms: Atom[] = [];
@@ -105,22 +174,42 @@ export function parseGjf(content: string): MolecularData {
     let hasExplicitBonds = false;
     let charge: number | undefined;
     let multiplicity: number | undefined;
+    const warnings: string[] = [];
 
     const link0Lines: string[] = [];
-    let routeLine = '';
+    const routeLines: string[] = [];
     const titleLines: string[] = [];
     let chargeMultLine = '';
     let afterConnectContent = '';
 
     let i = 0;
 
-    while (i < lines.length && lines[i].trim() !== '') {
-        if (lines[i].trim().startsWith('%')) {
+    // Link0 commands and the route card may sit in any number of blocks: a
+    // hand-edited or pasted file often separates them with a blank line
+    // (`%chk=…`), and the old reader took the blank line for the end of the
+    // header — the route card then became the title and the charge line its
+    // first "atom". Blank lines between the header sections are skipped, and a
+    // section is recognised by its own marker (`%`, `#`) rather than by
+    // position.
+    let headerGuard = 0;
+    while (i < lines.length && headerGuard++ < 4096) {
+        if (lines[i].trim() === '') { i++; continue; }
+        const head = lines[i].trim();
+        if (head.startsWith('%')) {
             link0Lines.push(lines[i]);
-        } else {
-            routeLine = lines[i].trim();
+            i++;
+            continue;
         }
-        i++;
+        if (head.startsWith('#')) {
+            // A route card may wrap: every line up to the blank that ends the
+            // section belongs to it.
+            while (i < lines.length && lines[i].trim() !== '') {
+                routeLines.push(lines[i].trim());
+                i++;
+            }
+            continue;
+        }
+        break;   // the title starts here
     }
     while (i < lines.length && lines[i].trim() === '') {
         i++;
@@ -136,16 +225,40 @@ export function parseGjf(content: string): MolecularData {
     }
 
     if (i < lines.length) {
-        chargeMultLine = lines[i];
-        const cmParts = lines[i].trim().split(/\s+/);
-        const chrg = parseInt(cmParts[0], 10);
-        const mult = parseInt(cmParts[1], 10);
-        if (!isNaN(chrg)) charge = chrg;
-        if (!isNaN(mult)) multiplicity = mult;
-        i++;
+        if (looksLikeChargeMultLine(lines[i])) {
+            chargeMultLine = lines[i];
+            const cmParts = chargeMultTokens(lines[i]);
+            // A multi-fragment job states one pair per fragment. The charge is
+            // the whole system's — the sum every fragment contributes — and is
+            // what bond-order perception has to be given; keeping only the
+            // first pair made a two-fragment ion look neutral and solved the
+            // wrong bond orders. A per-fragment multiplicity does not add up to
+            // one total, so the first is reported as before.
+            let totalCharge = 0;
+            const pairs = Math.floor(cmParts.length / 2);
+            for (let k = 0; k + 1 < cmParts.length; k += 2) {
+                const fragmentCharge = parseInt(cmParts[k], 10);
+                if (!isNaN(fragmentCharge)) totalCharge += fragmentCharge;
+            }
+            if (pairs > 1) charge = totalCharge;
+            else {
+                const chrg = parseInt(cmParts[0], 10);
+                if (!isNaN(chrg)) charge = chrg;
+            }
+            const mult = parseInt(cmParts[1], 10);
+            if (!isNaN(mult)) multiplicity = mult;
+            i++;
+        } else {
+            // The atom block starts here; keeping the line for the loop below
+            // is what preserves the first atom.
+            warnings.push('the charge/multiplicity line is missing: the atom block was read from line ' + (i + 1));
+        }
     }
 
     let atomIndex = 0;
+    let zMatrixRows = 0;
+    let cartesianRows = 0;
+    let rowNo = 0;
     while (i < lines.length) {
         const line = lines[i].trim();
         if (line === '' || line.startsWith('--')) {
@@ -153,14 +266,33 @@ export function parseGjf(content: string): MolecularData {
         }
 
         const parts = line.split(/\s+/);
-        const result = parseAtomLine(parts);
+        rowNo++;
+        // A Z-matrix row is not a position, so it must not be handed to the
+        // Cartesian reader — which would read `C 1 1.5 2 109.5` as an atom at
+        // (1.5, 2, 109.5). Which of the two shapes the block really is, is
+        // decided once the whole block has been seen.
+        const zRow = looksLikeZMatrixRow(parts, rowNo);
+        const result = zRow ? null : parseAtomLine(parts);
         if (result) {
+            cartesianRows++;
             const atom: Atom = { element: result.element, x: result.x, y: result.y, z: result.z, index: atomIndex };
             if (result.ghost) atom.ghost = true;
             atoms.push(atom);
             atomIndex++;
+        } else if (zRow) {
+            zMatrixRows++;
         }
         i++;
+    }
+
+    // A Z-matrix (internal-coordinate) geometry has no x/y/z to draw, and the
+    // rows that did parse are positions invented by the Cartesian reader. The
+    // block is refused as a whole and said so: showing a structure made of
+    // reference numbers is worse than showing none.
+    if (zMatrixRows > 0 && zMatrixRows >= cartesianRows) {
+        atoms.length = 0;
+        warnings.push('the input states a Z-matrix (internal coordinates): only a Cartesian geometry ' +
+            'can be drawn, and the internal coordinates are not converted');
     }
 
     let connectStartLine = -1;
@@ -219,7 +351,7 @@ export function parseGjf(content: string): MolecularData {
 
     const gjfMeta: GjfMeta = {
         link0Lines,
-        routeLine,
+        routeLine: routeLines.join('\n'),
         titleLines,
         chargeMultLine,
         afterConnectContent
@@ -232,11 +364,12 @@ export function parseGjf(content: string): MolecularData {
     for (let li = 0; li < lines.length; li++) {
         if (/^\s*--Link1--\s*$/i.test(lines[li])) linkedJobs++;
     }
-    const result: MolecularData = { atoms, bonds, title, hasExplicitBonds, gjfMeta, charge, multiplicity };
     if (linkedJobs > 0) {
-        result.warnings = ['the file holds ' + (linkedJobs + 1) +
-            ' Gaussian jobs joined by --Link1--: only the first structure is shown (split the file to open another)'];
+        warnings.push('the file holds ' + (linkedJobs + 1) +
+            ' Gaussian jobs joined by --Link1--: only the first structure is shown (split the file to open another)');
     }
+    const result: MolecularData = { atoms, bonds, title, hasExplicitBonds, gjfMeta, charge, multiplicity };
+    if (warnings.length > 0) result.warnings = warnings;
     return result;
 }
 

@@ -30,6 +30,9 @@
  * 算法说明: 生成树 + 二面角扫描给初值, 再用"全距离约束松弛"(1-2 键长 /
  * 1-3 键角 / 非键排斥) 迭代收敛, 顺反与共轭二面角另用整支刚性旋转精确落位。
  * 全部约束都表达为距离约束, 因此求解器只需一种投影算子, 实现短且稳定。
+ * 摆放阶段对"同一中心上几个等价取代基"有专门处理 (1-3 理想距离 + 重合回避),
+ * 否则甲基的几个氢对任何二面角都同分, 会叠在同一个位置; 环内角按环的几何取
+ * (七元环 128.6°、八元环 135°), 饱和大环仍用杂化角以保持褶皱。
  */
 
 // =====================================================================
@@ -150,7 +153,7 @@ const BOND_LENGTH_OVERRIDE: { [key: string]: number } = (function () {
 const AROMATIC_BOND_SCALE = 0.90;
 
 /** 键级对共价半径和的收缩系数 (查表未命中时使用) */
-const BOND_ORDER_SCALE: { [key: number]: number } = { 1: 1.00, 2: 0.87, 3: 0.78 };
+const BOND_ORDER_SCALE: { [key: number]: number } = { 1: 1.00, 2: 0.87, 3: 0.78, 4: 0.72 };
 
 const DEFAULT_BOND_LENGTH = 1.50;
 const DEFAULT_VDW_RADIUS = 1.80;
@@ -194,17 +197,46 @@ const BOND_ANGLE_TABLE: { [key: string]: number[] } = {
 };
 const DEFAULT_BOND_ANGLES = [109.47, 120.0, 180.0];
 
-/** 芳香环内角覆盖 (按环大小) */
-const AROMATIC_RING_ANGLE: { [key: number]: number } = { 3: 60.0, 4: 90.0, 5: 108.0, 6: 120.0, 7: 128.6, 8: 135.0 };
-
-/** 小环 (非芳香) 的环内角 */
-const RING_ANGLE: { [key: number]: number } = { 3: 60.0, 4: 90.0, 5: 108.0, 6: 120.0, 7: 128.6, 8: 135.0, 9: 140.0 };
-void RING_ANGLE;
+/**
+ * 平面环的内角 (按环大小): 正多边形内角 (180 − 360/n) 加上小环的实验值。
+ * 只用于**必须共面**的环 —— 芳香环, 或环上原子已是 sp² 的环。饱和大环是褶皱的,
+ * 拿平面多边形角去卡它只会把环压扁, 那种环仍旧走元素的理论杂化角。
+ */
+const PLANAR_RING_ANGLE: { [key: number]: number } = {
+    3: 60.0, 4: 90.0, 5: 108.0, 6: 120.0, 7: 128.6, 8: 135.0, 9: 140.0, 10: 144.0,
+};
 
 /** 元素原子量; 未知元素返回 0 */
 function elementMass(symbol: string): number {
     const v = ELEMENT_MASS[symbol];
     return v === undefined ? 0.0 : v;
+}
+
+/**
+ * 常见同位素的精确质量 (u)。未收录的核素退回质量数 —— 对分子量而言误差在
+ * 0.1 u 以内, 比把同位素当作普通元素 (误差可达数 u) 好得多。
+ */
+const ISOTOPE_MASS: { [key: string]: number } = {
+    '2H': 2.014102, '3H': 3.016049,
+    '6Li': 6.015123, '7Li': 7.016004,
+    '10B': 10.012937, '11B': 11.009305,
+    '13C': 13.003355, '14C': 14.003242,
+    '15N': 15.000109,
+    '17O': 16.999132, '18O': 17.999160,
+    '29Si': 28.976495, '30Si': 29.973770,
+    '31P': 30.973762, '33S': 32.971459, '34S': 33.967867, '36S': 35.967081,
+    '35Cl': 34.968853, '36Cl': 35.968307, '37Cl': 36.965903,
+    '79Br': 78.918338, '81Br': 80.916291,
+    '127I': 126.904473,
+};
+
+/** 一个原子的质量: 有同位素时按核素质量, 否则按元素平均原子量。 */
+function atomMass(element: string, isotope: number): number {
+    if (isotope > 0) {
+        const exact = ISOTOPE_MASS[String(isotope) + element];
+        return exact === undefined ? isotope : exact;
+    }
+    return elementMass(element);
 }
 
 /** 元素范德华半径 (表中缺失时用默认值)。 */
@@ -280,6 +312,7 @@ const ERR_BRACKET_UNCLOSED = 'unclosed_bracket'; // 方括号未闭合
 const ERR_RING_OPEN = 'unclosed_ring';           // 环号未闭合
 const ERR_RING_FORMAT = 'invalid_ring_number';   // 环号格式错误
 const ERR_RING_DUP = 'duplicate_ring_bond';      // 环闭合到已成键的原子
+const ERR_RING_BOND = 'conflicting_ring_bond';   // 环闭合两端写出了互相矛盾的键符号
 const ERR_RING_SELF = 'ring_closure_on_self';    // 环闭合到自身
 const ERR_NO_ATOM = 'no_atoms';                  // 没有原子
 const ERR_VALENCE = 'valence_error';             // 价态错误
@@ -289,6 +322,11 @@ const MAX_ATOMS_HARD = 2000;        // 硬上限: 超过直接拒绝
 const MAX_INPUT_LEN = 100000;       // 输入字符串长度上限
 const MAX_CONSTRAINT_STEP = 0.6;    // 单次距离投影允许修正的最大偏差 (Å)
 const RELAX_FACTOR = 0.5;           // 距离投影的松弛因子
+/**
+ * 两个原子再近也不该近于这个距离 (Å)。最短的真实化学键是 H–H 0.74 Å, 因此
+ * 0.60 Å 以内的原子对一定是几何缺陷 (重合或摆错), 与拓扑距离无关。
+ */
+const MIN_ATOM_DISTANCE = 0.60;
 
 /** 默认选项: 原子数上限、松弛轮数与阈值、是否加氢与居中、非键排斥强度、二面角扫描步长、片段间距。 */
 export interface SmilesOptions {
@@ -361,6 +399,7 @@ const ERROR_TEXT: { [key: string]: string } = {
     [ERR_RING_OPEN]: '存在未闭合的环',
     [ERR_RING_FORMAT]: '环编号格式错误',
     [ERR_RING_DUP]: '环闭合连接的两个原子之间已存在键',
+    [ERR_RING_BOND]: '环闭合两端的键符号互相矛盾',
     [ERR_RING_SELF]: '环闭合不能连接到自身',
     [ERR_NO_ATOM]: '没有解析出任何原子',
     [ERR_VALENCE]: '原子价态异常',
@@ -510,7 +549,13 @@ interface SmilesAtom {
     hcount: number;
     bracket: boolean;
     chirality: string;
+    /**
+     * 手性中心在方括号里写了 H (`[C@H]`): 该 H 计入取代基顺序。
+     * 顺序按"书写顺序"排, 而方括号里的 H 紧跟原子符号, 所以它排在前一个原子之后。
+     */
     stereo_h_first: boolean;
+    /** 手性中心前面还有原子 (即字符串里存在"来向"原子), H 因此排在第二而不是第一。 */
+    stereo_h_prev: boolean;
 }
 
 interface SmilesBond {
@@ -519,6 +564,12 @@ interface SmilesBond {
     order: number;
     aromatic: boolean;
     direction: string;
+    /**
+     * 该键是否由 SMILES 显式写出键符号 (`-` `=` `#` `:` `$` `/` `\`)。
+     * 只有"未写出符号"的键才在两端都是芳香原子时被提升为芳香键:
+     * 显式 `-` 是单键的明确声明 (联苯 c1ccccc1-c1ccccc1 的环间键)。
+     */
+    explicit: boolean;
 }
 
 interface Mol {
@@ -531,6 +582,8 @@ interface Mol {
 const SINGLE_BOND = 1;
 const DOUBLE_BOND = 2;
 const TRIPLE_BOND = 3;
+/** `$`: 四重键 (OpenSMILES 扩展, 如 Cr–Cr) */
+const QUADRUPLE_BOND = 4;
 const AROMATIC_BOND = 0;
 
 /** 允许不加方括号书写的两字母元素符号 */
@@ -553,6 +606,7 @@ function addAtom(mol: Mol, element: string, aromatic: boolean, charge: number, i
         bracket: bracket,
         chirality: chirality,
         stereo_h_first: false,
+        stereo_h_prev: false,
     };
     mol.atoms.push(atom);
     mol.adj.push([]);
@@ -560,12 +614,14 @@ function addAtom(mol: Mol, element: string, aromatic: boolean, charge: number, i
 }
 
 /** 追加一条键, 返回其索引; 两端邻接表各记录该键索引一次。 */
-function addBond(mol: Mol, a: number, b: number, order: number, aromatic: boolean, direction: string): number {
+function addBond(mol: Mol, a: number, b: number, order: number, aromatic: boolean,
+                 direction: string, explicit?: boolean): number {
     const bond: SmilesBond = {
         a: a, b: b,
         order: order,
         aromatic: aromatic,
         direction: direction,
+        explicit: explicit === true,
     };
     mol.bonds.push(bond);
     const index = mol.bonds.length - 1;
@@ -689,7 +745,7 @@ function parseBracketAtom(text: string, pos: number): AtomParseOutcome {
         return { ok: false, code: ERR_BRACKET };
     }
 
-    // --- 手性 @ / @@ ---
+    // --- 手性 @ / @@ / @THn / @ALn / @SPn / @TBn / @OHn ---
     if (i < n && text[i] === '@') {
         i += 1;
         if (i < n && text[i] === '@') {
@@ -697,6 +753,17 @@ function parseBracketAtom(text: string, pos: number): AtomParseOutcome {
             i += 1;
         } else {
             chirality = '@';
+            // 扩展手性类 (OpenSMILES 3.9): @TH1/@AL1 与 @ 同义, @TH2/@AL2 与 @@ 同义。
+            // 三角双锥/八面体/正方平面 (TB/OH/SP) 本引擎不建那种几何, 但仍接受语法
+            // 并按类号奇偶落成最近的四面体奇偶性 —— 拒绝整条输入比给出确定性几何
+            // 更糟, 而类号奇偶至少让同一输入恒得同一结果。
+            const cls = chiralClassAt(text, i);
+            if (cls !== null) {
+                if (cls.even) {
+                    chirality = '@@';
+                }
+                i = cls.next;
+            }
         }
     }
 
@@ -757,6 +824,33 @@ function parseBracketAtom(text: string, pos: number): AtomParseOutcome {
         chirality: chirality,
     };
     return { ok: true, fields: fields, next: i + 1 };
+}
+
+/** 扩展手性类的前缀 (OpenSMILES 3.9: @THn / @ALn / @SPn / @TBn / @OHn)。 */
+const CHIRAL_CLASS_NAMES = ['TH', 'AL', 'SP', 'TB', 'OH'];
+
+/**
+ * 读出手性类写法 `TH1` / `AL2` / `TB20` …; 不是类写法时返回 null。
+ * `even` 表示类号为偶数 (对应 @@ 一侧)。
+ */
+function chiralClassAt(text: string, pos: number): { even: boolean; next: number } | null {
+    const n = text.length;
+    for (let c = 0; c < CHIRAL_CLASS_NAMES.length; c++) {
+        const name = CHIRAL_CLASS_NAMES[c];
+        if (pos + 2 >= n || text[pos] !== name[0] || text[pos + 1] !== name[1]) {
+            continue;
+        }
+        if (!isDigit(text[pos + 2])) {
+            continue;
+        }
+        let end = pos + 3;
+        if (end < n && isDigit(text[end])) {
+            end += 1;                      // TB20 / OH30 之类的两位类号
+        }
+        const num = parseInt(text.substring(pos + 2, end), 10);
+        return { even: num % 2 === 0, next: end };
+    }
+    return null;
 }
 
 /** 检查 [ ] 内的元素符号是否以小写书写 (用于判定芳香性) */
@@ -881,7 +975,7 @@ export function parseSmiles(smiles: unknown): ParseResult {
     let pendingDir = '';
     let pendingSet = false;         // 是否已显式给出键符号
     const branchStack: number[] = [];
-    const ringOpen: { [key: number]: [number, number, boolean] } = {};   // 环号 -> (原子索引, 键级, 是否芳香)
+    const ringOpen: { [key: number]: [number, number, boolean, boolean] } = {};   // 环号 -> (原子索引, 键级, 是否芳香, 是否显式)
 
     /** 把 current 原子接上前一个原子 */
     const add = (current: number, needBond: boolean): void => {
@@ -893,7 +987,7 @@ export function parseSmiles(smiles: unknown): ParseResult {
                 aromatic = false;
                 order = SINGLE_BOND;
             }
-            addBond(mol, prev, current, order, aromatic, pendingDir);
+            addBond(mol, prev, current, order, aromatic, pendingDir, pendingSet);
         }
         prev = current;
     };
@@ -952,6 +1046,12 @@ export function parseSmiles(smiles: unknown): ParseResult {
                 pendingOrder = DOUBLE_BOND;
             } else if (ch === '#') {
                 pendingOrder = TRIPLE_BOND;
+            } else if (ch === '$') {
+                // OpenSMILES' fourth bond order (Cr–Cr and other metal–metal
+                // quadruple bonds). It is a bond, not a direction mark: letting
+                // it fall through to `pendingDir` both downgraded the order to
+                // a single bond and made the bond look cis/trans-specified.
+                pendingOrder = QUADRUPLE_BOND;
             } else if (ch === ':') {
                 pendingOrder = AROMATIC_BOND;
                 pendingArom = true;
@@ -997,17 +1097,28 @@ export function parseSmiles(smiles: unknown): ParseResult {
                 if (bondBetween(mol, other, prev) >= 0) {
                     return fail(result, ERR_RING_DUP, i - 1);
                 }
+                // 环闭合的两端都可以写键符号, 但写出的必须是同一个键。旧代码让
+                // 后写的这一端静默胜出, 于是 `C=1CCCCC-1` 这样自相矛盾的输入会
+                // 悄悄变成单键或双键, 而用户看到的结构与他写下的东西不一致。
+                if (pendingSet && entry[3] === true &&
+                    (pendingOrder !== order0 || pendingArom !== arom0)) {
+                    return fail(result, ERR_RING_BOND, i - 1);
+                }
                 let order = pendingSet ? pendingOrder : order0;
                 let arom = pendingArom || arom0;
                 if (arom && !(mol.atoms[other].aromatic && mol.atoms[prev].aromatic)) {
                     arom = false;
                     order = SINGLE_BOND;
                 }
-                addBond(mol, other, prev, order, arom, pendingDir);
+                // A symbol on either end of the ring closure states the bond
+                // (`c1ccccc-1` closes with an explicit single bond); with both
+                // ends bare, the bond is the implicit one the ring's aromatic
+                // atoms imply.
+                addBond(mol, other, prev, order, arom, pendingDir, pendingSet || entry[3]);
             } else {
                 // 注意: 环编号在闭合之后可以再次使用 (如 c1ccccc1C1CC1),
                 // 因此这里只检查"当前是否已打开", 不记录历史。
-                ringOpen[ringId] = [prev, pendingOrder, pendingArom];
+                ringOpen[ringId] = [prev, pendingOrder, pendingArom, pendingSet];
             }
             pendingOrder = SINGLE_BOND;
             pendingArom = false;
@@ -1027,6 +1138,9 @@ export function parseSmiles(smiles: unknown): ParseResult {
                                 f.hcount, true, f.chirality);
             if (f.chirality && f.hcount > 0) {
                 mol.atoms[idx].stereo_h_first = true;
+                // 该原子前面还有链尾时, 方括号里的 H 在书写顺序里排第二位
+                // (来向原子, H, 其余取代基); 中心是字符串开头时 H 才是第一位。
+                mol.atoms[idx].stereo_h_prev = prev >= 0;
             }
             add(idx, true);
             i = outcome.next;
@@ -1087,11 +1201,89 @@ export function parseSmiles(smiles: unknown): ParseResult {
 }
 
 /**
- * 把"芳香原子-芳香原子"之间的单键升级为芳香键 (order=0)。
+ * 找出所有"桥"键: 删掉它会让两端不再连通, 也就是不在任何环里的键。
+ * 迭代式 Tarjan (低值/发现序), 不用递归 —— 长链 SMILES 会把它压爆。
+ */
+function findBridgeBonds(mol: Mol): { [key: number]: boolean } {
+    const n = mol.atoms.length;
+    const disc: number[] = new Array<number>(n);
+    const low: number[] = new Array<number>(n);
+    const bridges: { [key: number]: boolean } = {};
+    for (let i = 0; i < n; i++) {
+        disc[i] = -1;
+        low[i] = 0;
+    }
+    let time = 0;
+    const stackNode: number[] = [];
+    const stackEdge: number[] = [];
+    const stackParent: number[] = [];
+    for (let root = 0; root < n; root++) {
+        if (disc[root] >= 0) {
+            continue;
+        }
+        disc[root] = time;
+        low[root] = time;
+        time += 1;
+        stackNode.push(root);
+        stackEdge.push(0);
+        stackParent.push(-1);
+        while (stackNode.length > 0) {
+            const top = stackNode.length - 1;
+            const cur = stackNode[top];
+            const list = mol.adj[cur];
+            if (stackEdge[top] < list.length) {
+                const k = list[stackEdge[top]];
+                stackEdge[top] += 1;
+                if (k === stackParent[top]) {
+                    continue;                       // 回到父边, 不算环
+                }
+                const bond = mol.bonds[k];
+                const nxt = bond.b === cur ? bond.a : bond.b;
+                if (disc[nxt] >= 0) {
+                    if (disc[nxt] < low[cur]) {
+                        low[cur] = disc[nxt];       // 回边
+                    }
+                } else {
+                    disc[nxt] = time;
+                    low[nxt] = time;
+                    time += 1;
+                    stackNode.push(nxt);
+                    stackEdge.push(0);
+                    stackParent.push(k);
+                }
+                continue;
+            }
+            stackNode.pop();
+            stackEdge.pop();
+            const parentBond = stackParent.pop() as number;
+            if (stackNode.length > 0) {
+                const p = stackNode[stackNode.length - 1];
+                if (low[cur] < low[p]) {
+                    low[p] = low[cur];
+                }
+                if (low[cur] > disc[p]) {
+                    bridges[parentBond] = true;
+                }
+            }
+        }
+    }
+    return bridges;
+}
+
+/**
+ * 把"芳香原子-芳香原子"之间**未写键符号**的单键升级为芳香键 (order=0)。
+ * 显式写出的 `-` 是单键声明 (联苯的环间键), 不在此升级;
+ * 不在环里的键同样不升级 —— 芳香键必须是一个环的一部分, 联苯
+ * `c1ccccc1c1ccccc1` 的环间键未写 `-` 时曾因此被当成 1.5 键,
+ * 使两个苯环被画成共轭的联苯烯。
  */
 function markAromaticBonds(mol: Mol): void {
+    const bridges = findBridgeBonds(mol);
     for (let k = 0; k < mol.bonds.length; k++) {
         const bond = mol.bonds[k];
+        if (bond.explicit || bridges[k] === true) {
+            continue;
+        }
         const a = mol.atoms[bond.a];
         const b = mol.atoms[bond.b];
         if (a.aromatic && b.aromatic && bond.order === SINGLE_BOND) {
@@ -1210,13 +1402,15 @@ function expandHydrogens(mol: Mol): Mol {
             element: atom.element, aromatic: atom.aromatic, charge: atom.charge,
             isotope: atom.isotope, hcount: atom.hcount, bracket: atom.bracket,
             chirality: atom.chirality, stereo_h_first: atom.stereo_h_first,
+            stereo_h_prev: atom.stereo_h_prev,
         };
         out.atoms.push(newAtom);
         out.adj.push([]);
     }
     for (let k = 0; k < mol.bonds.length; k++) {
         const bond = mol.bonds[k];
-        out.bonds.push({ a: bond.a, b: bond.b, order: bond.order, aromatic: bond.aromatic, direction: bond.direction });
+        out.bonds.push({ a: bond.a, b: bond.b, order: bond.order, aromatic: bond.aromatic,
+                         direction: bond.direction, explicit: bond.explicit });
         const index = out.bonds.length - 1;
         out.adj[bond.a].push(index);
         out.adj[bond.b].push(index);
@@ -1235,9 +1429,10 @@ function expandHydrogens(mol: Mol): Mol {
                 bracket: false,
                 chirality: '',
                 stereo_h_first: false,
+                stereo_h_prev: false,
             });
             out.adj.push([]);
-            out.bonds.push({ a: i, b: hidx, order: SINGLE_BOND, aromatic: false, direction: '' });
+            out.bonds.push({ a: i, b: hidx, order: SINGLE_BOND, aromatic: false, direction: '', explicit: false });
             const bi = out.bonds.length - 1;
             out.adj[i].push(bi);
             out.adj[hidx].push(bi);
@@ -1480,8 +1675,13 @@ function atomHybridization(mol: Mol, index: number): number {
     return SP3;
 }
 
-/** 小环的环内角。环太大时返回 null (用杂化角) */
-function ringAngleFor(size: number, aromaticLike: boolean): number | null {
+/**
+ * 环内角。`planarLike` 为真表示该环必须共面 (芳香环或全 sp² 环), 此时环内角由环
+ * 的几何决定: 七元环要 128.6°、八元环要 135°, 拿 sp² 的 120° 去卡它, 环永远
+ * 闭不上 (旧代码只在 3/4/5 元环里查表, 芳香七元环因此生成失败)。
+ * 饱和的大环返回 null, 交回元素的理论杂化角, 允许环褶皱。
+ */
+function ringAngleFor(size: number, planarLike: boolean): number | null {
     if (size === 3) {
         return 60.0;
     }
@@ -1489,9 +1689,16 @@ function ringAngleFor(size: number, aromaticLike: boolean): number | null {
         return 90.0;
     }
     if (size === 5) {
-        return aromaticLike ? AROMATIC_RING_ANGLE[5] : 104.0;
+        return planarLike ? PLANAR_RING_ANGLE[5] : 104.0;
     }
-    return null;
+    if (!planarLike) {
+        return null;
+    }
+    const known = PLANAR_RING_ANGLE[size];
+    if (known !== undefined) {
+        return known;
+    }
+    return 180.0 - 360.0 / size;
 }
 
 /**
@@ -1504,11 +1711,11 @@ function bondAngleAt(mol: Mol, center: number, nb1: number, nb2: number,
     if (r1 >= 0 && r1 === r2 && r1 < ringSize.length) {
         const size = ringSize[r1];
         const atoms = mol.atoms;
-        let aromaticLike = atoms[center].aromatic;
-        if (!aromaticLike) {
-            aromaticLike = hybrid === SP2;
+        let planarLike = atoms[center].aromatic;
+        if (!planarLike) {
+            planarLike = hybrid === SP2;
         }
-        const angle = ringAngleFor(size, aromaticLike);
+        const angle = ringAngleFor(size, planarLike);
         if (angle !== null) {
             return angle;
         }
@@ -1538,6 +1745,13 @@ function buildTorsionTargets(mol: Mol, rings: number[][], ringEdge: { [key: stri
     const hybridCache: number[] = [];
     for (let i = 0; i < atoms.length; i++) {
         hybridCache[i] = atomHybridization(mol, i);
+    }
+    // 环上的原子: 用于识别"环与环之间的单键"(联苯、联萘), 见下面的 sp2-sp2 分支
+    const ringAtom: { [key: number]: boolean } = {};
+    for (let r = 0; r < rings.length; r++) {
+        for (let t = 0; t < rings[r].length; t++) {
+            ringAtom[rings[r][t]] = true;
+        }
     }
 
     for (let k = 0; k < mol.bonds.length; k++) {
@@ -1596,14 +1810,23 @@ function buildTorsionTargets(mol: Mol, rings: number[][], ringEdge: { [key: stri
             if (refB < 0) {
                 refB = subsB[0];
             }
-            const dirA = bondDirection(mol, a, refA);
-            const dirB = bondDirection(mol, b, refB);
+            const dirA = bondDirectionOutward(mol, a, refA);
+            const dirB = bondDirectionOutward(mol, b, refB);
             if (dirA && dirB) {
-                base = dirA === dirB ? 180.0 : 0.0;
+                // 两个取代基的键都指向同一边 -> 顺式 (0°), 各朝一边 -> 反式 (180°)
+                base = dirA === dirB ? 0.0 : 180.0;
             } else {
                 base = 180.0;              // 未说明时默认反式
             }
         } else if (hybridCache[a] === SP2 && hybridCache[b] === SP2) {
+            // 两个环之间的单键 (联苯、联萘) 不强制共面: 两个环各自已经被环内角
+            // 固定成平面, 再把环间二面角钉在 180°, 每个环都要整体刚性转一次,
+            // 长链上误差逐环叠加 —— 实测十个苯环的链出现 3.4 Å 的"键"与 94 处
+            // 重叠。这种键的转动势垒很低, 交给非键扫描 (默认反式仍由 bond.order
+            // === 2 的双键分支负责)。
+            if (ringAtom[a] === true && ringAtom[b] === true) {
+                continue;
+            }
             refA = subsA[0];
             refB = subsB[0];
             base = 180.0;
@@ -1679,6 +1902,34 @@ function bondDirection(mol: Mol, a: number, b: number): string {
         if ((bond.a === a && bond.b === b) || (bond.a === b && bond.b === a)) {
             return bond.direction;
         }
+    }
+    return '';
+}
+
+/**
+ * a-b 键的方向记号, 统一到"从 a 指向 b"的读数。
+ *
+ * SMILES 的 `/` `\` 说的是"沿书写方向 (bond.a → bond.b) 向上", 而同一个符号在
+ * 双键两侧的含义取决于这条单键是朝双键写还是背双键写:
+ *   `F/C=C/F`   第一条键写作 F→C (朝双键), 与第二条 C→F (背双键) 同号却是反式;
+ *   `C(/F)=C/F` 第一条键写作 C→F (背双键), 与第二条同号就是顺式。
+ * 因此比较前必须把"朝双键写"的那一端翻过来, 否则分支写法 (`C(/F)=C/F`) 的
+ * E/Z 会整个反过来。
+ */
+function bondDirectionOutward(mol: Mol, a: number, b: number): string {
+    const list = mol.adj[a];
+    for (let t = 0; t < list.length; t++) {
+        const bond = mol.bonds[list[t]];
+        if (!((bond.a === a && bond.b === b) || (bond.a === b && bond.b === a))) {
+            continue;
+        }
+        if (!bond.direction) {
+            return '';
+        }
+        if (bond.a === a) {
+            return bond.direction;         // 书写方向就是 a→b
+        }
+        return bond.direction === '/' ? '\\' : '/';
     }
     return '';
 }
@@ -1881,10 +2132,21 @@ interface PlacementCtx {
     elements: string[];
     radii: number[];
     grid: SpatialGrid;
+    /** 环查询表: 供 1-3 理想距离用 (环内角与开链角不同)。 */
+    ringEdge: { [key: string]: number };
+    ringSize: number[];
+    /** 每个原子的杂化类型 (SP3/SP2/SP)。 */
+    hybrid: number[];
 }
 
 /**
- * 候选位置的代价 = 成环键长度偏差 + 严重重叠 + 非键排斥。
+ * 候选位置的代价 = 成环键长度偏差 + 1-3 (同中心两根键) 的理想距离偏差
+ * + 严重重叠 + 非键排斥。
+ *
+ * 1-3 项是"二面角扫描能不能看见同一个中心上的其它取代基"的关键: 只排除
+ * 1-2/1-3 距离而不给目标, 甲基上几个 H 对所有二面角都是 0 分, 扫描会停在第一个
+ * 候选角上, 把 H 摆成 1.2 Å 甚至重合。它只在没有别的证据可用时才生效 (见下面的
+ * 判据), 因为对成环键它会把笼状分子拉变形。
  */
 function placementEnergy(ctx: PlacementCtx, pos: Vec3, curr: number, newIndex: number,
                          coords: Vec3[], placed: boolean[], near: { [key: number]: boolean }): number {
@@ -1903,6 +2165,33 @@ function placementEnergy(ctx: PlacementCtx, pos: Vec3, curr: number, newIndex: n
         const target = bondLength(elements[newIndex], elements[other], bond.order);
         const dd = vDist(pos, coords[other]);
         energy += 20.0 * (dd - target) * (dd - target);
+    }
+    // 1-3 对: 与 curr 共享中心、已经摆好的另一根键。两项判据:
+    //   * 新原子是氢 —— 氢是唯一没有"1-4 以上非键斥力"可用来区分候选角度的
+    //     取代基 (它到同中心其它取代基的拓扑距离全是 2);
+    //   * 两根键都通向端基 (CF4、CCl4 这种等价取代基) —— 同样没有任何 1-4
+    //     斥力可以分开它们。
+    // 除此之外不加这项: 笼状分子 (金刚烷) 的成环键会被 1-3 项拉扯, 实测键长
+    // 偏差从 0.002 Å 涨到 0.2 Å。
+    const siblings = mol.adj[curr];
+    const newTerminal = mol.adj[newIndex].length === 1;
+    const lNew = bondLength(elements[curr], elements[newIndex],
+                            bondOrderOf(mol, curr, newIndex));
+    for (let t = 0; t < siblings.length; t++) {
+        const bond = mol.bonds[siblings[t]];
+        const sib = bond.b === curr ? bond.a : bond.b;
+        if (sib === newIndex || !placed[sib]) {
+            continue;
+        }
+        if (elements[newIndex] !== 'H' && !(newTerminal && mol.adj[sib].length === 1)) {
+            continue;
+        }
+        const angle = bondAngleAt(mol, curr, newIndex, sib, ctx.ringEdge, ctx.ringSize, ctx.hybrid[curr]);
+        const lSib = bondLength(elements[curr], elements[sib], bond.order);
+        const cosv = Math.cos(angle * Math.PI / 180.0);
+        const target13 = Math.sqrt(lNew * lNew + lSib * lSib - 2.0 * lNew * lSib * cosv);
+        const d13 = vDist(pos, coords[sib]);
+        energy += 4.0 * (d13 - target13) * (d13 - target13);
     }
     const candidates = ctx.grid.query(pos);
     for (let t = 0; t < candidates.length; t++) {
@@ -1975,6 +2264,47 @@ function scanDihedral(ctx: PlacementCtx, curr: number, newIndex: number, ref1: n
 }
 
 /**
+ * 放置一个原子, 并保证它不与任何已摆放的原子重合。
+ *
+ * 同一个中心上几个等价取代基 (甲基的三个 H、四氟化碳的四个 F) 对二面角扫描
+ * 而言是完全等价的; 一旦扫描给出的角度与某个已放置原子相同, 两个原子就叠在
+ * 一起, 而"把重合的两点分开"是距离约束做不到的事 (方向无定义)。这里在真正的
+ * 重合 (< 0.35 Å) 发生时, 绕 anchor→ref1 轴按 60° 步长换一个位置。
+ */
+function distinctPosition(ctx: PlacementCtx, coords: Vec3[], index: number, anchor: number,
+                          ref1: number, ref2: Vec3 | null, length: number, angle: number,
+                          dihedral: number, placed: boolean[]): Vec3 {
+    const pos = placeAtom(coords[anchor], coords[ref1], ref2, length, angle, dihedral);
+    if (!overlapsPlaced(ctx, pos, index, coords, placed)) {
+        return pos;
+    }
+    for (let step = 1; step <= 5; step++) {
+        const alt = placeAtom(coords[anchor], coords[ref1], ref2, length, angle,
+                              dihedral + 60.0 * step);
+        if (!overlapsPlaced(ctx, alt, index, coords, placed)) {
+            return alt;
+        }
+    }
+    return pos;
+}
+
+/** pos 是否落在某个已摆放原子 0.35 Å 以内 (等于重合)。 */
+function overlapsPlaced(ctx: PlacementCtx, pos: Vec3, index: number, coords: Vec3[],
+                        placed: boolean[]): boolean {
+    const near = ctx.grid.query(pos);
+    for (let t = 0; t < near.length; t++) {
+        const idx = near[t];
+        if (idx === index || !placed[idx]) {
+            continue;
+        }
+        if (vDist(pos, coords[idx]) < 0.35) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
  * 生成初始三维坐标。
  */
 function generateCoordinates(mol: Mol, targets: { [key: number]: { [key: string]: number } },
@@ -1986,6 +2316,9 @@ function generateCoordinates(mol: Mol, targets: { [key: number]: { [key: string]
         elements: [],
         radii: [],
         grid: new SpatialGrid(5.0),
+        ringEdge: ringEdge,
+        ringSize: ringSize,
+        hybrid: [],
     };
     for (let i = 0; i < n; i++) {
         ctx.elements.push(mol.atoms[i].element);
@@ -2004,6 +2337,7 @@ function generateCoordinates(mol: Mol, targets: { [key: number]: { [key: string]
         parent[i] = -1;
         hybridization[i] = atomHybridization(mol, i);
     }
+    ctx.hybrid = hybridization;
 
     let step = opts.dihedral_step;
     if (step <= 0.0) {
@@ -2207,7 +2541,8 @@ function generateCoordinates(mol: Mol, targets: { [key: number]: { [key: string]
                                         step, target);
             }
 
-            coords[index] = placeAtom(coords[anchor], coords[ref1], ref2Coord, length, angle, dihedral);
+            coords[index] = distinctPosition(ctx, coords, index, anchor, ref1, ref2Coord,
+                                             length, angle, dihedral, placed);
             placed[index] = true;
             grid.add(index, coords[index]);
         }
@@ -2537,6 +2872,32 @@ function buildPairList(mol: Mol, coords: Vec3[], excluded: { [key: number]: bool
 }
 
 /**
+ * 把两个完全重合的原子分开时用的方向: 立方体的 26 个方向, 按原子对索引取一个。
+ * 必须与随机数无关 —— 同一输入要得到同一坐标。
+ */
+const SEPARATION_DIRECTIONS: Vec3[] = (function (): Vec3[] {
+    const out: Vec3[] = [];
+    for (let x = -1; x <= 1; x++) {
+        for (let y = -1; y <= 1; y++) {
+            for (let z = -1; z <= 1; z++) {
+                if (x === 0 && y === 0 && z === 0) {
+                    continue;
+                }
+                out.push(vNorm([x, y, z]));
+            }
+        }
+    }
+    return out;
+})();
+
+/** 由原子对索引确定的分离方向 (确定性, 无随机数)。 */
+function separationDirection(i: number, j: number): Vec3 {
+    let h = (i * 73856093) ^ (j * 19349663);
+    h = h < 0 ? -h : h;
+    return SEPARATION_DIRECTIONS[h % SEPARATION_DIRECTIONS.length];
+}
+
+/**
  * 迭代投影求解全部约束。返回实际迭代轮数。
  */
 function relax(mol: Mol, coords: Vec3[], constraints: number[][], planarRings: number[][],
@@ -2588,6 +2949,22 @@ function relax(mol: Mol, coords: Vec3[], constraints: number[][], planarRings: n
             const dz = pj[2] - pi[2];
             const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
             if (dist < 1e-9) {
+                // 两点完全重合: 距离约束没有方向可言。旧代码在这里 continue,
+                // 于是重合的原子永远不会被分开 (把它们摆到一起的那条约束本来是
+                // 唯一能把它们拉回目标距离的东西)。给一个由索引决定的确定性方向,
+                // 各推开一半, 后续迭代接着按目标距离收敛。
+                const axis = separationDirection(i, j);
+                const half = 0.5 * Math.min(target, MAX_CONSTRAINT_STEP) * RELAX_FACTOR;
+                pi[0] -= axis[0] * half;
+                pi[1] -= axis[1] * half;
+                pi[2] -= axis[2] * half;
+                pj[0] += axis[0] * half;
+                pj[1] += axis[1] * half;
+                pj[2] += axis[2] * half;
+                const moved = Math.abs(axis[0]) * half + Math.abs(axis[1]) * half + Math.abs(axis[2]) * half;
+                if (moved > maxMove) {
+                    maxMove = moved;
+                }
                 continue;
             }
             // 限制单次修正幅度: 两点几乎重合时未加限幅会造成周期性震荡而无法收敛。
@@ -3137,13 +3514,19 @@ function collectBranch(mol: Mol, center: number, start: number): number[] {
 
 /**
  * 返回手性中心的取代基顺序; 无法处理时返回 null。
+ *
+ * 顺序 = SMILES 里的书写顺序 (OpenSMILES 3.9): 前面那个"来向"原子最先, 然后是
+ * 方括号里的 H (它紧跟原子符号书写), 再是其余取代基按出现次序。
+ * 旧代码把 H 放在整个列表最前面, 于是 `[C@@H]` 与等价的显式 H 写法
+ * `[C@@]([H])` 得到相反的对映体 —— 交换两个相邻取代基正好翻转手性。
  */
 function tetrahedralOrder(mol: Mol, center: number): number[] | null {
     const neighbors = neighborAtoms(mol, center);
     if (neighbors.length !== 4) {
         return null;
     }
-    if (!mol.atoms[center].stereo_h_first) {
+    const atom = mol.atoms[center];
+    if (!atom.stereo_h_first) {
         return neighbors;
     }
     let hy = -1;
@@ -3156,8 +3539,14 @@ function tetrahedralOrder(mol: Mol, center: number): number[] | null {
     if (hy < 0) {
         return neighbors;
     }
-    const ordered: number[] = [hy];
-    for (let t = 0; t < neighbors.length; t++) {
+    const ordered: number[] = [];
+    let start = 0;
+    if (atom.stereo_h_prev && neighbors[0] !== hy) {
+        ordered.push(neighbors[0]);        // 来向原子: 在字符串中先于中心出现
+        start = 1;
+    }
+    ordered.push(hy);
+    for (let t = start; t < neighbors.length; t++) {
         if (neighbors[t] !== hy) {
             ordered.push(neighbors[t]);
         }
@@ -3189,6 +3578,34 @@ function swapBranches(mol: Mol, coords: Vec3[], center: number, idxA: number, id
 }
 
 /**
+ * 每个取代基"从中心断开后"能到达的整支原子 (不含中心)。
+ * `order` 与返回值按下标对齐。
+ */
+function ligandBranches(mol: Mol, center: number, order: number[]): number[][] {
+    const out: number[][] = [];
+    for (let t = 0; t < order.length; t++) {
+        out.push(collectBranch(mol, center, order[t]));
+    }
+    return out;
+}
+
+/**
+ * 该分支能否单独整体旋转: 分支里不能出现中心的其它取代基。
+ * 环上的手性中心两支由环连在一起, 转动一支会连带另一支, 把环夹扁或拉断。
+ */
+function branchIsFree(order: number[], branch: number[]): boolean {
+    for (let t = 0; t < order.length; t++) {
+        if (order[t] === branch[0]) {
+            continue;                      // 分支自己的起点不算"闯进别人"
+        }
+        if (branch.indexOf(order[t]) >= 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
  * 按 @/@@ 修正四面体手性中心。返回被修正的中心个数。
  */
 function fixChirality(mol: Mol, coords: Vec3[], opts: SmilesOptions): number {
@@ -3207,20 +3624,30 @@ function fixChirality(mol: Mol, coords: Vec3[], opts: SmilesOptions): number {
         if (chiralParity(coords, center, order) === want) {
             continue;
         }
-        // 优先交换原子数最少的两个分支, 减少被移动的原子数
+        // 交换两支 = 翻转中心。只在"互不相交"的分支里选, 并且优先最小的两支,
+        // 被移动的原子最少; 环上的中心若找不到两支独立分支, 就保持原样 ——
+        // 一个未修正的手性中心远好于一个被撕开的环。
+        const branches = ligandBranches(mol, center, order);
         const candidates: number[][] = [];
         for (let t = 0; t < order.length; t++) {
-            candidates.push([collectBranch(mol, center, order[t]).length, order[t]]);
+            if (!branchIsFree(order, branches[t])) {
+                continue;
+            }
+            candidates.push([branches[t].length, order[t]]);
         }
-        candidates.sort((p, q) => (p[0] - q[0]) || (p[1] - q[1]));
         if (candidates.length < 2) {
             continue;
         }
+        candidates.sort((p, q) => (p[0] - q[0]) || (p[1] - q[1]));
         const idxA = candidates[0][1];
         const idxB = candidates[1][1];
         if (swapBranches(mol, coords, center, idxA, idxB)) {
             if (chiralParity(coords, center, order) === want) {
                 fixed += 1;
+            } else {
+                // 交换后仍未达到目标构型 (几何退化): 转回去, 不留下一个既非原
+                // 构型也非目标构型的结构。
+                swapBranches(mol, coords, center, idxA, idxB);
             }
         }
     }
@@ -3246,7 +3673,7 @@ export interface SmilesAtomDetail {
     z: number;
 }
 
-/** 单键信息 (键明细表的一项)。 */
+/** 单键信息 (键明细表的一项)。order 为 1/2/3/4 (4 = `$` 四重键); 芳香键另行标记。 */
 export interface SmilesBondDetail {
     a: number;
     b: number;
@@ -3262,6 +3689,12 @@ export interface SmilesQuality {
     worstBond: number;
     minNonbondedRatio: number;
     clashes: number;
+    /**
+     * 距离小于 0.60 Å 的原子对数 (与拓扑距离无关)。`clashes` 只统计拓扑距离
+     * > 4 的非键接触, 因此同一中心上两个叠在一起的氢永远不在它眼里 —— 这个
+     * 计数是给"重合"这种退化情况的唯一窗口。
+     */
+    overlaps: number;
 }
 
 /** analyze() 的分子信息 */
@@ -3356,19 +3789,21 @@ export function analyzeSmiles(smiles: unknown, options?: Partial<SmilesOptions>)
     const ringEdge = maps.ring_edge;
     const ringSize = maps.ring_size;
 
+    // 规模上限必须在展开氢之前判: 加氢会把原子数扩大一倍以上, 等图建好再拒绝
+    // 等于先用一个超大分子把内存吃光 (旧顺序正是这样)。
+    const limitError = atomLimitError(atomCountAfterHydrogens(heavy, opts.add_hydrogens), opts.max_atoms);
+    if (limitError) {
+        result.error = ERR_TOO_LARGE;
+        result.errorText = limitError;
+        return result;
+    }
+
     let mol: Mol;
     if (opts.add_hydrogens) {
         mol = expandHydrogens(heavy);
     } else {
         // 保留 hcount (即隐式氢数目) 供调用方参考, 但不生成氢原子坐标
         mol = heavy;
-    }
-
-    const limitError = atomLimitError(atomCountAfterHydrogens(heavy, opts.add_hydrogens), opts.max_atoms);
-    if (limitError) {
-        result.error = ERR_TOO_LARGE;
-        result.errorText = limitError;
-        return result;
     }
 
     const targets = buildTorsionTargets(mol, rings, ringEdge);
@@ -3471,10 +3906,10 @@ function buildInfo(smiles: string, mol: Mol, heavy: Mol, coords: Vec3[], rings: 
         ringList.push(rings[r].slice());
     }
 
-    const formula = hillFormula(elements);
+    const formula = hillFormula(atoms);
     let mass = 0.0;
-    for (let i = 0; i < elements.length; i++) {
-        mass += elementMass(elements[i]);
+    for (let i = 0; i < atoms.length; i++) {
+        mass += atomMass(atoms[i].element, atoms[i].isotope);
     }
     let totalCharge = 0;
     for (let i = 0; i < atoms.length; i++) {
@@ -3554,6 +3989,7 @@ function measureQuality(mol: Mol, coords: Vec3[], bondList: SmilesBondDetail[]):
     }
     let minRatio: number | null = null;
     let closePairs = 0;
+    let overlaps = 0;
     for (let i = 0; i < n; i++) {
         const candidates = grid.query(coords[i]);
         for (let t = 0; t < candidates.length; t++) {
@@ -3561,11 +3997,16 @@ function measureQuality(mol: Mol, coords: Vec3[], bondList: SmilesBondDetail[]):
             if (j <= i) {
                 continue;
             }
+            const d = vDist(coords[i], coords[j]);
+            if (d < MIN_ATOM_DISTANCE) {
+                // 重合自检不看拓扑: 一根 0.5 Å 的"键"同样是缺陷, 而下面的非键
+                // 统计按定义只看拓扑距离 > 4 的原子对。
+                overlaps += 1;
+            }
             const key = pairKey(i, j, n);
             if (excluded[key] === true || tight[key] === true) {
                 continue;
             }
-            const d = vDist(coords[i], coords[j]);
             const contact = vdwRadius(mol.atoms[i].element) + vdwRadius(mol.atoms[j].element);
             if (contact <= 0.0) {
                 continue;
@@ -3585,42 +4026,62 @@ function measureQuality(mol: Mol, coords: Vec3[], bondList: SmilesBondDetail[]):
         // 最近非键接触距离 / 范德华半径和; -1 表示分子太小, 没有可统计的原子对
         minNonbondedRatio: minRatio !== null ? minRatio : -1.0,
         clashes: closePairs,
+        overlaps: overlaps,
     };
 }
 
-/** Hill 排序分子式: C 优先, 然后 H, 其余按字母序 */
-function hillFormula(elements: string[]): string {
+/**
+ * Hill 排序分子式: C 优先, 然后 H, 其余按字母序。
+ * 同位素按核素符号单独计数, 写成 `[2H]`、`[13C]` (`13CH4` 写作 `[13C]H4`,
+ * CD4 写作 `C[2H]4`), 排序时仍归在所属元素里, 同一元素内按质量数从小到大。
+ */
+function hillFormula(atoms: SmilesAtom[]): string {
+    const elements: string[] = [];
+    const isotopes: { [key: string]: number[] } = {};
     const counts: { [key: string]: number } = {};
-    for (let i = 0; i < elements.length; i++) {
-        let symbol = elements[i];
-        if (symbol === '*') {
-            symbol = 'R';
+    for (let i = 0; i < atoms.length; i++) {
+        const symbol = atoms[i].element === '*' ? 'R' : atoms[i].element;
+        const iso = atoms[i].isotope;
+        if (isotopes[symbol] === undefined) {
+            isotopes[symbol] = [];
+            elements.push(symbol);
         }
-        counts[symbol] = (counts[symbol] === undefined ? 0 : counts[symbol]) + 1;
+        const list = isotopes[symbol];
+        if (list.indexOf(iso) < 0) {
+            list.push(iso);
+            list.sort((a, b) => a - b);
+        }
+        const key = symbol + '|' + iso;
+        counts[key] = (counts[key] === undefined ? 0 : counts[key]) + 1;
     }
-    const parts: Array<[string, number]> = [];
-    if (counts['C'] !== undefined) {
-        parts.push(['C', counts['C']]);
-        delete counts['C'];
-        if (counts['H'] !== undefined) {
-            parts.push(['H', counts['H']]);
-            delete counts['H'];
-        }
-    } else {
-        if (counts['H'] !== undefined) {
-            parts.push(['H', counts['H']]);
-            delete counts['H'];
-        }
+    const ordered: string[] = [];
+    if (isotopes['C'] !== undefined) {
+        ordered.push('C');
     }
-    const rest = Object.keys(counts).sort();
+    if (isotopes['H'] !== undefined) {
+        ordered.push('H');
+    }
+    const rest = elements.filter((s) => s !== 'C' && s !== 'H').sort();
     for (let i = 0; i < rest.length; i++) {
-        parts.push([rest[i], counts[rest[i]]]);
+        ordered.push(rest[i]);
     }
     let text = '';
-    for (let i = 0; i < parts.length; i++) {
-        text += parts[i][0];
-        if (parts[i][1] > 1) {
-            text += String(parts[i][1]);
+    for (let i = 0; i < ordered.length; i++) {
+        const symbol = ordered[i];
+        const list = isotopes[symbol];
+        for (let t = 0; t < list.length; t++) {
+            const iso = list[t];
+            const count = counts[symbol + '|' + iso];
+            if (iso > 0) {
+                // 同位素写成 `[2H]` / `[13C]`: 裸写 "2H4" 接在 "C" 后面会被读成
+                // C2H4 (乙烯), 而它其实是 CD4。
+                text += '[' + String(iso) + symbol + ']';
+            } else {
+                text += symbol;
+            }
+            if (count > 1) {
+                text += String(count);
+            }
         }
     }
     return text;
@@ -3721,6 +4182,50 @@ export function toXyz(info: SmilesInfo, comment?: string): string {
 /** 经验价态 (元素在常见中性化合物中的成键数); 未收录元素返回 0 = 不按经验补氢。 */
 export function empiricalValence(symbol: string): number {
     return baseValence(symbol);
+}
+
+/** 主族元素的族号; 未收录返回 0。用于按电荷推出形式价态。 */
+const ELEMENT_GROUP: { [key: string]: number } = {
+    H: 1, B: 13, C: 14, N: 15, O: 16, F: 17,
+    Si: 14, P: 15, S: 16, Cl: 17, Ge: 14, As: 15,
+    Se: 16, Br: 17, Sn: 14, Sb: 15, Te: 16, I: 17,
+};
+
+/**
+ * 带电中心的经验价态 (成键数):
+ *   第 15–17 族 - 阳离子多一根键、阴离子少一根 (N⁺ 4、O⁻ 1、F⁻ 0);
+ *   第 13 族 - 阴离子多一根、阳离子少一根 (B⁻ 4、B⁺ 2);
+ *   第 14 族 - 正负电荷都少一根 (C⁺ 3、C⁻ 3)。
+ * 这就是 `[O-]` 不该被补氢、而中性 O 该补到两根键的原因: 加氢只能按中心和它的
+ * 电荷判断"还差几个氢", 不能一律按中性价态算。
+ * 未收录的元素退回"电荷让成键数下降"的保守规则。
+ */
+export function empiricalChargedValence(symbol: string, charge: number): number {
+    const base = baseValence(symbol);
+    if (!isFinite(charge) || charge === 0) {
+        return base;
+    }
+    const q = Math.round(charge);
+    if (base <= 0) {
+        return base;
+    }
+    const group = ELEMENT_GROUP[symbol] === undefined ? 0 : ELEMENT_GROUP[symbol];
+    let target: number;
+    if (group >= 15) {
+        target = base + q;
+    } else if (group === 13) {
+        target = base - q;
+    } else {
+        target = base - Math.abs(q);
+    }
+    if (target < 0) {
+        target = 0;
+    }
+    const ceiling = maxValence(symbol);
+    if (ceiling > 0 && target > ceiling) {
+        target = ceiling;
+    }
+    return target;
 }
 
 /** 经验键长 (Å): 显式表优先, 未收录时用共价半径和; order 0/省略 = 芳香键。 */

@@ -184,15 +184,47 @@ function hasUnlistedType(typat: number[], count: number, znucl: string[]): boole
     return false;
 }
 
+/**
+ * The element `typat` names for one site.
+ *
+ * A type index `znucl` does not list is not the first element: the warning
+ * beside this reader says such a site is a dummy, and the structure has to
+ * agree with what it says. A file that states no `znucl` names nothing at all,
+ * so every site of it is the dummy element too.
+ */
+function typeElement(typat: number[], index: number, znucl: string[]): string {
+    const type = typat[index] !== undefined ? typat[index] : 1;
+    if (znucl.length === 0) return 'X';
+    if (!isFinite(type) || type < 1 || type > znucl.length) return 'X';
+    return znucl[type - 1];
+}
+
+/**
+ * The token list a keyword holds for one dataset.
+ *
+ * ABINIT's multi-dataset rule is *inheritance*, not "dataset or global": a
+ * variable a dataset does not state keeps the value of the dataset before it,
+ * and only a dataset that inherits nothing falls back to the unsuffixed
+ * (global) value. Reading only `KEY<n>` and `KEY` therefore lost the geometry
+ * of every dataset after the one that stated it — `xred2` is dataset 3's
+ * geometry too, and a file that states it only for dataset 2 showed nothing.
+ * The search runs downwards so a value stated for a *later* dataset cannot
+ * leak backwards.
+ */
 function datasetKey(input: TokenizedInput, key: string, dataset: number): string[] | undefined {
-    const suffix = key + String(dataset);
-    if (dataset > 1 && input.values[suffix]) return input.values[suffix];
+    for (let d = dataset; d >= 2; d--) {
+        const suffix = key + String(d);
+        if (input.values[suffix]) return input.values[suffix];
+    }
     return input.values[key];
 }
 
+/** Where the value `datasetKey` returns was written, for the position-family choice. */
 function datasetOrder(input: TokenizedInput, key: string, dataset: number): number {
-    const suffix = key + String(dataset);
-    if (dataset > 1 && input.order[suffix] !== undefined) return input.order[suffix];
+    for (let d = dataset; d >= 2; d--) {
+        const suffix = key + String(d);
+        if (input.order[suffix] !== undefined) return input.order[suffix];
+    }
     return input.order[key] !== undefined ? input.order[key] : -1;
 }
 
@@ -296,8 +328,7 @@ function geometryFromInput(input: TokenizedInput): AbinitGeometry | null {
     const sites: Site[] = [];
     const count = natom > 0 ? Math.min(natom, Math.floor(positions.length / 3)) : Math.floor(positions.length / 3);
     for (let i = 0; i < count; i++) {
-        const type = typat[i] !== undefined ? typat[i] : 1;
-        const element = znucl[type - 1] || znucl[0] || 'X';
+        const element = typeElement(typat, i, znucl);
         const x = positions[3 * i];
         const y = positions[3 * i + 1];
         const z = positions[3 * i + 2];
@@ -484,8 +515,7 @@ function parseOutvarBlock(content: string): OutvarGeometry {
         const n = natom > 0 ? Math.min(natom, Math.floor(positions.list.length / 3)) : Math.floor(positions.list.length / 3);
         if (natom <= 0) natom = n;
         for (let i = 0; i < n; i++) {
-            const type = typat[i] !== undefined ? typat[i] : 1;
-            const element = znucl[type - 1] || znucl[0] || 'X';
+            const element = typeElement(typat, i, znucl);
             const x = positions.list[3 * i];
             const y = positions.list[3 * i + 1];
             const z = positions.list[3 * i + 2];
@@ -519,14 +549,24 @@ function parseOutvarBlock(content: string): OutvarGeometry {
     }
 
     // Final positions: the numbered block after a relaxation is Cartesian
-    // Angstrom and supersedes the echoed xred.
+    // Angstrom and supersedes the echoed xred. A blank line or a rule between
+    // the header and its rows is part of the print, not the end of the table:
+    // breaking on it left the run's own coordinates unread and the *input*
+    // geometry on screen as if it were the relaxed one.
     let finalCart: number[][] = [];
     for (let i = lines.length - 1; i >= 0; i--) {
         if (!/cartesian coordinates\s*\((angstrom|bohr)\)\s*at end/i.test(lines[i])) continue;
         const bohr = /bohr/i.test(lines[i]);
         const rows: number[][] = [];
         for (let j = i + 1; j < lines.length; j++) {
-            const parts = lines[j].trim().split(/\s+/);
+            const text = lines[j].trim();
+            if (text === '' || /^[-=_*#]+$/.test(text)) {
+                // A separator only belongs above the table; one after it ends
+                // the block rather than letting the scan run into the next.
+                if (rows.length > 0) break;
+                continue;
+            }
+            const parts = text.split(/\s+/);
             if (parts.length < 4) break;
             const x = parseFloat(parts[1]);
             const y = parseFloat(parts[2]);
@@ -540,9 +580,8 @@ function parseOutvarBlock(content: string): OutvarGeometry {
     if (finalCart.length > 0) {
         if (natom <= 0) natom = finalCart.length;
         sites = finalCart.slice(0, natom).map((row, i) => {
-            const type = typat[i] !== undefined ? typat[i] : 1;
             return {
-                element: znucl[type - 1] || znucl[0] || 'X',
+                element: typeElement(typat, i, znucl),
                 cart: row
             } as Site;
         });
