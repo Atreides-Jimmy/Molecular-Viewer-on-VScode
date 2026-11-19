@@ -215,10 +215,9 @@ export interface CrystalData {
      */
     asymBonds?: Bond[];
     /**
-     * The bonds the file itself states (`_geom_bond`), already expanded into
-     * `baseAtoms` indices with the periodic image each bond points at. Only the
-     * CIF reader fills it, because only CIF carries a bond table among the
-     * formats read here.
+     * The bonds the file itself states (`_geom_bond` in a CIF, the `Bonds`
+     * section of a LAMMPS data file), already expanded into `baseAtoms` indices
+     * with the periodic image each bond points at.
      *
      * This is evidence, not the session's bond list: `baseBonds` stays the
      * geometry-perceived list, and the page merges this table over it once, on
@@ -328,6 +327,112 @@ export interface OptThresholds {
     rmsDisplacement?: number;
 }
 
+/**
+ * One point of a relaxed potential-energy-surface scan.
+ *
+ * A scan drives one internal coordinate through a series of values and lets the
+ * optimiser relax everything else at each of them, so a point is not an
+ * optimisation step: it is the *converged* geometry of one scan value, with the
+ * energy and the forces printed at that geometry. The intermediate steps a
+ * point took are counted (`steps`) and the frames are kept in the viewer, but
+ * the number that belongs to a point is the one its own optimisation ended on.
+ */
+export interface ScanPoint {
+    /** 1-based scan point, as the file numbers it. */
+    point: number;
+    /** Total energy of the optimized geometry, Hartree. */
+    energy?: number;
+    /** Largest force component at that geometry, Hartree/Bohr. */
+    maxForce?: number;
+    /** RMS force at that geometry, Hartree/Bohr. */
+    rmsForce?: number;
+    /** Largest displacement of the point's last step, Bohr. */
+    maxDisplacement?: number;
+    /** RMS displacement of the point's last step, Bohr. */
+    rmsDisplacement?: number;
+    /** Optimizer steps this point needed (absent when the file printed none). */
+    steps?: number;
+    /** 0-based index of the frame holding the point's optimized geometry. */
+    frame?: number;
+    /** True when the point's own optimisation reached its stationary point. */
+    converged?: boolean;
+    /** Value of the scanned coordinate at this point (see `ScanResult.coord`). */
+    coord?: number;
+}
+
+/** The scanned coordinate a run drives, as the file names it. */
+export interface ScanCoordinate {
+    /** `R(1,6)` or `D(4,3,5,6)` — the internal coordinate, as printed. */
+    label: string;
+    /** Angstrom for a bond length, degrees for an angle or a dihedral. */
+    unit: 'A' | 'deg';
+}
+
+/** A relaxed scan: its points, in the order the file took them. */
+export interface ScanResult {
+    points: ScanPoint[];
+    /** How many points the run set out to take, when it said so. */
+    total?: number;
+    /** The coordinate the scan drives, when the file names it. */
+    coord?: ScanCoordinate;
+}
+
+/** The half of an IRC path a sequence of points was computed along. */
+export type IrcDirection = 'forward' | 'reverse';
+
+/** One point of one IRC path. */
+export interface IrcPoint {
+    /** Path series, 1-based in file order: the file's own `Path Number` for a
+     *  single IRC job; sequential when a `--Link1--` file runs the analysis
+     *  twice and both runs would otherwise claim path 1. */
+    path: number;
+    /** 0-based point number on that path, as printed (`Point Number`). */
+    point: number;
+    /** Energy at that point, Hartree. */
+    energy?: number;
+    /** 0-based index of the frame holding the point's geometry. */
+    frame?: number;
+}
+
+/**
+ * One IRC calculation: the path halves it printed and the transition state the
+ * path starts from. A file can hold several (`--Link1--`), and each is shown as
+ * one joined reaction path rather than one chart per half.
+ */
+export interface IrcRun {
+    /** Path series numbers of this run, in the order the file printed them. */
+    paths: number[];
+    /** 0-based frame index of the transition-state geometry printed before the
+     *  path began, when the file printed one. It is the barrier both halves
+     *  start from, so the joined path passes through it once. */
+    tsFrame?: number;
+    /** Energy of that geometry, Hartree. */
+    tsEnergy?: number;
+}
+
+/** An intrinsic-reaction-coordinate run: every point of every path. */
+export interface IrcResult {
+    points: IrcPoint[];
+    /** One entry per path, in the order the file printed them. */
+    paths: { path: number; count: number; dir?: IrcDirection }[];
+    /** One entry per IRC calculation, in file order. */
+    runs: IrcRun[];
+}
+
+/**
+ * The two dimensional analyses a Gaussian output can carry beside its
+ * optimisation series: a relaxed scan and an IRC path.
+ *
+ * Both are sequences of *structures along a coordinate*, which is why they are
+ * carried together and shown instead of the convergence panel — the panel that
+ * plots optimiser steps would plot every step of every scan point as one
+ * series, which is not a convergence at all.
+ */
+export interface LogPathways {
+    scan?: ScanResult;
+    irc?: IrcResult;
+}
+
 export interface NormalMode {
     index: number;
     frequency: number;
@@ -338,11 +443,119 @@ export interface NormalMode {
     displacements: number[][];
 }
 
+/**
+ * One sphere of a solvation cavity, in Angstrom: the centre the program placed
+ * it at and the radius it gave it.
+ */
+export interface CavitySphere {
+    x: number;
+    y: number;
+    z: number;
+    r: number;
+}
+
+/**
+ * The solvent cavity a file states.
+ *
+ * A formatted checkpoint lists the spheres themselves (`PCM-SphereRadii` and
+ * `PCM-SphereLoc`), which is what the viewer draws. A log states the *cavity*,
+ * not its spheres: the type, the solvent, how many spheres the algorithm used
+ * and the area and volume it measured. Both are kept in this one shape so the
+ * panel can describe either without asking which file it came from, and
+ * `spheres` absent is what tells it that nothing can be drawn.
+ */
+export interface SolventCavity {
+    spheres?: CavitySphere[];
+    /**
+     * The solvation model the job ran: `SMD`, `PCM`, `CPCM`, `IEFPCM`, … — from
+     * the route's `SCRF=(…)` or, when the route names none, the model named by
+     * the continuum banner the file prints.
+     */
+    model?: string;
+    /** `Scaled VdW (van der Waals Surface) (Alpha=1.100)` — the file's own words. */
+    type?: string;
+    solvent?: string;
+    /** The scaling factor the cavity type states, when it states one. */
+    alpha?: number;
+    /** Surface area in Angstrom squared, when the file states it. */
+    area?: number;
+    /** Volume in Angstrom cubed, when the file states it. */
+    volume?: number;
+    /** How many spheres the file says the cavity has. */
+    sphereCount?: number;
+    /** Where the numbers came from — a checkpoint lists the spheres, a log does not. */
+    source: 'fchk' | 'log';
+}
+
+/**
+ * A set of orbital energies with the occupation the file implies.
+ *
+ * A log prints an eigenvalue dump per SCF and never the coefficients; a
+ * formatted checkpoint prints the coefficients and no occupations. Both arrive
+ * in this shape so the level diagram can be drawn from either, and only the
+ * checkpoint's orbitals can become a surface.
+ */
+export interface OrbitalSpinLevels {
+    /** `Alpha` or `Beta`, as the file names it. */
+    label: string;
+    /** Orbital energies in Hartree, in the file's own order. */
+    energies: number[];
+    /** Per-orbital occupation (2, 1 or 0). */
+    occupations: number[];
+    /** How many of the orbitals are occupied. */
+    occupied: number;
+}
+
+/** What a file says about its orbitals, without the coefficients. */
+export interface OrbitalLevels {
+    spins: OrbitalSpinLevels[];
+    /** True when the file printed no beta block. */
+    closedShell: boolean;
+    /** 0-based index of the frame whose SCF the eigenvalues describe, in the
+     *  final frame list. A log prints one dump per SCF and the panel draws the
+     *  last, so this is the geometry the run ended on; a checkpoint states no
+     *  frame (its orbitals belong to its one geometry). */
+    frame?: number;
+}
+
+/**
+ * One geometry of a multi-step output, before the host turns it into a frame.
+ *
+ * A CP2K molecular-dynamics run, an ABACUS `MD_dump` and a Quantum ESPRESSO
+ * output that prints one `ATOMIC_POSITIONS` block per ionic step all describe
+ * one system over time. The parser keeps those geometries here — Cartesian
+ * coordinates only, because every frame of a document shares the elements and
+ * bonds of the structure itself — and the host gives them the frame list a
+ * binary trajectory already has. A file that states a single geometry carries
+ * no array at all, so nothing downstream changes for it.
+ */
+export interface StructureStep {
+    /** The step the file names (`MD step 12`, `Step 3`), for the frame list. */
+    label: string;
+    /** Cartesian coordinates in Angstrom, `3 * atoms.length` numbers. */
+    xyz: number[];
+    /** The cell that geometry was computed in, in Angstrom, when the file states one. */
+    lattice?: number[][];
+}
+
 export interface MolecularData {
     atoms: Atom[];
     bonds: Bond[];
     title: string;
     hasExplicitBonds: boolean;
+    /**
+     * Bonds the file states *beside* the table `bonds` holds, where the table
+     * is not the whole truth about the structure.
+     *
+     * A PDB's `SSBOND` records are the case this exists for: they name a
+     * disulfide by residue, not the structure's bond list, so they must be
+     * added to what bond perception finds instead of replacing it — stating
+     * them as `hasExplicitBonds` would have claimed the file lists every bond,
+     * and a protein would have opened with two bonds. `ensureBonds` merges them
+     * over the perceived set and clears the field, so nothing downstream ever
+     * sees a half-stated structure.
+     */
+    statedBonds?: Bond[];
     filePath?: string;
     gjfMeta?: GjfMeta;
     charge?: number;
@@ -369,6 +582,19 @@ export interface MolecularData {
      * the reader had to assume or leave out.
      */
     trajectory?: TrajectoryInfo;
+    /**
+     * The further geometries a multi-step output states, in file order, when it
+     * states more than one (a molecular-dynamics run, a variable-cell
+     * relaxation). Absent on every file whose geometry is one structure.
+     *
+     * `atoms` is the geometry the parser chose to show — the last complete step
+     * for CP2K and ABACUS, the converged block for Quantum ESPRESSO — and the
+     * host opens the first of these steps as frame 1, exactly as it does for a
+     * binary trajectory.
+     */
+    steps?: StructureStep[];
+    /** How many geometries the file holds, before the sampling above. */
+    stepsInFile?: number;
 }
 
 /** What a trajectory file contributes, beside the frames themselves. */

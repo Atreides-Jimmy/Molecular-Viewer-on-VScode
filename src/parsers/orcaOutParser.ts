@@ -70,6 +70,14 @@ export interface OrcaFrame {
     stepLabel: string;
     charge?: number;
     multiplicity?: number;
+    /** Which job of a compound run printed this geometry (0-based). Frames of
+     *  one job share an atom list; a later job may describe another molecule,
+     *  so the per-job checks (odd-sized blocks, step series) are scoped by it. */
+    job?: number;
+    /** The optimizer step whose geometry this is, 1-based inside its own job —
+     *  the same link a Gaussian log's frames carry, so the convergence chart
+     *  marks the step on screen instead of guessing from the frame index. */
+    optStep?: number;
     /** Single-point energy (Hartree) of the geometry in this frame.
      *
      *  ORCA prints the geometry of a cycle BEFORE the energy computed at it
@@ -234,43 +242,65 @@ function skipCoordinateBlock(lines: string[], start: number): number {
 const MAX_FRAMES_PER_ENERGY = 8;
 
 /**
- * Keep only the frames that describe the molecule the run is about.
+ * Keep only the frames that describe the molecule the job is about.
  *
- * Every geometry of one ORCA output has the same atom count, so a frame with a
- * different one is not a geometry of this run: it is a block a killed job left
+ * Every geometry of one job has the same atom count, so a frame with a
+ * different one is not a geometry of that job: it is a block a killed job left
  * half written (the file simply ends in the middle of it, and the rows that did
  * get written parse into a shorter "molecule"), or a stray block from a source
  * concatenated onto the file. Both are worse than showing nothing — a truncated
  * structure silently loses bonds and atoms.
  *
- * The count that wins is the most frequent one, so a run whose FIRST block was
- * the truncated one is treated exactly like a run whose last block was, and the
+ * The count that wins is the most frequent one, so a job whose FIRST block was
+ * the truncated one is treated exactly like a job whose last block was, and the
  * tie-break takes the larger count (the complete molecule) rather than the
- * smaller. A file where every block has the same count — the ordinary case —
+ * smaller. A job where every block has the same count — the ordinary case —
  * passes through untouched.
+ *
+ * The check is per JOB: a compound run may legitimately print a 10-atom
+ * optimisation and then a 20-atom one, and comparing them against each other
+ * deleted whichever molecule happened to be the minority — the whole second job
+ * in the common two-job file.
  */
-function dropOddSizedFrames<T extends { atoms: Atom[] }>(frames: T[]): T[] {
+function dropOddSizedFrames<T extends { atoms: Atom[]; job?: number }>(frames: T[]): T[] {
     if (frames.length <= 1) return frames;
-    const seen = new Map<number, number>();
-    for (const f of frames) seen.set(f.atoms.length, (seen.get(f.atoms.length) || 0) + 1);
-    let best = -1;
-    let bestCount = 0;
-    seen.forEach((count, size) => {
-        if (count > bestCount || (count === bestCount && size > best)) {
-            best = size;
-            bestCount = count;
-        }
-    });
-    if (best < 0) return frames;
-    return frames.filter(f => f.atoms.length === best);
+    const keep = new Set<T>();
+    // The jobs in the order they first appear, so the output order is the
+    // input order whatever the grouping does.
+    const jobOrder: number[] = [];
+    const byJob = new Map<number, T[]>();
+    for (const f of frames) {
+        const j = f.job === undefined ? 0 : f.job;
+        let list = byJob.get(j);
+        if (!list) { list = []; byJob.set(j, list); jobOrder.push(j); }
+        list.push(f);
+    }
+    for (const j of jobOrder) {
+        const list = byJob.get(j) as T[];
+        if (list.length <= 1) { for (const f of list) keep.add(f); continue; }
+        const seen = new Map<number, number>();
+        for (const f of list) seen.set(f.atoms.length, (seen.get(f.atoms.length) || 0) + 1);
+        let best = -1;
+        let bestCount = 0;
+        seen.forEach((count, size) => {
+            if (count > bestCount || (count === bestCount && size > best)) {
+                best = size;
+                bestCount = count;
+            }
+        });
+        for (const f of list) if (f.atoms.length === best) keep.add(f);
+    }
+    return frames.filter(f => keep.has(f));
 }
 
 /** Bind a freshly read single-point energy to the geometry it was computed at.
  *  ORCA's order is geometry → energy, so the frame waiting for it is the last
  *  one that still has none; frames that already carry an energy are stepped
- *  over, never overwritten. */
-function bindEnergy(frames: OrcaFrame[], energy: number): void {
+ *  over, never overwritten. The search stops at the job boundary: an energy of
+ *  the second job is not the missing energy of the first job's last geometry. */
+function bindEnergy(frames: OrcaFrame[], energy: number, job: number): void {
     for (let k = frames.length - 1; k >= 0 && k >= frames.length - MAX_FRAMES_PER_ENERGY; k--) {
+        if (frames[k].job !== undefined && frames[k].job !== job) break;
         if (frames[k].energy == null) frames[k].energy = energy;
     }
 }
@@ -287,8 +317,14 @@ const CONV_ROW_RE = /^(Energy change|RMS gradient|MAX gradient|RMS step|MAX step
 /** `TolMAXG  ....  3.0000e-04` — one line of the tolerances block. */
 const TOL_LINE_RE = /Tol(MAXG|RMSG|MAXD|RMSD)\s+\.+\s*(\S+)/;
 
+/** The `|Geometry convergence|` banner. ORCA prints it above the table and
+ *  closes the table with a plain rule of dashes; a writer that repeats the
+ *  banner below it as well would otherwise have that closing line read as the
+ *  header of a second table. */
+const CONV_BANNER_RE = /^-{3,}.*Geometry convergence.*-{3,}$/;
+
 /** `|  1> ! B3LYP def2-SVP Opt freq` — one echoed input line. */
-const INPUT_ECHO_RE = /^\|\s*\d+>\s?(.*)$/;
+const INPUT_ECHO_RE = /^\|\s*(\d+)>\s?(.*)$/;
 
 /**
  * Read the echoed input file, which gives the three things the rest of the
@@ -296,20 +332,37 @@ const INPUT_ECHO_RE = /^\|\s*\d+>\s?(.*)$/;
  * and the charge/multiplicity of the run (the info panel and bond perception).
  *
  * ORCA 4/5/6 all echo the input as `|  n> <text>`; the echo repeats for every
- * job in a compound run, so the values are simply kept up to date as they are
- * met. Returns whether the line belonged to the echo.
+ * job in a compound run, so the values are kept up to date as they are met.
+ * The line number restarts at 1 for each job, which is the only certain mark of
+ * a job boundary: a second `|  1>` means the values of the previous job no
+ * longer describe what follows, and `newJob` says so. The accumulated keywords
+ * of the job that just ended are handed over in `finished` and the state starts
+ * empty, so one job's keywords are never appended to the next job's line.
+ * Returns whether the line belonged to the echo.
  */
 interface EchoState {
     keywords: string[];
     raw: string;
     charge?: number;
     multiplicity?: number;
+    /** Set on the line that opens a new job's echo (see above). */
+    newJob?: boolean;
+    /** The previous job's simple-input lines, moved here on that same line. */
+    finished?: { keywords: string[]; raw: string };
 }
 
 function readEchoLine(line: string, state: EchoState): boolean {
     const m = INPUT_ECHO_RE.exec(line);
     if (!m) return false;
-    const text = m[1].trim();
+    const text = m[2].trim();
+    state.newJob = parseInt(m[1], 10) === 1 && state.raw !== '';
+    if (state.newJob) {
+        state.charge = undefined;
+        state.multiplicity = undefined;
+        state.finished = { keywords: state.keywords, raw: state.raw };
+        state.keywords = [];
+        state.raw = '';
+    }
 
     if (text.charAt(0) === '!') {
         // The simple input line; wrapped `!` lines are joined in order.
@@ -334,7 +387,7 @@ function readEchoLine(line: string, state: EchoState): boolean {
 /** The keyword list as the route panel expects it. ORCA's simple input has no
  *  `key=value` option syntax (options live in `%block` directives), so every
  *  token is a keyword with no options. */
-function buildOrcaRoute(state: EchoState): RouteSection | undefined {
+function buildOrcaRoute(state: { keywords: string[]; raw: string }): RouteSection | undefined {
     if (state.keywords.length === 0) return undefined;
     const keywords: RouteKeyword[] = state.keywords.map(k => ({ name: k, options: [] }));
     const hasOpt = state.keywords.some(k => {
@@ -543,8 +596,10 @@ function buildModes(
     return modes.length > 0 ? modes : undefined;
 }
 
-export function parseOrcaOut(content: string): OrcaLogResult {
+export function parseOrcaOut(content: string, onProgress?: (fraction: number) => void): OrcaLogResult {
     const lines = content.split(/\r?\n/);
+    const lineTotal = lines.length || 1;
+    let lastProgress = 0;
 
     const frames: OrcaFrame[] = [];
     /** The Ångström blocks are the primary geometry source; the A.U. blocks are
@@ -554,15 +609,46 @@ export function parseOrcaOut(content: string): OrcaLogResult {
     const auFrames: OrcaFrame[] = [];
 
     const echo: EchoState = { keywords: [], raw: '' };
-    let charge: number | undefined;
-    let multiplicity: number | undefined;
+
+    /** Everything one job states about itself. A compound run (ORCA restarts
+     *  its input echo for each job) can change the charge, the convergence
+     *  targets and the step series between jobs; keeping them per job is what
+     *  stops the previous molecule's values from describing the next one. */
+    interface OrcaJobState {
+        charge?: number;
+        multiplicity?: number;
+        steps: OptStep[];
+        thresholds: OptThresholds;
+    }
+    const jobs: OrcaJobState[] = [{ steps: [], thresholds: {} }];
+    let jobIndex = 0;
+    const job = (): OrcaJobState => jobs[jobIndex];
+
+    /** The file's own title: the first job's simple-input line. */
+    let title = '';
+
+    /** One route section per job: the panel lists the keywords of the job it
+     *  describes instead of every job's keywords concatenated. */
+    const routes: RouteSection[] = [];
+    const addRoute = (src: { keywords: string[]; raw: string }): void => {
+        const section = buildOrcaRoute(src);
+        if (section) {
+            routes.push(section);
+            if (title === '') title = section.raw;
+        }
+    };
 
     /** Label the next geometry block gets, set by the banner that precedes it. */
     let pendingLabel = '';
+    /** Whether that banner was an optimization cycle (or the final evaluation),
+     *  which is what gives the block its `optStep` link. */
+    let pendingStepKind: 'cycle' | 'final' | '' = '';
     let lastEnergy: number | undefined;
-    const optSteps: OptStep[] = [];
-    let stepCounter = 0;
-    const thresholds: OptThresholds = {};
+    /** Atom count of the geometry the frequency set was computed for, taken
+     *  when the `VIBRATIONAL FREQUENCIES` block is met. The displacement matrix
+     *  is 3N rows of THAT structure; reading N off the last frame of the file
+     *  made a compound run's modes belong to the wrong molecule. */
+    let modeAtomCount = 0;
 
     /** The frequency set being assembled: `freqs` comes from `VIBRATIONAL
      *  FREQUENCIES`, `dofs` from the `NORMAL MODES` matrix after it and
@@ -580,13 +666,35 @@ export function parseOrcaOut(content: string): OrcaLogResult {
 
     let i = 0;
     while (i < lines.length) {
+        if (onProgress && i - lastProgress >= 2048) {
+            onProgress(i / lineTotal);
+            lastProgress = i;
+        }
         const line = lines[i];
 
         // --- Echoed input file (keywords, charge, multiplicity) --------------
         // The char check keeps the regex off the overwhelming majority of lines.
         if (line.charCodeAt(0) === 124 /* '|' */ && readEchoLine(line, echo)) {
-            if (echo.charge !== undefined) charge = echo.charge;
-            if (echo.multiplicity !== undefined) multiplicity = echo.multiplicity;
+            if (echo.newJob) {
+                // A new job states its own charge, multiplicity, keywords and
+                // convergence tables. The previous job's values describe the
+                // previous geometry list, so they are closed here rather than
+                // carried into this one — which used to number the second job's
+                // steps after the first job's, stamp the first job's energy on
+                // the second job's first step and label its first geometry with
+                // the first job's last cycle.
+                if (echo.finished) {
+                    addRoute(echo.finished);
+                    echo.finished = undefined;
+                }
+                jobIndex++;
+                jobs.push({ steps: [], thresholds: {} });
+                pendingLabel = '';
+                pendingStepKind = '';
+                lastEnergy = undefined;
+            }
+            if (echo.charge !== undefined) job().charge = echo.charge;
+            if (echo.multiplicity !== undefined) job().multiplicity = echo.multiplicity;
             i++;
             continue;
         }
@@ -596,6 +704,7 @@ export function parseOrcaOut(content: string): OrcaLogResult {
         if (line.indexOf('GEOMETRY OPTIMIZATION CYCLE') >= 0) {
             const m = line.match(/CYCLE\s+(\d+)/);
             pendingLabel = m ? 'Cycle ' + m[1] : 'Cycle';
+            pendingStepKind = 'cycle';
             i++;
             continue;
         }
@@ -603,6 +712,7 @@ export function parseOrcaOut(content: string): OrcaLogResult {
         // geometry the run actually converged to, printed once after HURRAY.
         if (line.indexOf('FINAL ENERGY EVALUATION AT THE STATIONARY POINT') >= 0) {
             pendingLabel = 'Final';
+            pendingStepKind = 'final';
             i++;
             continue;
         }
@@ -619,10 +729,19 @@ export function parseOrcaOut(content: string): OrcaLogResult {
                         title: label,
                         hasExplicitBonds: false,
                         stepLabel: label,
-                        charge,
-                        multiplicity
+                        charge: job().charge,
+                        multiplicity: job().multiplicity,
+                        job: jobIndex,
+                        // A cycle's geometry is the structure the table printed
+                        // after it relaxes; the final evaluation repeats the
+                        // last cycle's geometry, so it names that same step.
+                        optStep: pendingStepKind === 'cycle' ? job().steps.length + 1
+                            : (pendingStepKind === 'final' && job().steps.length > 0
+                                ? job().steps.length : undefined)
                     });
                 }
+                pendingLabel = '';
+                pendingStepKind = '';
                 i = block.end;
                 continue;
             }
@@ -641,10 +760,16 @@ export function parseOrcaOut(content: string): OrcaLogResult {
                         title: label,
                         hasExplicitBonds: false,
                         stepLabel: label,
-                        charge,
-                        multiplicity
+                        charge: job().charge,
+                        multiplicity: job().multiplicity,
+                        job: jobIndex,
+                        optStep: pendingStepKind === 'cycle' ? job().steps.length + 1
+                            : (pendingStepKind === 'final' && job().steps.length > 0
+                                ? job().steps.length : undefined)
                     });
                 }
+                pendingLabel = '';
+                pendingStepKind = '';
                 i = block.end;
                 continue;
             }
@@ -656,7 +781,7 @@ export function parseOrcaOut(content: string): OrcaLogResult {
             const m = line.match(/(-?\d+\.\d+(?:[EeDd][-+]?\d+)?)/);
             if (m) {
                 lastEnergy = parseFloat(m[1].replace(/[Dd]/, 'E'));
-                bindEnergy(liveFrames(), lastEnergy);
+                bindEnergy(liveFrames(), lastEnergy, jobIndex);
             }
             i++;
             continue;
@@ -667,7 +792,7 @@ export function parseOrcaOut(content: string): OrcaLogResult {
             const m = line.match(/Total Energy\s*:\s*(-?\d+\.\d+)\s*Eh/);
             if (m) {
                 lastEnergy = parseFloat(m[1]);
-                bindEnergy(liveFrames(), lastEnergy);
+                bindEnergy(liveFrames(), lastEnergy, jobIndex);
             }
             i++;
             continue;
@@ -679,7 +804,7 @@ export function parseOrcaOut(content: string): OrcaLogResult {
         // *difference*, not an energy, so it is not stored as one; the step's
         // energy is the `FINAL SINGLE POINT ENERGY` printed for its geometry.
         if (line.indexOf('Geometry convergence') >= 0) {
-            const step: OptStep = { step: stepCounter + 1, energy: lastEnergy };
+            const step: OptStep = { step: job().steps.length + 1, energy: lastEnergy };
             let j = i + 1;
             let matched = 0;
             let guard = 0;
@@ -700,10 +825,11 @@ export function parseOrcaOut(content: string): OrcaLogResult {
                         // targets the run was actually held to.
                         const tol = parseFloat((m[3] || '').replace(/[Dd]/, 'E'));
                         if (isFinite(tol)) {
-                            if (m[1] === 'MAX gradient' && thresholds.maxForce === undefined) thresholds.maxForce = tol;
-                            else if (m[1] === 'RMS gradient' && thresholds.rmsForce === undefined) thresholds.rmsForce = tol;
-                            else if (m[1] === 'MAX step' && thresholds.maxDisplacement === undefined) thresholds.maxDisplacement = tol;
-                            else if (m[1] === 'RMS step' && thresholds.rmsDisplacement === undefined) thresholds.rmsDisplacement = tol;
+                            const th = job().thresholds;
+                            if (m[1] === 'MAX gradient' && th.maxForce === undefined) th.maxForce = tol;
+                            else if (m[1] === 'RMS gradient' && th.rmsForce === undefined) th.rmsForce = tol;
+                            else if (m[1] === 'MAX step' && th.maxDisplacement === undefined) th.maxDisplacement = tol;
+                            else if (m[1] === 'RMS step' && th.rmsDisplacement === undefined) th.rmsDisplacement = tol;
                         }
                         matched++;
                     }
@@ -713,9 +839,16 @@ export function parseOrcaOut(content: string): OrcaLogResult {
                 j++;
             }
             if (matched > 0) {
-                optSteps.push(step);
-                stepCounter++;
-                i = j;
+                job().steps.push(step);
+                // Close the table: skip the blank line that follows it and the
+                // rule that ends it. A closing line that repeats the banner
+                // text would otherwise be taken for the header of another
+                // table, and the rows of the NEXT cycle would be counted as
+                // this cycle's.
+                let k = j;
+                while (k < lines.length && lines[k].trim() === '') k++;
+                if (k < lines.length && CONV_BANNER_RE.test(lines[k].trim())) k++;
+                i = k;
             } else {
                 // Not a real table (a mention of one, or a print-suppressed run):
                 // step over the header only, never over the lines that follow it.
@@ -732,10 +865,11 @@ export function parseOrcaOut(content: string): OrcaLogResult {
             if (m) {
                 const v = parseFloat(m[2].replace(/[Dd]/, 'E'));
                 if (isFinite(v)) {
-                    if (m[1] === 'MAXG') thresholds.maxForce = v;
-                    else if (m[1] === 'RMSG') thresholds.rmsForce = v;
-                    else if (m[1] === 'MAXD') thresholds.maxDisplacement = v;
-                    else if (m[1] === 'RMSD') thresholds.rmsDisplacement = v;
+                    const th = job().thresholds;
+                    if (m[1] === 'MAXG') th.maxForce = v;
+                    else if (m[1] === 'RMSG') th.rmsForce = v;
+                    else if (m[1] === 'MAXD') th.maxDisplacement = v;
+                    else if (m[1] === 'RMSD') th.rmsDisplacement = v;
                 }
             }
             i++;
@@ -750,6 +884,11 @@ export function parseOrcaOut(content: string): OrcaLogResult {
             pendingFreqs = res.freqs.size > 0 ? res.freqs : null;
             pendingDofs = null;
             pendingIntensities.clear();
+            // The displacement matrix that follows states 3N rows of the
+            // geometry printed just above it — the frequency job's, which is not
+            // always the last frame of a compound run.
+            const list = liveFrames();
+            modeAtomCount = list.length > 0 ? list[list.length - 1].atoms.length : 0;
             i = res.end;
             continue;
         }
@@ -784,8 +923,12 @@ export function parseOrcaOut(content: string): OrcaLogResult {
             }
             if (found < 0) { i++; continue; }
             j = found;
-            let guard = 0;
-            while (j < lines.length && guard++ < 400) {
+            // One row per mode, until the first line that is not a row (the
+            // blank line and the `The epsilon …` note under the table). A mode
+            // count is never guessed at: a 400-mode cap truncated the second
+            // half of every large molecule's spectrum (3N-6 rows), so the table
+            // itself — not a fixed budget — decides where it ends.
+            while (j < lines.length) {
                 const t = lines[j].trim();
                 const m = /^(\d+):\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)/.exec(t);
                 if (!m) break;
@@ -803,49 +946,78 @@ export function parseOrcaOut(content: string): OrcaLogResult {
     // The A.U. fallback is used only when no Ångström geometry was found; a
     // half-written block at either end of the file is dropped from whichever
     // list is used.
-    const source = dropOddSizedFrames(frames.length > 0 ? frames : auFrames);
+    const raw = frames.length > 0 ? frames : auFrames;
 
     // A coordinate block comes before the `SCF SETTINGS` section that states the
     // charge, so a frame created before that point is filled in here. A frame
-    // that already carries a value keeps it: a compound run can change the
-    // charge between jobs and each job's frames must keep their own.
-    if (charge !== undefined || multiplicity !== undefined) {
-        for (const f of source) {
-            if (f.charge === undefined && charge !== undefined) f.charge = charge;
-            if (f.multiplicity === undefined && multiplicity !== undefined) f.multiplicity = multiplicity;
-        }
+    // that already carries a value keeps it, and each frame is filled from ITS
+    // OWN job: a compound run can change the charge between jobs and each job's
+    // frames must keep their own.
+    for (const f of raw) {
+        const js = jobs[f.job === undefined ? 0 : f.job];
+        if (!js) continue;
+        if (f.charge === undefined && js.charge !== undefined) f.charge = js.charge;
+        if (f.multiplicity === undefined && js.multiplicity !== undefined) f.multiplicity = js.multiplicity;
+    }
+    const source = dropOddSizedFrames(raw);
+
+    // The step series the charts draw is one job's: the last job that printed a
+    // convergence table. Concatenating every job plotted two unrelated
+    // optimisations as one curve, and a step of the second job inherited the
+    // first job's energy. A frame of another job carries no link into this
+    // series (its own numbering would address the wrong row), so the link is
+    // dropped instead of pointing at somebody else's step.
+    let seriesJob = jobs[jobs.length - 1];
+    let seriesIndex = jobs.length - 1;
+    for (let k = jobs.length - 1; k >= 0; k--) {
+        if (jobs[k].steps.length > 0) { seriesJob = jobs[k]; seriesIndex = k; break; }
+    }
+    for (const f of source) {
+        if (f.optStep !== undefined && f.job !== seriesIndex) f.optStep = undefined;
     }
 
     // Labels are composed once, when every fact they mention is known — the same
     // `(Charge=0 Mult=1)` suffix a Gaussian log's `Step k` frames carry, so a
-    // trajectory reads the same whichever program wrote it.
-    const suffix = (charge !== undefined && multiplicity !== undefined)
-        ? ' (Charge=' + charge + ' Mult=' + multiplicity + ')'
-        : '';
+    // trajectory reads the same whichever program wrote it. The suffix is taken
+    // from the frame's own values, never from the last job's globals: a
+    // compound run that changed the charge used to label every job's frames
+    // with the final one, contradicting the `f.charge` beside it.
     for (const f of source) {
+        const suffix = (f.charge !== undefined && f.multiplicity !== undefined)
+            ? ' (Charge=' + f.charge + ' Mult=' + f.multiplicity + ')'
+            : '';
         f.stepLabel = f.stepLabel + suffix;
         f.title = f.stepLabel;
     }
 
-    // The frequency set was assembled while scanning; it is built once here, when
-    // the IR intensities that follow it are known as well.
-    const modeAtomCount = source.length > 0 ? source[source.length - 1].atoms.length : 0;
+    // The frequency set was assembled while scanning, with the atom count of the
+    // geometry it was computed for. A file that ends on another structure still
+    // has no modes for that one, and the panel would animate vectors that do not
+    // belong to the atoms on screen; the fallback below only applies when the
+    // block was found before any geometry.
+    const atomsForModes = modeAtomCount > 0
+        ? modeAtomCount
+        : (source.length > 0 ? source[source.length - 1].atoms.length : 0);
     const modes = pendingFreqs
-        ? buildModes(pendingFreqs, pendingDofs || [], modeAtomCount, pendingIntensities)
+        ? buildModes(pendingFreqs, pendingDofs || [], atomsForModes, pendingIntensities)
         : undefined;
 
-    const route = buildOrcaRoute(echo);
-    const hasThresholds = thresholds.maxForce !== undefined || thresholds.rmsForce !== undefined ||
-        thresholds.maxDisplacement !== undefined || thresholds.rmsDisplacement !== undefined;
+    // The last job's route, when the file ended inside an echo that has not been
+    // closed by another job's `|  1>` yet.
+    addRoute(echo);
+    const th = seriesJob.thresholds;
+    const hasThresholds = th.maxForce !== undefined || th.rmsForce !== undefined ||
+        th.maxDisplacement !== undefined || th.rmsDisplacement !== undefined;
 
+    onProgress?.(1);
     return {
         frames: source,
-        title: echo.raw,
-        optSteps: optSteps.length > 0 ? optSteps : undefined,
+        title: title || echo.raw,
+        optSteps: seriesJob.steps.length > 0 ? seriesJob.steps : undefined,
         normalModes: modes,
-        routes: route ? [route] : undefined,
-        optThresholds: hasThresholds ? thresholds : undefined,
-        charge,
-        multiplicity
+        routes: routes.length > 0 ? routes : undefined,
+        optThresholds: hasThresholds ? th : undefined,
+        charge: jobs[jobIndex].charge,
+        multiplicity: jobs[jobIndex].multiplicity
     };
 }

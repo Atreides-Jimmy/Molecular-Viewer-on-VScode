@@ -34,12 +34,50 @@ function cellFromBoxValues(box: number[]): number[][] | null {
     return null;
 }
 
-/** Float from a fixed-width slice, or undefined when the slice is not one. */
-function sliceNumber(line: string, start: number, end: number): number | undefined {
-    if (line.length < end) return undefined;
-    const text = line.slice(start, end).trim();
-    const v = parseFloat(text);
-    return isFinite(v) ? v : undefined;
+/** The first three numbers of a text, whatever the field widths around them. */
+function firstThreeNumbers(text: string): [number, number, number] | undefined {
+    const re = /[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?/g;
+    const values: number[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+        const v = parseFloat(m[0]);
+        if (!isFinite(v)) continue;
+        values.push(v);
+        if (values.length === 3) return [values[0], values[1], values[2]];
+    }
+    return undefined;
+}
+
+/**
+ * The three coordinate columns of a `.gro` atom line.
+ *
+ * The format is fixed-width, but the width of a coordinate field is not:
+ * `-ndec 6` widens every field, and a value that overflows its own field
+ * (`-1000.000`) swallows the space before the next one. Reading the fixed
+ * 8-column slices therefore landed inside the wrong field for both, while
+ * scanning *numbers* is independent of the widths and of the token count.
+ *
+ * The scan stays anchored on the serial, because a row may carry three
+ * velocity columns after the positions (a `.gro` written by `mdrun`) and those
+ * are not coordinates: the three numbers that follow the serial are the
+ * position, whoever wrote the file.
+ */
+function coordinateTriple(line: string, fixedPrefix: boolean): [number, number, number] | undefined {
+    if (fixedPrefix) {
+        // The serial really is in its column, so the coordinates start right
+        // after it — even when the first of them ran into the serial's field.
+        const tail = firstThreeNumbers(line.slice(20));
+        if (tail) return tail;
+    }
+    // A writer that collapsed the padding (or a prefix that overflowed its
+    // columns) has no column 20 to cut at: the serial token is the anchor.
+    const parts = line.trim().split(/\s+/);
+    for (let k = 2; k + 3 < parts.length; k++) {
+        if (!/^\d+$/.test(parts[k])) continue;
+        const triple = firstThreeNumbers(parts.slice(k + 1).join(' '));
+        if (triple) return triple;
+    }
+    return undefined;
 }
 
 interface GroAtom {
@@ -58,26 +96,23 @@ function readAtomLines(lines: string[], count: number): { atoms: GroAtom[]; next
         if (line.trim() === '') continue;
         let label = '';
         let residueName = '';
-        let x: number | undefined;
-        let y: number | undefined;
-        let z: number | undefined;
-        if (line.length >= 44) {
-            label = line.slice(10, 15).trim();
+        // The label block is fixed-width too, but it is only trusted where the
+        // serial really is in its column: a residue number of six digits or an
+        // atom name longer than five characters moves it, and a wrong label
+        // would name the wrong element.
+        const fixedPrefix = line.length >= 20 && /^\s*\d+\s*$/.test(line.slice(15, 20));
+        if (fixedPrefix) {
             residueName = line.slice(5, 10).trim();
-            x = sliceNumber(line, 20, 28);
-            y = sliceNumber(line, 28, 36);
-            z = sliceNumber(line, 36, 44);
+            label = line.slice(10, 15).trim();
         }
-        if (label === '' || x === undefined || y === undefined || z === undefined) {
+        if (label === '' || residueName === '') {
             // A writer that collapsed the padding still produces a readable
             // token line: a residue (number and name, possibly merged), an atom
             // name, an integer serial, then x y z. Finding the serial is what
             // keeps `1 SOL OW 1 x y z` from reading the serial as x.
             const parts = line.trim().split(/\s+/);
             label = '';
-            x = undefined;
-            y = undefined;
-            z = undefined;
+            residueName = '';
             for (let k = 2; k + 3 < parts.length; k++) {
                 if (!/^\d+$/.test(parts[k])) continue;
                 const px = parseFloat(parts[k + 1]);
@@ -86,34 +121,57 @@ function readAtomLines(lines: string[], count: number): { atoms: GroAtom[]; next
                 if (!isFinite(px) || !isFinite(py) || !isFinite(pz)) continue;
                 label = parts[k - 1];
                 residueName = parts[k - 2];
-                x = px;
-                y = py;
-                z = pz;
                 break;
             }
-            if (label === '' || x === undefined || y === undefined || z === undefined) {
+            if (label === '' || residueName === '') {
                 if (parts.length < 6) continue;
                 label = parts[1];
-                x = parseFloat(parts[3]);
-                y = parseFloat(parts[4]);
-                z = parseFloat(parts[5]);
-                if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
+                residueName = parts[0];
             }
         }
+        const coords = coordinateTriple(line, fixedPrefix);
+        if (!coords) continue;
         atoms.push({
             label,
             residueName,
-            x: x * NM_TO_ANGSTROM,
-            y: y * NM_TO_ANGSTROM,
-            z: z * NM_TO_ANGSTROM
+            x: coords[0] * NM_TO_ANGSTROM,
+            y: coords[1] * NM_TO_ANGSTROM,
+            z: coords[2] * NM_TO_ANGSTROM
         });
     }
     return { atoms, next: i };
 }
 
+/**
+ * The monoatomic-ion residues whose names are not element spellings.
+ *
+ * CHARMM (and the GROMACS ports of its force fields) writes its ions as `SOD`,
+ * `CLA`, `CAL`, `POT`, `CES`, `BAR` and `IOD`, and the topology's atom name is
+ * the element the ion carries (`SOD  NA`, `CLA  CL`). Neither name is an
+ * element symbol, so neither of the rules below can read them: a three-letter
+ * residue fails the "residue name is the element" test, and `NA` then matches
+ * the protein atom-name pattern and becomes nitrogen. A sodium drawn as a
+ * nitrogen takes nitrogen's radius, colour and mass, and bonds to the wrong
+ * neighbours. The table states the element the residue is, which is the only
+ * place that fact exists.
+ */
+const ION_RESIDUE_ELEMENTS: { [residue: string]: string } = {
+    SOD: 'Na', CLA: 'Cl', CAL: 'Ca', POT: 'K', CES: 'Cs', BAR: 'Ba', IOD: 'I'
+};
+
 function atomElement(atom: GroAtom): string {
     const label = atom.label.trim();
     const residue = atom.residueName.trim();
+
+    // An ion residue is checked first: its atom name is a label for the ion,
+    // which may well read like a protein atom (`NA`, `CL`). The table is only
+    // trusted when the atom name agrees with it — it repeats the residue or
+    // spells the ion's element — so a residue that merely happens to be called
+    // `CAL` and carries a carbon is left to the ordinary rules.
+    const ion = ION_RESIDUE_ELEMENTS[residue.toUpperCase()];
+    if (ion && (label.toUpperCase() === residue.toUpperCase() || normalizeElementSymbol(label) === ion)) {
+        return ion;
+    }
 
     // A monoatomic ion's residue name is the element itself and its atom name
     // repeats it (`CA` in `CA`, `CL` in `CL`, `NA` in `NA`). The residue name

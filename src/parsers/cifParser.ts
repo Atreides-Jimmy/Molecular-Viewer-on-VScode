@@ -11,9 +11,10 @@ import {
     SymOp,
     wrapFrac
 } from '../tools/crystalGeometry';
-import { lookupSpaceGroupOps, SpaceGroupOps } from '../tools/spaceGroupTable';
+import { lookupSpaceGroupOps, lookupSpaceGroupSettings, SpaceGroupOps } from '../tools/spaceGroupTable';
+import { normalizeElementSymbol } from '../tools/periodicTable';
 import { isUsableLattice } from './periodicUtils';
-import { AnisoTensor, rotateAnisoTensor, symOpCartesianRotation } from '../tools/adp';
+import { AnisoTensor, rotateAnisoTensor, symOpCartesianRotation, uCifAsCart } from '../tools/adp';
 
 /**
  * CIF reader.
@@ -46,6 +47,26 @@ import { AnisoTensor, rotateAnisoTensor, symOpCartesianRotation } from '../tools
 interface CifLoop {
     keys: string[];
     rows: string[][];
+}
+
+/**
+ * A place in the file that survives a line break.
+ *
+ * A CIF loop body is a stream of values, not a table of lines: a record is
+ * exactly as many values as the loop has keys, and the file is free to put two
+ * records on one line or to wrap one record over several. The reader therefore
+ * walks the body with a cursor that can cross lines, and only the item/keyword
+ * level below stays line-oriented.
+ */
+interface CifCursor {
+    line: number;
+    col: number;
+}
+
+/** One token of that stream: a value, a data name, or a structural keyword. */
+interface CifToken {
+    kind: 'value' | 'tag' | 'keyword';
+    text: string;
 }
 
 interface CifData {
@@ -118,6 +139,90 @@ function normaliseElement(raw: string): string {
     const m = bare.match(/[A-Za-z]{1,2}/);
     if (!m) return '';
     return m[0].charAt(0).toUpperCase() + m[0].slice(1).toLowerCase();
+}
+
+/**
+ * The element a site *label* names, for a row whose `_atom_site_type_symbol`
+ * says nothing.
+ *
+ * CIF's own rule is the leading letters of the label, and that is right for
+ * `C12` and `O1W`. It is wrong for a label that is a PDB atom name: an X-ray
+ * file with no type column writes `CA` for the alpha carbon, `CD` for a delta
+ * carbon and `HG` for a gamma hydrogen, and reading those as calcium, cadmium
+ * and mercury turned a protein into three metals — no bonds, no valence, every
+ * table lookup missing. A polymer CIF is the common case for that shape.
+ *
+ * So a two-letter label is read as a PDB atom name — the element is its first
+ * letter — with three exceptions:
+ *
+ *   - a lowercase second letter (`Ca`, `Zn`, `Cl`) spells a two-letter symbol
+ *     outright, so it is read as one;
+ *   - the file's own type column, when it states a symbol somewhere, settles
+ *     the ambiguity: a file that declares `Ca` and never `C` means calcium by
+ *     `CA`. This is what keeps a partially typed inorganic CIF correct;
+ *   - a label column that numbers every site (`CU1`, `NA1`, `CO1`) is naming
+ *     elements, not PDB atom names, and there the two-letter symbol is right.
+ *     Reading those by their first letter turned three metals into carbon,
+ *     nitrogen and carbon — organics the file never contained.
+ *
+ * A first letter that is not an element (`Z` in `ZN`) falls back to the
+ * two-letter symbol, so `ZN1` still reads as zinc.
+ */
+function elementFromLabel(raw: string, declared: { [sym: string]: boolean }, indexed: boolean): string {
+    const s = String(raw === undefined || raw === null ? '' : raw).trim();
+    if (s === '' || s === '?' || s === '.') return '';
+    const m = /[A-Za-z]{1,2}/.exec(s);
+    if (!m) return '';
+    const letters = m[0];
+    if (letters.length === 1) return normalizeElementSymbol(letters) || '';
+    const second = letters.charAt(1);
+    if (second !== second.toUpperCase()) {
+        // `Ca`, `Zn`, `Cl` — and `Ow`, whose fallback is the O it starts with.
+        return normalizeElementSymbol(letters) || normalizeElementSymbol(letters.charAt(0)) || '';
+    }
+    const one = normalizeElementSymbol(letters.charAt(0)) || '';
+    const two = normalizeElementSymbol(letters.charAt(0) + second.toLowerCase()) || '';
+    if (two && declared[two] && !(one && declared[one])) return two;
+    if (one && declared[one] && !(two && declared[two])) return one;
+    if (indexed && two) return two;
+    // PDB atom name — `CA` is C-alpha, `HG` is H-gamma — unless the first letter
+    // is not an element at all.
+    return one || two;
+}
+
+/**
+ * Whether a site loop names its sites `element + serial` (`CU1`, `NA1`, `O1`)
+ * rather than by PDB atom name (`CA`, `CD1`, `HG`).
+ *
+ * The label column's own shape is the only evidence a file without a type
+ * column offers. A CIF written by a crystal tool numbers every site
+ * (`CU1 O1 O2 C1 H1`); a polymer CIF names the backbone the way the PDB does,
+ * and most of its labels carry no serial at all (`N`, `CA`, `C`, `O`, `CB`).
+ * The ratio over the whole column separates the two without betting on any
+ * single label — which is what a per-label guess had to do.
+ */
+function indexedLabelStyle(loop: CifLoop, labelCol: number): boolean {
+    if (labelCol < 0) return false;
+    let indexed = 0;
+    let total = 0;
+    for (const row of loop.rows) {
+        const label = (row[labelCol] || '').trim();
+        if (label === '' || isMissingValue(label)) continue;
+        total++;
+        if (/^[A-Za-z]{1,2}\d/.test(label)) indexed++;
+    }
+    return total > 0 && indexed / total >= 0.8;
+}
+
+/** Every element a site loop's type column states, for `elementFromLabel`. */
+function declaredElementsOf(loop: CifLoop, typeCol: number): { [sym: string]: boolean } {
+    const out: { [sym: string]: boolean } = {};
+    if (typeCol < 0) return out;
+    for (const row of loop.rows) {
+        const el = normaliseElement(row[typeCol]);
+        if (el) out[el] = true;
+    }
+    return out;
 }
 
 // ===== Tags =====
@@ -231,18 +336,120 @@ function tokenize(content: string): CifBlock[] {
         semicolonKey = null;
     }
 
-    function readValue(rest: string): { value: string; consumed: number } {
-        const trimmed = rest.trimStart();
-        if (trimmed.startsWith("'")) {
-            const end = trimmed.indexOf("'", 1);
-            if (end >= 0) return { value: trimmed.substring(1, end), consumed: (rest.length - trimmed.length) + end + 1 };
+    /** The characters CIF treats as token separators. */
+    function isBlankChar(ch: string): boolean {
+        return ch === ' ' || ch === '\t' || ch === '\r' || ch === '\f' || ch === '\v';
+    }
+
+    /**
+     * Move the cursor onto the next token: past blank space, past a comment
+     * (`#` to the end of its line) and past empty lines. A `#` only starts a
+     * comment where a token could start, which is where this leaves the cursor.
+     */
+    function skipGap(cur: CifCursor): void {
+        while (cur.line < lines.length) {
+            const text = lines[cur.line];
+            if (cur.col >= text.length) {
+                cur.line++;
+                cur.col = 0;
+                continue;
+            }
+            const ch = text.charAt(cur.col);
+            if (isBlankChar(ch)) {
+                cur.col++;
+                continue;
+            }
+            if (ch === '#') {
+                cur.line++;
+                cur.col = 0;
+                continue;
+            }
+            return;
         }
-        if (trimmed.startsWith('"')) {
-            const end = trimmed.indexOf('"', 1);
-            if (end >= 0) return { value: trimmed.substring(1, end), consumed: (rest.length - trimmed.length) + end + 1 };
+    }
+
+    /** A structural keyword that ends whatever construct is being read. */
+    function isKeywordToken(text: string): boolean {
+        const lower = text.charAt(0).toLowerCase();
+        if (lower !== 'l' && lower !== 'd' && lower !== 's' && lower !== 'g') return false;
+        const word = text.toLowerCase();
+        return word.indexOf('loop_') === 0 || word.indexOf('data_') === 0 ||
+            word.indexOf('save_') === 0 || word.indexOf('stop_') === 0 || word.indexOf('global_') === 0;
+    }
+
+    /**
+     * The token at the cursor, which must already sit on a non-blank character.
+     *
+     * Quoted values are delimited by their own quote and may contain blanks; a
+     * semicolon text field runs from a `;` in the first column to the next line
+     * that opens with one, and is the only value a CIF may wrap over lines
+     * without a quote. Everything else is a run of non-blank characters and
+     * ends at the line boundary — which is exactly what lets the caller read two
+     * records from one line and one record from several.
+     */
+    function readToken(cur: CifCursor): CifToken {
+        const text = lines[cur.line];
+        const start = cur.col;
+        const ch = text.charAt(start);
+        if (ch === "'" || ch === '"') {
+            // A quoted value ends at the same quote *followed by a blank or by
+            // the end of the line* — that is the delimiter CIF defines. Ending
+            // it at the first occurrence of the quote cut `'O'Brien'` in half:
+            // the value became `O`, and what followed (`Brien'`) was re-read as
+            // further values, which shifted every column of that row.
+            let end = start + 1;
+            while (end <= text.length) {
+                const hit = text.indexOf(ch, end);
+                if (hit < 0) break;
+                const next = hit + 1 < text.length ? text.charAt(hit + 1) : '';
+                if (next === '' || isBlankChar(next)) {
+                    cur.col = hit + 1;
+                    return { kind: 'value', text: text.substring(start + 1, hit) };
+                }
+                end = hit + 1;
+            }
+        } else if (ch === ';' && text.substring(0, start).trim() === '') {
+            // A text field: this line to the next line that opens with a `;`.
+            const buf: string[] = [];
+            const head = text.substring(start + 1);
+            if (head !== '') buf.push(head);
+            cur.line++;
+            cur.col = 0;
+            while (cur.line < lines.length) {
+                const body = lines[cur.line];
+                const mark = body.indexOf(';');
+                if (mark >= 0 && body.substring(0, mark).trim() === '') {
+                    // Whatever follows the closing `;` on its own line is the
+                    // next token, not part of the text.
+                    cur.col = mark + 1;
+                    break;
+                }
+                buf.push(body);
+                cur.line++;
+            }
+            return { kind: 'value', text: buf.join('\n').trim() };
         }
-        const parts = trimmed.split(/\s+/);
-        return { value: parts[0], consumed: rest.length - trimmed.length + parts[0].length };
+        let end = start;
+        while (end < text.length && !isBlankChar(text.charAt(end))) end++;
+        cur.col = end;
+        const word = text.substring(start, end);
+        if (word.charAt(0) === '_') return { kind: 'tag', text: word };
+        if (isKeywordToken(word)) return { kind: 'keyword', text: word };
+        return { kind: 'value', text: word };
+    }
+
+    /**
+     * The line the outer, line-oriented reader resumes from when a loop body
+     * ends. A body can end in the middle of a line (a `_key value` written
+     * behind the last value), so what is left of that line is handed back
+     * rather than dropped.
+     */
+    function resumeAfterLoop(cur: CifCursor): number {
+        if (cur.line >= lines.length) return lines.length;
+        const text = lines[cur.line];
+        if (cur.col >= text.length) return cur.line + 1;
+        if (cur.col > 0) lines[cur.line] = text.substring(cur.col);
+        return cur.line;
     }
 
     while (i < lines.length) {
@@ -300,57 +507,83 @@ function tokenize(content: string): CifBlock[] {
         if (line.startsWith('loop_')) {
             pendingKey = null;
             const loop: CifLoop = { keys: [], rows: [] };
-            i++;
-            let startedRows = false;
-            while (i < lines.length) {
-                const l = lines[i].trim();
-                if (l === '' || l.startsWith('#')) { i++; continue; }
-                if (l.startsWith('_')) {
-                    if (startedRows) break;
-                    const parts = l.split(/\s+/);
-                    if (parts.length > 1) {
-                        // Key with inline value = scalar item, not part of loop
+            const cur: CifCursor = { line: i, col: rawLine.indexOf('loop_') + 5 };
+
+            // ----- the key list -----
+            // Keys may share the keyword's line and may run over several lines.
+            // A value on a key's own line is either the loop's first record (a
+            // complete loop is legal on a single line: `loop_ _a _b 1 2`) or the
+            // `_key value` spelling some writers use for a one-row loop. Which
+            // one it is cannot be known here — it is known once the body has
+            // been read: the item spelling never completes a record, because
+            // the next key follows before the row is full.
+            let lastKey: CifCursor = { line: cur.line, col: cur.col };
+            let bodyStartsInline = false;
+            while (true) {
+                skipGap(cur);
+                if (cur.line >= lines.length) break;
+                const before: CifCursor = { line: cur.line, col: cur.col };
+                const tok = readToken(cur);
+                if (tok.kind === 'tag') {
+                    lastKey = before;
+                    loop.keys.push(tok.text);
+                    continue;
+                }
+                bodyStartsInline = loop.keys.length > 0 && before.line === lastKey.line;
+                cur.line = before.line;
+                cur.col = before.col;
+                break;
+            }
+
+            // ----- the records -----
+            // A record is complete when it holds one value per key, whatever
+            // the line breaks did. The old reader assembled at most one record
+            // per line and discarded the rest of the line, so a compact table
+            // (`1 2 3 4` for two keys) lost half its rows, and a record wrapped
+            // over two lines came out short and took the whole loop with it.
+            if (loop.keys.length > 0) {
+                const width = loop.keys.length;
+                let row: string[] = [];
+                while (true) {
+                    skipGap(cur);
+                    if (cur.line >= lines.length) break;
+                    const before: CifCursor = { line: cur.line, col: cur.col };
+                    const tok = readToken(cur);
+                    // A data name or a keyword is never a value: the loop body
+                    // ends here, exactly where the next construct starts.
+                    if (tok.kind !== 'value') {
+                        cur.line = before.line;
+                        cur.col = before.col;
                         break;
                     }
-                    loop.keys.push(parts[0]);
-                    i++;
-                } else if (l.startsWith('loop_') || l.startsWith('data_') || l.startsWith('save_')) {
-                    break;
-                } else {
-                    startedRows = true;
-                    const row: string[] = [];
-                    let lineRest = lines[i];
-                    for (let k = 0; k < loop.keys.length; k++) {
-                        if (lineRest.trim() === '') break;
-                        if (lineRest.trim().startsWith(';')) {
-                            const buf: string[] = [];
-                            const firstPart = lineRest.trim().substring(1);
-                            if (firstPart !== '') buf.push(firstPart);
-                            i++;
-                            while (i < lines.length && !lines[i].trim().startsWith(';')) {
-                                buf.push(lines[i]);
-                                i++;
-                            }
-                            row.push(buf.join('\n').trim());
-                            lineRest = '';
-                            if (i < lines.length) {
-                                lineRest = lines[i].replace(/^\s*;\s*/, '');
-                            }
-                        } else {
-                            const { value, consumed } = readValue(lineRest);
-                            row.push(value);
-                            lineRest = lineRest.substring(consumed);
-                        }
+                    row.push(tok.text);
+                    if (row.length === width) {
+                        loop.rows.push(row);
+                        row = [];
                     }
-                    if (row.length > 0) loop.rows.push(row);
-                    i++;
+                }
+                // What a truncated file leaves behind: a partial record is kept
+                // so its consumer can count it as the short row it is instead
+                // of the structure quietly losing an atom.
+                if (row.length > 0) loop.rows.push(row);
+
+                // The body never filled a record and it started on the last
+                // key's line: that is the `_key value` spelling, not a loop.
+                // Handing the key and its value back to the line reader is what
+                // keeps a one-row loop written as items readable — and it no
+                // longer costs a legal single-line loop, whose record does
+                // complete here.
+                const completed = loop.rows.some(r => r.length === width);
+                if (bodyStartsInline && !completed) {
+                    loop.keys.pop();
+                    loop.rows.length = 0;
+                    cur.line = lastKey.line;
+                    cur.col = lastKey.col;
                 }
             }
-            if (loop.keys.length > 0) {
-                if (loop.rows.length === 0 || loop.rows[0].length === loop.keys.length) {
-                    data.loops.push(loop);
-                }
-            }
+
+            if (loop.keys.length > 0) data.loops.push(loop);
+            i = resumeAfterLoop(cur);
             continue;
         }
 
@@ -571,7 +804,8 @@ interface CifRawAtom {
     element: string;
     label: string;
     frac: number[];
-    occupancy: number;
+    /** The file's occupancy, or undefined when it states none (`?`, `.`). */
+    occupancy?: number;
     disorderGroup?: string;
     uAniso?: AnisoTensor;
 }
@@ -804,7 +1038,7 @@ function symOpSetsEquivalent(a: SymOp[], b: SymOp[]): boolean {
     return cifOpsMatch(ea, eb, centering) && cifOpsMatch(eb, ea, centering);
 }
 
-function symmetryCheckWarning(check: CrystalSymmetryCheck): string {
+function symmetryCheckWarning(check: CrystalSymmetryCheck, canSwitch: boolean): string {
     const label = check.symbol + ' (No. ' + check.number +
         (check.settingLabel === '' ? '' : ', ' + check.settingLabel) + ')';
     return 'space-group check: the file names ' + label + ', whose ' + check.tableOps.length +
@@ -812,7 +1046,9 @@ function symmetryCheckWarning(check: CrystalSymmetryCheck): string {
         check.tableAtoms + ' atom' + (check.tableAtoms === 1 ? '' : 's') + ', but its own ' +
         check.fileOps.length + ' operation' + (check.fileOps.length === 1 ? '' : 's') +
         ' expand them to ' + check.fileAtoms + ' atom' + (check.fileAtoms === 1 ? '' : 's') +
-        '; the file\'s operations are used, and the crystal panel offers a switch to the name\'s';
+        '; the file\'s operations are used, and ' + (canSwitch
+            ? 'the crystal panel offers a switch to the name\'s'
+            : 'the name states no setting its coordinates could be re-expanded under, so no switch is offered');
 }
 
 // ===== The file's own bond table =====
@@ -1034,10 +1270,12 @@ function readCifBondTable(
 // ===== Anisotropic displacement parameters =====
 //
 // `_atom_site_aniso_U_ij` is a table of its own, keyed by site label, and the
-// six numbers are a Cartesian tensor in Angstrom squared. The loop is read
-// separately from the atom sites because the two need not list the same rows
-// (a file may refine ADPs for the heavy atoms only), and it is joined back by
-// the label the dictionary itself defines as the join key.
+// six numbers are in the crystal-axis basis — not Cartesian. They are
+// converted as they are read (see `uCifAsCart`), because everything downstream
+// draws and rotates the Cartesian tensor. The loop is read separately from the
+// atom sites because the two need not list the same rows (a file may refine
+// ADPs for the heavy atoms only), and it is joined back by the label the
+// dictionary itself defines as the join key.
 //
 // A U_iso-only loop is not this table: it states one isotropic value per site,
 // which is not an ellipsoid, and drawing it as one would invent an orientation.
@@ -1048,7 +1286,7 @@ interface AnisoTable {
     warnings: string[];
 }
 
-function readAnisoTable(data: CifData): AnisoTable {
+function readAnisoTable(data: CifData, lattice: number[][]): AnisoTable {
     const byLabel: { [label: string]: AnisoTensor } = {};
     const warnings: string[] = [];
     let skipped = 0;
@@ -1056,6 +1294,7 @@ function readAnisoTable(data: CifData): AnisoTable {
     let zeroedOffDiagonal = 0;
     let negative = 0;
     let negativeExample = '';
+    let unconverted = 0;
 
     for (const loop of data.loops) {
         const labelCol = columnOf(loop, ['_atom_site_aniso_label']);
@@ -1097,10 +1336,17 @@ function readAnisoTable(data: CifData): AnisoTable {
                     negativeExample = 'site ' + label + ': ' + bad[0] + '=' + bad[1].toFixed(4);
                 }
             }
+            // The file's numbers are in the crystal-axis basis; the viewer
+            // stores Cartesian. A degenerate cell has no reciprocal basis to
+            // convert with, and guessing that its U values are Cartesian is
+            // the very mistake this conversion exists to avoid — the site
+            // keeps its scalar/disorder data but gets no ellipsoid.
+            const cart = uCifAsCart(u, lattice);
+            if (cart === null) { unconverted++; continue; }
             // The first record for a label wins: a duplicated row is a file
             // error, and taking the later one would make two readers disagree
             // depending on which they happened to look at.
-            if (!byLabel[label]) byLabel[label] = u;
+            if (!byLabel[label]) byLabel[label] = cart;
         }
     }
 
@@ -1117,6 +1363,11 @@ function readAnisoTable(data: CifData): AnisoTable {
         warnings.push('anisotropic displacement: ' + negative + ' record' + (negative === 1 ? ' has' : 's have') +
             ' a negative diagonal element (e.g. ' + negativeExample +
             '): the ellipsoid is drawn from the data that is there');
+    }
+    if (unconverted > 0) {
+        warnings.push('anisotropic displacement: the unit cell has no usable reciprocal basis, so ' +
+            unconverted + ' record' + (unconverted === 1 ? ' is' : 's are') +
+            ' not converted to Cartesian and not drawn');
     }
     return { byLabel, warnings };
 }
@@ -1254,7 +1505,7 @@ export function parseCif(content: string): MolecularData {
     const occCol = columnOf(atomLoop, ['_atom_site_occupancy']);
     const disorderCol = columnOf(atomLoop, ['_atom_site_disorder_group']);
 
-    const aniso = readAnisoTable(data);
+    const aniso = readAnisoTable(data, lattice);
     warnings.push(...aniso.warnings);
 
     const rawAtoms: CifRawAtom[] = [];
@@ -1263,25 +1514,48 @@ export function parseCif(content: string): MolecularData {
     const minCols = cols.length > 0 ? Math.max(...cols) + 1 : 0;
     let skipped = 0;
     let unknownElements = 0;
+    let zeroOccupancy = 0;
+
+    // The elements the file's own type column states, so a row that leaves it
+    // empty can be read against what the rest of the same column says. Built on
+    // the first row that needs it: a file whose column is complete (the usual
+    // case) never pays for the pass.
+    let declaredElements: { [sym: string]: boolean } | null = null;
+    // And how the label column itself names its sites, for the same rows: a
+    // numbered column names elements, an atom-name column does not.
+    let indexedLabels: boolean | null = null;
 
     for (const row of atomLoop.rows) {
         if (row.length < minCols) { skipped++; continue; }
         const label = labelCol >= 0 ? (row[labelCol] || '') : '';
         const typeSym = typeCol >= 0 ? row[typeCol] : '';
-        // The label is the fallback the dictionary itself suggests (`C12` is a
-        // carbon), and it is also what a file with no type column has. A row
-        // that names no readable element is a dummy point, not a carbon: an
-        // invented C would take part in bonding, formula and valence checks as
-        // a real atom the file never stated.
-        const named = normaliseElement(isMissingValue(typeSym) ? label : typeSym) ||
-            normaliseElement(label);
+        // The type column is the file's own statement and wins whenever it
+        // names an element. Only when it says nothing (or says something that
+        // is not a symbol) does the label speak, by the PDB name rules above —
+        // `CA`/`CD`/`HG` are carbons and a hydrogen, not three metals. A row
+        // that still names no readable element is a dummy point, not a carbon:
+        // an invented C would take part in bonding, formula and valence checks
+        // as a real atom the file never stated.
+        let named = normaliseElement(typeSym);
+        if (!named) {
+            if (declaredElements === null) declaredElements = declaredElementsOf(atomLoop, typeCol);
+            if (indexedLabels === null) indexedLabels = indexedLabelStyle(atomLoop, labelCol);
+            named = elementFromLabel(label, declaredElements, indexedLabels);
+        }
         const element = named || 'X';
         const xv = parseNumber(row[xCol]);
         const yv = parseNumber(row[yCol]);
         const zv = parseNumber(row[zCol]);
         if (xv === null || yv === null || zv === null) { skipped++; continue; }
         if (named === '') unknownElements++;
-        const occupancy = occCol >= 0 ? (parseNumber(row[occCol]) ?? 1) : 1;
+        // An occupancy the file does not state is *unknown*, not full: `?` and
+        // `.` are CIF's two spellings of "no value", and reading them as 1 made
+        // a structure whose occupancies were never refined claim every site was
+        // fully occupied. Zero is a value, and it means the site is not there —
+        // a row kept at occupancy 0 put an atom the file says is absent into
+        // the picture, the formula and the electron count.
+        const occupancy = occCol >= 0 ? parseNumber(row[occCol]) : null;
+        if (occupancy !== null && occupancy <= 0) { zeroOccupancy++; continue; }
         const groupRaw = disorderCol >= 0 ? (row[disorderCol] || '').trim() : '';
         // `?` and `.` both mean "no group": a file that marks none must not
         // grow a group called "?" that the panel would offer to filter.
@@ -1291,11 +1565,20 @@ export function parseCif(content: string): MolecularData {
         // The join is by site label, the dictionary's own key. A site whose
         // label is empty cannot be named by the aniso table and keeps none.
         const uAniso = label.trim() !== '' ? aniso.byLabel[label.trim()] : undefined;
-        rawAtoms.push({ element, label, frac, occupancy, disorderGroup, uAniso });
+        rawAtoms.push({
+            element, label, frac,
+            occupancy: occupancy === null ? undefined : occupancy,
+            disorderGroup, uAniso
+        });
     }
     if (skipped > 0) {
         warnings.push(skipped + ' atom site' + (skipped === 1 ? '' : 's') +
             ' skipped: the row is short or its coordinates are not numbers');
+    }
+    if (zeroOccupancy > 0) {
+        warnings.push(zeroOccupancy + ' atom site' + (zeroOccupancy === 1 ? '' : 's') +
+            ' state an occupancy of zero: ' + (zeroOccupancy === 1 ? 'it is' : 'they are') +
+            ' not part of the structure and ' + (zeroOccupancy === 1 ? 'is' : 'are') + ' left out');
     }
     if (unknownElements > 0) {
         warnings.push(unknownElements + ' atom site' + (unknownElements === 1 ? '' : 's') +
@@ -1360,16 +1643,38 @@ export function parseCif(content: string): MolecularData {
     // The file's operations are what the picture is built from — that does not
     // change. When the file also names a group the built-in table knows, the
     // two statements are compared once; a disagreement is reported with the
-    // atom count of each expansion, and the name's expansion is kept so the
-    // page can offer a one-time switch.
+    // atom count of each expansion. A name that leaves its setting open is
+    // checked against every setting it allows, and the name's expansion is kept
+    // for the one-time switch only when the name states which setting it is.
     let symmetryCheck: CrystalSymmetryCheck | undefined;
     let symmetryAlternative: CrystalSymmetryAlternative | undefined;
     if (scan.ops.length > 0 && spaceGroupOut !== undefined) {
-        const hit = lookupSpaceGroupOps(spaceGroupOut, cell);
-        if (hit !== null) {
-            const nameSymOps = hit.ops.map(parseSymOp);
-            if (!symOpSetsEquivalent(parsedSymOps, nameSymOps)) {
-                const nameExpansion = expandCifSites(rawAtoms, nameSymOps, lattice);
+        const settings = lookupSpaceGroupSettings(spaceGroupOut, cell);
+        if (settings.length > 0) {
+            // A name that leaves the setting open names a family, not one
+            // operation list: `P n n n` fits either origin and `R -3 c` fits
+            // either axis triple. The file is consistent when its own
+            // operations are any member's — the member the table prefers is a
+            // convention, and comparing against it alone reported a correctly
+            // written origin-choice-1 file as contradicting its own name.
+            let equivalent = false;
+            for (const setting of settings) {
+                if (symOpSetsEquivalent(parsedSymOps, setting.ops.map(parseSymOp))) {
+                    equivalent = true;
+                    break;
+                }
+            }
+            if (!equivalent) {
+                const hit = settings[0];
+                const nameExpansion = expandCifSites(rawAtoms, hit.ops.map(parseSymOp), lattice);
+                // The switch puts this file's coordinates under the name's
+                // setting. That is the same structure only when the name says
+                // which setting the coordinates were written in: with an
+                // origin choice left open, applying the conventional one to
+                // coordinates written for the other moves every atom that the
+                // two operations place differently — a different structure,
+                // not a correction. Such a file is reported without a switch.
+                const canSwitch = settings.length === 1;
                 symmetryCheck = {
                     declared: spaceGroupOut,
                     symbol: hit.symbol,
@@ -1380,17 +1685,19 @@ export function parseCif(content: string): MolecularData {
                     fileAtoms: baseAtoms.length,
                     tableAtoms: nameExpansion.baseAtoms.length
                 };
-                symmetryAlternative = {
-                    ops: hit.ops.slice(),
-                    symbol: hit.symbol,
-                    settingLabel: hit.settingLabel,
-                    baseAtoms: nameExpansion.baseAtoms,
-                    asymAtoms: nameExpansion.asymAtoms
-                };
+                if (canSwitch) {
+                    symmetryAlternative = {
+                        ops: hit.ops.slice(),
+                        symbol: hit.symbol,
+                        settingLabel: hit.settingLabel,
+                        baseAtoms: nameExpansion.baseAtoms,
+                        asymAtoms: nameExpansion.asymAtoms
+                    };
+                }
                 // First, because the panel's warning line shows only the head
                 // of the list and a self-contradicting file is the one thing
                 // here that changes what the structure is.
-                warnings.unshift(symmetryCheckWarning(symmetryCheck));
+                warnings.unshift(symmetryCheckWarning(symmetryCheck, canSwitch));
             }
         }
     }
@@ -1417,7 +1724,11 @@ export function parseCif(content: string): MolecularData {
         atoms,
         bonds: [],
         title,
-        hasExplicitBonds: false,
+        // A file whose own `_geom_bond` table supplied bonds has stated them,
+        // exactly like a PDB's `CONECT` records: the flag says so, so the
+        // loader merges that table instead of treating the structure as one
+        // with no bond information at all.
+        hasExplicitBonds: bondTable.bonds.length > 0,
         warnings,
         crystal
     };

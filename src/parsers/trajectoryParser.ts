@@ -1,4 +1,4 @@
-import { cellToLatticeVectors } from '../tools/crystalGeometry';
+import { cellToLatticeVectors, CELL_VOLUME_EPSILON } from '../tools/crystalGeometry';
 
 /**
  * Binary MD trajectories, read without a native dependency.
@@ -92,7 +92,7 @@ function usableCell(lattice: number[][] | undefined): number[][] | undefined {
         a[0] * (b[1] * c[2] - b[2] * c[1]) -
         a[1] * (b[0] * c[2] - b[2] * c[0]) +
         a[2] * (b[0] * c[1] - b[1] * c[0]);
-    if (!isFinite(det) || Math.abs(det) < 1e-9) return undefined;
+    if (!isFinite(det) || Math.abs(det) < CELL_VOLUME_EPSILON) return undefined;
     return lattice;
 }
 
@@ -480,6 +480,12 @@ function scanTrr(dv: DataView): { infos: TrrFrameInfo[]; truncated: boolean } {
             const boxSize = dv.getInt32(p + 8, false);
             const virSize = dv.getInt32(p + 12, false);
             const presSize = dv.getInt32(p + 16, false);
+            // The topology and symplectic blocks sit between the pressure and
+            // the coordinates: leaving them out of the skip put the coordinate
+            // read `top_size + sym_size` bytes early, which decoded a frame of
+            // a file that writes either as noise.
+            const topSize = dv.getInt32(p + 20, false);
+            const symSize = dv.getInt32(p + 24, false);
             const xSize = dv.getInt32(p + 28, false);
             const vSize = dv.getInt32(p + 32, false);
             const fSize = dv.getInt32(p + 36, false);
@@ -491,10 +497,11 @@ function scanTrr(dv: DataView): { infos: TrrFrameInfo[]; truncated: boolean } {
             if (!floatSize || natoms <= 0 || natoms > MAX_SINGLE_FRAME_ATOMS) {
                 throw new RecordError('bad TRR frame header');
             }
-            if (boxSize < 0 || virSize < 0 || presSize < 0 || xSize < 0 || vSize < 0 || fSize < 0) {
+            if (boxSize < 0 || virSize < 0 || presSize < 0 || topSize < 0 || symSize < 0 ||
+                xSize < 0 || vSize < 0 || fSize < 0) {
                 throw new RecordError('negative TRR block size');
             }
-            for (const size of [boxSize, virSize, presSize, xSize, vSize, fSize]) {
+            for (const size of [boxSize, virSize, presSize, topSize, symSize, xSize, vSize, fSize]) {
                 if (size % floatSize !== 0) throw new RecordError('unaligned TRR block');
             }
             p += 52;
@@ -508,7 +515,7 @@ function scanTrr(dv: DataView): { infos: TrrFrameInfo[]; truncated: boolean } {
                     box.push(floatSize === 8 ? dv.getFloat64(p + i * 8, false) : dv.getFloat32(p + i * 4, false));
                 }
             }
-            p += boxSize + virSize + presSize;
+            p += boxSize + virSize + presSize + topSize + symSize;
             ensure(dv, p, xSize + vSize + fSize);
             if (xSize > 0) {
                 infos.push({ offset, natoms, step, time, box, floatSize, xAt: p, xBytes: xSize, xSize });
@@ -623,11 +630,17 @@ function readDcdHeader(bytes: Uint8Array, dv: DataView, reader: DcdReader): DcdH
     const header = content + 4;
     ensure(dv, header, 80);
     const int32 = (at: number) => dv.getInt32(header + at, reader.littleEndian);
+    // ICNTRL(20) is the VERNUM field: X-PLOR writes 0, CHARMM and NAMD write
+    // their version (24, 32, 36 …). It states the *header* flavour — a CHARMM
+    // header stores DELTA as a float and uses ICNTRL(9) as the crystal-type
+    // flag — and nothing else. It does not state whether a frame carries a
+    // unit-cell record: LAMMPS writes a version-0 header and still writes one,
+    // which is why the frame layout below is probed instead of being taken
+    // from `extraBlock` alone.
     const version = int32(76);
     const charmm = version !== 0;
     const extraBlock = charmm && int32(40) !== 0;
     const has4dims = charmm && int32(44) === 1;
-    const natoms = 0;
     const nsets = int32(0);
     const istart = int32(4);
     const nsavc = int32(8);
@@ -695,7 +708,28 @@ function skipDcdRecord(dv: DataView, reader: DcdReader, offset: number): number 
     return offset + reader.markerSize + size + reader.markerSize;
 }
 
-function scanDcd(dv: DataView, reader: DcdReader, header: DcdHeader): { infos: DcdFrameInfo[]; truncated: boolean } {
+interface DcdScan {
+    infos: DcdFrameInfo[];
+    truncated: boolean;
+    /** The scan walked the file to its end, or to the frame count the header states. */
+    complete: boolean;
+    /** Whether the frames were read as a unit-cell record followed by X, Y, Z. */
+    withCell: boolean;
+}
+
+/**
+ * Walk the frame records of one DCD file under one reading of their layout.
+ *
+ * A frame is either three axis records (X, Y, Z) or a CHARMM unit-cell record
+ * in front of them, and the file states which only indirectly: the version-0
+ * header X-PLOR writes carries no cell record, a CHARMM header flags one, and
+ * a LAMMPS file writes a version-0 header *and* a cell record. The layout is
+ * therefore probed rather than trusted — `complete` says whether the reading
+ * walked the whole file (or the frame count the header names), which is what
+ * separates them: the wrong reading runs out of records a frame early or lands
+ * on a marker that is not the one it needs.
+ */
+function scanDcdLayout(dv: DataView, reader: DcdReader, header: DcdHeader, withCell: boolean): DcdScan {
     const infos: DcdFrameInfo[] = [];
     let offset = header.firstOffset;
     let truncated = false;
@@ -704,7 +738,7 @@ function scanDcd(dv: DataView, reader: DcdReader, header: DcdHeader): { infos: D
     while (offset < dv.byteLength && infos.length < limit) {
         try {
             let cell: number[][] | undefined;
-            if (header.extraBlock) {
+            if (withCell) {
                 const size = dcdMarker(dv, reader, offset);
                 offset += reader.markerSize;
                 if (size === 48) {
@@ -750,7 +784,22 @@ function scanDcd(dv: DataView, reader: DcdReader, header: DcdHeader): { infos: D
             break;
         }
     }
-    return { infos, truncated };
+    const complete = offset >= dv.byteLength || (isFinite(limit) && infos.length >= limit);
+    return { infos, truncated, complete, withCell };
+}
+
+function scanDcd(dv: DataView, reader: DcdReader, header: DcdHeader): DcdScan {
+    // The header's own flag is the prior, not the answer: a CHARMM crystal run
+    // flags its cell, a LAMMPS file writes a version-0 header and still writes
+    // the record. Whichever reading walks the file is the one the file has.
+    const order = header.extraBlock ? [true, false] : [false, true];
+    let best: DcdScan | null = null;
+    for (const withCell of order) {
+        const attempt = scanDcdLayout(dv, reader, header, withCell);
+        if (attempt.infos.length > 0 && attempt.complete) return attempt;
+        if (!best || attempt.infos.length > best.infos.length) best = attempt;
+    }
+    return best as DcdScan;
 }
 
 function readDcdAxis(dv: DataView, reader: DcdReader, at: number, count: number, out: Float64Array, axis: number): void {
@@ -823,16 +872,22 @@ export function chooseTrajectoryFrameIndexes(
     if (count <= 0) return [];
     const frameLimit = maxFrames !== undefined && maxFrames > 0 ? maxFrames : DEFAULT_MAX_FRAMES;
     const atomLimit = maxTotalAtoms !== undefined && maxTotalAtoms > 0 ? maxTotalAtoms : DEFAULT_MAX_TOTAL_ATOMS;
-    let stride = 1;
-    while (Math.ceil(count / stride) > frameLimit ||
-        Math.ceil(count / stride) * natoms > atomLimit) {
-        stride++;
-        if (stride > count) return [0];
+    const fits = (frames: number) => frames <= frameLimit && frames * natoms <= atomLimit;
+    // Start at the stride the limits need instead of counting up to it: a
+    // hundred-thousand-frame file must not build a hundred-thousand lists.
+    const needed = Math.max(Math.ceil(count / frameLimit), Math.ceil(count * natoms / atomLimit));
+    let stride = isFinite(needed) && needed > 1 ? Math.min(needed, count) : 1;
+    for (; stride <= count; stride++) {
+        const chosen: number[] = [];
+        for (let i = 0; i < count; i += stride) chosen.push(i);
+        // The last frame of the run is *added*, never substituted for the last
+        // sampled one: replacing it left a gap of up to two strides at the end
+        // of every sampled trajectory.
+        if (chosen[chosen.length - 1] !== count - 1) chosen.push(count - 1);
+        if (fits(chosen.length)) return chosen;
     }
-    const chosen: number[] = [];
-    for (let i = 0; i < count; i += stride) chosen.push(i);
-    if (chosen[chosen.length - 1] !== count - 1) chosen[chosen.length - 1] = count - 1;
-    return chosen;
+    // A limit that cannot hold two frames keeps the one the run ended on.
+    return [count - 1];
 }
 
 function readXtc(bytes: Uint8Array, dv: DataView, scale: number, options: TrajectoryReadOptions, result: BinaryTrajectory): void {
@@ -937,6 +992,15 @@ function readDcd(bytes: Uint8Array, dv: DataView, reader: DcdReader, scale: numb
     const scan = scanDcd(dv, reader, header);
     result.truncated = scan.truncated;
     result.frameCount = scan.infos.length;
+    // The frame layout is probed, so a file whose header disagrees with its own
+    // frames still reads; say so, because it is a statement about the writer.
+    if (scan.withCell && !header.extraBlock) {
+        result.warnings.push('the DCD header flags no unit-cell record, but every frame states one: ' +
+            'the cell is read (LAMMPS writes a version-0 header)');
+    } else if (!scan.withCell && header.extraBlock) {
+        result.warnings.push('the DCD header flags a unit-cell record, but no frame states one: ' +
+            'the frames are read without a cell');
+    }
     if (scan.infos.length === 0) {
         result.warnings.push('the DCD file holds no complete frame');
         return;
@@ -1034,4 +1098,34 @@ export function readBinaryTrajectory(bytes: Uint8Array, options: TrajectoryReadO
 /** A file name whose extension names a binary trajectory. */
 export function isTrajectoryFileName(fileName: string): boolean {
     return /\.(xtc|trr|dcd)$/i.test(fileName);
+}
+
+/**
+ * Whether a trajectory file is binary but not a format this reader knows.
+ *
+ * `.trj` is used by CHARMM and NAMD for their binary trajectories, and also by
+ * xTB for a text trajectory. A file of the first kind that `detectBinaryTrajectory`
+ * does not recognise used to be decoded as UTF-8 and parsed as text, which
+ * produced mojibake and an "unable to parse" error naming the wrong cause.
+ * A NUL byte, or a noticeable share of other control bytes, identifies the
+ * binary case; UTF-16 text keeps its NULs too, but it has a BOM and is decoded
+ * before this is asked (the callers only test `.trj` content).
+ */
+export function looksLikeBinaryTrajectory(bytes: Uint8Array): boolean {
+    // A UTF-16 text file is full of NUL bytes but is still text; the loader's
+    // BOM-aware decoder is the one that should see it.
+    if (bytes.length >= 2 &&
+        ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff))) {
+        return false;
+    }
+    const limit = Math.min(bytes.length, 8192);
+    if (limit === 0) return false;
+    let control = 0;
+    for (let i = 0; i < limit; i++) {
+        const b = bytes[i];
+        if (b === 0) return true;
+        if (b === 9 || b === 10 || b === 11 || b === 12 || b === 13) continue;
+        if (b < 32) control++;
+    }
+    return control / limit > 0.02;
 }

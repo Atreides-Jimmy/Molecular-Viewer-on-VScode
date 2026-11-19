@@ -37,6 +37,12 @@
  * accumulated file lists no such fit (Al-O) or only a superseded one (Si-O):
  * Si-O 1.624 and Al-O 1.651, both with B = 0.37.
  *
+ * H is the one exception to the gas-phase exclusion: every H fit the file
+ * lists is of that kind, and omitting H would leave every O-H, N-H and F-H
+ * contact outside the sums. H-O takes Brown's O-H < 1.05 A branch (the
+ * covalent bond; the file's other two branches describe hydrogen bonds),
+ * and H-N takes the only fit the file lists.
+ *
  * Scope: main-group cations and the closed-shell cations Ag(I), Zn(II) and
  * Cd(II). Transition metals with several accessible oxidation states and
  * variable spin states are deliberately absent: a BVS built on one chosen
@@ -44,6 +50,28 @@
  * the usual closed-shell anions; their sums use the cation parameters of
  * their neighbours, with each neighbour's oxidation state chosen as the one
  * whose own sum best matches it.
+ *
+ * Hydrogen is the one light element the table carries, as H+. Without it
+ * every X-H contact is invisible: a hydroxide oxygen then sums only its
+ * cation contacts (typically 1.0-1.3) and is reported as badly
+ * under-coordinated, when its O-H bond is exactly the missing valence. The
+ * accumulated file lists no Brown-Altermatt or Brese-O'Keeffe fit for H, so
+ * the values below are the published fits it does list. H-O uses Brown's
+ * short-range branch (O-H below 1.05 A, the covalent bond); the same
+ * reference's long-range and intermediate branches describe hydrogen bonds
+ * and cannot share one pair with the covalent bond. Hydride H(-1) is not
+ * inferred from the element: an oxidation state guessed from an element
+ * symbol is the kind of guess this table exists to avoid, so a hydride
+ * site is left alone rather than checked as H+.
+ *
+ * Occupancy is honoured: a contact is weighted by the occupancy of the
+ * neighbour that makes it. A site present in only half the cells cannot
+ * contribute a full bond to the sites around it, which is what made a
+ * partially occupied structure look over-bonded. The central site's own
+ * occupancy is not applied to its sum: the check is conditional on that
+ * site being there, and when it is, the neighbours' occupancies are what
+ * its coordination sphere contains. A neighbour with zero occupancy is not
+ * a contact at all.
  *
  * Both the extension host and the webview run the same code: BVS_SOURCE
  * serialises this module into one expression the page evaluates, exactly as
@@ -60,6 +88,8 @@ export interface BvsAtom {
     y: number;
     z: number;
     ghost?: boolean;
+    /** Site occupancy; absent means fully occupied. */
+    occupancy?: number;
 }
 
 export interface BvsAtomResult {
@@ -109,6 +139,13 @@ export interface BvsReport {
  * 0.35; the pair function reads both numbers rather than assuming 0.37.
  */
 const BVS_CATIONS: { [element: string]: { [state: string]: { [anion: string]: [number, number] } } } = {
+    // H-O is Brown (2002) p.230, the O-H < 1.05 A branch, the one that covers
+    // the covalent bond; H-N, H-F, H-S and H-Cl are the single fits that
+    // accumulated file gives (Majerz & Olovsson 2007; Adams et al. 2004;
+    // Trzeowska et al. 2006).
+    H: {
+        '1': { N: [1.014, 0.413], O: [0.907, 0.28], F: [0.708, 0.558], S: [1.192, 0.591], Cl: [1.336, 0.53] },
+    },
     Li: {
         '1': { N: [1.61, 0.37], O: [1.466, 0.37], F: [1.36, 0.37], S: [1.94, 0.37], Cl: [1.91, 0.37], Se: [2.09, 0.37], Br: [2.02, 0.37], Te: [2.3, 0.37], I: [2.22, 0.37] },
     },
@@ -204,9 +241,11 @@ const BVS_ANIONS: { [element: string]: number } = {
  * The longest distance any pair can contribute from. A contact is inside its
  * own pair cutoff when s = exp((R0 - d) / B) is still worth summing; the
  * per-pair cutoff below is R0 + 3.3 B, where one contact contributes 0.037.
- * This ceiling only bounds the lattice search.
+ * This ceiling only bounds the lattice search; it has to reach the longest
+ * tabulated pair, Cs-I, whose own cutoff is 3.18 + 3.3 * 0.37 = 4.40 A. The
+ * previous 4.0 A clipped that tail and the Cs/Ba-I sums with it.
  */
-export const BVS_MAX_CUT = 4.0;
+export const BVS_MAX_CUT = 4.5;
 
 /** How far past R0 a contact is still counted, in units of B. */
 const BVS_TAIL = 3.3;
@@ -379,6 +418,10 @@ function bvsSumImages(fx: number, fy: number, fz: number, cut: number, lv: numbe
  * so the sum is periodic whether or not the cell happens to contain both ends
  * of a contact: one NaCl formula unit still gives sodium six chloride
  * neighbours.
+ *
+ * Each contact is weighted by the occupancy of the neighbour that makes it
+ * (see the module note above): an absent neighbour contributes nothing, a
+ * half-occupied one contributes half a bond and still one contact.
  */
 export function bvsAnalyse(atoms: BvsAtom[], lv: number[][]): BvsReport {
     const empty: BvsReport = {
@@ -406,10 +449,16 @@ export function bvsAnalyse(atoms: BvsAtom[], lv: number[][]): BvsReport {
     const kinds: string[] = new Array(n);
     const statesOf: (number[] | null)[] = new Array(n);
     const valenceOf: (number | null)[] = new Array(n);
+    // A missing occupancy means the site is fully occupied; a value outside
+    // [0, 1] is a file error and is read as full rather than allowed to
+    // amplify a bond.
+    const occ: number[] = new Array(n);
     const cations: number[] = [];
     const anions: number[] = [];
     for (let i = 0; i < n; i++) {
         const a = atoms[i];
+        const o = a.occupancy;
+        occ[i] = typeof o === 'number' && isFinite(o) ? (o <= 0 ? 0 : (o > 1 ? 1 : o)) : 1;
         if (a.ghost) { kinds[i] = 'none'; statesOf[i] = null; valenceOf[i] = null; continue; }
         const cls = bvsClassify(a.element);
         kinds[i] = cls.kind;
@@ -438,12 +487,14 @@ export function bvsAnalyse(atoms: BvsAtom[], lv: number[][]): BvsReport {
                 const pair = bvsPair(el, state, atoms[j].element);
                 if (!pair) continue;
                 hasPair = true;
+                const w = occ[j];
+                if (w <= 0) continue;
                 const cut = bvsPairCutoff(pair);
                 const fj = frac[j];
                 const fx = fj[0] - fi[0], fy = fj[1] - fi[1], fz = fj[2] - fi[2];
                 if (bvsLowerBound(fx, fy, fz, widths) > cut) continue;
                 const r = bvsSumImages(fx, fy, fz, cut, lv, widths, pair[0], pair[1]);
-                sum += r.s;
+                sum += r.s * w;
                 count += r.c;
             }
             if (count > 0) {
@@ -472,12 +523,14 @@ export function bvsAnalyse(atoms: BvsAtom[], lv: number[][]): BvsReport {
             const pair = bvsPair(atoms[i].element, st.state as number, el);
             if (!pair) continue;
             hasPair = true;
+            const w = occ[i];
+            if (w <= 0) continue;
             const cut = bvsPairCutoff(pair);
             const fi = frac[i];
             const fx = fi[0] - fj[0], fy = fi[1] - fj[1], fz = fi[2] - fj[2];
             if (bvsLowerBound(fx, fy, fz, widths) > cut) continue;
             const r = bvsSumImages(fx, fy, fz, cut, lv, widths, pair[0], pair[1]);
-            sum += r.s;
+            sum += r.s * w;
             count += r.c;
         }
         if (count === 0 && !hasPair && cations.length) {
@@ -550,6 +603,21 @@ const BVS_MODULE_FUNCTIONS: Function[] = [
 ];
 
 /**
+ * Every module-level name the emitted source declares. A function body that
+ * mentions a name outside this set would become a free variable in the page,
+ * where the failure surfaces only when the panel opens; the build refuses it
+ * instead. The list is derived from the same two sources the emitter uses, so
+ * adding a table or a function to them is enough to keep the guard in step.
+ */
+const BVS_EMITTED_NAMES: string[] = [
+    'BVS_CATIONS', 'BVS_ANIONS', 'BVS_MAX_CUT', 'BVS_TAIL',
+    'BVS_MAX_ATOMS', 'BVS_MAX_REPEAT', 'BVS_PARAMETERS'
+];
+for (let i = 0; i < BVS_MODULE_FUNCTIONS.length; i++) {
+    BVS_EMITTED_NAMES.push(BVS_MODULE_FUNCTIONS[i].name);
+}
+
+/**
  * The module as one self-contained expression, for the webview to evaluate.
  * The table and the constants are emitted as JSON and the functions as their
  * own source text inside one scope, so the names they reference resolve to
@@ -566,18 +634,20 @@ export const BVS_SOURCE: string = (function buildSource(): string {
     parts.push('var BVS_MAX_REPEAT=' + BVS_MAX_REPEAT + ';');
     parts.push('var BVS_PARAMETERS=' + JSON.stringify(BVS_PARAMETERS) + ';');
     for (let i = 0; i < BVS_MODULE_FUNCTIONS.length; i++) {
-        // The compiled module writes its exported constants as `exports.X`.
-        // The page has no `exports`; inside this scope every such name is one
-        // of the local variables emitted above, so qualifying it is removed
-        // and the function body binds to that local exactly as the host's
-        // body binds to its module variable. A reference to any export not
-        // emitted above would become a free variable in the page, so it is
+        // The compiled CommonJS module qualifies only the names it exports, and
+        // the page has no `exports`; inside this scope each such name is one of
+        // the local variables emitted above, so the qualification is removed.
+        // The compiled bodies also reference module constants bare (`BVS_TAIL`,
+        // not `exports.BVS_TAIL`), so checking `exports.` alone would miss the
+        // one mistake that matters: a constant used by a function but never
+        // emitted. Every module-level identifier in a body is therefore checked
+        // against the emitted set, and a name the page would not define is
         // refused here, at module load, rather than when a panel opens.
         const body = BVS_MODULE_FUNCTIONS[i].toString();
-        const refs = body.match(/exports\.\w+/g) || [];
-        for (let r = 0; r < refs.length; r++) {
-            if (refs[r] !== 'exports.BVS_MAX_CUT' && refs[r] !== 'exports.BVS_MAX_ATOMS' && refs[r] !== 'exports.BVS_PARAMETERS') {
-                throw new Error('bond-valence source refers to an export the page does not define: ' + refs[r]);
+        const names = body.match(/\b(?:BVS_[A-Z0-9_]+|bvs[A-Z]\w*)\b/g) || [];
+        for (let r = 0; r < names.length; r++) {
+            if (BVS_EMITTED_NAMES.indexOf(names[r]) < 0) {
+                throw new Error('bond-valence source refers to a name the page does not define: ' + names[r]);
             }
         }
         parts.push(body.split('exports.').join(''));
@@ -587,6 +657,11 @@ export const BVS_SOURCE: string = (function buildSource(): string {
     const source = parts.join('\n');
     if (source.indexOf('`') >= 0 || source.indexOf('${') >= 0) {
         throw new Error('bond-valence source contains a template-literal delimiter');
+    }
+    // The page puts this text inside a <script> element; the HTML parser ends
+    // that element at the first `</script`, even inside a string or comment.
+    if (/<\/script/i.test(source)) {
+        throw new Error('bond-valence source contains a </script> sequence');
     }
     return source;
 })();

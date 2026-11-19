@@ -6,6 +6,9 @@ import { MolecularData } from './types';
 
 export function activate(context: vscode.ExtensionContext) {
     const provider = new MolecularViewerProvider(context);
+    // The provider owns the panels' event emitter and their message bridges, so
+    // it is disposed with the extension rather than left to the process exit.
+    context.subscriptions.push(provider);
 
     context.subscriptions.push(
         vscode.window.registerCustomEditorProvider(
@@ -35,7 +38,7 @@ export function activate(context: vscode.ExtensionContext) {
                         canSelectMany: false,
                         openLabel: 'Select Molecular File',
                         filters: {
-                            'Molecular Files': ['gjf', 'xyz', 'extxyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta', 'abi', 'abo', 'stru', 'gro', 'xtc', 'trr', 'dcd', 'trj', 'molden', 'pwi', 'pwo', 'lammpstrj', 'dump', 'lmp', 'lammps', 'data', 'md_dump', 'xdatcar', 'outcar', 'xml', 'raw', 'npy', 'in'],
+                            'Molecular Files': ['gjf', 'xyz', 'extxyz', 'gjf03', 'gjf09', 'gjf16', 'com', 'mol', 'mol2', 'log', 'out', 'coord', 'inp', 'pdb', 'ent', 'mop', 'mopac', 'dat', 'tcl', 'cif', 'vasp', 'poscar', 'contcar', 'cube', 'vesta', 'abi', 'abo', 'stru', 'gro', 'xtc', 'trr', 'dcd', 'trj', 'molden', 'pwi', 'pwo', 'lammpstrj', 'dump', 'lmp', 'lammps', 'data', 'md_dump', 'xdatcar', 'outcar', 'xml', 'raw', 'npy', 'in', 'fchk', 'fch'],
                             'All Files': ['*']
                         }
                     });

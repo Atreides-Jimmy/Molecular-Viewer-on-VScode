@@ -9,7 +9,9 @@
  * The data is International Tables for Crystallography Vol. B (2001), Table
  * A1.4.2.7: one Hall symbol (Hall 1981) for every setting of all 230 space
  * groups, 530 settings in all, including both origins where a group has two
- * and both the hexagonal and rhombohedral axes of the seven R groups. A Hall
+ * and both the hexagonal and rhombohedral axes of the seven R groups. The five
+ * orthorhombic groups whose 2002 symbol is an e glide (No. 39 `A e m 2` beside
+ * the older `A b m 2`) are indexed under both spellings; see `E_GLIDE_SYMBOLS`. A Hall
  * symbol is a compact list of generators, so the operations are produced by
  * closing the group rather than stored one by one: the whole table costs a few
  * kilobytes instead of the tens of thousands of operation strings an explicit
@@ -883,6 +885,52 @@ function symbolKey(hm: string): string {
     return symbolTokens(hm).join('');
 }
 
+/**
+ * The five orthorhombic groups whose 2002 symbols carry an e glide.
+ *
+ * A double glide plane `e` is what a single glide becomes when the lattice
+ * centring supplies a second, perpendicular glide vector in the same plane, so
+ * `A e m 2` is the same group as the older `A b m 2` (No. 39) — same lattice,
+ * same operations, only a newer spelling. Which symbol position is affected is
+ * not fixed: it is the one whose plane contains the centring translation. In an
+ * A-centred cell that is the plane perpendicular to a, in a B-centred cell the
+ * one perpendicular to b, in a C-centred cell the one perpendicular to c.
+ *
+ * Every row is renamed, not just the standard setting: `A b m a` (setting cab
+ * of No. 64) is the modern `A e m a`, and a file that writes the modern
+ * spelling of a non-standard setting has to resolve just as one that writes
+ * `C m c e` does. The IT table this data comes from predates the 2002 symbols,
+ * so the alias is derived from each row below.
+ */
+const E_GLIDE_GROUPS: { [number: number]: boolean } = {
+    39: true, 41: true, 64: true, 67: true, 68: true
+};
+
+/**
+ * The 2002 spelling of an orthorhombic row, or null when the row is not one of
+ * the five e-glide groups or has no single glide in the affected position.
+ *
+ * The affected position follows from the centring letter: A-centred cells
+ * centre the plane perpendicular to a (symbol position 1), B the one
+ * perpendicular to b (position 2), C the one perpendicular to c (position 3).
+ */
+function eGlideKey(number: number, base: string): string | null {
+    if (!E_GLIDE_GROUPS[number]) return null;
+    const tokens = symbolTokens(base);
+    if (tokens.length !== 4) return null;
+    const axis = tokens[0].toLowerCase() === 'a' ? 0
+        : tokens[0].toLowerCase() === 'b' ? 1
+        : tokens[0].toLowerCase() === 'c' ? 2 : -1;
+    if (axis < 0) return null;
+    const at = axis + 1;
+    // Only a single glide (a, b, c or d) can be doubled; a mirror stays a
+    // mirror, an n glide already has both in-plane components, and a 2 stays
+    // a 2.
+    if (!/^[abcd]$/.test(tokens[at])) return null;
+    tokens[at] = 'e';
+    return tokens.join('');
+}
+
 const ROWS: SgRow[] = [];
 const INDEX = new Map<string, number[]>();
 
@@ -910,6 +958,8 @@ for (const line of SG_HALL_DATA) {
     const tokens = symbolTokens(base);
     if (tokens.length < 2) continue;
     const keys = [symbolKey(base)];
+    const eGlide = eGlideKey(number, base);
+    if (eGlide !== null && keys.indexOf(eGlide) < 0) keys.push(eGlide);
     // Monoclinic HM symbols are written full (P 1 21/c 1); the short form the
     // rest of the world writes (P 21/c) is the same group with the redundant
     // 1 positions dropped. Only the unique-axis-b rows get that alias: a short
@@ -1030,6 +1080,15 @@ function parseName(raw: string): ParsedName | null {
  * Whether a cell is the primitive rhombohedral cell of an R group rather than
  * its hexagonal one. The distinction matters because the two settings use
  * different coordinates for the same crystal; the table carries both.
+ *
+ * The signature is three equal lengths and three equal angles. A hexagonal
+ * cell cannot satisfy it (its gamma is 120 degrees, the other two 90), so the
+ * angles need no further test. Rejecting an alpha near 90 degrees — as this
+ * once did — mistook the R lattice's own primitive cell for a cubic one: the
+ * primitive cell of an R lattice is rhombohedral for every c/a, and at
+ * c/a = sqrt(3/2) its angle passes through exactly 90 degrees. Applying the
+ * hexagonal basis there is the one choice guaranteed to be wrong, because the
+ * cell is not hexagonal.
  */
 function looksRhombohedral(cell: CellShape | undefined): boolean {
     if (!cell) return false;
@@ -1039,8 +1098,7 @@ function looksRhombohedral(cell: CellShape | undefined): boolean {
     const minLen = Math.min(lens[0], lens[1], lens[2]);
     if ((maxLen - minLen) / maxLen > 0.02) return false;
     const angles = [cell.alpha, cell.beta, cell.gamma];
-    if (Math.max(angles[0], angles[1], angles[2]) - Math.min(angles[0], angles[1], angles[2]) > 0.5) return false;
-    return Math.abs(cell.alpha - 90) > 0.5;
+    return Math.max(angles[0], angles[1], angles[2]) - Math.min(angles[0], angles[1], angles[2]) <= 0.5;
 }
 
 /**
@@ -1138,19 +1196,42 @@ export interface SpaceGroupOps {
     assumed: boolean;
     /** Whether origin choice 2 was assumed because the file did not state one. */
     assumedOrigin: boolean;
+    /**
+     * The same group under the other settings the name left open (origin
+     * choice 1 beside choice 2, rhombohedral axes beside hexagonal ones).
+     *
+     * A caller that gets only the conventional setting has no way to ask for
+     * the other one, and the other one is often what a file's coordinates
+     * were actually written for. These are complete entries of their own, so
+     * expanding the structure under either is one call away. They carry no
+     * further alternatives; this list is flat.
+     */
+    alternatives: SpaceGroupOps[];
+}
+
+/** Normalises a caller's setting request to the form the table's suffixes use. */
+function normaliseSettingRequest(setting: string | undefined): string {
+    const s = String(setting === undefined || setting === null ? '' : setting).trim().toLowerCase();
+    if (s === 'h' || s === 'r' || s === '1' || s === '2') return s;
+    return '';
 }
 
 /**
- * The operations a declared space-group name stands for, or null when the
- * name is not one this table knows. The `cell` is only consulted to choose
- * between the hexagonal and rhombohedral settings of an R group; everything
- * else is decided by the name's own settings suffix and the table's defaults.
+ * The rows a name resolves to, most preferred first, or null when unknown.
+ *
+ * `preferredSetting` fills in a choice the name itself leaves open; a suffix
+ * the name states (`P n n n:1`, `R -3 c:H`) always wins, because that is the
+ * file's own statement rather than the caller's request.
  */
-export function lookupSpaceGroupOps(name: string, cell?: CellShape): SpaceGroupOps | null {
+function resolveRows(
+    name: string,
+    cell?: CellShape,
+    preferredSetting?: string
+): { family: SgRow[]; ordered: SgRow[]; stated: boolean } | null {
     const parsed = parseName(name);
     if (!parsed) return null;
 
-    let rows: SgRow[] | null = null;
+    let family: SgRow[] | null = null;
     for (const key of parsed.keys) {
         const hit = INDEX.get(key);
         if (!hit || hit.length === 0) continue;
@@ -1159,27 +1240,88 @@ export function lookupSpaceGroupOps(name: string, cell?: CellShape): SpaceGroupO
         // one; the less specific keys that follow are tried instead.
         const number = candidates[0].number;
         if (candidates.some(r => r.number !== number)) continue;
-        rows = candidates;
+        family = candidates;
         break;
     }
-    if (!rows) return null;
+    if (!family) return null;
 
-    if (parsed.setting !== '') {
-        const filtered = rows.filter(r => matchesSetting(r.setting, parsed.setting));
-        if (filtered.length > 0) rows = filtered;
+    const stated = parsed.setting !== '';
+    const wanted = stated ? parsed.setting : normaliseSettingRequest(preferredSetting);
+    let candidates = family;
+    if (wanted !== '') {
+        const filtered = family.filter(r => matchesSetting(r.setting, wanted));
+        if (filtered.length > 0) candidates = filtered;
     }
 
-    const chosen = pickRow(rows, cell);
-    const assumedOrigin = rows.length > 1 && originChoiceOf(chosen.setting) === '2' &&
-        rows.some(r => originChoiceOf(r.setting) === '1');
+    // The setting a convention picks comes first; the rest keep the table's
+    // order, which is the order the settings are listed in the International
+    // Tables (abc, ba-c, cab, …, origin 1 before origin 2).
+    const chosen = pickRow(candidates, cell);
+    const ordered = [chosen];
+    for (const row of candidates) {
+        if (row !== chosen) ordered.push(row);
+    }
+    return { family, ordered, stated };
+}
 
-    return {
-        ops: operationsFor(chosen).map(symOpToString),
-        number: chosen.number,
-        symbol: chosen.symbol,
-        setting: chosen.setting,
-        settingLabel: settingLabelFor(chosen, rows),
-        assumed: rows.length > 1,
-        assumedOrigin
+function opsOfRow(row: SgRow, family: SgRow[], stated: boolean, withAlternatives = true): SpaceGroupOps {
+    const hit: SpaceGroupOps = {
+        ops: operationsFor(row).map(symOpToString),
+        number: row.number,
+        symbol: row.symbol,
+        setting: row.setting,
+        settingLabel: settingLabelFor(row, family),
+        assumed: family.length > 1 && !stated,
+        assumedOrigin: !stated && family.length > 1 &&
+            originChoiceOf(row.setting) === '2' &&
+            family.some(r => originChoiceOf(r.setting) === '1'),
+        alternatives: []
     };
+    if (withAlternatives) {
+        hit.alternatives = family
+            .filter(r => r !== row)
+            .map(r => opsOfRow(r, family, stated, false));
+    }
+    return hit;
+}
+
+/**
+ * The operations a declared space-group name stands for, or null when the
+ * name is not one this table knows. The `cell` is only consulted to choose
+ * between the hexagonal and rhombohedral settings of an R group; everything
+ * else is decided by the name's own settings suffix and the table's defaults.
+ *
+ * `setting` supplies an origin or axis choice the name leaves open — `'1'` or
+ * `'2'` for the two origins, `'h'`/`'r'` for an R group's axes. Without it a
+ * two-origin group answers with origin choice 2, the International Tables'
+ * convention, and `alternatives` carries the other settings so that choice is
+ * never the only one available.
+ */
+export function lookupSpaceGroupOps(name: string, cell?: CellShape, setting?: string): SpaceGroupOps | null {
+    const resolved = resolveRows(name, cell, setting);
+    return resolved === null ? null
+        : opsOfRow(resolved.ordered[0], resolved.family, resolved.stated);
+}
+
+/**
+ * Every setting a name leaves open, the one `lookupSpaceGroupOps` answers with
+ * first.
+ *
+ * A name such as `P n n n` names a group but says nothing about which of its
+ * two origins the coordinates use, and `R -3 c` says nothing about hexagonal
+ * versus rhombohedral axes. The choice the table makes for those is a
+ * convention, not a statement of the file, so a caller comparing a file's own
+ * operation list against the name has to try every setting before it may call
+ * the two inconsistent — otherwise a correctly written origin-choice-1 file is
+ * reported as contradicting its own name, and the "fix" it is offered rewrites
+ * the structure under the other origin.
+ *
+ * Returns an empty array when the name is not one this table knows.
+ */
+export function lookupSpaceGroupSettings(name: string, cell?: CellShape, setting?: string): SpaceGroupOps[] {
+    const resolved = resolveRows(name, cell, setting);
+    if (resolved === null) return [];
+    // Each entry already is one of the alternatives, so none carries a nested
+    // copy of the rest.
+    return resolved.ordered.map(row => opsOfRow(row, resolved.family, resolved.stated, false));
 }
