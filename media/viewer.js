@@ -4579,6 +4579,11 @@ function refreshMovedBondsAndMeshes(selOverride){
     // 原子被移动过, 质心随之改变 —— 放在区域刷新之后: 上面的网格都还是按旧中心
     // 摆放的, 这里再整体平移一次, 随后旋转就绕新的结构中心进行。
     updateRotationCenter();
+    // A comparison is a reading of the geometry that was just committed. The
+    // release path updates meshes without a rebuild, so it has to refresh the
+    // differences itself or the panel keeps describing where the atoms were
+    // before the drag.
+    if(diffMode)refreshDiff();
 }
 function endMoveDrag(){
     if(!moveDragActive)return;
@@ -6201,6 +6206,10 @@ function commitRotAngle(newAngle){
     if(ain)ain.value=newAngle;
     // 表面片在预览期间被隐藏, 提交后立刻恢复 (签名没变时是空操作)。
     refreshVmdSurfaces();
+    // The rotation is committed: the comparison measures the geometry it left
+    // behind, not the one the slider started from (the preview itself only
+    // moves the handles, so it is not recomputed per pixel of drag).
+    if(diffMode)refreshDiff();
 }
 (function(){
     var gi=document.getElementById('rp-group-input');
@@ -8015,6 +8024,62 @@ function findAtomMapping(atoms1,bonds1,atoms2,bonds2){
     return null;
 }
 
+// The correspondence for two structures that are almost the same skeleton.
+// findAtomMapping answers "is this the same graph?" exactly, and a trajectory
+// frame fails that question as soon as one bond is perceived differently: a
+// hydrogen that hops to a neighbouring acceptor at a transition state, a
+// contact that crosses the perception cutoff, a bond that forms or breaks in
+// the step being looked at. The atoms are still the same list in the same
+// order, so the correspondence a reader means is the identity — with it every
+// shared bond, angle and torsion is still comparable, and the bonds that
+// appear or disappear are reported as connectivity changes (see
+// computeConformationDiffs) instead of the whole comparison being refused.
+//
+// The fallback is deliberately narrow: it needs the same atoms in the same
+// order, which no unrelated molecule with a different atom list can satisfy,
+// and at least DIFF_ORDER_SHARED_MIN of the union of the two bond sets. A pair
+// whose skeletons really differ still falls through to findAtomMapping and
+// still reports "Skeletons Differ".
+var DIFF_ORDER_SHARED_MIN=0.8;
+function findAtomMappingByOrder(atoms1,bonds1,atoms2,bonds2){
+    var n=atoms1.length,i;
+    if(n!==atoms2.length)return null;
+    for(i=0;i<n;i++){
+        if(atoms1[i].element!==atoms2[i].element)return null;
+    }
+    var keys1={},keys2={},k;
+    var c1=0,c2=0,shared=0;
+    for(i=0;i<bonds1.length;i++){
+        k=Math.min(bonds1[i].atom1,bonds1[i].atom2)+'-'+Math.max(bonds1[i].atom1,bonds1[i].atom2);
+        if(!keys1[k]){keys1[k]=true;c1++}
+    }
+    for(i=0;i<bonds2.length;i++){
+        k=Math.min(bonds2[i].atom1,bonds2[i].atom2)+'-'+Math.max(bonds2[i].atom1,bonds2[i].atom2);
+        if(!keys2[k]){keys2[k]=true;c2++}
+    }
+    for(k in keys1){
+        if(!Object.prototype.hasOwnProperty.call(keys1,k))continue;
+        if(keys2[k])shared++;
+    }
+    var union=c1+c2-shared;
+    // A pair with no bonds at all (isolated atoms, ions) has only its elements
+    // and its order left to match on, and both agree.
+    if(union===0||shared/union>=DIFF_ORDER_SHARED_MIN){
+        var map=new Array(n);
+        for(i=0;i<n;i++)map[i]=i;
+        return map;
+    }
+    return null;
+}
+// The molecular comparison's one door to a correspondence: the near-identical
+// case first (cheap, and the answer a frame switch or a re-saved file means),
+// the exact graph search otherwise.
+function findDiffMapping(atoms1,bonds1,atoms2,bonds2){
+    var m=findAtomMappingByOrder(atoms1,bonds1,atoms2,bonds2);
+    if(m)return m;
+    return findAtomMapping(atoms1,bonds1,atoms2,bonds2);
+}
+
 function dist3d(a,b){var dx=a.x-b.x,dy=a.y-b.y,dz=a.z-b.z;return Math.sqrt(dx*dx+dy*dy+dz*dz)}
 function angle3d(a,b,c){
     var v1={x:a.x-b.x,y:a.y-b.y,z:a.z-b.z},v2={x:c.x-b.x,y:c.y-b.y,z:c.z-b.z};
@@ -8305,7 +8370,7 @@ function diffOrderLabel(o){
     return String(o);
 }
 function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct,geo){
-    var diffs={bonds:[],orders:[],angles:[],dihedrals:[]};
+    var diffs={bonds:[],orders:[],angles:[],dihedrals:[],links:[]};
     // A threshold of zero means zero, not "unset": a truthiness fallback
     // silently replaced the slider's leftmost position with the default.
     var tp=threshPct==null?2:threshPct;
@@ -8342,8 +8407,39 @@ function computeConformationDiffs(atoms1,bonds1,atoms2,bonds2,mapping,threshPct,
             if(pct>tp){
                 diffs.bonds.push({i1:b.atom1,i2:b.atom2,d1:d1,d2:d2,diff:dd,pct:pct});
             }
+        }else if(!geo){
+            // A bond this side has and the other does not. The exact skeleton
+            // match never reaches here; the order-based one does, and this is
+            // exactly what an optimisation step is worth looking at for.
+            diffs.links.push({i1:b.atom1,i2:b.atom2,side:'left',order:b.order==null?1:b.order,
+                d1:dist1(b.atom1,b.atom2),d2:dist2(mapping[b.atom1],mapping[b.atom2])});
         }
     });
+    // The other direction: bonds the right side has and the left does not.
+    // A pair counted above is skipped by its mapped key, so no bond is listed
+    // twice.
+    if(!geo){
+        var mappedKeys={},bondSet1Keys={};
+        bonds1.forEach(function(b){
+            var k1=Math.min(b.atom1,b.atom2)+'-'+Math.max(b.atom1,b.atom2);
+            bondSet1Keys[k1]=true;
+            mappedKeys[Math.min(mapping[b.atom1],mapping[b.atom2])+'-'+
+                Math.max(mapping[b.atom1],mapping[b.atom2])]=true;
+        });
+        var revMap=new Array(atoms2.length).fill(-1);
+        for(var rmi=0;rmi<mapping.length;rmi++)revMap[mapping[rmi]]=rmi;
+        bonds2.forEach(function(b){
+            var bk=Math.min(b.atom1,b.atom2)+'-'+Math.max(b.atom1,b.atom2);
+            if(mappedKeys[bk])return;
+            var i1=revMap[b.atom1],i2=revMap[b.atom2];
+            if(i1<0||i2<0)return;
+            // Already reported from the left-hand pass when both sides carry
+            // it; nothing to add then.
+            if(bondSet1Keys[Math.min(i1,i2)+'-'+Math.max(i1,i2)])return;
+            diffs.links.push({i1:i1,i2:i2,side:'right',order:b.order==null?1:b.order,
+                d1:dist1(i1,i2),d2:dist2(b.atom1,b.atom2)});
+        });
+    }
 
     var adj1=buildAdjacency(atoms1,bonds1);
     var angleSeen={};
@@ -8492,7 +8588,7 @@ function showCrystalDiffStatus(res){
 }
 function startCrystalDiff(msg){
     diffMode=true;
-    diffLabelLeft.textContent='Original: '+(MD.title||'crystal');
+    diffLabelLeft.textContent='Original: '+diffLeftName();
     diffLabelLeft.classList.add('show');
     diffLabelRight.textContent='Diff: '+diffData.fileName;
     diffLabelRight.classList.add('show');
@@ -8521,7 +8617,7 @@ function startCrystalDiff(msg){
     if(res.status==='ok'){
         crystalDiffDisplayMaps(res.mapping);
         var diffs=res.diffs;
-        var total=diffs.bonds.length+diffs.orders.length+diffs.angles.length+diffs.dihedrals.length;
+        var total=diffs.bonds.length+diffs.orders.length+diffs.angles.length+diffs.dihedrals.length+diffs.links.length;
         showDiffPanel(buildDiffResultsHTML(diffs,total),true);
         wireDiffSlider();
         diffLabelRight.textContent='Diff: '+diffData.fileName;
@@ -8549,7 +8645,7 @@ function crystalDiffRefresh(){
     diffBaseIndices=true;diffLabelAtoms=CRY.baseAtoms;
     crystalDiffDisplayMaps(res.mapping);
     var diffs=res.diffs;
-    var total=diffs.bonds.length+diffs.orders.length+diffs.angles.length+diffs.dihedrals.length;
+    var total=diffs.bonds.length+diffs.orders.length+diffs.angles.length+diffs.dihedrals.length+diffs.links.length;
     var listEl=diffPanelEl.querySelector('#diff-results-list');
     if(listEl){
         listEl.innerHTML=buildDiffListHTML(diffs,total);
@@ -8610,7 +8706,7 @@ function startDiff(msg){
     diffDetBonds1=detBonds1;
     diffDetBonds2=detBonds2;
 
-    var mapping=findAtomMapping(MD.atoms,detBonds1,diffData.atoms,detBonds2);
+    var mapping=findDiffMapping(MD.atoms,detBonds1,diffData.atoms,detBonds2);
 
     if(!mapping){
         diffMapping=null;diffReverseMapping=null;
@@ -8623,7 +8719,7 @@ function startDiff(msg){
             '<div class="diff-row" style="margin-top:6px;color:var(--vscode-descriptionForeground,#999)">Click Diff again to exit.</div>',true);
         diffPanelEl.classList.add('show');
         diffMode=true;
-        diffLabelLeft.textContent='Original: '+(MD.title||'molecule');
+        diffLabelLeft.textContent='Original: '+diffLeftName();
         diffLabelLeft.classList.add('show');
         diffLabelRight.textContent='Diff: '+diffData.fileName+' (skeleton differs)';
         diffLabelRight.classList.add('show');
@@ -8639,7 +8735,7 @@ function startDiff(msg){
     }
 
     var diffs=computeConformationDiffs(MD.atoms,detBonds1,diffData.atoms,detBonds2,mapping,diffThresholdPct);
-    var totalDiff=diffs.bonds.length+diffs.orders.length+diffs.angles.length+diffs.dihedrals.length;
+    var totalDiff=diffs.bonds.length+diffs.orders.length+diffs.angles.length+diffs.dihedrals.length+diffs.links.length;
 
     diffMapping=mapping;
     diffReverseMapping=new Array(diffData.atoms.length).fill(-1);
@@ -8895,6 +8991,16 @@ function syncDiffViewButtons(){
         b.classList.toggle('active',b.getAttribute('data-diff-view')===diffViewMode);
     }
 }
+// What the left half is, including the frame when the file has more than one.
+// A frame switch changes the structure the comparison is about, so the label
+// names the step the numbers describe instead of leaving the reader to guess
+// whether the panel followed the picture.
+function diffLeftName(){
+    var name=MD.title||(CRY?'crystal':'molecule');
+    var f=(MD.frames&&MD.frames[currentFrame])?MD.frames[currentFrame].stepLabel:'';
+    if(f&&totalFrames>1)return name+' — '+f;
+    return name;
+}
 function syncDiffLabels(){
     if(!diffData){
         diffLabelLeft.classList.remove('show');
@@ -8905,10 +9011,10 @@ function syncDiffLabels(){
         // One picture, one name: the halves' separate labels have nothing left
         // to tell apart, so the right label widens over the whole view.
         diffLabelLeft.classList.remove('show');
-        diffLabelRight.textContent='Overlay: '+(MD.title||'molecule')+' vs '+diffData.fileName;
+        diffLabelRight.textContent='Overlay: '+diffLeftName()+' vs '+diffData.fileName;
         diffLabelRight.classList.add('overlay','show');
     }else{
-        diffLabelLeft.textContent='Original: '+(MD.title||'molecule');
+        diffLabelLeft.textContent='Original: '+diffLeftName();
         diffLabelLeft.classList.add('show');
         diffLabelRight.textContent='Diff: '+diffData.fileName+(diffMapping?'':' (skeleton differs)');
         diffLabelRight.classList.remove('overlay');
@@ -9076,10 +9182,29 @@ function buildDiffListHTML(diffs,totalDiff){
     // A crystal comparison's indices address the base cell, so its labels come
     // from that list; the molecular one keeps MD.atoms.
     var labelAtoms=diffLabelAtoms||MD.atoms;
+    var links=diffs.links||[];
     if(totalDiff===0){
         html+='<div class="diff-row" style="color:#4ec9b0">Structures are identical (same bond orders and conformation within thresholds).</div>';
     }else{
         html+='<div class="diff-row">Mapping: '+labelAtoms.length+' atoms matched. '+totalDiff+' differences found.</div>';
+        if(links.length>0){
+            // The two skeletons are not identical: say how the atoms were
+            // paired, or the numbers below would look like an exact match.
+            html+='<div class="diff-row" style="color:var(--vscode-descriptionForeground,#999)">The skeletons differ in '+
+                links.length+' bond'+(links.length===1?'':'s')+
+                '; atoms are paired by order and the shared skeleton is measured below.</div>';
+        }
+    }
+    // Connectivity changes first: a bond that appeared or disappeared is the
+    // most structural thing the comparison can report, and it is the reason
+    // this pair was paired by order rather than by the exact graph.
+    if(links.length>0){
+        html+='<div class="diff-row" style="margin-top:6px;color:#f0c674"><b>Connectivity Changes ('+links.length+')</b></div>';
+        links.forEach(function(d){
+            html+='<div class="diff-row">  '+atomLabel(labelAtoms[d.i1],d.i1)+'-'+atomLabel(labelAtoms[d.i2],d.i2)+
+                ': '+diffOrderLabel(d.order)+' bond only in the '+(d.side==='left'?'left':'right')+
+                ' structure ('+d.d1.toFixed(3)+' Å left, '+d.d2.toFixed(3)+' Å right)</div>';
+        });
     }
     html+=buildDiffStatsHTML(diffs.stats);
     if(totalDiff>0){
@@ -9199,11 +9324,19 @@ function recomputeDiff(){
     }
     if(!diffMapping||!diffDetBonds1||!diffDetBonds2)return;
     var diffs=computeConformationDiffs(MD.atoms,diffDetBonds1,diffData.atoms,diffDetBonds2,diffMapping,diffThresholdPct);
-    var totalDiff=diffs.bonds.length+diffs.orders.length+diffs.angles.length+diffs.dihedrals.length;
+    var totalDiff=diffs.bonds.length+diffs.orders.length+diffs.angles.length+diffs.dihedrals.length+diffs.links.length;
     var listEl=diffPanelEl.querySelector('#diff-results-list');
     if(listEl){
         listEl.innerHTML=buildDiffListHTML(diffs,totalDiff);
         wireDiffStatsToggle(listEl);
+    }else{
+        // The panel is still showing the refusal an earlier frame (or edit)
+        // wrote: the comparison is back, so the whole results panel comes back
+        // with its controls — but only if it is open. A panel the user closed
+        // stays closed; its chip reopens it with the refreshed results.
+        if(diffPanelEl.classList.contains('show')){
+            showDiffPanel(buildDiffResultsHTML(diffs,totalDiff),true);
+        }
     }
     var fullHTML=buildDiffResultsHTML(diffs,totalDiff);
     diffPanelHTML=fullHTML;
@@ -9222,7 +9355,7 @@ function refreshDiff(){
         return;
     }
     diffDetBonds1=detectBondsFromAtoms(MD.atoms,MD.charge);
-    diffMapping=findAtomMapping(MD.atoms,diffDetBonds1,diffData.atoms,diffDetBonds2);
+    diffMapping=findDiffMapping(MD.atoms,diffDetBonds1,diffData.atoms,diffDetBonds2);
     if(diffMapping){
         diffReverseMapping=new Array(diffData.atoms.length).fill(-1);
         for(var mi=0;mi<diffMapping.length;mi++){diffReverseMapping[diffMapping[mi]]=mi}
@@ -9248,6 +9381,11 @@ function refreshDiff(){
             rebuildDiffModel();
         }
         diffRefreshOverlayPanel();
+        // The structure may have been in the refusal state a moment ago (a
+        // frame whose perceived skeleton differed); its right-hand label and
+        // the display row are brought back with the results.
+        syncDiffLabels();
+        syncDiffViewButtons();
     }else{
         diffReverseMapping=null;
         // Without a correspondence there is no fit and no ramp: the display
@@ -9256,14 +9394,20 @@ function refreshDiff(){
         diffResetOverlayState();
         if(hadDisp)diffRecolorLeft();
         diffTotalCount=0;
-        diffPanelEl.innerHTML='<span class="diff-close">×</span>'+
+        // The refusal is a result of this structure, so it is shown through the
+        // same panel path as the differences (its close button works, its chip
+        // reopens it) and the status line and the half labels say what the
+        // panel says — a frame switch must never leave them describing the
+        // frame before it.
+        showDiffPanel('<span class="diff-close">×</span>'+
             '<h4>Skeletons Differ</h4>'+
             buildDiffViewHTML()+
-            '<div class="diff-row">After edit, molecular skeletons differ — cannot compare.</div>'+
+            '<div class="diff-row">The structures now have different skeletons — cannot compare.</div>'+
             '<div class="diff-row">Left: '+MD.atoms.length+' atoms, '+diffDetBonds1.length+' bonds (detected)</div>'+
-            '<div class="diff-row">Right: '+diffData.atoms.length+' atoms, '+diffDetBonds2.length+' bonds (detected)</div>';
-        wireDiffViewControls(diffPanelEl);
+            '<div class="diff-row">Right: '+diffData.atoms.length+' atoms, '+diffDetBonds2.length+' bonds (detected)</div>',true);
+        modeInfoEl.textContent='Diff Mode (skeletons differ)';
         syncDiffLabels();
+        syncDiffViewButtons();
         atomMeshes.forEach(function(m){m.userData.diffHi=false;setAtomHighlight(m,0)});
         diffAtomMeshes.forEach(function(m){m.userData.diffHi=false;setDiffAtomHighlight(m,0)});
         diffBondPieces.forEach(function(p){p.hi=false});
@@ -9288,6 +9432,13 @@ function updateDiffHighlights(diffs){
     });
     diffs.dihedrals.forEach(function(d){
         highlightAtoms[d.i1]=true;highlightAtoms[d.i2]=true;highlightAtoms[d.i3]=true;highlightAtoms[d.i4]=true;
+    });
+    // A bond that exists on one side only: both of its atoms are what changed,
+    // and the bond itself is marked on the side that has it (the other side
+    // carries no piece with that key, so nothing is invented there).
+    (diffs.links||[]).forEach(function(d){
+        highlightAtoms[d.i1]=true;highlightAtoms[d.i2]=true;
+        highlightBonds[Math.min(d.i1,d.i2)+'-'+Math.max(d.i1,d.i2)]=true;
     });
 
     atomMeshes.forEach(function(m,i){
