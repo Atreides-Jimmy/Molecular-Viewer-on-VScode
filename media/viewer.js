@@ -4590,7 +4590,7 @@ function endMoveDrag(){
     moveDragActive=false;
     moveDragOrig=null;
     // A Ctrl+click without any displacement pushes a redundant snapshot — drop it.
-    if(!moveDragMoved)dropUndoSnapshot()
+    if(!moveDragMoved)dropGestureSnapshot()
     // Re-detect connectivity once on release (not per frame during the drag).
     if(moveDragMoved){provMark('translate',1);refreshMovedBondsAndMeshes();}
     else refreshVmdSurfaces();
@@ -4601,7 +4601,7 @@ function endFragRot(){
     if(!fragRotActive)return;
     fragRotActive=false;
     // A Ctrl+click without any rotation pushes a redundant snapshot — drop it.
-    if(!fragRotMoved)dropUndoSnapshot()
+    if(!fragRotMoved)dropGestureSnapshot()
     // Re-detect connectivity once on release (not per frame during the drag).
     if(fragRotMoved){provMark('rotate',1);refreshMovedBondsAndMeshes();}
     else refreshVmdSurfaces();
@@ -5205,7 +5205,14 @@ function mmApplyLiveCoords(coords){
         plan.push([i,c]);
     }
     if(plan.length===0)return false;
-    if(!mmRun.undoPushed){pushUndo();mmRun.undoPushed=true}
+    if(!mmRun.undoPushed){
+        pushUndo();mmRun.undoPushed=true;
+        // The geometry this run is about to replace was a manual displacement
+        // when the click that started it closed the session (see the start of
+        // the run): the snapshot describes that structure, so it is tagged with
+        // the session the same way a pushUndo inside the session would be.
+        if(mmRun.vdOrigin&&undoStack.length){undoStack[undoStack.length-1].vd=mmRun.vdOrigin;mmRun.vdOrigin=null}
+    }
     var moved=[];
     for(k=0;k<plan.length;k++){
         i=plan[k][0];c=plan[k][1];
@@ -5574,6 +5581,12 @@ function startMmOptimization(){
     if(vibActive||vibPaused)stopVibration();
     if(moveDragActive||fragRotActive||moveKeyActive)stopMoveSession();
     stopFrameAutoPlay();
+    // The run's own undo snapshot is taken in front of its first write (see
+    // mmApplyLiveCoords), which is after this commit — so the displacement this
+    // click closes is remembered here and tagged onto that snapshot. Undoing
+    // the run then restores the very geometry the run started from *and* the
+    // slider that describes it, instead of a displacement with no record.
+    var vdAtStart=vdSnapshotState();
     vdCommit();
     var i,indices=movable,origin=new Array(indices.length);
     for(i=0;i<indices.length;i++){
@@ -5593,6 +5606,7 @@ function startMmOptimization(){
         energyBefore:null,
         undoPushed:false,
         restored:false,
+        vdOrigin:vdAtStart,
         moved:[],
         movedAll:{},
         movedCount:0
@@ -6361,27 +6375,40 @@ var redoParked={};
 function undoFrameKey(){
     return (VMD&&VMD.molecules.length>1?('m'+vmdMolIdx):'m0')+'/f'+currentFrame;
 }
-function parkedStackAtoms(stack){
+function parkedStackAtoms(stack,seenBases){
     var total=0;
     for(var i=0;i<stack.length;i++){
         total+=stack[i].atomCount||0;
+        // A displacement snapshot also holds the equilibrium its slider is
+        // measured from. That array is shared by every snapshot taken from one
+        // session (see vdSnapshotState), so it is charged once per array rather
+        // than once per snapshot: charging it repeatedly would evict parked
+        // histories for memory that is not being held.
+        var vb=stack[i].vd&&stack[i].vd.base;
+        if(vb){
+            if(!seenBases)seenBases=[];
+            if(seenBases.indexOf(vb)<0){seenBases.push(vb);total+=vb.length}
+        }
         // A snapshot that an edit pushed after an undo carries the redo branch
         // it displaced (see pushUndo), and that branch is parked — and held in
         // memory — with it. Counting only the stack's own snapshots would let a
         // parked history keep almost twice the budget it is bounded to.
-        if(stack[i].redoBefore)total+=parkedStackAtoms(stack[i].redoBefore);
+        if(stack[i].redoBefore)total+=parkedStackAtoms(stack[i].redoBefore,seenBases);
     }
     return total;
 }
 function undoParkedAtoms(){
     var total=0;
+    // One list of the equilibria already charged, across both sides and every
+    // key, so an array shared by two stacks is paid for once.
+    var seenBases=[];
     for(var k in undoParked){
         if(!undoParked.hasOwnProperty(k))continue;
-        total+=parkedStackAtoms(undoParked[k]);
+        total+=parkedStackAtoms(undoParked[k],seenBases);
     }
     for(var r in redoParked){
         if(!redoParked.hasOwnProperty(r))continue;
-        total+=parkedStackAtoms(redoParked[r]);
+        total+=parkedStackAtoms(redoParked[r],seenBases);
     }
     return total;
 }
@@ -6530,8 +6557,16 @@ function pushUndo(symmetryState){
     // for every edit path at the one door they all pass through. The geometry it
     // produced stays exactly as it is, and the snapshot below therefore captures
     // the displaced structure the edit is about to change.
+    //
+    // The displacement therefore also *describes* the state this snapshot is
+    // taken of, and it is read before vdCommit() clears the components. Tagging
+    // the snapshot with it is what lets an Undo of the edit put the block back
+    // in step with the structure on screen, exactly as rotAngle keeps the
+    // Rotate Group slider on the angle the restored atoms carry.
+    var vdState=vdSnapshotState();
     if(vdActive&&!vdSuppress)vdCommit();
     var snap=buildUndoSnapshot(symmetryState);
+    if(vdState)snap.vd=vdState;
     // An undo left a future behind and this edit replaces it. The branch is
     // kept on the snapshot rather than dropped outright because a gesture can
     // still take the snapshot back — a dialog's Cancel, a click without a drag,
@@ -6577,6 +6612,22 @@ function dropUndoSnapshot(expected){
         snap.redoBefore=null;
     }
     updateUndoBtn();
+    return true;
+}
+/**
+ * Take back the snapshot a gesture opened with, and put the block back with it.
+ *
+ * A Cancel — or a click that never dragged, or an OK that changed nothing —
+ * puts the gesture's own geometry back and then drops its step. The
+ * displacement that geometry carries belongs in the block again, or the slider
+ * would read zero over a displaced structure; a snapshot without one adopts
+ * nothing. When the step being dropped is not the gesture's (another edit
+ * landed on top of it), nothing is adopted either.
+ */
+function dropGestureSnapshot(expected){
+    var snap=expected||undoStack[undoStack.length-1];
+    if(!dropUndoSnapshot(expected))return false;
+    if(snap)vdAdoptSnapshot(snap.vd);
     return true;
 }
 function doUndo(){return walkHistory(true)}
@@ -6693,6 +6744,11 @@ function finishHistoryRestore(snap){
             originalCoords=null;
         }
     }
+    // The displacement block follows the structure the same way: a snapshot
+    // that carries a session comes back with its slider, components and row
+    // markers, and one that carries none leaves the block at rest (the session
+    // that was on screen already ended in beginHistoryRestore).
+    vdAdoptSnapshot(snap.vd);
 }
 /**
  * One step through the history, in either direction.
@@ -6704,6 +6760,12 @@ function finishHistoryRestore(snap){
  */
 function walkHistory(isUndo){
     if((isUndo?undoStack:redoStack).length===0)return false;
+    // The displacement on screen is part of the state being left, and
+    // beginHistoryRestore ends the session that describes it — so it is read
+    // here, in front of the teardown, and travels with the snapshot this step
+    // pushes. Without it a redo would put the displaced geometry back with the
+    // slider at zero, describing a structure that is no longer there.
+    var vdLeaving=vdSnapshotState();
     beginHistoryRestore();
     // beginHistoryRestore may end a gesture that takes its own snapshot back
     // (an Alt-click without a drag drops it, restoring the branch it held), so
@@ -6722,6 +6784,10 @@ function walkHistory(isUndo){
     if(snap.rotAngle!=null&&rotActive&&currentMode==='rotateGroup'&&typeof rotCommittedAngle==='number'){
         leaving.rotAngle=rotCommittedAngle;
     }
+    // The slider's share travels the same way (see vdSnapshotState): the step
+    // that walks away from a displaced structure carries the components that
+    // describe it, so walking back puts the block where it was.
+    if(vdLeaving)leaving.vd=vdLeaving;
     toStack.push(leaving);
     if(toStack.length>MAX_UNDO)toStack.shift();
     restoreHistorySnapshot(snap);
@@ -11784,14 +11850,7 @@ function vdWriteAtoms(){
     }
     // The largest displacement of the *combination* is not the sum of the
     // components' own (vectors can cancel), so it is measured on the result.
-    var maxSq=0;
-    for(i=0;i<n;i++){
-        var a3=MD.atoms[i],b3=vdBase[i];
-        var dx=a3.x-b3.x,dy=a3.y-b3.y,dz=a3.z-b3.z;
-        var q=dx*dx+dy*dy+dz*dz;
-        if(q>maxSq)maxSq=q;
-    }
-    vdMaxDisp=Math.sqrt(maxSq);
+    vdMaxDisp=vdMeasureDisp();
     // A displaced geometry is a different geometry: the aromatic sides are
     // re-planned from it (a displaced ring is still a ring, and its plane may
     // have tilted), which the pieces then read when they are placed. Playback
@@ -11800,6 +11859,21 @@ function vdWriteAtoms(){
     // a second could flip a side mid-animation.
     planAromaticDashes();
     return true;
+}
+/** How far the combination moves the atom that moves most, read off the
+ *  geometry itself — the components' own maxima can cancel. Zero when the
+ *  session and the atom list no longer describe the same structure. */
+function vdMeasureDisp(){
+    var n=MD.atoms.length;
+    if(!vdBase||vdBase.length!==n)return 0;
+    var maxSq=0;
+    for(var i=0;i<n;i++){
+        var a=MD.atoms[i],b=vdBase[i];
+        var dx=a.x-b.x,dy=a.y-b.y,dz=a.z-b.z;
+        var q=dx*dx+dy*dy+dz*dz;
+        if(q>maxSq)maxSq=q;
+    }
+    return Math.sqrt(maxSq);
 }
 /** Add a mode to the distortion or change its share; false when the mode
  *  carries no usable displacement for this structure. */
@@ -11811,10 +11885,23 @@ function vdSetComp(idx,scale){
     vdComp.push({idx:idx,scale:scale,dir:dir});
     return true;
 }
+/** A share that is no longer in the geometry is no longer part of what a saved
+ *  file should say about it: the title's clause for that mode comes off with
+ *  the component. An entry left by an earlier commit at a different share
+ *  describes a displacement the geometry still carries, so it stays. */
+function vdForgetProv(idx,scale){
+    if(typeof provModes==='undefined'||!provModes)return;
+    var e=provModes[idx];
+    if(e&&typeof e.scale==='number'&&Math.abs(e.scale-scale)<1e-9)delete provModes[idx];
+}
 /** Take one mode out of the distortion. */
 function vdDropComp(idx){
     for(var i=0;i<vdComp.length;i++){
-        if(vdComp[i].idx===idx){vdComp.splice(i,1);return true}
+        if(vdComp[i].idx===idx){
+            vdForgetProv(idx,vdComp[i].scale);
+            vdComp.splice(i,1);
+            return true;
+        }
     }
     return false;
 }
@@ -11835,12 +11922,79 @@ function vdCompSig(){
     for(var i=0;i<vdComp.length;i++)s+=vdComp[i].idx+',';
     return s;
 }
+/**
+ * The session as an undo snapshot carries it: the equilibrium it is measured
+ * from, the components the structure holds and the mode the slider points at.
+ *
+ * Null when there is no displacement to describe — a snapshot without this
+ * field means "no session", which is what an ordinary edit leaves behind. The
+ * base is the session's own array: it is written once when the session opens
+ * and never mutated afterwards, so every snapshot taken from one session
+ * shares that one array instead of each carrying a copy of the equilibrium.
+ */
+function vdSnapshotState(){
+    // vdSuppress marks the snapshot a session takes of itself (vdBegin): the
+    // equilibrium it holds is not a displacement, and tagging it would make an
+    // Undo of the first slider move restore a session with nothing in it.
+    if(vdSuppress||!vdActive||!vdBase||!vdComp.length)return null;
+    if(!vdAvailable()||vdBase.length!==MD.atoms.length)return null;
+    var comps=[];
+    for(var i=0;i<vdComp.length;i++)comps.push({idx:vdComp[i].idx,scale:vdComp[i].scale});
+    return {base:vdBase,comps:comps,target:vdTarget};
+}
+/**
+ * Put a snapshot's displacement back into the block, so the slider, the
+ * component list and the row markers describe the structure that was just
+ * restored instead of a zero that no longer describes anything.
+ *
+ * The unit vectors are recomputed from the modes rather than stored: they are
+ * a pure function of the mode and the atom list, and storing them would put an
+ * n×3 array per component into every snapshot. A mode whose vectors no longer
+ * fit the structure refuses the whole adoption (nothing half-restored), and
+ * the session owns no undo step of its own afterwards — the step that brought
+ * it back belongs to the history, not to the session.
+ */
+function vdAdoptSnapshot(v){
+    if(!v||!v.base||!v.comps||!v.comps.length)return false;
+    if(!vdAvailable()||v.base.length!==MD.atoms.length)return false;
+    var comps=[];
+    for(var i=0;i<v.comps.length;i++){
+        var c=v.comps[i];
+        var dir=vdDirFor(c.idx);
+        if(!dir)return false;
+        comps.push({idx:c.idx,scale:c.scale,dir:dir});
+    }
+    vdActive=true;
+    vdBase=v.base;
+    vdComp=comps;
+    if(typeof v.target==='number'&&v.target>=0&&v.target<NORMAL_MODES.length)vdTarget=v.target;
+    // See vdDropSession: this session has no snapshot in the stack to take back.
+    vdUndoDepth=-1;
+    vdMaxDisp=vdMeasureDisp();
+    vdSyncPanel();
+    return true;
+}
+/** Whether the newest undo step describes exactly the equilibrium the session
+ *  is measured from — the state returning to it would undo to anyway. */
+function vdTopHoldsBase(){
+    if(!undoStack.length||!vdBase)return false;
+    var s=undoStack[undoStack.length-1];
+    if(!s||!s.atoms||s.atoms.length!==vdBase.length)return false;
+    for(var i=0;i<vdBase.length;i++){
+        var a=s.atoms[i],b=vdBase[i];
+        if(!a||Math.abs(a.x-b.x)>1e-9||Math.abs(a.y-b.y)>1e-9||Math.abs(a.z-b.z)>1e-9)return false;
+    }
+    return true;
+}
 /** End the session bookkeeping; the atoms are left exactly as they are. */
 function vdDropSession(popUndo){
     // The snapshot belongs to the session: when the geometry is back at the
     // equilibrium it is not an edit any more, unless something else pushed on
-    // top of it in the meantime.
-    if(popUndo&&vdUndoDepth===undoStack.length&&undoStack.length>0)dropUndoSnapshot()
+    // top of it in the meantime. A session an Undo brought back owns no step of
+    // its own (the step that restored it is the history's), so there the step
+    // is only taken when it holds the equilibrium itself — exactly the state
+    // the session is returning to, which undoing would have been a no-op.
+    if(popUndo&&undoStack.length>0&&(vdUndoDepth===undoStack.length||vdTopHoldsBase()))dropUndoSnapshot()
     vdActive=false;vdBase=null;vdComp.length=0;vdMaxDisp=0;vdUndoDepth=-1;
 }
 /** Open a session: the equilibrium snapshot and the one undo step it owns. */
@@ -11856,6 +12010,9 @@ function vdBegin(){
  *  the snapshot, so the session's own undo step goes with it. */
 function vdClearAll(msg){
     if(!vdActive){vdSyncPanel();return}
+    // Every component leaves the geometry here, so every mode they described
+    // leaves the title with them (see vdForgetProv).
+    for(var i=0;i<vdComp.length;i++)vdForgetProv(vdComp[i].idx,vdComp[i].scale);
     vdComp.length=0;
     vdWriteAtoms();            // nothing left to add: the atoms become vdBase
     updateVibrationPositions();
@@ -18501,7 +18658,7 @@ function showBondLengthModal(){
         // edit: dropping the snapshot the dialog opened with also puts back the
         // redo branch that snapshot displaced, exactly as its Cancel does.
         var bondChanged=(existingBond?existingBond.order:0)!==(hadBondAtOpen?curOrder:0);
-        if(!provMarkIfMoved('bondLen')&&!bondChanged)dropUndoSnapshot(originalSnap);
+        if(!provMarkIfMoved('bondLen')&&!bondChanged)dropGestureSnapshot(originalSnap);
         hideModal();originalCoords=null;resetSelection()
     });
     document.getElementById('m-cancel').addEventListener('click',function(){
@@ -18513,7 +18670,7 @@ function showBondLengthModal(){
         // snapshot this dialog opened with is the state to put back before the
         // snapshot is dropped.
         if(CRY)restoreCrystalBaseFromUndoTop();
-        restoreOriginal();rebuildScene();dropUndoSnapshot(originalSnap);hideModal();originalCoords=null;resetSelection()
+        restoreOriginal();rebuildScene();dropGestureSnapshot(originalSnap);hideModal();originalCoords=null;resetSelection()
     });
 }
 
@@ -18548,10 +18705,10 @@ function showBondAngleModal(){
         if(CRY)commitCrystalCoords();
         // See the bond length dialog: an untouched angle is not an edit, and
         // its snapshot (with the redo branch it displaced) goes back with OK.
-        if(!provMarkIfMoved('bondAngle'))dropUndoSnapshot(originalSnap);
+        if(!provMarkIfMoved('bondAngle'))dropGestureSnapshot(originalSnap);
         hideModal();originalCoords=null;resetSelection()
     });
-    document.getElementById('m-cancel').addEventListener('click',function(){restoreOriginal();rebuildScene();dropUndoSnapshot(originalSnap);hideModal();originalCoords=null;resetSelection()});
+    document.getElementById('m-cancel').addEventListener('click',function(){restoreOriginal();rebuildScene();dropGestureSnapshot(originalSnap);hideModal();originalCoords=null;resetSelection()});
 }
 
 function showDihedralModal(){
@@ -18584,10 +18741,10 @@ function showDihedralModal(){
     document.getElementById('m-ok').addEventListener('click',function(){
         if(CRY)commitCrystalCoords();
         // See the bond length dialog: an untouched dihedral is not an edit.
-        if(!provMarkIfMoved('dihedral'))dropUndoSnapshot(originalSnap);
+        if(!provMarkIfMoved('dihedral'))dropGestureSnapshot(originalSnap);
         hideModal();originalCoords=null;resetSelection()
     });
-    document.getElementById('m-cancel').addEventListener('click',function(){restoreOriginal();rebuildScene();dropUndoSnapshot(originalSnap);hideModal();originalCoords=null;resetSelection()});
+    document.getElementById('m-cancel').addEventListener('click',function(){restoreOriginal();rebuildScene();dropGestureSnapshot(originalSnap);hideModal();originalCoords=null;resetSelection()});
 }
 
 var UNIT_CANDIDATES=(function(){
@@ -21075,7 +21232,7 @@ function endBakeSession(){
     bakeActive=false;
     if(!bakeMoved){
         // An Alt-click that changed nothing pushed a snapshot it does not need.
-        dropUndoSnapshot();
+        dropGestureSnapshot();
     }else{
         // The centre follows the atoms, so a baked translation changes it by
         // exactly that translation. Committing the pan the drag would have
